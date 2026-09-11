@@ -17,6 +17,7 @@ import {
   takeoff, landingReadout,
 } from '../js/game/landing.js';
 import { captureBody, carryShip, gravityField, CAPTURE_G } from '../js/game/gravity.js';
+import { shipShadow } from '../js/game/shadow.js';
 import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
@@ -1126,6 +1127,62 @@ console.log('\n== гравитация и захват ==');
   ok(climb > 0.3 && fwd > 3,
     `с выпущенным шасси за 10 с: вперёд ${fwd.toFixed(1)} км и вверх ` +
     `${(climb * 1000).toFixed(0)} м одновременно`);
+}
+
+// --- 5f. Тень корабля --------------------------------------------------------
+console.log('\n== тень ==');
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const mesh = buildCobra();
+  const out = {};
+
+  // Ищем неровное место: на ровной площадке натянутая тень и плоская
+  // неразличимы, и проверка ничего не значила бы.
+  let dir = null, spread = 0;
+  for (let i = 0; i < 400 && spread < 0.006; i++) {
+    const u = -1 + 2 * ((i + 0.5) / 400);
+    const a = i * 2.399963;
+    const r = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = normalize(v3(r * Math.cos(a), u, r * Math.sin(a)));
+    const g0 = groundRadius(moon, d);
+    let lo = g0, hi = g0;
+    for (let k = 0; k < 8; k++) {
+      const t = (k / 8) * Math.PI * 2;
+      const off = normalize(v3(
+        d.x + Math.cos(t) * 0.00004, d.y + Math.sin(t) * 0.00004, d.z + Math.cos(t) * 0.00003));
+      const g = groundRadius(moon, off);
+      lo = Math.min(lo, g); hi = Math.max(hi, g);
+    }
+    if (hi - lo > spread) { spread = hi - lo; dir = d; }
+  }
+
+  const sh = makeShip();
+  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 0.04, v3()), makeBasis());
+  const up = dirToWorldBody(moon, dir, v3());
+  // Ось для носа берём заведомо не вдоль вертикали, иначе горизонтальная
+  // составляющая вырождается в ноль и базис корабля выходит нулевым.
+  const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
+  lookAlong(sh.basis, normalize(horizontal(axis, up, v3())), up);
+  const zone = landingContext(w, sh);
+  const sun = v3(moon.pos.x + up.x * 1e6, moon.pos.y + up.y * 1e6, moon.pos.z + up.z * 1e6);
+  const n = shipShadow(zone, sh, mesh, sun, out);
+
+  // Каждая вершина тени обязана лежать на грунте, а не на плоскости:
+  // иначе на кратере тень наполовину под землёй, наполовину висит.
+  let worstAlt = 0, loR = Infinity, hiR = -Infinity;
+  const p = v3();
+  for (let i = 0; i < n; i++) {
+    p.x = sh.pos.x + out.verts[i * 3];
+    p.y = sh.pos.y + out.verts[i * 3 + 1];
+    p.z = sh.pos.z + out.verts[i * 3 + 2];
+    worstAlt = Math.max(worstAlt, Math.abs(altitudeOf(moon, p).alt));
+    const rr = Math.hypot(p.x - moon.pos.x, p.y - moon.pos.y, p.z - moon.pos.z);
+    loR = Math.min(loR, rr); hiR = Math.max(hiR, rr);
+  }
+  ok(n > 40 && worstAlt < 0.004 && hiR - loR > 0.003,
+    `тень натянута на рельеф: ${n} вершин, все в ${(worstAlt * 1000).toFixed(1)} м от грунта, ` +
+    `а сам грунт под ней гуляет на ${((hiR - loR) * 1000).toFixed(1)} м`);
 }
 
 console.log('\n== столкновения ==');

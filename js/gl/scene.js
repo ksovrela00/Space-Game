@@ -126,7 +126,7 @@ export class GlScene {
     this.quad = buildQuad(gl, this.pGlow.attrib('aQuad'));
     // Тень корабля переписывается каждый кадр; вершин у её силуэта
     // немного — это выпуклая оболочка полусотни точек корпуса.
-    this.shadowMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 32);
+    this.shadowMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 16 * 9);
     this.shadowBuf = {};
     this.stars = this.buildStars();
     this.blankTex = createBlankTexture(gl);

@@ -144,7 +144,7 @@ export function buildDynamicMesh(gl, loc, maxVerts) {
     gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
   }
   gl.bindVertexArray(null);
-  const mesh = new GlMesh(gl, vao, 0, gl.TRIANGLE_FAN, null, [buf]);
+  const mesh = new GlMesh(gl, vao, 0, gl.TRIANGLES, null, [buf]);
   mesh.maxVerts = maxVerts;
   mesh.update = (data, count) => {
     mesh.count = Math.min(count, maxVerts);

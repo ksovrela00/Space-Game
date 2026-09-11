@@ -9,6 +9,7 @@ import { gearLabel } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
 import { targetLabel } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
+import { altitudeOf, worldPoint } from '../game/surface.js';
 
 const CY = '#4fb3e0';
 const CY_DIM = 'rgba(79,179,224,0.35)';
@@ -23,6 +24,7 @@ const MARK_R = 0.030;      // км
 const MARK_MAX = 1.5;      // км
 const _mk = { x: 0, y: 0, z: 0 };
 const _mkc = { x: 0, y: 0, z: 0 };
+const _mkAlt = { dir: { x: 0, y: 0, z: 0 } };
 const _pt = { x: 0, y: 0 };
 
 export const fmtDist = (km) => {
@@ -355,6 +357,10 @@ function drawGroundMark(ctx, cam, game) {
   ax /= al; ay /= al; az /= al;
   const bx = up.y * az - up.z * ay, by = up.z * ax - up.x * az, bz = up.x * ay - up.y * ax;
 
+  // Кольцо кладётся НА РЕЛЬЕФ: высота грунта берётся под каждой его
+  // точкой. Плоским кольцом высота не читается — оно одинаково лежит и
+  // на ровном месте, и поперёк кратера, а именно перепад под ним и даёт
+  // глазу чувство высоты.
   const N = 16;
   const pts = [];
   for (let i = 0; i < N; i++) {
@@ -363,6 +369,8 @@ function drawGroundMark(ctx, cam, game) {
     _mk.x = gx + ax * c + bx * s;
     _mk.y = gy + ay * c + by * s;
     _mk.z = gz + az * c + bz * s;
+    const g = altitudeOf(z.body, _mk, _mkAlt);
+    worldPoint(z.body, g.dir, g.groundR, _mk);
     cam.toCamera(_mk, _mkc);
     if (_mkc.z <= cam.near) return;            // кольцо частично за спиной
     pts.push(cam.project(_mkc, { x: 0, y: 0 }));
