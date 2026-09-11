@@ -21,9 +21,13 @@ export const SHIP = {
   gearTime: 2.4,      // секунды на выпуск или уборку шасси
   gearSpeed: 0.35,    // доля максимальной скорости с выпущенным шасси
   gearClear: 0.010,   // высота центра корабля над грунтом на шасси, км
-  hoverSpeed: 0.09,   // км/с — горизонтальный ход на посадочных движках
-  vtolRate: 0.06,     // км/с — вертикальный ход
-  vtolSharp: 2.2,     // как быстро посадочные движки выходят на заданную
+  liftRate: 0.06,     // км/с — вертикальный ход подъёмных движков (R/F)
+  liftSharp: 2.2,     // как быстро движки выходят на заданную скорость
+  // Установившаяся скорость снижения с выпущенным шасси = g · sinkTime.
+  // Модель полёта задаёт скорость, а не силу, поэтому и притяжение здесь
+  // выражено скоростью: свободного падения с разгоном до бесконечности
+  // в аркадной схеме всё равно быть не может.
+  sinkTime: 3.0,      // с
 };
 
 export function makeShip() {
@@ -41,10 +45,13 @@ export function makeShip() {
     docking: null,
     mesh: null,
     control: { pitch: 0, yaw: 0, roll: 0, thr: 0, lift: 0 },
-    // Посадка: шасси (t — доля выпуска), посадочный режим с векторной
-    // тягой, тело, на котором стоим, и посадочный компьютер.
+    // Вертикальный канал: ход подъёмных движков и просадка под своим
+    // весом (появляется с выпущенным шасси, см. updateShip).
+    lift: 0,
+    sink: 0,
+    // Посадка: шасси (t — доля выпуска), тело, на котором стоим, и
+    // посадочный компьютер.
     gear: { t: 0, out: false },
-    vtol: null,
     landedAt: null,
     landing: null,
   };
@@ -59,16 +66,13 @@ export function readControls(ship) {
   // Стрелки — классическая схема Elite: тангаж и крен.
   c.roll = input.axis(['KeyQ', 'ArrowLeft'], ['KeyE', 'ArrowRight']);
   c.yaw = input.axis(['KeyA'], ['KeyD']);
-  // В посадочном режиме Shift/Ctrl управляют не тягой, а вертикальным
-  // ходом посадочных движков: тяга там задаёт только горизонтальный ход.
-  if (ship.vtol) {
-    c.lift = input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']);
-    c.thr = 0;
-  } else {
-    c.thr = input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']);
-  }
+  c.thr = input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']);
+  // Вертикальный ход — отдельный канал, доступный всегда: с ним можно
+  // и садиться брюхом вниз, не опуская нос, и просто держать высоту над
+  // поверхностью, продолжая лететь вперёд.
+  c.lift = input.axis(['KeyF'], ['KeyR']);
   if (input.pressed('KeyX')) ship.throttle = 0;
-  if (input.pressed('KeyF')) ship.throttle = 1;
+  if (input.pressed('KeyZ')) ship.throttle = 1;
 }
 
 export function clearControls(ship) {
@@ -79,8 +83,11 @@ export function clearControls(ship) {
 /**
  * @param dt     реальный шаг (управление, вращение, разгон)
  * @param moveDt шаг для перемещения (dt, умноженный на круиз)
+ * @param field  тяготение под кораблём: {up, sink} — местная вертикаль и
+ *               установившаяся скорость просадки (0, пока шасси убрано:
+ *               с убранным шасси высоту держит компенсатор)
  */
-export function updateShip(ship, dt, moveDt) {
+export function updateShip(ship, dt, moveDt, field = null) {
   const c = ship.control;
 
   ship.throttle = clamp(ship.throttle + c.thr * SHIP.throttleRate * dt, 0, 1);
@@ -91,21 +98,6 @@ export function updateShip(ship, dt, moveDt) {
   r.roll = approach(r.roll, c.roll * SHIP.rollRate, SHIP.rotSharp, dt);
   rotateBasis(ship.basis, r.pitch * dt, r.yaw * dt, r.roll * dt);
 
-  // Посадочный режим: перемещение задаётся ВЕКТОРОМ (посадочные движки),
-  // а не направлением носа — иначе сесть брюхом вниз невозможно, корабль
-  // умеет двигаться только туда, куда смотрит. Круиз в этом режиме всегда
-  // x1, поэтому шаг перемещения — реальный dt.
-  if (ship.vtol) {
-    ship.vel.x = ship.vtol.x;
-    ship.vel.y = ship.vtol.y;
-    ship.vel.z = ship.vtol.z;
-    ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
-    ship.pos.x += ship.vel.x * dt;
-    ship.pos.y += ship.vel.y * dt;
-    ship.pos.z += ship.vel.z * dt;
-    return;
-  }
-
   // С выпущенным шасси скорость ограничена — на нём не летают.
   const target = ship.throttle * SHIP.maxSpeed *
     (ship.gear && ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
@@ -113,14 +105,22 @@ export function updateShip(ship, dt, moveDt) {
   ship.speed += clamp(target - ship.speed, -a, a);
   if (ship.speed < 1e-5) ship.speed = 0;
 
-  const f = ship.basis.fwd;
-  ship.vel.x = f.x * ship.speed;
-  ship.vel.y = f.y * ship.speed;
-  ship.vel.z = f.z * ship.speed;
+  // Вертикальный канал: подъёмные движки вдоль «верха» корабля плюс
+  // просадка вдоль местной вертикали. Второе включается только с
+  // выпущенным шасси — так гравитация чувствуется там, где она нужна
+  // (на посадке), и не мешает стыковке.
+  ship.lift = approach(ship.lift, SHIP.liftRate * ship.control.lift, SHIP.liftSharp, dt);
+  ship.sink = approach(ship.sink, field ? field.sink : 0, SHIP.liftSharp, dt);
 
-  ship.pos.x += f.x * ship.speed * moveDt;
-  ship.pos.y += f.y * ship.speed * moveDt;
-  ship.pos.z += f.z * ship.speed * moveDt;
+  const f = ship.basis.fwd, u = ship.basis.up;
+  const d = field ? field.up : null;
+  ship.vel.x = f.x * ship.speed + u.x * ship.lift - (d ? d.x * ship.sink : 0);
+  ship.vel.y = f.y * ship.speed + u.y * ship.lift - (d ? d.y * ship.sink : 0);
+  ship.vel.z = f.z * ship.speed + u.z * ship.lift - (d ? d.z * ship.sink : 0);
+
+  ship.pos.x += ship.vel.x * moveDt;
+  ship.pos.y += ship.vel.y * moveDt;
+  ship.pos.z += ship.vel.z * moveDt;
 }
 
 // Мгновенно поставить корабль в точку с заданной ориентацией.
@@ -133,5 +133,7 @@ export function placeShip(ship, pos, basis) {
   }
   ship.speed = 0;
   ship.throttle = 0;
+  ship.lift = 0;
+  ship.sink = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
 }

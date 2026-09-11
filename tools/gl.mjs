@@ -940,7 +940,10 @@ console.log('\n== плитки поверхности ==');
   {
     const FIT = 2 / Math.min(CRATER_STEP ** -DETAIL_MAX_CS, LAC ** DETAIL_MAX_OCT);
     const finestPx = TILE_TEXEL_TOL * FIT;
-    ok(finestPx <= 2.5,
+    // Порог именно единица: деталь обязана доходить ДО ПИКСЕЛЯ на любой
+    // разрешённой плитке. Если обрывается выше, то при смене уровня
+    // недостающее появляется разом — кратеры «прогружаются» на глазах.
+    ok(finestPx <= 1.05,
       `бюджет шейдера (${DETAIL_MAX_CS} масштабов, ${DETAIL_MAX_OCT} октав) дотягивает деталь ` +
       `до ${finestPx.toFixed(1)} px на самой грубой разрешённой плитке ` +
       `(${TILE_TEXEL_TOL} px на тексель)`);
@@ -987,6 +990,39 @@ console.log('\n== плитки поверхности ==');
     ok(gap <= 2,
       `с 250 м в кадре ${out.length} плиток, соседи отличаются не больше ` +
       `чем на ${gap} уровня (худшая пара ${where})`);
+  }
+
+  // Все атрибуты плитки обязаны доехать до шейдера.
+  //
+  // uv не доезжал: buildIndexedMesh про него не знал, атрибут оставался
+  // непривязанным, и вместо него шейдер получал константу — то есть вся
+  // плитка выбирала ОДИН тексель своей текстуры. Освещение выходило
+  // плоским на всю плитку, поверхность — шахматкой из светлых и тёмных
+  // четырёхугольников. Глазами это ловится мгновенно, а headless — вот
+  // так: сверяем список залитых буферов со списком данных.
+  {
+    const { buildIndexedMesh } = await import('../js/gl/mesh.js');
+    const bld = tileBuilder(moon, { face: 1, level: 5, tx: 9, ty: 4 });
+    while (!bld.step(4096));
+    const geo = bld.result;
+    const bound = new Map();
+    let cur = null;
+    const fake = {
+      FLOAT: 1, ARRAY_BUFFER: 2, ELEMENT_ARRAY_BUFFER: 3, STATIC_DRAW: 4, TRIANGLES: 5,
+      UNSIGNED_SHORT: 6, UNSIGNED_INT: 7,
+      createVertexArray: () => ({}), bindVertexArray() {}, createBuffer: () => ({ id: 1 }),
+      bindBuffer(target, b) { if (target === 2) cur = b; },
+      bufferData(target, arr) { if (target === 2 && cur) cur.data = arr; },
+      enableVertexAttribArray() {},
+      vertexAttribPointer(loc, size) { bound.set(loc, { size, data: cur && cur.data }); },
+    };
+    const locs = { aPos: 0, aNormal: 1, aColor: 2, aUv: 3, aT: 4 };
+    buildIndexedMesh(fake, locs, geo);
+    const uv = bound.get(locs.aUv);
+    ok(bound.size === 4 && uv && uv.size === 2 && uv.data === geo.uv &&
+       bound.get(locs.aPos).data === geo.positions,
+      `у плитки привязаны все ${bound.size} атрибута, включая uv ` +
+      `(${uv ? uv.size : 0} числа на вершину)`);
   }
 
   // Стоимость: одна плитка собирается порциями, чтобы не ронять кадр.
@@ -1337,6 +1373,46 @@ console.log('\n== мок GL: путь отрисовки ==');
       ok(frames < 900,
         `с 250 м подробная плитка (тексель ${texelM.toFixed(1)} м, уровень ${best}) ` +
         `подгружается за ${frames} кадров`);
+    }
+
+    // Висение над вращающимся телом: грунт уезжает под кораблём со
+    // скоростью вращения (у луны это сотня-полторы метров в секунду), и
+    // плитки подгружаются НЕПРЕРЫВНО. Меряем, насколько набор отстаёт
+    // от идеального: уровень плитки под кораблём против того, который
+    // выбрался бы, будь всё уже собрано.
+    {
+      const { selectTiles: sel, tileTexelAngle: tta, tileCellAngle: tca, TILE_MAX_LEVEL: TML } =
+        await import('../js/gl/quadtree.js');
+      const { TILE_TEXEL_TOL: TTT } = await import('../js/gl/tiles.js');
+      const { terrainOf: terrOf } = await import('../js/gl/terrain.js');
+      const tt = terrOf(moon);
+      const alt = 0.687;
+      const speed = 0.146;                 // км/с — вращение поверхности
+      let worstLag = 0, sumLag = 0, n = 0;
+      for (let f = 0; f < 240; f++) {
+        const a = (f / 60) * speed / moon.radius;   // угол сноса за кадр
+        const d = normalize(v3(dirL.x + a * 0.7, dirL.y, dirL.z - a * 0.7));
+        const e = worldPoint(moon, d, groundRadius(moon, d) + alt, v3());
+        placeShip(ship, e, null);
+        lookAt(e, worldPoint(moon, normalize(v3(d.x + 0.02, d.y, d.z - 0.02)), groundRadius(moon, d), v3()));
+        scene.render(game);
+        if (f < 60) continue;              // первую секунду не считаем
+        // идеальный набор при полностью собранном кэше
+        const camDir = localDir(moon, scene.camera.pos, v3());
+        const ideal = sel({
+          radius: moon.radius, camDir, camAlt: alt, focal: scene.camera.focal,
+          tol: 5 * scene.tiles.tolScale, texelTol: TTT, maxLevel: TML, relief: tt.ampUp,
+          errorOf: (lv) => tt.meshError(tt.detailForCell(tca(lv))) + tca(lv) ** 2 / 8,
+          texelOf: (lv) => tta(lv), ready: () => true, want: () => {},
+        }, []);
+        const deepest = (list) => { let m = 0; for (const q of list) m = Math.max(m, q.level); return m; };
+        const lag = deepest(ideal) - deepest(scene.tiles.draw);
+        worstLag = Math.max(worstLag, lag);
+        sumLag += lag; n++;
+      }
+      ok(worstLag <= 1,
+        `висение над вращающимся телом: набор отстаёт от идеального на ` +
+        `${(sumLag / n).toFixed(1)} уровня в среднем, худший случай ${worstLag}`);
     }
 
     // Кэш не растёт бесконечно: облёт тела вытесняет далёкие плитки.

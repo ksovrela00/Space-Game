@@ -9,13 +9,14 @@ import { checkStation, startDockingComputer, updateDockingComputer, dockingQuali
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
   isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
-  worldPoint, surfaceVelocity,
+  worldPoint, surfaceVelocity, localDir, dirToWorldBody,
 } from '../js/game/surface.js';
 import {
-  toggleGear, updateGear, gearReady, landingContext, syncVtol, manualHover,
+  toggleGear, updateGear, gearReady, landingContext,
   startLanding, updateLandingComputer, checkTouchdown, settle, updateLandedPose,
   takeoff, landingReadout,
 } from '../js/game/landing.js';
+import { captureBody, carryShip, gravityField } from '../js/game/gravity.js';
 import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
@@ -801,18 +802,19 @@ function landTest(pick, startMul, opts = {}) {
   const phases = new Set();
   for (let i = 0; i < 60 * 900; i++) {
     updateWorld(w, STEP);
+    const cap = captureBody(w, sh.pos);
+    if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
     if (opts.noGear) { sh.gear.out = false; sh.gear.t = 0; }
     else updateGear(sh, STEP);
     let zone = landingContext(w, sh);
-    syncVtol(sh, zone);
     if (sh.landing) {
-      updateLandingComputer(sh, STEP, cr.level);
+      updateLandingComputer(sh, STEP, cr.level, zone);
       phases.add(sh.landing.phase);
       if (sh.landing.wantCruise !== null) cr.index = sh.landing.wantCruise;
     }
     const lvl = updateCruise(cr, w, sh, STEP);
-    updateShip(sh, STEP, STEP * lvl);
+    updateShip(sh, STEP, STEP * lvl, gravityField(cap, sh));
     t += STEP;
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0 && !isLandable(nb.body)) return { status: 'crash-body', t };
@@ -867,12 +869,12 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     takeoff(sh);
     for (let i = 0; i < 60 * 40; i++) {
       updateWorld(w, STEP);
+      const cap = captureBody(w, sh.pos);
+      if (cap) carryShip(sh, cap, STEP);
       clearControls(sh);
       updateGear(sh, STEP);
-      const z = landingContext(w, sh);
-      syncVtol(sh, z);
-      if (z && sh.vtol) { sh.control.lift = 1; manualHover(sh, z, STEP); }
-      updateShip(sh, STEP, STEP);
+      sh.control.lift = 1;                 // держим R: набор высоты
+      updateShip(sh, STEP, STEP, gravityField(cap, sh));
     }
     const z = landingContext(w, sh);
     ok(z && z.alt > 1.5, `за 40 с взлёта поднялись на ${z ? z.alt.toFixed(2) : '?'} км`);
@@ -900,20 +902,19 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   lookAlong(sh.basis, normalize(v3(
     moon.pos.x - sh.pos.x, moon.pos.y - sh.pos.y, moon.pos.z - sh.pos.z)));
   sh.throttle = 0.02;
-  let res = null, vtolSeen = false;
+  let res = null;
   for (let i = 0; i < 60 * 120 && !res; i++) {
     updateWorld(w, STEP);
+    const cap = captureBody(w, sh.pos);
+    if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
     updateGear(sh, STEP);
-    const zone = landingContext(w, sh);
-    if (syncVtol(sh, zone)) vtolSeen = true;
-    updateShip(sh, STEP, STEP);
+    updateShip(sh, STEP, STEP, gravityField(cap, sh));
     const z2 = landingContext(w, sh);
     if (z2) res = checkTouchdown(sh, z2);
   }
-  ok(res && res.result === 'crash' && /шасси/i.test(res.reason) && !vtolSeen,
-    `мягкое касание с убранным шасси — авария: ${res ? res.reason : 'не произошло'}` +
-    (vtolSeen ? ' (посадочный режим включился зря)' : ''));
+  ok(res && res.result === 'crash' && /шасси/i.test(res.reason),
+    `мягкое касание с убранным шасси — авария: ${res ? res.reason : 'не произошло'}`);
 }
 
 // Слишком быстрое касание: падаем на грунт без посадочного режима.
@@ -980,6 +981,135 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
 }
 
 // --- 6. Столкновение с планетой --------------------------------------------
+// --- 5e. Гравитация и захват -------------------------------------------------
+console.log('\n== гравитация и захват ==');
+{
+  const w = makeSystem(0x1a7e);
+  const home = w.home;
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const giant = w.planets.find((p) => p.kind === 'gas');
+
+  // Числа должны быть похожи на солнечные: у землеподобной планеты
+  // единицы м/с², у луны — около двух, и сфера действия всегда больше
+  // самого тела, но меньше орбиты.
+  let sane = true;
+  for (const b of w.bodies) {
+    if (b.kind === 'star') { if (isFinite(b.soi)) sane = false; continue; }
+    if (!(b.g0 > 0.3 && b.g0 < 30)) sane = false;
+    if (!(b.soi > b.radius * 2 && b.soi < b.orbit.radius)) sane = false;
+  }
+  ok(sane && home.g0 > 4 && home.g0 < 12 && moon.g0 < home.g0,
+    `гравитация: дом ${home.g0.toFixed(1)} м/с², луна ${moon.g0.toFixed(1)}, ` +
+    `гигант ${giant.g0.toFixed(1)}; сферы действия ${(moon.soi / moon.radius).toFixed(1)}–` +
+    `${(giant.soi / giant.radius).toFixed(1)} радиусов`);
+
+  // Внутри сферы луны захватывает луна, а не планета-хозяин: из
+  // вложенных сфер выбирается самая тесная.
+  const near = worldPoint(moon, normalize(v3(0.2, 0.9, 0.3)), moon.radius + 5, v3());
+  const far = v3(moon.pos.x + moon.soi * 3, moon.pos.y, moon.pos.z);
+  ok(captureBody(w, near) === moon && captureBody(w, far) !== moon,
+    `захват у поверхности луны — ${captureBody(w, near).name}, ` +
+    `в трёх сферах от неё — ${(captureBody(w, far) || { name: 'никто' }).name}`);
+}
+
+// Главное свойство захвата: с нулевой тягой корабль стоит над ТОЧКОЙ
+// ПОВЕРХНОСТИ, а не над точкой пространства. Без переноса системы
+// отсчёта грунт уезжал бы со скоростью вращения — сотня метров в
+// секунду, то есть километры за минуту зависания.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const dir = normalize(v3(0.3, 0.7, 0.6));
+  const sh = makeShip();
+  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 1, v3()), makeBasis());
+  // Брюхом вниз: подъёмные движки работают вдоль «верха» корабля, и на
+  // боку они держали бы не высоту, а снос — как у настоящего вертолёта.
+  const upW = dirToWorldBody(moon, dir, v3());
+  lookAlong(sh.basis, normalize(horizontal(v3(1, 0, 0), upW, v3())), upW);
+  sh.gear.out = true; sh.gear.t = 1;
+  const start = localDir(moon, sh.pos, v3());
+  let worstAlt = 0;
+  for (let i = 0; i < 60 * 60; i++) {
+    updateWorld(w, STEP);
+    const cap = captureBody(w, sh.pos);
+    if (cap) carryShip(sh, cap, STEP);
+    clearControls(sh);
+    // Держим высоту: ровно столько движков, сколько нужно против веса.
+    sh.control.lift = sh.sink / SHIP.liftRate;
+    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    if (i % 600 === 0) {
+      const z = landingContext(w, sh);
+      worstAlt = Math.max(worstAlt, Math.abs(z.alt - 1));
+    }
+  }
+  const now = localDir(moon, sh.pos, v3());
+  const drift = Math.acos(Math.min(1, dot(start, now))) * moon.radius;
+  const spinSpeed = moon.spin * moon.radius;
+  ok(drift < 0.15 && worstAlt < 0.05,
+    `минута зависания над луной: снос по грунту ${(drift * 1000).toFixed(0)} м ` +
+    `(без переноса было бы ${(spinSpeed * 60).toFixed(0)} км), ` +
+    `высота ушла на ${(worstAlt * 1000).toFixed(0)} м`);
+}
+
+// Гравитация как сила: с выпущенным шасси корабль проседает тем быстрее,
+// чем тяжелее тело, а с убранным высоту держит компенсатор.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const dir = normalize(v3(-0.4, 0.5, 0.76));
+  const drop = (gearOut, seconds) => {
+    const sh = makeShip();
+    placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 3, v3()), makeBasis());
+    sh.gear.out = gearOut; sh.gear.t = gearOut ? 1 : 0;
+    for (let i = 0; i < 60 * seconds; i++) {
+      updateWorld(w, STEP);
+      const cap = captureBody(w, sh.pos);
+      if (cap) carryShip(sh, cap, STEP);
+      clearControls(sh);
+      updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    }
+    return 3 - landingContext(w, sh).alt;
+  };
+  const withGear = drop(true, 20);
+  const noGear = drop(false, 20);
+  const want = moon.g0 / 1000 * SHIP.sinkTime * 20;     // км за 20 с
+  ok(Math.abs(withGear - want) < want * 0.15 && Math.abs(noGear) < 0.001,
+    `за 20 с на шасси просели на ${(withGear * 1000).toFixed(0)} м ` +
+    `(по тяге тела ${(want * 1000).toFixed(0)} м), с убранным шасси — ` +
+    `${(noGear * 1000).toFixed(0)} м`);
+}
+
+// Вертикальный ход доступен всегда и не мешает лететь вперёд: это и
+// была просьба убрать «посадочный режим», где можно только вверх-вниз.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const dir = normalize(v3(0.1, -0.8, 0.59));
+  const sh = makeShip();
+  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 2, v3()), makeBasis());
+  // Нос по горизонту, брюхо вниз, шасси выпущено.
+  const up = dirToWorldBody(moon, dir, v3());
+  lookAlong(sh.basis, normalize(horizontal(v3(1, 0, 0), up, v3())), up);
+  sh.gear.out = true; sh.gear.t = 1;
+  sh.throttle = 1;
+  const p0 = { x: sh.pos.x, y: sh.pos.y, z: sh.pos.z };
+  for (let i = 0; i < 60 * 10; i++) {
+    updateWorld(w, STEP);
+    const cap = captureBody(w, sh.pos);
+    if (cap) carryShip(sh, cap, STEP);
+    clearControls(sh);
+    sh.control.lift = 1;                     // держим R
+    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+  }
+  const z = landingContext(w, sh);
+  const moved = v3(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
+  const climb = z.alt - 2;
+  const fwd = Math.hypot(moved.x, moved.y, moved.z);
+  ok(climb > 0.3 && fwd > 3,
+    `с выпущенным шасси за 10 с: вперёд ${fwd.toFixed(1)} км и вверх ` +
+    `${(climb * 1000).toFixed(0)} м одновременно`);
+}
+
 console.log('\n== столкновения ==');
 {
   const w = makeSystem(0x1a7e);

@@ -20,8 +20,9 @@ import {
   updateDockingComputer, DOCK_RANGE,
 } from './game/docking.js';
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
+import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import {
-  toggleGear, updateGear, gearLabel, landingContext, syncVtol, manualHover,
+  toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, settle,
   updateLandedPose, takeoff, landingReadout, landedInfo, LAND,
 } from './game/landing.js';
@@ -81,6 +82,7 @@ const game = {
   nearest: null,
   dockAssist: null,
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
+  capture: null,         // тело, в чьём гравитационном захвате корабль
   landInfo: null,        // показания посадочного дисплея
   statusLine: null,
   scanBlips: [],
@@ -105,7 +107,8 @@ function dockAt(station) {
   stopDockingComputer(ship);
   stopLanding(ship);
   resetCruise(game.cruise);
-  ship.vtol = null;
+  ship.lift = 0;
+  ship.sink = 0;
   ship.gear.out = false;
   ship.speed = 0;
   ship.throttle = 0;
@@ -180,7 +183,8 @@ function crash(reason) {
   ship.hull = 0;
   ship.speed = 0;
   ship.throttle = 0;
-  ship.vtol = null;
+  ship.lift = 0;
+  ship.sink = 0;
   ship.landedAt = null;
   stopAutopilot(ship);
   stopDockingComputer(ship);
@@ -212,7 +216,8 @@ function teleportToTarget() {
   stopAutopilot(ship);
   stopDockingComputer(ship);
   stopLanding(ship);
-  ship.vtol = null;
+  ship.lift = 0;
+  ship.sink = 0;
   ship.landedAt = null;
   ship.landedPose = null;
   resetCruise(game.cruise);
@@ -458,7 +463,7 @@ function handleKeys() {
   if (ship.autopilot || ship.docking || ship.landing) {
     if (input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE',
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
-      input.pressed('KeyX', 'KeyF')) {
+      input.isDown('KeyR', 'KeyF') || input.pressed('KeyX', 'KeyZ')) {
       if (ship.autopilot) stopAutopilot(ship);
       if (ship.docking) stopDockingComputer(ship);
       if (ship.landing) stopLanding(ship);
@@ -482,6 +487,12 @@ function step(dt) {
   const st = game.state;
   updateWorld(world, dt);
 
+  // Гравитационный захват: внутри сферы действия тела корабль
+  // переносится вместе с ним (см. js/game/gravity.js). Без этого
+  // «зависнуть над точкой» нельзя — поверхность уезжает из-под корабля.
+  game.capture = captureBody(world, ship.pos);
+  if (game.capture && st.mode === ST.FLIGHT) carryShip(ship, game.capture, dt);
+
   if (st.mode === ST.DOCKED) {
     // Корабль стоит в порту и едет вместе со станцией.
     const s = ship.dockedAt;
@@ -502,10 +513,9 @@ function step(dt) {
   // Обстановка у поверхности считается до управления: от неё зависит и
   // посадочный режим, и команды посадочного компьютера.
   let zone = landingContext(world, ship);
-  syncVtol(ship, zone);
 
   if (ship.landing) {
-    game.statusLine = updateLandingComputer(ship, dt, game.cruise.level);
+    game.statusLine = updateLandingComputer(ship, dt, game.cruise.level, zone);
     if (ship.landing && ship.landing.wantCruise !== null) {
       game.cruise.index = ship.landing.wantCruise;
     }
@@ -533,12 +543,8 @@ function step(dt) {
     readControls(ship);
   }
 
-  // В посадочном режиме вручную двигают посадочные движки; под
-  // управлением компьютера вектор задаёт он сам.
-  if (ship.vtol && !ship.landing && zone) manualHover(ship, zone, dt);
-
   const level = updateCruise(game.cruise, world, ship, dt);
-  updateShip(ship, dt, dt * level);
+  updateShip(ship, dt, dt * level, gravityField(game.capture, ship));
   game.stats.flownKm += ship.speed * level * dt;
 
   // Касание поверхности: посадка или удар.
@@ -616,7 +622,7 @@ function prepareHud() {
 
   // Посадочный дисплей — когда близка поверхность, на которую можно сесть.
   game.landInfo = game.zone && isLandable(game.zone.body) &&
-    game.zone.alt < LAND.vtolAlt * 4
+    game.zone.alt < LAND.landAlt * 4
     ? landingReadout(ship, game.zone)
     : null;
 

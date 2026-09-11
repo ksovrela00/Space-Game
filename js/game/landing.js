@@ -1,34 +1,45 @@
-// Посадка на безатмосферное тело: шасси, посадочный режим, посадочный
-// компьютер и стоянка на поверхности.
+// Посадка на безатмосферное тело: шасси, посадочный компьютер и стоянка
+// на поверхности.
 //
-// Главная особенность — модель полёта. В обычном режиме корабль летит
-// туда, куда смотрит нос (аркадная схема, как в Elite), и сесть брюхом
-// вниз в ней нельзя: чтобы опускаться, пришлось бы смотреть в землю.
-// Поэтому у самой поверхности включается ПОСАДОЧНЫЙ РЕЖИМ: перемещение
-// задаётся вектором посадочных движков (ship.vtol), а нос и «верх»
-// корабля от направления движения больше не зависят.
+// Отдельного «посадочного режима» здесь нет. Корабль всегда летит одним
+// и тем же способом: тяга — вдоль носа, R/F — вверх и вниз подъёмными
+// движками. Поэтому с выпущенным шасси можно и снижаться брюхом вниз, и
+// продолжать лететь вперёд, и то и другое одновременно.
 //
-// Гравитации в модели нет: нулевая команда движков означает зависание.
-// Это честнее, чем изображать притяжение, которого нигде больше в
-// расчётах полёта не существует.
+// Гравитация настоящая (js/game/gravity.js): с выпущенным шасси
+// компенсатор высоты выключается, и корабль проседает тем быстрее, чем
+// тяжелее тело. Держать высоту приходится движками — в этом и состоит
+// посадка.
+//
+// Скорости здесь считаются ОТНОСИТЕЛЬНО ГРУНТА, но грунт у поверхности
+// уже неподвижен: перенос системы отсчёта компенсирует и орбитальное
+// движение тела, и его вращение (см. gravity.js).
 
-import { v3, normalize, dot, clamp, approach } from '../core/vec3.js';
+import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { SHIP } from './ship.js';
 import { alignBasis, aimAt, levelRoll, horizontal } from './pilot.js';
 import { LEVELS } from './cruise.js';
 import {
-  isLandable, isSolid, altitudeOf, surfaceNormal, worldPoint, surfaceVelocity,
+  isLandable, isSolid, altitudeOf, surfaceNormal, worldPoint,
   dirToWorldBody, groundRadius, findSite, bodyFrame, latLon,
 } from './surface.js';
+import { groundDrift } from './gravity.js';
 
 export const LAND = {
   vspeed: 0.030,    // км/с — предельная вертикальная скорость касания (30 м/с)
   hspeed: 0.025,    // км/с — предельная боковая скорость (25 м/с)
   tilt: 0.94,       // косинус угла между «верхом» корабля и нормалью площадки
   slope: 0.35,      // рад — предельный уклон площадки (20°)
-  vtolAlt: 6,       // км — ниже этой высоты работает посадочный режим
+  landAlt: 6,       // км — ниже этой высоты компьютер переходит к спуску
   range: 3,         // в радиусах тела: дальше посадочный компьютер не берётся
   hold: 2.5,        // км — высота, на которую компьютер выводит перед спуском
+  closeSpeed: 0.09, // км/с — предел скорости, с которой доводится снос
+  // Снос доводится тягой вдоль носа, а разворот идёт с конечной угловой
+  // скоростью: радиус разворота v/ω. Чтобы не кружить вокруг площадки,
+  // скорость подхода держим такой, чтобы этот радиус был вчетверо
+  // меньше оставшегося сноса — отсюда и коэффициент (ω ≈ 0.55 рад/с).
+  closeGain: 0.12,  // км/с на километр сноса
+  liftGain: 20,     // обратная связь по вертикальной скорости
 };
 
 // Рабочие векторы модуля: в шаге физики их трогают каждый кадр, поэтому
@@ -40,7 +51,6 @@ const _up = v3();
 const _nLocal = v3();
 const _nWorld = v3();
 const _fwd = v3();
-const _surf = v3();
 const _alt = { dir: v3() };
 
 const fmtKm = (km) => (Math.abs(km) < 1 ? (km * 1000).toFixed(0) + ' м' : km.toFixed(1) + ' км');
@@ -113,8 +123,9 @@ export function landingContext(world, ship, out = _zone) {
   dirToWorldBody(b, out.nLocal, out.normalWorld);
   out.slope = Math.acos(clamp(dot(out.nLocal, out.dir), -1, 1));
   // Скорость грунта и скорость корабля ОТНОСИТЕЛЬНО грунта: все
-  // посадочные условия проверяются по второй.
-  surfaceVelocity(b, ship.pos, out.surfVel);
+  // посадочные условия проверяются по второй. Грунт здесь — тот, что
+  // остался после переноса системы отсчёта: у поверхности он стоит.
+  groundDrift(b, ship.pos, out.surfVel);
   out.relVel.x = ship.vel.x - out.surfVel.x;
   out.relVel.y = ship.vel.y - out.surfVel.y;
   out.relVel.z = ship.vel.z - out.surfVel.z;
@@ -141,54 +152,6 @@ export function landingReadout(ship, zone) {
     tiltOk: tilt >= LAND.tilt,
     slopeOk: zone.slope <= LAND.slope,
   };
-}
-
-// --- Посадочный режим --------------------------------------------------------
-
-/**
- * Включить или выключить посадочный режим. Условие одно: выпущенное
- * шасси у самой поверхности. Тем же порогом пользуется посадочный
- * компьютер, поэтому он и режим движения всегда согласованы.
- */
-export function syncVtol(ship, zone) {
-  const want = !!zone && isLandable(zone.body) &&
-    ship.gear.t > 0.02 && zone.alt < LAND.vtolAlt && !ship.landedAt;
-  if (want && !ship.vtol) {
-    // Входим в режим с текущей скоростью — иначе корабль дёрнулся бы.
-    ship.vtol = v3(ship.vel.x, ship.vel.y, ship.vel.z);
-  } else if (!want && ship.vtol) {
-    // Выходим: остаётся то, что летит вдоль носа.
-    ship.speed = Math.max(0, dot(ship.vtol, ship.basis.fwd));
-    ship.throttle = clamp(ship.speed / (SHIP.maxSpeed * SHIP.gearSpeed), 0, 1);
-    ship.vtol = null;
-  }
-  return !!ship.vtol;
-}
-
-/** Плавно подвести вектор посадочных движков к заданному. */
-function driveVtol(ship, want, dt, sharp = SHIP.vtolSharp) {
-  const v = ship.vtol;
-  v.x = approach(v.x, want.x, sharp, dt);
-  v.y = approach(v.y, want.y, sharp, dt);
-  v.z = approach(v.z, want.z, sharp, dt);
-  return v;
-}
-
-/**
- * Ручное управление в посадочном режиме: тяга — горизонтальный ход по
- * направлению носа, Shift/Ctrl — вверх и вниз. Всё это ОТНОСИТЕЛЬНО
- * грунта, поэтому при нулевых командах корабль висит над одной и той же
- * точкой поверхности, а не над одной и той же точкой пространства.
- */
-export function manualHover(ship, zone, dt) {
-  const up = zone.upWorld;
-  normalize(horizontal(ship.basis.fwd, up, _h), _h);
-  const fwdSp = SHIP.hoverSpeed * ship.throttle;
-  const vertSp = SHIP.vtolRate * ship.control.lift;
-  _want.x = zone.surfVel.x + _h.x * fwdSp + up.x * vertSp;
-  _want.y = zone.surfVel.y + _h.y * fwdSp + up.y * vertSp;
-  _want.z = zone.surfVel.z + _h.z * fwdSp + up.z * vertSp;
-  driveVtol(ship, _want, dt);
 }
 
 // --- Посадочный компьютер ----------------------------------------------------
@@ -223,24 +186,24 @@ export function startLanding(ship, body, pos) {
 export function stopLanding(ship) { ship.landing = null; }
 
 /**
- * Ведёт корабль на площадку. Пишет в ship.control / ship.throttle /
- * ship.vtol и выбирает уровень круиза (ship.landing.wantCruise).
+ * Ведёт корабль на площадку. Пишет в ship.control / ship.throttle и
+ * выбирает уровень круиза (ship.landing.wantCruise).
+ * @param zone обстановка у поверхности (landingContext) — из неё берётся
+ *             фактическая вертикальная скорость относительно грунта
  * @returns строка статуса для HUD
  */
-export function updateLandingComputer(ship, dt, cruiseLevel = 1) {
+export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
   const L = ship.landing;
   if (!L) return null;
   const b = L.body;
   L.wantCruise = null;
   const alt = altitudeOf(b, ship.pos, _alt);
 
-  // Пока посадочный режим не включился (высоко), идём обычным полётом
-  // ВЕРТИКАЛЬНО ВНИЗ — к точке прямо под собой. Целиться в конкретную
-  // площадку здесь нельзя: поверхность движется, и задача превращается в
-  // погоню за целью, которая не медленнее преследователя.
-  // Порог перехода тот же, что у syncVtol, поэтому фаза и способ
-  // движения никогда не расходятся.
-  if (!ship.vtol) {
+  // Высоко — идём обычным полётом ВЕРТИКАЛЬНО ВНИЗ, к точке прямо под
+  // собой. Целиться в конкретную площадку здесь нельзя: пока корабль
+  // снижается, она уезжает, и задача превращается в погоню за целью,
+  // которая не медленнее преследователя.
+  if (alt.alt > LAND.landAlt && !L.site) {
     L.phase = 'подход';
     worldPoint(b, alt.dir, alt.groundR + LAND.hold, _target);
     const dist = Math.hypot(
@@ -250,7 +213,7 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1) {
 
     // Шасси на подходе убрано: с ним скорость втрое ниже, а спуск с
     // орбиты и так самая долгая часть. Выпускается ниже (см. ниже).
-    ship.gear.out = alt.alt < LAND.vtolAlt * 2;
+    ship.gear.out = alt.alt < LAND.landAlt * 2;
     const vMax = SHIP.maxSpeed * (ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
 
     // Экспоненциальный подход, как у автопилота: чем ближе, тем медленнее.
@@ -268,14 +231,14 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1) {
     return `ПОСАДКА: ПОДХОД, высота ${fmtKm(alt.alt)}, до площадки ${fmtKm(dist)}`;
   }
 
-  // --- Спуск на посадочных движках.
+  // --- Спуск: брюхом вниз, тягой доводим снос, движками — высоту.
   L.wantCruise = 0;
   dirToWorldBody(b, alt.dir, _up);                 // местная вертикаль
 
   // Площадка выбирается здесь, под собой, с оглядкой на уклон: садиться
   // строго в точку под кораблём нельзя — можно попасть на склон
   // кратерного вала и опрокинуться. Радиус поиска небольшой: до площадки
-  // придётся ползти на посадочных движках, а это 90 м/с.
+  // придётся ползти на малой тяге.
   // Если под нами всё круто, поиск повторяется с вдвое большим радиусом,
   // но не бесконечно: иначе корабль бегал бы по всей луне.
   if (!L.site || (L.slope > LAND.slope && L.tries < 4)) {
@@ -297,31 +260,48 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1) {
 
   // Брюхо — по нормали грунта ПОД КОРАБЛЁМ (не под площадкой): именно
   // по ней проверяется касание, и на неровной поверхности нормали в
-  // соседних точках заметно расходятся.
+  // соседних точках заметно расходятся. Нос — на площадку, пока до неё
+  // есть куда лететь: горизонтальный ход даёт та же тяга, что и в
+  // обычном полёте, а она работает только вдоль носа.
   surfaceNormal(b, alt.dir, _nLocal, 0.06);
   dirToWorldBody(b, _nLocal, _nWorld);
-  normalize(horizontal(ship.basis.fwd, _nWorld, _fwd), _fwd);
+  if (lateral > 0.02) {
+    _want.x = sx; _want.y = sy; _want.z = sz;
+    normalize(horizontal(_want, _nWorld, _fwd), _fwd);
+  } else {
+    normalize(horizontal(ship.basis.fwd, _nWorld, _fwd), _fwd);
+  }
   const attErr = alignBasis(ship, _fwd, _nWorld, 1.5);
 
+  // Горизонталь — тягой. Скорость подхода падает вместе со сносом, а
+  // тяга даётся только когда нос уже развёрнут: иначе корабль уходит
+  // боком от площадки.
+  const vMaxH = SHIP.maxSpeed * SHIP.gearSpeed;
+  const wantH = attErr < 0.3 ? Math.min(lateral * LAND.closeGain, LAND.closeSpeed) : 0;
+  ship.throttle = clamp(wantH / vMaxH, 0, 1);
+
   // Спускаемся, только выйдя точно на ось площадки и выровнявшись.
-  // Допуск по сносу здесь жёсткий: на скорости бокового хода по склону
-  // корабль «догоняет» поднимающийся грунт, и спуск встаёт.
+  // Допуск по сносу жёсткий: на склоне корабль «догоняет» поднимающийся
+  // грунт, и спуск встаёт.
   const ready = lateral < 0.05 && attErr < 0.08;
-  let rate = clamp(alt.alt * 0.22, 0.004, 0.45);
+  // Быстрее, чем могут движки, снижаться бессмысленно: команда просто
+  // насытится, а в строке состояния будет стоять недостижимое число.
+  let rate = clamp(alt.alt * 0.22, 0.004, SHIP.liftRate * 0.9);
   if (alt.alt < 0.20) rate = Math.min(rate, 0.010);      // подтормаживание
   if (alt.alt < 0.05) rate = Math.min(rate, 0.005);      // касание
-  // Не готовы — висим на месте и доводим снос. Возвращаться на высоту
+  // Не готовы — держим высоту и доводим снос. Возвращаться на высоту
   // ожидания нельзя: получается цикл «спуск — подъём — спуск».
   let vert = 0;
   if (ready) vert = -rate;
   else if (alt.alt < 0.08) vert = 0.004;                 // чуть отойти от грунта
 
-  // Команда — поверх скорости грунта: садимся на движущуюся поверхность.
-  const sv = surfaceVelocity(b, ship.pos, _surf);
-  _want.x = sv.x + clamp(sx * 0.25, -SHIP.hoverSpeed, SHIP.hoverSpeed) + _up.x * vert;
-  _want.y = sv.y + clamp(sy * 0.25, -SHIP.hoverSpeed, SHIP.hoverSpeed) + _up.y * vert;
-  _want.z = sv.z + clamp(sz * 0.25, -SHIP.hoverSpeed, SHIP.hoverSpeed) + _up.z * vert;
-  driveVtol(ship, _want, dt, 3.0);
+  // Вертикаль — подъёмными движками. Основная часть команды считается
+  // наперёд (сколько надо, чтобы удержать вес: ship.sink — это как раз
+  // текущая просадка), а разница с фактической скоростью добирается
+  // обратной связью.
+  const vUp = zone ? dot(zone.relVel, _up) : 0;
+  ship.control.lift = clamp(
+    (vert + ship.sink) / SHIP.liftRate + (vert - vUp) * LAND.liftGain, -1, 1);
 
   L.phase = ready ? 'спуск' : 'выравнивание';
   return ready
@@ -397,10 +377,11 @@ export function settle(ship, zone) {
     up: loc(ship.basis.up),
     fwd: loc(ship.basis.fwd),
   };
-  ship.vtol = null;
   ship.landing = null;
   ship.speed = 0;
   ship.throttle = 0;
+  ship.lift = 0;
+  ship.sink = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
   updateLandedPose(ship);
   return ship.landedPose;
@@ -415,27 +396,27 @@ export function updateLandedPose(ship) {
   dirToWorldBody(b, p.right, ship.basis.right);
   dirToWorldBody(b, p.up, ship.basis.up);
   dirToWorldBody(b, p.fwd, ship.basis.fwd);
-  // Скорость — это скорость самой площадки: с неё и начнётся взлёт.
-  surfaceVelocity(b, ship.pos, ship.vel);
+  // Своей скорости у стоящего корабля нет: площадку под ним держит
+  // перенос системы отсчёта (js/game/gravity.js).
+  ship.vel.x = ship.vel.y = ship.vel.z = 0;
   ship.speed = 0;
 }
 
-/** Взлёт с поверхности: отрыв вертикально вверх на посадочных движках. */
+/** Взлёт с поверхности: отрыв вертикально вверх на подъёмных движках. */
 export function takeoff(ship) {
   const b = ship.landedAt;
   const p = ship.landedPose;
   if (!b || !p) return false;
-  dirToWorldBody(b, p.dir, _up);
-  const sv = surfaceVelocity(b, ship.pos, _surf);
   ship.landedAt = null;
   ship.landedPose = null;
   ship.gear.out = true;            // шасси убирает пилот, когда сочтёт нужным
   ship.throttle = 0;
+  ship.speed = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
-  ship.vtol = v3(
-    sv.x + _up.x * SHIP.vtolRate * 0.5,
-    sv.y + _up.y * SHIP.vtolRate * 0.5,
-    sv.z + _up.z * SHIP.vtolRate * 0.5);
+  // Половина хода движков вверх: этого хватает, чтобы оторваться от
+  // грунта на любом теле, где вообще можно сесть.
+  ship.lift = SHIP.liftRate * 0.5;
+  ship.sink = 0;
   return true;
 }
 

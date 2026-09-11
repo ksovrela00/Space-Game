@@ -27,7 +27,12 @@ export function drawDebug(r, game, dbg) {
     `speed ${s.speed.toFixed(4)} км/с  тяга ${s.throttle.toFixed(2)}  круиз x${game.cruise.level}`,
     `круиз лимит x${[1, 10, 100, 1000, 10000, 50000][game.cruise.limitedTo]}  masslock ${game.cruise.massLocked ? game.cruise.lockedBy.name : 'нет'}`,
     `rot ${s.rot.pitch.toFixed(3)} ${s.rot.yaw.toFixed(3)} ${s.rot.roll.toFixed(3)}`,
-    `режим ${game.state.mode}  вид ${game.state.view}${s.vtol ? '  посадочный режим' : ''}`,
+    `режим ${game.state.mode}  вид ${game.state.view}` +
+      (s.lift || s.sink ? `  верт ${((s.lift - s.sink) * 1000).toFixed(1)} м/с` : ''),
+    game.capture
+      ? `захват ${game.capture.name}: g ${game.capture.g0.toFixed(2)} м/с², ` +
+        `сфера ${(game.capture.soi / game.capture.radius).toFixed(1)} радиусов`
+      : 'вне захвата',
     rs.tiles
       ? `плитки: в кадре ${rs.tiles.drawn}, в кэше ${rs.tiles.tiles}, ` +
         `собрано ${rs.tiles.built}, вытеснено ${rs.tiles.evicted}` +

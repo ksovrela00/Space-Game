@@ -3,6 +3,7 @@
 // которые иначе видны только в браузере.
 
 const calls = {};
+let texts = null;        // включается на время проверки вёрстки
 const count = (name) => { calls[name] = (calls[name] || 0) + 1; };
 
 const gradient = { addColorStop() { count('addColorStop'); } };
@@ -25,6 +26,9 @@ const ctx = new Proxy({}, {
             throw new Error(`${prop}(${a.join(',')}): нечисловой аргумент`);
           }
         }
+        // Надписи запоминаем с координатами: по ним проверяется вёрстка
+        // приборов (см. проверку панели подхода).
+        if (prop === 'fillText' && texts) texts.push({ s: String(a[0]), x: a[1], y: a[2] });
         count(prop);
       };
     }
@@ -164,6 +168,22 @@ await step('ручное управление: тяга, рыскание, кр�
   frames(20);
   if (!(game.ship.throttle > 0.1)) throw new Error('тяга не выросла: ' + game.ship.throttle);
   if (!(game.ship.speed > 0)) throw new Error('скорость нулевая');
+});
+
+await step('подъёмные движки (R/F) и полная тяга (Z)', () => {
+  key('KeyX'); frames(20);
+  holdDown('KeyR'); frames(40);
+  const up = game.ship.lift;
+  release('KeyR');
+  holdDown('KeyF'); frames(60);
+  const down = game.ship.lift;
+  release('KeyF'); frames(30);
+  if (!(up > 0.01)) throw new Error('R не поднимает: lift ' + up);
+  if (!(down < -0.01)) throw new Error('F не опускает: lift ' + down);
+  key('KeyZ'); frames(2);
+  if (game.ship.throttle !== 1) throw new Error('Z не даёт полную тягу: ' + game.ship.throttle);
+  key('KeyX'); frames(2);
+  if (game.ship.throttle !== 0) throw new Error('X не сбрасывает тягу: ' + game.ship.throttle);
 });
 
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
@@ -323,6 +343,42 @@ await step('телепорт к цели (K) и смена высоты (Shift+K
   if (!(d > 3 && d < 12)) throw new Error('телепорт к станции: дистанция ' + d.toFixed(1) + ' км');
 });
 
+await step('панель подхода: всё в одном месте и вокруг прицела', () => {
+  const moon = game.world.bodies.find((b) => b.kind === 'moon');
+  game.nav.index = game.nav.list.indexOf(moon);
+  // Телепорт на малую высоту: там панель показывает и посадочные условия.
+  game.teleAlt = 4;                       // 3 км (см. TELEPORT_ALTS)
+  key('KeyK'); frames(3);
+  if (!game.capture) throw new Error('нет гравитационного захвата у поверхности луны');
+
+  texts = [];
+  frames(1);
+  const seen = texts;
+  texts = null;
+
+  const has = (re) => seen.some((t) => re.test(t.s));
+  for (const re of [/ЗАХВАТ/, /ТЯЖЕСТЬ/, /ВЫСОТА/, /СКОРОСТЬ/, /ВЕРТ/, /БОК/, /ДО ЦЕЛИ/]) {
+    if (!has(re)) throw new Error('панель не показывает ' + re);
+  }
+
+  // Вёрстка: всё внутри рамки вокруг прицела, а сама середина свободна —
+  // иначе приборы закрывали бы то, на что целятся.
+  const w = window.innerWidth, h = window.innerHeight;
+  const cx = w / 2, cy = h / 2;
+  const BW = Math.min(Math.max(w * 0.10, 120), 220);
+  const BH = Math.min(Math.max(h * 0.13, 92), 160);
+  const mine = seen.filter((t) => Math.abs(t.x - cx) <= BW + 60 && Math.abs(t.y - cy) <= BH + 40);
+  if (mine.length < 12) throw new Error('в панели всего ' + mine.length + ' надписей');
+  for (const t of mine) {
+    if (Math.abs(t.x - cx) > BW || Math.abs(t.y - cy) > BH) {
+      throw new Error(`надпись «${t.s}» вылезла из рамки: ${(t.x - cx).toFixed(0)}, ${(t.y - cy).toFixed(0)}`);
+    }
+    if (Math.abs(t.x - cx) < 40 && Math.abs(t.y - cy) < 30) {
+      throw new Error(`надпись «${t.s}» лезет на прицел`);
+    }
+  }
+});
+
 await step('шасси выпускается и убирается по G', () => {
   // Возвращаемся в полёт: предыдущий шаг оставляет корабль внутри звезды.
   if (game.state.mode === 'crashed') { key('Space'); frames(5); }
@@ -377,7 +433,7 @@ await step('стоянка на поверхности и взлёт по Space'
   if (!saved.gear) throw new Error('состояние шасси не сохранено');
   key('Space'); frames(30);
   if (game.state.mode !== 'flight') throw new Error('после взлёта режим ' + game.state.mode);
-  if (!game.ship.vtol) throw new Error('посадочный режим не включён после отрыва');
+  if (!(game.ship.lift > 0)) throw new Error('после отрыва нет хода подъёмных движков');
   frames(60 * 5);
 });
 

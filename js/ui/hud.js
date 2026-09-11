@@ -8,6 +8,7 @@ import { LIMITS, dockingQuality } from '../game/docking.js';
 import { gearLabel } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
 import { targetLabel } from '../game/nav.js';
+import { gravityAt } from '../game/gravity.js';
 
 const CY = '#4fb3e0';
 const CY_DIM = 'rgba(79,179,224,0.35)';
@@ -108,7 +109,7 @@ export function drawHud(r, game) {
   if (ship.gear.t > 0.005 || ship.gear.out) {
     ctx.font = '10px Consolas, monospace';
     ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER;
-    ctx.fillText(gearLabel(ship) + (ship.vtol ? '  ·  ПОСАДОЧНЫЙ РЕЖИМ' : ''), px, py - 8);
+    ctx.fillText(gearLabel(ship), px, py - 8);
   }
 
   // --- правая колонка: цель ---
@@ -138,9 +139,15 @@ export function drawHud(r, game) {
 
   drawScanner(ctx, w / 2, h - 60, game);
 
-  // --- помощник стыковки и посадочный дисплей ---
+  // --- приборы подхода, помощник стыковки ---
+  // Панель подхода заменяет собой угловой посадочный дисплей: у
+  // поверхности всё нужное должно быть в одном месте.
+  if (game.capture && state.mode === 'flight') {
+    drawApproachPanel(ctx, w / 2, h / 2, w, h, game);
+  } else if (game.landInfo) {
+    drawLandPanel(ctx, w - 152, 24, game.landInfo, ship);
+  }
   if (game.dockAssist) drawDockAssist(ctx, w / 2, 96, game.dockAssist);
-  else if (game.landInfo) drawLandPanel(ctx, w - 152, 24, game.landInfo, ship);
 
   // --- сообщения ---
   ctx.font = '12px Consolas, monospace';
@@ -161,6 +168,130 @@ export function drawHud(r, game) {
     ctx.fillText(game.statusLine, w / 2, h - 148);
   }
 
+  ctx.restore();
+}
+
+/**
+ * Приборы подхода — одно место, куда пилот смотрит у планеты.
+ *
+ * Раньше то же самое лежало по четырём углам экрана: скорость слева
+ * внизу, дистанция справа внизу, посадочные условия справа сверху, а
+ * гравитации не было видно нигде. У поверхности это не работает: между
+ * взглядами в разные углы корабль успевает уйти на десятки метров.
+ *
+ * Поэтому здесь всё вместе и вокруг прицела — как на авиационном ИЛС:
+ * колонки по краям рамки, середина свободна, чтобы не загораживать вид.
+ * Появляется панель ровно тогда, когда корабль попадает в
+ * гравитационный захват тела (js/game/gravity.js), и сама по себе
+ * служит признаком захвата.
+ */
+function drawApproachPanel(ctx, cx, cy, w, h, game) {
+  const { ship, cruise } = game;
+  const b = game.capture;
+  const zone = game.zone;
+  const L = game.landInfo;
+
+  const BW = clamp(w * 0.10, 120, 220);
+  const BH = clamp(h * 0.13, 92, 160);
+  const left = cx - BW + 12, right = cx + BW - 12;
+
+  ctx.save();
+  // Рамка углами, а не сплошным прямоугольником: инструмент очерчен, но
+  // вид сквозь него не заперт в коробку.
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  const C = 16;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    const x = cx + sx * BW, y = cy + sy * BH;
+    ctx.beginPath();
+    ctx.moveTo(x - sx * C, y);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x, y - sy * C);
+    ctx.stroke();
+  }
+
+  // Показание: маленькая подпись и крупное значение под ней. Координаты
+  // абсолютные, без translate — так вёрстку видно и в коде, и в
+  // проверке (tools/smoke.mjs сверяет, что всё легло в рамку).
+  const stat = (x, y, align, label, value, color, size = 15) => {
+    ctx.textAlign = align;
+    ctx.font = '9px Consolas, monospace';
+    ctx.fillStyle = CY_DIM;
+    ctx.fillText(label, x, y);
+    ctx.font = size + 'px Consolas, monospace';
+    ctx.fillStyle = color || '#d8f2ff';
+    ctx.fillText(value, x, y + 18);
+  };
+  const rowY = [cy - BH + 22, cy - BH + 68, cy - BH + 114];
+
+  // Высота: над РЕЛЬЕФОМ, пока он посчитан, иначе над сферой тела.
+  const gap = Math.hypot(
+    ship.pos.x - b.pos.x, ship.pos.y - b.pos.y, ship.pos.z - b.pos.z) - b.radius;
+  const alt = zone ? zone.alt : gap;
+
+  // Вертикальная и боковая скорость относительно грунта: у поверхности
+  // это главные числа, по ним же проверяется касание.
+  let vUp = null, hSp = null;
+  if (L) { vUp = L.vspeed; hSp = L.hspeed; } else if (zone) {
+    vUp = dot(zone.relVel, zone.upWorld);
+    const hx = zone.relVel.x - zone.upWorld.x * vUp;
+    const hy = zone.relVel.y - zone.upWorld.y * vUp;
+    const hz = zone.relVel.z - zone.upWorld.z * vUp;
+    hSp = Math.hypot(hx, hy, hz);
+  }
+  const ms = (v) => (v === null ? '—' : (v * 1000).toFixed(0) + ' м/с');
+
+  stat(left, rowY[0], 'left', 'СКОРОСТЬ', fmtSpeed(ship.speed * cruise.level), '#d8f2ff', 16);
+  stat(right, rowY[0], 'right', 'ВЫСОТА', fmtDist(Math.max(0, alt)), '#d8f2ff', 16);
+  stat(left, rowY[1], 'left', 'ВЕРТ', ms(vUp), L ? (L.vspeedOk ? GREEN : RED) : null, 13);
+  stat(right, rowY[1], 'right', 'ДО ЦЕЛИ',
+    game.info ? fmtDist(game.info.gap) : '—', AMBER, 13);
+  stat(left, rowY[2], 'left', 'БОК', ms(hSp), L ? (L.hspeedOk ? GREEN : RED) : null, 13);
+  stat(right, rowY[2], 'right', 'ETA', game.info ? fmtTime(game.info.eta) : '—', '#9fd9ff', 13);
+
+  // Гравитация: сколько её здесь и насколько это близко к тому, что на
+  // поверхности. Полоса растёт как R/d — линейно по мере приближения;
+  // по самому ускорению она бы почти всё время стояла в нуле и прыгала
+  // только у грунта.
+  const gHere = gravityAt(b, ship.pos) * 1000;          // м/с²
+  const frac = Math.sqrt(clamp(gHere / Math.max(b.g0, 1e-6), 0, 1));
+  const by = cy + BH - 56;
+  ctx.textAlign = 'center';
+  ctx.font = '9px Consolas, monospace';
+  ctx.fillStyle = AMBER;
+  ctx.fillText('ЗАХВАТ · ' + b.name.toUpperCase().slice(0, 16), cx, by);
+  bar(ctx, left, by + 8, right - left, 7, frac, frac > 0.75 ? AMBER : CY);
+  ctx.textAlign = 'left';
+  ctx.font = '9px Consolas, monospace';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('ТЯЖЕСТЬ', left, by + 27);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#d8f2ff';
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillText(gHere.toFixed(2) + ' м/с²  (у грунта ' + b.g0.toFixed(1) + ')', right, by + 27);
+
+  // Посадочные условия — теми же цветами, что и скорости выше: зелёное
+  // значит «в допуске касания».
+  if (L) {
+    const chips = [
+      ['ШАССИ', L.gearOk ? 'ГОТОВО' : 'УБРАНО', L.gearOk],
+      ['НАКЛОН', (Math.acos(clamp(L.tilt, -1, 1)) * 57.3).toFixed(0) + '°', L.tiltOk],
+      ['УКЛОН', (L.slope * 57.3).toFixed(0) + '°', L.slopeOk],
+    ];
+    const step = (right - left) / chips.length;
+    ctx.font = '9px Consolas, monospace';
+    for (let i = 0; i < chips.length; i++) {
+      const [label, value, ok] = chips[i];
+      const x = left + step * (i + 0.5);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = CY_DIM;
+      ctx.fillText(label, x, cy + BH - 18);
+      ctx.fillStyle = ok ? GREEN : RED;
+      ctx.font = '11px Consolas, monospace';
+      ctx.fillText(value, x, cy + BH - 5);
+      ctx.font = '9px Consolas, monospace';
+    }
+  }
   ctx.restore();
 }
 
