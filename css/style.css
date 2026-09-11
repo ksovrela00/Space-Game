@@ -1,0 +1,70 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: #000;
+  overflow: hidden;
+  font-family: "Consolas", "DejaVu Sans Mono", monospace;
+  color: #9fd9ff;
+}
+
+/* Сцена и HUD — два наложенных слоя: 3D рисуется в WebGL, приборы остаются
+   на Canvas 2D, поэтому весь код интерфейса не зависит от рендера. */
+#screen, #hud {
+  position: fixed;
+  left: 0; top: 0;
+  display: block;
+  width: 100vw; height: 100vh;
+  cursor: none;
+}
+#screen { z-index: 1; background: #000; }
+#hud { z-index: 2; pointer-events: none; }
+
+.overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, rgba(4,14,26,.86), rgba(0,0,0,.94));
+  z-index: 10;
+}
+.overlay.hidden { display: none; }
+
+.panel {
+  min-width: 340px; max-width: min(760px, 92vw);
+  max-height: 90vh; overflow-y: auto;
+  padding: 22px 26px;
+  border: 1px solid #1d5f86;
+  background: rgba(2, 12, 20, .92);
+  box-shadow: 0 0 0 1px rgba(80,200,255,.12), 0 0 40px rgba(0,120,200,.25);
+}
+
+.panel h1 {
+  font-size: 26px; letter-spacing: 6px; font-weight: normal;
+  color: #d8f2ff; text-shadow: 0 0 12px rgba(90,200,255,.6);
+}
+.panel h2 {
+  font-size: 16px; letter-spacing: 3px; font-weight: normal;
+  color: #ffcc66; margin: 4px 0 12px;
+}
+.panel .sub { color: #5e9dc0; font-size: 12px; letter-spacing: 2px; margin: 6px 0 18px; }
+.panel p { font-size: 13px; line-height: 1.7; color: #8fc7e6; }
+.panel .warn { color: #ff8866; }
+.panel .good { color: #78e08f; }
+
+.keys { list-style: none; font-size: 12px; line-height: 1.9; color: #7fb6d4; margin-bottom: 18px; }
+.keys b { color: #ffcc66; font-weight: normal; }
+
+.rows { width: 100%; font-size: 13px; border-collapse: collapse; margin: 6px 0 16px; }
+.rows td { padding: 3px 10px 3px 0; color: #8fc7e6; }
+.rows td.v { color: #d8f2ff; }
+
+.btn {
+  display: inline-block;
+  margin: 6px 8px 0 0;
+  padding: 9px 20px;
+  font-family: inherit; font-size: 13px; letter-spacing: 3px;
+  color: #061520; background: #4fb3e0;
+  border: none; cursor: pointer;
+}
+.btn:hover { background: #7fd4ff; }
+.btn.ghost { background: transparent; color: #7fb6d4; border: 1px solid #1d5f86; }
+.btn.ghost:hover { color: #d8f2ff; border-color: #4fb3e0; }

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ELITE :: Solar Trader</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<!-- 3D-сцена: WebGL2, а при его отсутствии — Canvas 2D -->
+<canvas id="screen"></canvas>
+<!-- Приборная панель отдельным прозрачным слоем поверх сцены -->
+<canvas id="hud"></canvas>
+
+<div id="overlay" class="overlay hidden">
+  <div class="panel" id="panel"></div>
+</div>
+
+<div id="boot" class="overlay">
+  <div class="panel">
+    <h1>SOLAR TRADER</h1>
+    <p class="sub">космический симулятор, система Lave</p>
+    <ul class="keys">
+      <li><b>W</b>/<b>S</b> — тангаж (нос вниз/вверх), <b>A</b>/<b>D</b> — рыскание</li>
+      <li><b>Q</b>/<b>E</b> — крен (или <b>&larr;</b>/<b>&rarr;</b>)</li>
+      <li><b>Shift</b>/<b>Ctrl</b> — тяга, <b>X</b> — стоп, <b>F</b> — полная</li>
+      <li><b>Tab</b> — следующая цель</li>
+      <li><b>T</b>/<b>Y</b> — круизный ускоритель +/−</li>
+      <li><b>J</b> — автопилот к цели, <b>C</b> — докинг-компьютер</li>
+      <li><b>V</b> — вид от 3-го лица, <b>M</b> — карта, <b>H</b> — помощь</li>
+    </ul>
+    <p class="sub">Курс на станцию: <b>Tab</b> до нужной станции, затем <b>J</b> —
+      автопилот доведёт до створа порта и включит стыковку.</p>
+    <button class="btn" id="bootBtn">ВЗЛЁТ</button>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

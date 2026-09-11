@@ -1,0 +1,13 @@
+{
+  "name": "solar-trader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Псевдо-3D космический симулятор в духе Elite на Canvas 2D",
+  "type": "module",
+  "scripts": {
+    "test": "node tools/test.mjs",
+    "test:gl": "node tools/gl.mjs",
+    "smoke": "node tools/smoke.mjs",
+    "shot": "node tools/shot.mjs"
+  }
+}
