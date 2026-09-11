@@ -3,6 +3,7 @@
 
 import { fmtDist } from './hud.js';
 import { ST } from '../game/state.js';
+import { landedInfo } from '../game/landing.js';
 
 const overlay = () => document.getElementById('overlay');
 const panelEl = () => document.getElementById('panel');
@@ -48,6 +49,29 @@ export function showDocked(game) {
   ]);
 }
 
+export function showLanded(game) {
+  const info = landedInfo(game.ship);
+  const b = info ? info.body : null;
+  const hemis = info && info.lat >= 0 ? 'с.ш.' : 'ю.ш.';
+  show(`
+    <h1>ПОСАДКА ВЫПОЛНЕНА</h1>
+    <h2>${b ? b.name : ''}</h2>
+    <table class="rows">
+      <tr><td>Тип</td><td class="v">${b ? KIND_RU[b.kind] || b.kind : '—'}</td></tr>
+      <tr><td>Радиус тела</td><td class="v">${b ? fmtDist(b.radius) : '—'}</td></tr>
+      <tr><td>Координаты</td><td class="v">${info ? Math.abs(info.lat).toFixed(2) + '° ' + hemis + ', ' + info.lon.toFixed(2) + '°' : '—'}</td></tr>
+      <tr><td>Высота площадки</td><td class="v">${info ? fmtDist(info.height) : '—'}</td></tr>
+      <tr><td>Состояние корпуса</td><td class="v">${Math.round(game.ship.hull)}%</td></tr>
+      <tr><td>Посадок выполнено</td><td class="v">${game.stats.landings || 0}</td></tr>
+    </table>
+    <p class="sub">Ремонта здесь нет: корпус восстанавливают только на станциях.
+      Шасси выпущено, взлёт — на посадочных движках.</p>
+  `, [
+    { label: 'ВЗЛЁТ', onClick: () => game.takeoff() },
+    { label: 'КАРТА СИСТЕМЫ', ghost: true, onClick: () => { hideOverlay(); game.state.mode = ST.MAP; } },
+  ]);
+}
+
 export function showCrash(game) {
   show(`
     <h1>КОРПУС РАЗРУШЕН</h1>
@@ -72,13 +96,22 @@ export function showHelp(game) {
       <tr><td>T / Y</td><td class="v">круизный ускоритель +/−</td></tr>
       <tr><td>J</td><td class="v">автопилот к цели</td></tr>
       <tr><td>C</td><td class="v">докинг-компьютер (ближе 120 км)</td></tr>
+      <tr><td>G</td><td class="v">шасси: выпуск / уборка</td></tr>
+      <tr><td>L</td><td class="v">посадочный компьютер (тела без атмосферы)</td></tr>
       <tr><td>V</td><td class="v">кокпит / вид от 3-го лица</td></tr>
       <tr><td>M</td><td class="v">карта системы</td></tr>
       <tr><td>H</td><td class="v">эта справка</td></tr>
       <tr><td>~</td><td class="v">отладочный оверлей</td></tr>
+      <tr><td>K / Shift+K</td><td class="v">телепорт к цели / смена высоты телепорта</td></tr>
     </table>
     <p class="sub">Стыковка: войти в щель порта носом вперёд, скорость ниже
       0.28 км/с, крен согласован с вращением станции (зелёные огни сверху).</p>
+    <p class="sub">Посадка: сесть можно на луны и голые планеты — там, где нет
+      атмосферы. С выпущенным шасси у самой поверхности включается посадочный
+      режим: <b>Shift/Ctrl</b> — вверх и вниз, тяга — ход по горизонту.
+      Касаться грунта надо на шасси, брюхом вниз, вертикально не быстрее
+      30 м/с и с боковой скоростью не выше 25 м/с. Всё это умеет делать
+      посадочный компьютер (<b>L</b>) — он же выбирает ровную площадку.</p>
   `, [
     { label: 'НАЗАД', onClick: () => game.closeOverlay() },
   ]);

@@ -213,7 +213,12 @@ export function makeSystem(seed = 0x1a7e) {
       kind: L.kind,
       name: `${systemName} ${ROMAN[i]}`,
       radius: L.r,
-      spinPeriod: rng.range(600, 1800),
+      // Период суток привязан к радиусу: скорость поверхности выходит
+      // 0.1–0.3 км/с, как у настоящих планет. Раньше периоды были в сотни
+      // раз короче — вращение красиво читалось с орбиты, но поверхность
+      // при этом «ехала» со скоростью в десятки км/с, и сесть на неё было
+      // физически невозможно (см. js/game/landing.js).
+      spinPeriod: L.r * rng.range(20, 60),
       parent: star,
       orbit: {
         radius: L.orbit,
@@ -235,11 +240,12 @@ export function makeSystem(seed = 0x1a7e) {
 
     for (let m = 0; m < (L.moons || 0); m++) {
       const mplane = orbitPlane(rng);
+      const mr = p.radius * rng.range(0.16, 0.30);
       const moon = makeBody(rng, {
         kind: 'moon',
         name: `${p.name}${String.fromCharCode(97 + m)}`,
-        radius: p.radius * rng.range(0.16, 0.30),
-        spinPeriod: rng.range(1500, 5000),
+        radius: mr,
+        spinPeriod: mr * rng.range(25, 80),
         parent: p,
         orbit: {
           radius: p.radius * rng.range(3.5, 7),
@@ -333,6 +339,27 @@ export function updateWorld(world, dt) {
       cross(f, s.basis.right, s.basis.up);
     }
   }
+}
+
+/**
+ * Локальный базис тела: y (up) — ось вращения, поворот вокруг неё —
+ * суточное вращение. Меш поверхности статичен, всё вращение живёт в этой
+ * матрице. Этим же базисом игровая логика переводит мировые координаты в
+ * «широту-долготу» тела (js/game/surface.js).
+ */
+export function bodyBasis(body, out) {
+  const p = body.pole, a = body.eqRef, s = body.eqSide;
+  const c = Math.cos(body.spinPhase), sn = Math.sin(body.spinPhase);
+  // right = eqRef, повёрнутый вокруг полюса; up = полюс.
+  out.right.x = a.x * c + s.x * sn;
+  out.right.y = a.y * c + s.y * sn;
+  out.right.z = a.z * c + s.z * sn;
+  out.up.x = p.x; out.up.y = p.y; out.up.z = p.z;
+  // fwd = right x up (правая тройка, как и у камеры)
+  out.fwd.x = out.right.y * p.z - out.right.z * p.y;
+  out.fwd.y = out.right.z * p.x - out.right.x * p.z;
+  out.fwd.z = out.right.x * p.y - out.right.y * p.x;
+  return out;
 }
 
 // Ближайшее крупное тело — для mass lock и проверки столкновений.

@@ -108,9 +108,28 @@ export function ridged(seed, x, y, z, octaves = 6, freq = 1) {
 export const CRATER_C0 = 0.44;        // шаг самого крупного масштаба, рад
 export const CRATER_STEP = 0.4;       // во сколько раз мельче следующий
 export const CRATER_MAX_SCALES = 10;
-const CRATER_RIM = 0.30;              // высота вала в долях глубины
-const CRATER_RMIN = 0.18, CRATER_RSPAN = 0.12;   // радиус в долях шага
-const CRATER_REACH = 1.7;             // докуда тянется выброс, в радиусах
+export const CRATER_SEED = 4441;      // сдвиг seed для кратерного слоя
+// Глубина кратера: min(DMAX, DK·sqrt(DREF/rc))·rc — см. craterDepth.
+// Показатель ровно 1/2 не случайно: в шейдере это один inversesqrt
+// вместо pow, а считается он на каждый пиксель.
+export const CRATER_DMAX = 0.35;
+export const CRATER_DK = 0.13;
+export const CRATER_DREF = 0.02;
+export const CRATER_BOWL = 0.85;      // докуда идёт чаша, в радиусах кратера
+export const CRATER_RIM_AT = 0.92;    // где стоит вал
+export const CRATER_RIM_W = 0.33;     // полуширина вала (вал кончается на REACH)
+export const CRATER_RIM = 0.30;       // высота вала в долях глубины
+// Радиус кратера в долях шага решётки: rc = (RMIN + RSPAN·u^1.5)·c, где
+// u — равномерное [0,1). Показатель больше единицы намеренный: он даёт
+// много мелких кратеров и редкие крупные, как в жизни. Узкий диапазон
+// (было 0.18–0.30) давал на каждом масштабе кратеры почти одного
+// размера, и поверхность выглядела пузырчатой плёнкой.
+export const CRATER_RMIN = 0.05;
+export const CRATER_RSPAN = 0.35;
+// Сохранность кратера: свежие глубокие и старые почти заплывшие в одной
+// пропорции. Без этого все кратеры выглядят отштампованными.
+export const CRATER_FRESH_MIN = 0.30;
+export const CRATER_REACH = 1.25;     // докуда тянется выброс, в радиусах
 
 /**
  * Глубина кратера в долях радиуса тела. Зависимость от размера
@@ -119,7 +138,8 @@ const CRATER_REACH = 1.7;             // докуда тянется выбро�
  * давала бассейны глубиной в 3% радиуса, то есть вдвое глубже любого
  * реального (у Луны самый глубокий бассейн — 0.75% радиуса).
  */
-export const craterDepth = (rc) => Math.min(0.4, 0.14 * (0.02 / rc) ** 0.45) * rc;
+export const craterDepth = (rc) =>
+  Math.min(CRATER_DMAX, CRATER_DK * Math.sqrt(CRATER_DREF / rc)) * rc;
 
 /**
  * Профиль кратера по t = (угловое расстояние / радиус кратера):
@@ -129,16 +149,44 @@ export const craterDepth = (rc) => Math.min(0.4, 0.14 * (0.02 / rc) ** 0.45) * r
  */
 export function craterProfile(t) {
   if (t >= CRATER_REACH) return 0;
-  const bowl = smooth01(t / 0.85) - 1;
-  const u = (t - 0.95) / 0.20;
-  return bowl + CRATER_RIM * Math.exp(-u * u);
+  const bowl = smooth01(t / CRATER_BOWL) - 1;
+  // Вал — компактный полиномиальный горб вместо гауссианы: он вдвое
+  // дешевле в шейдере (там нет ни одного exp) и обрывается ровно на
+  // нуле, а не «почти».
+  const u = (t - CRATER_RIM_AT) / CRATER_RIM_W;
+  const bump = u > -1 && u < 1 ? 1 - u * u : 0;
+  return bowl + CRATER_RIM * bump * bump;
+}
+
+/**
+ * Производная профиля по t. Нужна шейдеру: он наклоняет нормаль по
+ * градиенту мелкого рельефа, а считать градиент конечными разностями по
+ * всему кратерному полю — это втрое больше работы на каждый пиксель.
+ */
+export function craterProfileD(t) {
+  if (t >= CRATER_REACH) return 0;
+  const s = t / CRATER_BOWL;
+  const bowl = s > 0 && s < 1 ? 6 * s * (1 - s) / CRATER_BOWL : 0;
+  const u = (t - CRATER_RIM_AT) / CRATER_RIM_W;
+  const rim = u > -1 && u < 1
+    ? -4 * CRATER_RIM * u * (1 - u * u) / CRATER_RIM_W
+    : 0;
+  return bowl + rim;
 }
 
 // Один масштаб кратеров. Проверяются 27 соседних ячеек решётки: дальше
 // кратер дотянуться не может, потому что его радиус не превышает 0.3 шага.
-function craterLayer(seed, scale, x, y, z) {
+// Предел влияния кратера от центра его ячейки: собственный радиус
+// (не больше RMIN+RSPAN шага) на REACH плюс полудиагональ ячейки и
+// сдвиг при нормировке на сферу. Дальше профиль равен РОВНО нулю
+// (у вала компактный носитель), поэтому отсев точный, а не примерный.
+const CRATER_CULL = CRATER_REACH * (CRATER_RMIN + CRATER_RSPAN) + 1.37;
+
+export function craterLayer(seed, scale, x, y, z) {
   const inv = 1 / scale;
   const i0 = Math.floor(x * inv), j0 = Math.floor(y * inv), k0 = Math.floor(z * inv);
+  const lo = (1 - scale) * (1 - scale), hi = (1 + scale) * (1 + scale);
+  const cull2 = (CRATER_CULL * scale) * (CRATER_CULL * scale);
   let h = 0;
   for (let di = -1; di <= 1; di++) {
     const i = i0 + di;
@@ -146,10 +194,12 @@ function craterLayer(seed, scale, x, y, z) {
       const j = j0 + dj;
       for (let dk = -1; dk <= 1; dk++) {
         const k = k0 + dk;
-        // Дешёвый отсев: ячейка целиком далеко от сферы.
+        // Два дешёвых отсева: ячейка далеко от сферы или далеко от точки.
         const ax = (i + 0.5) * scale, ay = (j + 0.5) * scale, az = (k + 0.5) * scale;
-        const al = Math.sqrt(ax * ax + ay * ay + az * az);
-        if (al < 1 - scale || al > 1 + scale) continue;
+        const al2 = ax * ax + ay * ay + az * az;
+        if (al2 < lo || al2 > hi) continue;
+        const ex = ax - x, ey = ay - y, ez = az - z;
+        if (ex * ex + ey * ey + ez * ez > cull2) continue;
 
         const hh = hashInt(seed, i, j, k);
         const qx = (i + (hh & 1023) / 1024) * scale;
@@ -165,10 +215,14 @@ function craterLayer(seed, scale, x, y, z) {
         const ang = chord * (1 + chord * chord / 24);
 
         const h2 = hashInt(seed ^ 0x9e37, i, j, k);
-        const rc = (CRATER_RMIN + CRATER_RSPAN * ((h2 & 255) / 256)) * scale;
+        const u = (h2 & 255) / 256;
+        const rc = (CRATER_RMIN + CRATER_RSPAN * u * Math.sqrt(u)) * scale;
         const t = ang / rc;
         if (t >= CRATER_REACH) continue;
-        h += craterDepth(rc) * craterProfile(t);
+        // Сохранность: старые кратеры и мельче, и без вала.
+        const fu = ((h2 >>> 8) & 255) / 256;
+        const fresh = CRATER_FRESH_MIN + (1 - CRATER_FRESH_MIN) * fu * fu;
+        h += craterDepth(rc) * fresh * craterProfile(t);
       }
     }
   }
@@ -283,6 +337,8 @@ const rampAt = (ramp, t, out) => {
  * её использует игровая логика (высота поверхности под кораблём), а
  * сетки рендера просят ровно столько, сколько способны показать.
  */
+export const terrainOf = (body) => body._terrain || (body._terrain = makeTerrain(body));
+
 export function makeTerrain(body) {
   const cfg = KIND[body.kind] || KIND.rock;
   const seed = (strHash(body.name + '#' + body.id) ^ 0x5a7e) | 0;
@@ -310,6 +366,20 @@ export function makeTerrain(body) {
   const raw = (x, y, z, oct) => (cfg.ridge
     ? ridged(seed, x, y, z, oct, cfg.freq)
     : fbm(seed, x, y, z, oct, cfg.freq));
+
+  /**
+   * Плотность кратеров: 0 в «морях», 1 на «материках».
+   *
+   * Без этой маски кратеры равномерно покрывают весь шар, и поверхность
+   * выглядит пузырчатой плёнкой. У настоящих безатмосферных тел
+   * кратерами насыщены древние высокогорья, а залитые лавой низины
+   * почти гладкие — именно этот контраст и читается как «луна».
+   *
+   * Частота низкая (пятна в тысячи километров), поэтому сетка передаёт
+   * маску вершинами без потерь, а шейдер считает её один раз на пиксель.
+   */
+  const mare = (x, y, z) =>
+    smooth01((fbm(seed + 991, x * 1.3, y * 1.3, z * 1.3, 3, 1) + 0.25) / 0.5);
 
   // Газовый гигант: полосы по широте плюс лёгкая турбулентность.
   const gasBand = (x, y, z) => {
@@ -346,8 +416,9 @@ export function makeTerrain(body) {
       return 0;
     }
     const r = flat ? 0 : raw(x, y, z, d.oct);
-    const cr = !flat && d.cs > 0 && craterW > 0
-      ? craterW * craterField(seed + 4441, x, y, z, d.cs)
+    const dens = !flat && craterW > 0 ? mare(x, y, z) : 0;
+    const cr = dens > 0 && d.cs > 0
+      ? craterW * dens * craterField(seed + CRATER_SEED, x, y, z, d.cs)
       : 0;
     // Ниже уровня моря — ровная водная сфера, а не дно.
     const h = flat ? 0 : clamp01((r - cfg.sea) / span) * cfg.amp + cr;
@@ -367,6 +438,10 @@ export function makeTerrain(body) {
       // читаются только в скользящем свете.
       let k = 1 + fbm(seed + 909, x * 6, y * 6, z * 6, 3, 2.4) * 0.10;
       if (cr !== 0) k *= 1 + Math.max(-0.30, Math.min(0.30, cr / (cfg.amp * 0.5)));
+      // «Моря» темнее высокогорий — это заливший их базальт. Шейдер
+      // этого уже не повторяет: маска низкочастотная, и цвет вершин
+      // передаёт её без потерь.
+      if (craterW > 0) k *= 0.72 + 0.28 * dens;
       rgb[0] = clamp01(rgb[0] * k);
       rgb[1] = clamp01(rgb[1] * k);
       rgb[2] = clamp01(rgb[2] * k);
@@ -380,7 +455,8 @@ export function makeTerrain(body) {
   // Вклад кратеров отдельно — нужен проверкам.
   const craterAt = flat || craterW === 0
     ? () => 0
-    : (x, y, z, detail) => craterW * craterField(seed + 4441, x, y, z, (detail || FULL).cs);
+    : (x, y, z, detail) => craterW * mare(x, y, z) *
+      craterField(seed + CRATER_SEED, x, y, z, (detail || FULL).cs);
 
   const heightNorm = (x, y, z, oct) => normOf(flat ? 0 : raw(x, y, z, oct || FULL.oct));
 
@@ -398,14 +474,55 @@ export function makeTerrain(body) {
     return noise + cr;
   };
 
+  /**
+   * Реалистичная оценка ошибки сетки с такой детализацией — по ней
+   * выбирается уровень плиток (js/gl/tiles.js).
+   *
+   * От detailGap отличается намеренно: тот даёт ГРАНИЦУ сверху («как
+   * будто все неучтённые масштабы сложились в одной точке») и нужен
+   * юбкам. Для выбора уровня такая оценка завышена в разы, и дерево
+   * дробится куда глубже, чем нужно глазу: здесь считается самая
+   * крупная неучтённая деталь, а не сумма всех.
+   */
+  const meshError = (coarse) => {
+    if (flat) return 0;
+    const c = coarse || FULL;
+    const noise = cfg.amp * 1.1 * (cfg.ridge ? 1.6 : 1) * GAIN ** c.oct / span;
+    let cr = 0;
+    if (craterW > 0 && c.cs < CRATER_MAX_SCALES) {
+      const cScale = CRATER_C0 * CRATER_STEP ** c.cs;
+      cr = craterDepth((CRATER_RMIN + CRATER_RSPAN) * cScale) * craterW;
+    }
+    return noise + cr;
+  };
+
   const ampUp = flat ? 0 : cfg.amp + craterW * craterBound(0, +1);
   const ampDown = flat ? 0 : craterW * craterBound(0, -1);
+
+  /**
+   * Числа, по которым фрагментный шейдер считает тот же рельеф, что и
+   * CPU (js/gl/detail.js). Шейдер добавляет к сетке ровно те октавы и
+   * масштабы кратеров, которые в неё не вошли, поэтому сумма
+   * «геометрия + шейдер» не зависит от уровня LOD.
+   */
+  const shaderParams = () => ({
+    seed,
+    amp: cfg.amp,
+    span,
+    freq: cfg.freq,
+    ridge: cfg.ridge ? 1 : 0,
+    craterW,
+    flat,
+  });
 
   return {
     amp: cfg.amp,
     ampUp,                 // максимум смещения наружу (в долях радиуса)
     ampDown,               // максимум смещения внутрь
     detailForCell,
+    shaderParams,
+    meshError,
+    craterDensity: flat || craterW === 0 ? () => 0 : mare,
     FULL,
     sample,
     displace,

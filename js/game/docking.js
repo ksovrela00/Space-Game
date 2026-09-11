@@ -2,8 +2,9 @@
 // с корпусом и докинг-компьютер (скриптованный подлёт).
 
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
-import { toLocal, toWorld, aimAngles } from '../core/basis.js';
+import { toLocal, toWorld } from '../core/basis.js';
 import { SHIP } from './ship.js';
+import { aimAt, flyVelocity, levelRoll } from './pilot.js';
 import { STATION_R, STATION_D, SLOT } from '../models/station.js';
 
 export const LIMITS = {
@@ -90,34 +91,8 @@ const stationPoint = (st, x, y, z) => toWorld(st.basis, st.pos, v3(x, y, z), _pt
 const distTo = (ship, p) =>
   Math.hypot(p.x - ship.pos.x, p.y - ship.pos.y, p.z - ship.pos.z);
 
-// Наведение носа по направлению. Команда — это ЗАДАННАЯ УГЛОВАЯ СКОРОСТЬ,
-// делённая на максимальную (k * ошибка рад/с). Прямой P-регулятор по углу
-// с большим коэффициентом вырождается в релейное управление и уводит нос
-// в автоколебания на десятки градусов.
-const aimDir = (ship, dir, k = 1.6) => {
-  const ang = aimAngles(ship.basis, dir);
-  const c = ship.control;
-  c.pitch = clamp(ang.pitch * k / SHIP.pitchRate, -1, 1);
-  c.yaw = clamp(ang.yaw * k / SHIP.yawRate, -1, 1);
-  return Math.hypot(ang.pitch, ang.yaw);
-};
-
-const aimAt = (ship, point, k = 1.6) => aimDir(ship, normalize(v3(
-  point.x - ship.pos.x,
-  point.y - ship.pos.y,
-  point.z - ship.pos.z)), k);
-
-/**
- * Полёт заданным вектором скорости: нос по направлению вектора, тяга по
- * его длине. Корабль умеет двигаться только вдоль носа, поэтому «висеть
- * рядом со станцией» — это лететь с её скоростью, а не стоять на месте.
- */
-const flyVelocity = (ship, vec, k = 1.6) => {
-  const sp = Math.hypot(vec.x, vec.y, vec.z);
-  if (sp > 1e-7) aimDir(ship, normalize(vec, _vec), k);
-  ship.throttle = clamp(sp / SHIP.maxSpeed, 0, 1);
-  return sp;
-};
+// Наведение носа, полёт заданным вектором скорости и гашение крена —
+// в js/game/pilot.js: тем же приёмом пользуются автопилот и посадка.
 
 // Согласование крена с вращающейся станцией (по модулю 180°).
 const matchRoll = (ship, station, k = 2.0) => {
@@ -129,10 +104,6 @@ const matchRoll = (ship, station, k = 2.0) => {
   const feed = station.spinRate * (dot(station.basis.fwd, ship.basis.fwd) < 0 ? 1 : -1);
   ship.control.roll = clamp((-err * k + feed) / SHIP.rollRate, -1, 1);
   return Math.abs(err);
-};
-
-const levelRoll = (ship) => {
-  ship.control.roll = clamp(-ship.rot.roll * 2 / SHIP.rollRate, -1, 1);
 };
 
 /**

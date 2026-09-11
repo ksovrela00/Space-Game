@@ -12,21 +12,33 @@
 import { createContext, rendererName, resizeCanvas, watchContextLoss } from './context.js';
 import { buildProgram } from './program.js';
 import {
-  MESH_VS, MESH_FS, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
-  ATMO_VS, ATMO_FS, RING_VS, RING_FS,
+  MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
+  ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS,
 } from './shaders.js';
+import { detailUniforms } from './detail.js';
+import { terrainOf } from './terrain.js';
+import { edgeAngle } from './icosphere.js';
+import { Baker, createBlankTexture } from './bake.js';
+import { TileSet } from './tiles.js';
+import { tileKey } from './quadtree.js';
+import { localDir, altitudeOf } from '../game/surface.js';
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
 } from './mesh.js';
 import { icosphere } from './icosphere.js';
-import { planetMesh, planetLevel, bodyBasis } from './planetmesh.js';
+import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './planetmesh.js';
+import { SurfacePatch } from './patches.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis } from '../core/basis.js';
+import { bodyBasis } from '../game/world.js';
 
 const NEAR = 0.004;          // 4 метра
 const FAR = 2e9;             // с запасом на всю систему
 const AMBIENT = 0.14;
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
+const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
+const PATCH_MS = 3.0;        // и на заплатки поверхности
+const TILE_MS = 6.0;         // и на плитки (только пока они подгружаются)
 
 const applyMat16 = (m, x, y, z, out) => {
   out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
@@ -62,7 +74,20 @@ export class GlScene {
     const gl = this.gl;
     this.name = rendererName(gl);
 
-    this.pMesh = buildProgram(gl, 'mesh', MESH_VS, MESH_FS);
+    // Мелкий рельеф на пиксель — основной вариант; если он не соберётся
+    // на каком-то драйвере, сцена должна остаться рабочей, поэтому есть
+    // запасной шейдер без детали.
+    this.detailOn = new URLSearchParams(
+      typeof location !== 'undefined' ? location.search : '').get('detail') !== '0';
+    if (this.detailOn) {
+      try {
+        this.pMesh = buildProgram(gl, 'mesh', MESH_VS, MESH_FS_DETAIL);
+      } catch (e) {
+        console.error('Мелкий рельеф не собрался, рисуем без него:\n' + e.message);
+        this.detailOn = false;
+      }
+    }
+    if (!this.detailOn) this.pMesh = buildProgram(gl, 'mesh', MESH_VS, MESH_FS);
     this.pStars = buildProgram(gl, 'stars', STARS_VS, STARS_FS);
     this.pGlow = buildProgram(gl, 'glow', GLOW_VS, GLOW_FS);
     this.pAtmo = buildProgram(gl, 'atmo', ATMO_VS, ATMO_FS);
@@ -72,6 +97,7 @@ export class GlScene {
       aPos: this.pMesh.attrib('aPos'),
       aNormal: this.pMesh.attrib('aNormal'),
       aColor: this.pMesh.attrib('aColor'),
+      aUv: this.pMesh.attrib('aUv'),
     };
     this.atmoLocs = { aPos: this.pAtmo.attrib('aPos') };
     this.ringLocs = { aPos: this.pRing.attrib('aPos'), aT: this.pRing.attrib('aT') };
@@ -85,6 +111,27 @@ export class GlScene {
 
     this.quad = buildQuad(gl, this.pGlow.attrib('aQuad'));
     this.stars = this.buildStars();
+    this.blankTex = createBlankTexture(gl);
+    this.patch = new SurfacePatch(gl, this.meshLocs);
+
+    // Поверхность плитками: геометрия и текстуры считаются по одному
+    // разу на плитку и живут в кэше (js/gl/tiles.js). Прежний путь —
+    // заплатки под кораблём с процедурной деталью на пиксель — остаётся
+    // по `?surface=clipmap` для сравнения картинки.
+    const q = new URLSearchParams(
+      typeof location !== 'undefined' ? location.search : '');
+    this.tilesOn = (q.get('surface') || 'tiles') === 'tiles';
+    if (this.tilesOn) {
+      try {
+        this.pBake = buildProgram(gl, 'bake', BAKE_VS, BAKE_FS);
+        this.bakeQuad = buildQuad(gl, this.pBake.attrib('aQuad'));
+        this.baker = new Baker(gl);
+        this.tiles = new TileSet(gl, this.meshLocs, this.baker, this.pBake, this.bakeQuad);
+      } catch (e) {
+        console.error('Запекание поверхности не собралось, рисуем заплатками:\n' + e.message);
+        this.tilesOn = false;
+      }
+    }
 
     this.proj = new Float32Array(16);
     this.mv = new Float32Array(16);
@@ -93,6 +140,7 @@ export class GlScene {
     this.sunDir = new Float32Array(3);
     this.tmp3 = new Float32Array(3);
     this.basisTmp = makeBasis();
+    this.tmpPos = { x: 0, y: 0, z: 0 };
     this.jsMeshes = new WeakMap();
     this.logFC = logDepthCoef(FAR);
 
@@ -158,6 +206,31 @@ export class GlScene {
     return this.sunDir;
   }
 
+  /**
+   * Uniform-ы мелкого рельефа для очередной сетки. Шейдер добавляет
+   * ровно то, что в эту сетку не влезло, поэтому ему нужен угловой
+   * размер её ячейки: у сферы это ребро икосферы, у заплатки — её шаг.
+   */
+  setDetail(prog, body, meshCell, budget = 1) {
+    if (!this.detailOn) return;
+    const gl = this.gl;
+    const u = body && body.isBody
+      ? detailUniforms(terrainOf(body), meshCell, budget)
+      : { on: 0 };
+    gl.uniform1f(prog.loc('uDetail'), u.on);
+    if (!u.on) return;
+    gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
+    gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
+    gl.uniform1i(prog.loc('uSeed'), u.seed);
+    gl.uniform1f(prog.loc('uAmp'), u.amp);
+    gl.uniform1f(prog.loc('uSpan'), u.span);
+    gl.uniform1f(prog.loc('uFreq'), u.freq);
+    gl.uniform1f(prog.loc('uRidge'), u.ridge);
+    gl.uniform1f(prog.loc('uCraterW'), u.craterW);
+    gl.uniform1i(prog.loc('uOctFrom'), u.octFrom);
+    gl.uniform1i(prog.loc('uCsFrom'), u.csFrom);
+  }
+
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
     const gl = this.gl;
     modelView(this.camera.basis, this.camera.pos, basis, pos, scale, this.mv, this.nrm);
@@ -183,14 +256,29 @@ export class GlScene {
     const aspect = this.canvas.width / this.canvas.height;
     perspective(cam.fov, aspect, NEAR, FAR, this.proj);
 
+    // Досборка геометрии и запекание поверхности — ДО настройки кадра.
+    // Проход запекания рисует в свою текстуру: он меняет вьюпорт и
+    // отключает тесты глубины, и если делать это после clear, весь
+    // остальной кадр уйдёт в угол размером с текстуру плитки.
+    this.pending = pendingBuilds();
+    if (this.pending) pumpBuilds(gl, this.meshLocs, BUILD_MS);
+    this.updatePatches(game);
+
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clearDepth(1);
+    gl.clearStencil(0);
     gl.disable(gl.CULL_FACE);        // освещение двустороннее, отсев не нужен
     gl.depthFunc(gl.LEQUAL);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.STENCIL_TEST);
+    // Очистка трафарета подчиняется stencilMask: без этой строки маска,
+    // выставленная заплатками в прошлом кадре, осталась бы в буфере — и
+    // сфера продолжала бы «не рисоваться» там, где заплаток уже нет.
+    gl.stencilMask(0xff);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
     this.drawStars();
     this.drawOpaque(game, world, sunPos);
@@ -198,6 +286,72 @@ export class GlScene {
 
     gl.depthMask(true);
     gl.disable(gl.BLEND);
+    gl.disable(gl.STENCIL_TEST);
+  }
+
+  // Ближайшее тело под камерой: только для него имеет смысл считать
+  // подробные заплатки поверхности.
+  nearestSurface(world) {
+    const cam = this.camera;
+    let best = null, bestGap = Infinity;
+    for (const b of world.bodies) {
+      if (b.kind === 'star' || b.kind === 'gas') continue;
+      const gap = Math.hypot(
+        b.pos.x - cam.pos.x, b.pos.y - cam.pos.y, b.pos.z - cam.pos.z) - b.radius;
+      if (gap < bestGap) { bestGap = gap; best = b; }
+    }
+    // Плитки имеет смысл держать и на подлёте (корни строятся заранее),
+    // а заплатки включаются только у самой поверхности.
+    const range = this.tilesOn ? 30 : 0.2;
+    return best && bestGap < best.radius * range ? best : null;
+  }
+
+  updatePatches(game) {
+    const body = this.nearestSurface(game.world);
+    if (this.tilesOn) {
+      this.updateTiles(body);
+      this.patchBody = null;
+      return;
+    }
+    this.patchBody = body
+      ? this.patch.update(body, this.camera.pos, body._glLevel || 0, PATCH_MS)
+      : this.patch.update(null, null, 0, 0);
+  }
+
+  /**
+   * Плитки ближайшего тела с поверхностью. Пока корневые шесть не
+   * готовы, тело рисуется обычной сферой — так подгрузка не оставляет
+   * дырок в кадре.
+   */
+  updateTiles(body) {
+    if (!body) {
+      if (this.tiles.body) this.tiles.clear();
+      this.tileBody = null;
+      return;
+    }
+    const info = altitudeOf(body, this.camera.pos,
+      this._tinfo || (this._tinfo = { dir: { x: 0, y: 0, z: 0 } }));
+    const dir = localDir(body, this.camera.pos,
+      this._tdir || (this._tdir = { x: 0, y: 0, z: 0 }));
+    this.tiles.update(body, dir, info.alt, this.camera.focal, TILE_MS);
+    this.tileBody = this.tiles.rootsReady ? body : null;
+  }
+
+  // Плитки рисуются одной матрицей тела: меняется только текстура.
+  drawTiles(prog, sunPos) {
+    const gl = this.gl;
+    const body = this.tileBody;
+    bodyBasis(body, this.basisTmp);
+    gl.uniform1f(prog.loc('uSurfMode'), 1);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    for (const t of this.tiles.draw) {
+      const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
+      if (!e || !e.mesh) continue;
+      gl.bindTexture(gl.TEXTURE_2D, e.tex.tex);
+      this.drawObject(prog, e.mesh, body.pos, this.basisTmp, body.radius, sunPos);
+    }
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
   }
 
   drawStars() {
@@ -226,21 +380,68 @@ export class GlScene {
     const gl = this.gl;
     const prog = this.pMesh;
     prog.use();
+    // Сэмплер поверхности всегда должен смотреть в готовую текстуру,
+    // даже когда она не используется.
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
 
+    // Поверхность плитками: она полностью заменяет сферу этого тела,
+    // поэтому ни трафарет, ни деталь на пиксель тут не нужны.
+    if (this.tileBody) this.drawTiles(prog, sunPos);
+
+    // Подробные заплатки поверхности — первыми, с записью трафарета:
+    // там, где легла подробная земля, грубая сфера не нужна.
+    const patchMeshes = this.patchBody ? this.patch.meshes : null;
+    if (patchMeshes) {
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilMask(0xff);
+      gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+      bodyBasis(this.patchBody, this.basisTmp);
+      for (const m of patchMeshes) {
+        this.setDetail(prog, this.patchBody, m.cellAngle);
+        this.drawObject(prog, m, this.patchBody.pos, this.basisTmp,
+          this.patchBody.radius, sunPos);
+      }
+      gl.stencilMask(0);
+    }
+
     // Планеты, луны, светило.
     for (const body of world.bodies) {
+      if (body === this.tileBody) continue;      // нарисовано плитками
       const px = this.pixelsOf(body);
       if (px < MIN_PIXELS) continue;
-      const level = planetLevel(body, px === Infinity ? 1e6 : px);
-      const mesh = planetMesh(gl, this.meshLocs, body, level);
+      let level = planetLevel(body, px === Infinity ? 1e6 : px);
+      const masked = patchMeshes && body === this.patchBody;
+      // Под заплатками сфера почти целиком закрыта (их край — за
+      // горизонтом), поэтому самый подробный уровень ей там не нужен:
+      // это 80 тысяч треугольников и 60 мс сборки впустую.
+      if (masked && level > 5) level = 5;
+      const mesh = requestPlanetMesh(gl, this.meshLocs, body, level);
       bodyBasis(body, this.basisTmp);
+      if (masked) {
+        gl.enable(gl.STENCIL_TEST);
+        gl.stencilFunc(gl.EQUAL, 0, 0xff);
+      }
       // Светило само себе источник света — направление не важно.
+      //
+      // Под заплатками сфера почти целиком закрыта трафаретом, но
+      // логарифмическая глубина отключает early-z, и фрагментный шейдер
+      // отрабатывает её пиксели впустую. Поэтому там деталь урезана до
+      // одного масштаба: видимой остаётся только даль за краем заплаток,
+      // а на таком угле к поверхности след пикселя всё равно огромен.
+      this.setDetail(prog, body, edgeAngle(level), masked ? 0.34 : 1);
       this.drawObject(prog, mesh, body.pos, this.basisTmp, body.radius,
         body.kind === 'star' ? { x: body.pos.x, y: body.pos.y, z: body.pos.z + 1 } : sunPos);
+      if (masked) gl.disable(gl.STENCIL_TEST);
     }
+    gl.disable(gl.STENCIL_TEST);
+    this.setDetail(prog, null, 0);      // дальше — рукотворные объекты
 
     // Станции.
     for (const st of world.stations) {
@@ -253,9 +454,26 @@ export class GlScene {
     }
 
     // Свой корабль — только в виде от третьего лица.
-    if (game.state.view === 'chase' && game.state.mode === 'flight') {
-      this.drawObject(prog, this.glMeshFor(game.shipMesh),
-        game.ship.pos, game.ship.basis, 1, sunPos);
+    if (game.state.view === 'chase' && game.state.mode !== 'docked') {
+      const ship = game.ship;
+      this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+      this.drawGear(prog, game, sunPos);
+    }
+  }
+
+  // Стойки шасси: каждая рисуется своим вызовом от точки крепления,
+  // масштаб по длине — так стойка выдвигается, а не растёт из центра.
+  drawGear(prog, game, sunPos) {
+    const ship = game.ship;
+    const mesh = game.gearMesh;
+    if (!mesh || !ship.gear || ship.gear.t < 0.01) return;
+    const legMesh = this.glMeshFor(mesh);
+    const b = ship.basis;
+    for (const hp of mesh.hardpoints) {
+      this.tmpPos.x = ship.pos.x + b.right.x * hp.x + b.up.x * hp.y + b.fwd.x * hp.z;
+      this.tmpPos.y = ship.pos.y + b.right.y * hp.x + b.up.y * hp.y + b.fwd.y * hp.z;
+      this.tmpPos.z = ship.pos.z + b.right.z * hp.x + b.up.z * hp.y + b.fwd.z * hp.z;
+      this.drawObject(prog, legMesh, this.tmpPos, b, mesh.legLength * ship.gear.t, sunPos);
     }
   }
 

@@ -6,6 +6,16 @@ import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game
 import { makeCruise, updateCruise } from '../js/game/cruise.js';
 import { makeNav, startAutopilot, updateAutopilot, currentTarget } from '../js/game/nav.js';
 import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality } from '../js/game/docking.js';
+import { alignBasis, horizontal } from '../js/game/pilot.js';
+import {
+  isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
+  worldPoint, surfaceVelocity,
+} from '../js/game/surface.js';
+import {
+  toggleGear, updateGear, gearReady, landingContext, syncVtol, manualHover,
+  startLanding, updateLandingComputer, checkTouchdown, settle, updateLandedPose,
+  takeoff, landingReadout,
+} from '../js/game/landing.js';
 import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
@@ -682,6 +692,291 @@ console.log('\n== полный цикл: станция -> станция ==');
     if (r === 'crash') { status = 'crash-station'; break; }
   }
   ok(status === 'docked', `${from.name} -> ${to.name}: ${status} за ${t.toFixed(0)} с (докинг включался: ${docking})`);
+}
+
+// --- 5b. Ориентация по площадке ---------------------------------------------
+// Посадка требует выйти на ПОЛНУЮ ориентацию (брюхом вниз), а не только
+// навести нос. Короткая формула через сумму векторных произведений здесь
+// имеет неподвижную точку около поворота на 180°, и регулятор честно
+// сходился к ошибке в 76° — отсюда и были «опрокидывания».
+console.log('\n== выход на заданную ориентацию ==');
+{
+  const cases = [
+    ['малый угол', 0.2, -0.1, 0.15],
+    ['средний', 0.6, -1.1, 0.9],
+    ['почти вверх ногами', 2.9, 0.2, 0.1],
+    ['вверх ногами', Math.PI - 0.02, 0, 0],
+  ];
+  for (const [label, p, y, r] of cases) {
+    const sh = makeShip();
+    rotateBasis(sh.basis, p, y, r);
+    const up = normalize(v3(0.2, 0.9, 0.3));
+    const fwd = normalize(horizontal(v3(1, 0, 0), up, v3()));
+    let err = 1;
+    for (let i = 0; i < 60 * 20; i++) {
+      clearControls(sh);
+      err = alignBasis(sh, fwd, up, 1.5);
+      updateShip(sh, STEP, STEP);
+    }
+    const tilt = dot(sh.basis.up, up);
+    const nose = dot(sh.basis.fwd, fwd);
+    ok(tilt > 0.9999 && nose > 0.999,
+      `${label}: за 20 с вышли на ориентацию (верх ${tilt.toFixed(5)}, нос ${nose.toFixed(4)})`);
+  }
+}
+
+// --- 5c. Поверхность и посадка ----------------------------------------------
+console.log('\n== поверхность ==');
+{
+  const w = makeSystem(0x1a7e);
+  // Скорость поверхности должна быть по силам посадочным движкам —
+  // иначе сесть физически невозможно (и раньше так и было: периоды
+  // суток в минутах давали десятки км/с).
+  for (const b of w.bodies) {
+    if (b.kind === 'star') continue;
+    const v = b.spin * b.radius;
+    ok(v < 0.5, `${b.name}: скорость поверхности ${(v * 1000).toFixed(0)} м/с, ` +
+      `сутки ${(Math.PI * 2 / b.spin / 3600).toFixed(1)} ч`);
+  }
+
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  ok(isLandable(moon) && !isLandable(w.home) && !isLandable(w.star) &&
+     !isLandable(w.planets.find((p) => p.kind === 'gas')),
+    'сесть можно на луну, но не на мир с атмосферой, не на светило и не на гиганта');
+
+  // Высота считается по рельефу, а не по сфере: над горой она меньше.
+  const dirA = normalize(v3(0.3, 0.7, 0.6));
+  const rA = groundRadius(moon, dirA);
+  const p = worldPoint(moon, dirA, rA + 2, v3());
+  const info = altitudeOf(moon, p, {});
+  ok(Math.abs(info.alt - 2) < 1e-6 && Math.abs(rA - moon.radius) > 0.01,
+    `высота над рельефом: 2 км над точкой с рельефом ` +
+    `${(rA - moon.radius).toFixed(2)} км -> ${info.alt.toFixed(6)} км`);
+
+  // Нормаль и уклон: нормаль единичная, уклон совпадает с углом до радиуса.
+  const n = surfaceNormal(moon, dirA, v3(), 0.06);
+  ok(Math.abs(len(n) - 1) < 1e-9 && dot(n, dirA) > 0,
+    `нормаль площадки единичная и наружу, уклон ${(slopeAt(moon, dirA) * 57.3).toFixed(1)}°`);
+
+  // Поиск площадки обязан находить место ровнее, чем «куда смотрели».
+  let better = 0, total = 0;
+  for (let i = 0; i < 30; i++) {
+    const a = i * 2.399963;
+    const u = -1 + 2 * (i / 29);
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+    const was = slopeAt(moon, d);
+    const site = findSite(moon, d, 1.2);
+    total++;
+    if (site.slope <= was + 1e-9) better++;
+  }
+  ok(better === total, `поиск площадки не ухудшает уклон (${better}/${total} точек)`);
+
+  // Скорость грунта: складывается из орбитальной и вращения.
+  const sv = surfaceVelocity(moon, p, v3());
+  ok(len(sv) > moon.spin * moon.radius * 0.5,
+    `скорость грунта ${(len(sv) * 1000).toFixed(0)} м/с (вращение ` +
+    `${(moon.spin * moon.radius * 1000).toFixed(0)} м/с + орбита)`);
+}
+
+// --- 5d. Посадочный компьютер -----------------------------------------------
+console.log('\n== посадка ==');
+function landTest(pick, startMul, opts = {}) {
+  const w = makeSystem(0x1a7e);
+  const body = pick(w);
+  const sh = makeShip();
+  const dir = normalize(v3(0.3, 0.7, 0.6));
+  placeShip(sh, v3(
+    body.pos.x + dir.x * body.radius * startMul,
+    body.pos.y + dir.y * body.radius * startMul,
+    body.pos.z + dir.z * body.radius * startMul), makeBasis());
+  lookAlong(sh.basis, normalize(v3(
+    body.pos.x - sh.pos.x, body.pos.y - sh.pos.y, body.pos.z - sh.pos.z)));
+  const cr = makeCruise();
+  const res = startLanding(sh, body, sh.pos);
+  if (!res.ok) return { status: 'refused', reason: res.reason };
+  if (opts.noGear) { sh.gear.out = false; sh.gear.t = 0; }
+
+  let t = 0;
+  const phases = new Set();
+  for (let i = 0; i < 60 * 900; i++) {
+    updateWorld(w, STEP);
+    clearControls(sh);
+    if (opts.noGear) { sh.gear.out = false; sh.gear.t = 0; }
+    else updateGear(sh, STEP);
+    let zone = landingContext(w, sh);
+    syncVtol(sh, zone);
+    if (sh.landing) {
+      updateLandingComputer(sh, STEP, cr.level);
+      phases.add(sh.landing.phase);
+      if (sh.landing.wantCruise !== null) cr.index = sh.landing.wantCruise;
+    }
+    const lvl = updateCruise(cr, w, sh, STEP);
+    updateShip(sh, STEP, STEP * lvl);
+    t += STEP;
+    const nb = nearestBody(w, sh.pos);
+    if (nb.gap <= 0 && !isLandable(nb.body)) return { status: 'crash-body', t };
+    zone = landingContext(w, sh);
+    if (!zone) continue;
+    const touch = checkTouchdown(sh, zone);
+    if (touch && touch.result === 'landed') {
+      const r = landingReadout(sh, zone);
+      settle(sh, zone);
+      return { status: 'landed', t, w, sh, body, r, phases: [...phases] };
+    }
+    if (touch && touch.result === 'crash') return { status: 'crash', t, reason: touch.reason };
+  }
+  return { status: 'timeout', t };
+}
+
+const moonPick = (w) => w.bodies.find((b) => b.kind === 'moon');
+const moon2Pick = (w) => w.bodies.filter((b) => b.kind === 'moon')[1];
+const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
+
+{
+  const r1 = landTest(moonPick, 2.0);
+  ok(r1.status === 'landed',
+    `луна с высоты в радиус: ${r1.status} за ${r1.t ? r1.t.toFixed(0) : '?'} с`,
+    r1.phases ? r1.phases.join(' -> ') : r1.reason || '');
+  if (r1.status === 'landed') {
+    ok(Math.abs(r1.r.alt - SHIP.gearClear) < 0.003 && r1.r.vspeedOk && r1.r.hspeedOk &&
+       r1.r.tiltOk && r1.r.slopeOk,
+      `касание в допусках: высота ${(r1.r.alt * 1000).toFixed(1)} м, вертикальная ` +
+      `${(r1.r.vspeed * 1000).toFixed(1)} м/с, боковая ${(r1.r.hspeed * 1000).toFixed(1)} м/с, ` +
+      `наклон ${(Math.acos(Math.min(1, r1.r.tilt)) * 57.3).toFixed(1)}°`);
+
+    // Стоянка: корабль едет вместе с вращающейся поверхностью и не
+    // проваливается в неё.
+    const { w, sh, body } = r1;
+    const p0 = { ...sh.pos };
+    let worstAlt = 0;
+    for (let i = 0; i < 60 * 120; i++) {
+      updateWorld(w, STEP);
+      updateLandedPose(sh);
+      if (i % 60 === 0) {
+        const z = landingContext(w, sh);
+        worstAlt = Math.max(worstAlt, Math.abs(z.alt - SHIP.gearClear));
+      }
+    }
+    const moved = Math.hypot(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
+    ok(worstAlt < 1e-6 && moved > 1,
+      `за 2 минуты стоянки корабль проехал с поверхностью ${moved.toFixed(1)} км, ` +
+      `высота не изменилась (${(worstAlt * 1e6).toFixed(2)} мм)`);
+
+    // Взлёт: отрыв и набор высоты на посадочных движках.
+    takeoff(sh);
+    for (let i = 0; i < 60 * 40; i++) {
+      updateWorld(w, STEP);
+      clearControls(sh);
+      updateGear(sh, STEP);
+      const z = landingContext(w, sh);
+      syncVtol(sh, z);
+      if (z && sh.vtol) { sh.control.lift = 1; manualHover(sh, z, STEP); }
+      updateShip(sh, STEP, STEP);
+    }
+    const z = landingContext(w, sh);
+    ok(z && z.alt > 1.5, `за 40 с взлёта поднялись на ${z ? z.alt.toFixed(2) : '?'} км`);
+  }
+}
+
+{
+  const r2 = landTest(moon2Pick, 3.5);
+  ok(r2.status === 'landed', `вторая луна с 2.5 радиусов: ${r2.status} за ${r2.t ? r2.t.toFixed(0) : '?'} с`);
+  const r3 = landTest(rockPick, 1.6);
+  ok(r3.status === 'landed', `каменистая планета: ${r3.status} за ${r3.t ? r3.t.toFixed(0) : '?'} с`);
+  const r4 = landTest((w) => w.home, 1.5);
+  ok(r4.status === 'refused', `на мир с атмосферой компьютер не берётся: ${r4.reason || r4.status}`);
+}
+
+// Мягкое касание с убранным шасси: скорости в допуске, но садиться не на
+// что. Заодно проверяем, что посадочный режим без шасси не включается.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = moonPick(w);
+  const sh = makeShip();
+  const dir = normalize(v3(0.2, 0.6, -0.7));
+  const gr = groundRadius(moon, dir);
+  placeShip(sh, worldPoint(moon, dir, gr + 0.1, v3()), makeBasis());
+  lookAlong(sh.basis, normalize(v3(
+    moon.pos.x - sh.pos.x, moon.pos.y - sh.pos.y, moon.pos.z - sh.pos.z)));
+  sh.throttle = 0.02;
+  let res = null, vtolSeen = false;
+  for (let i = 0; i < 60 * 120 && !res; i++) {
+    updateWorld(w, STEP);
+    clearControls(sh);
+    updateGear(sh, STEP);
+    const zone = landingContext(w, sh);
+    if (syncVtol(sh, zone)) vtolSeen = true;
+    updateShip(sh, STEP, STEP);
+    const z2 = landingContext(w, sh);
+    if (z2) res = checkTouchdown(sh, z2);
+  }
+  ok(res && res.result === 'crash' && /шасси/i.test(res.reason) && !vtolSeen,
+    `мягкое касание с убранным шасси — авария: ${res ? res.reason : 'не произошло'}` +
+    (vtolSeen ? ' (посадочный режим включился зря)' : ''));
+}
+
+// Слишком быстрое касание: падаем на грунт без посадочного режима.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = moonPick(w);
+  const sh = makeShip();
+  const dir = normalize(v3(0.3, 0.7, 0.6));
+  const gr = groundRadius(moon, dir);
+  placeShip(sh, worldPoint(moon, dir, gr + 0.4, v3()), makeBasis());
+  // Нос в землю, шасси выпущено, полная тяга.
+  lookAlong(sh.basis, normalize(v3(
+    moon.pos.x - sh.pos.x, moon.pos.y - sh.pos.y, moon.pos.z - sh.pos.z)));
+  sh.gear.out = true; sh.gear.t = 1;
+  sh.throttle = 1; sh.speed = SHIP.maxSpeed * SHIP.gearSpeed;
+  let res = null;
+  for (let i = 0; i < 60 * 60 && !res; i++) {
+    updateWorld(w, STEP);
+    clearControls(sh);
+    updateGear(sh, STEP);
+    const zone = landingContext(w, sh);
+    // Посадочный режим сознательно не включаем: это падение, не посадка.
+    updateShip(sh, STEP, STEP);
+    const z2 = landingContext(w, sh);
+    if (z2) res = checkTouchdown(sh, z2);
+  }
+  ok(res && res.result === 'crash' && /скорость/i.test(res.reason),
+    `удар о поверхность на скорости — авария: ${res ? res.reason : 'не произошло'}`);
+}
+
+// Касание планеты с атмосферой — всегда удар, даже идеально мягкое:
+// садиться туда нельзя, а рельеф у неё есть, и считается он так же.
+{
+  const w = makeSystem(0x1a7e);
+  const planet = w.planets.find((p) => p.kind === 'desert');
+  const sh = makeShip();
+  const dir = normalize(v3(0.1, 0.9, 0.4));
+  placeShip(sh, worldPoint(planet, dir, groundRadius(planet, dir) + 0.005, v3()), makeBasis());
+  sh.gear.out = true; sh.gear.t = 1;
+  const zone = landingContext(w, sh);
+  const touch = zone ? checkTouchdown(sh, zone) : null;
+  ok(zone && zone.body === planet && touch && touch.result === 'crash',
+    `у планеты с атмосферой рельеф учитывается, но посадка невозможна: ` +
+    `${touch ? touch.reason : 'касание не определено'}`);
+}
+
+// Шасси: время выпуска и ограничение скорости.
+{
+  const sh = makeShip();
+  toggleGear(sh);
+  let t = 0;
+  while (sh.gear.t < 1 && t < 10) { updateGear(sh, STEP); t += STEP; }
+  ok(Math.abs(t - SHIP.gearTime) < 0.05 && gearReady(sh),
+    `шасси выпускается за ${t.toFixed(2)} с (задано ${SHIP.gearTime})`);
+  sh.throttle = 1;
+  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP, STEP); }
+  const withGear = sh.speed;
+  toggleGear(sh);
+  while (sh.gear.t > 0) updateGear(sh, STEP);
+  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP, STEP); }
+  ok(Math.abs(withGear - SHIP.maxSpeed * SHIP.gearSpeed) < 0.01 &&
+     Math.abs(sh.speed - SHIP.maxSpeed) < 0.01,
+    `с шасси скорость ${withGear.toFixed(2)} км/с, без него ${sh.speed.toFixed(2)} км/с`);
 }
 
 // --- 6. Столкновение с планетой --------------------------------------------

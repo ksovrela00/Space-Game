@@ -3,6 +3,7 @@
 export const ST = {
   FLIGHT: 'flight',
   DOCKED: 'docked',
+  LANDED: 'landed',       // стоим на поверхности тела
   CRASHED: 'crashed',
   MAP: 'map',
   HELP: 'help',

@@ -8,12 +8,13 @@
 //     что затенение должно быть гладким.
 
 export class GlMesh {
-  constructor(gl, vao, count, mode, indexType) {
+  constructor(gl, vao, count, mode, indexType, buffers = null) {
     this.gl = gl;
     this.vao = vao;
     this.count = count;
     this.mode = mode;
     this.indexType = indexType;   // null, если без индексов
+    this.buffers = buffers;       // для освобождения
   }
 
   draw() {
@@ -21,6 +22,20 @@ export class GlMesh {
     gl.bindVertexArray(this.vao);
     if (this.indexType) gl.drawElements(this.mode, this.count, this.indexType, 0);
     else gl.drawArrays(this.mode, 0, this.count);
+  }
+
+  /**
+   * Освободить память GPU. Нужно мешам, которые пересобираются на ходу
+   * (заплатки поверхности): без этого при посадке утекали бы десятки
+   * мегабайт видеопамяти.
+   */
+  dispose() {
+    const gl = this.gl;
+    if (this.buffers) for (const b of this.buffers) gl.deleteBuffer(b);
+    if (this.vao) gl.deleteVertexArray(this.vao);
+    this.buffers = null;
+    this.vao = null;
+    this.count = 0;
   }
 
   get tris() { return this.mode === this.gl.TRIANGLES ? this.count / 3 : 0; }
@@ -80,18 +95,25 @@ export function buildFlatMesh(gl, locs, mesh) {
 export function buildIndexedMesh(gl, locs, data) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
-  attrib(gl, locs.aPos, arrayBuffer(gl, data.positions), 3);
-  if (data.normals) attrib(gl, locs.aNormal, arrayBuffer(gl, data.normals), 3);
-  if (data.colors) attrib(gl, locs.aColor, arrayBuffer(gl, data.colors), 4);
-  if (data.t) attrib(gl, locs.aT, arrayBuffer(gl, data.t), 1);
+  const bufs = [];
+  const add = (loc, arr, size) => {
+    const b = arrayBuffer(gl, arr);
+    bufs.push(b);
+    attrib(gl, loc, b, size);
+  };
+  add(locs.aPos, data.positions, 3);
+  if (data.normals) add(locs.aNormal, data.normals, 3);
+  if (data.colors) add(locs.aColor, data.colors, 4);
+  if (data.t) add(locs.aT, data.t, 1);
 
   const ib = gl.createBuffer();
+  bufs.push(ib);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data.indices, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
 
   const type = data.indices instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
-  return new GlMesh(gl, vao, data.indices.length, gl.TRIANGLES, type);
+  return new GlMesh(gl, vao, data.indices.length, gl.TRIANGLES, type, bufs);
 }
 
 /** Звёзды: облако точек с направлением и цветом. */

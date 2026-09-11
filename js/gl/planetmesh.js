@@ -1,16 +1,27 @@
-// Сборка меша планеты: икосфера + смещение вершин рельефом + цвет
-// биома + нормали. Меш живёт в единичном радиусе, масштаб задаётся
-// матрицей объекта, поэтому одну и ту же геометрию можно использовать
-// для тела любого размера.
+// Сборка меша тела: икосфера + смещение вершин рельефом + цвет биома +
+// нормали. Меш живёт в единичном радиусе, масштаб задаётся матрицей
+// объекта, поэтому одну и ту же геометрию можно использовать для тела
+// любого размера.
+//
+// Генерация не мгновенная: уровень 6 — это 41 тысяча вершин и около
+// 60 мс работы. Поэтому меши собираются ПОРЦИЯМИ в фоновой очереди
+// (pumpBuilds), а пока подробный уровень не готов, рисуется тот, что
+// уже есть. Иначе первый же подлёт к телу давал бы провал кадра.
 
-import { icosphere, computeNormals, levelForPixels } from './icosphere.js';
-import { makeTerrain } from './terrain.js';
+import { icosphere, computeNormals, levelForPixels, edgeAngle } from './icosphere.js';
+import { terrainOf } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
 
-/** Геометрия планеты на CPU — эту часть можно проверить без браузера. */
-export function planetGeometry(body, level) {
+export { terrainOf };
+
+/**
+ * Порционный сборщик геометрии. step(n) обрабатывает n вершин и
+ * возвращает true, когда всё готово (результат — в .result).
+ */
+export function planetBuilder(body, level) {
   const base = icosphere(level);
-  const terrain = body._terrain || (body._terrain = makeTerrain(body));
+  const terrain = terrainOf(body);
+  const detail = terrain.detailForCell(edgeAngle(level));
   const n = base.positions.length / 3;
 
   const positions = new Float32Array(base.positions.length);
@@ -20,53 +31,122 @@ export function planetGeometry(body, level) {
   // Светило — однородный самосветящийся шар своего цвета: процедурные
   // биомы ему не нужны (иначе досталась бы серая каменная палитра).
   const isStar = body.kind === 'star';
+  const sr = body.color[0] / 255, sg = body.color[1] / 255, sb = body.color[2] / 255;
 
-  for (let i = 0; i < n; i++) {
-    const x = base.positions[i * 3];
-    const y = base.positions[i * 3 + 1];
-    const z = base.positions[i * 3 + 2];
-    const h = 1 + terrain.displace(x, y, z);
-    positions[i * 3] = x * h;
-    positions[i * 3 + 1] = y * h;
-    positions[i * 3 + 2] = z * h;
+  let i = 0;
+  let result = null;
 
-    if (isStar) {
-      rgb[0] = body.color[0] / 255;
-      rgb[1] = body.color[1] / 255;
-      rgb[2] = body.color[2] / 255;
-    } else {
-      terrain.color(x, y, z, rgb);
-    }
-    colors[i * 4] = rgb[0];
-    colors[i * 4 + 1] = rgb[1];
-    colors[i * 4 + 2] = rgb[2];
-    colors[i * 4 + 3] = isStar ? 1 : 0;                // альфа = «сам светится»
+  return {
+    body, level, total: n,
+    get result() { return result; },
+    get progress() { return i / n; },
+    step(count = 1 << 30) {
+      const end = Math.min(n, i + count);
+      for (; i < end; i++) {
+        const x = base.positions[i * 3];
+        const y = base.positions[i * 3 + 1];
+        const z = base.positions[i * 3 + 2];
+        const h = 1 + (isStar ? 0 : terrain.sample(x, y, z, detail, rgb));
+        positions[i * 3] = x * h;
+        positions[i * 3 + 1] = y * h;
+        positions[i * 3 + 2] = z * h;
+        colors[i * 4] = isStar ? sr : rgb[0];
+        colors[i * 4 + 1] = isStar ? sg : rgb[1];
+        colors[i * 4 + 2] = isStar ? sb : rgb[2];
+        colors[i * 4 + 3] = isStar ? 1 : 0;          // альфа = «сам светится»
+      }
+      if (i < n) return false;
+      // Нормали считаем по УЖЕ смещённой геометрии, иначе рельеф не будет
+      // виден в освещении — только силуэтом на кромке.
+      const normals = terrain.isFlat
+        ? base.positions.slice()
+        : computeNormals(positions, base.indices);
+      result = {
+        positions, normals, colors, indices: base.indices,
+        level, detail, faces: base.faceCount,
+      };
+      return true;
+    },
+  };
+}
+
+/** Геометрия планеты целиком — этой частью пользуются проверки. */
+export function planetGeometry(body, level) {
+  const b = planetBuilder(body, level);
+  b.step();
+  return b.result;
+}
+
+// --- Очередь сборки ----------------------------------------------------------
+
+const QUEUE = [];
+
+/**
+ * Меш нужного уровня, если он готов. Иначе — лучший из готовых, а нужный
+ * ставится в очередь. Совсем пустой случай закрывается грубым уровнем:
+ * он собирается мгновенно.
+ */
+export function requestPlanetMesh(gl, locs, body, level) {
+  if (!body._glMeshes) body._glMeshes = new Map();
+  const meshes = body._glMeshes;
+  const exact = meshes.get(level);
+  if (exact) return exact;
+
+  if (!body._glQueued) body._glQueued = new Set();
+  if (!body._glQueued.has(level)) {
+    body._glQueued.add(level);
+    QUEUE.push(planetBuilder(body, level));
   }
 
-  // Нормали считаем по УЖЕ смещённой геометрии, иначе рельеф не будет
-  // виден в освещении — только силуэтом на кромке.
-  const normals = terrain.isFlat
-    ? base.positions.slice()
-    : computeNormals(positions, base.indices);
-
-  return { positions, normals, colors, indices: base.indices, level, faces: base.faceCount };
+  // Ближайший готовый уровень: сначала ищем ниже (он точно дешевле).
+  for (let lv = level - 1; lv >= 0; lv--) {
+    const m = meshes.get(lv);
+    if (m) return m;
+  }
+  for (let lv = level + 1; lv <= 6; lv++) {
+    const m = meshes.get(lv);
+    if (m) return m;
+  }
+  const fallback = Math.min(level, 2);
+  const geo = planetGeometry(body, fallback);
+  const mesh = buildIndexedMesh(gl, locs, geo);
+  mesh.faces = geo.faces;
+  meshes.set(fallback, mesh);
+  return mesh;
 }
 
 /**
- * Меш планеты для нужного уровня LOD. Кэшируется на самом теле:
- * генерация уровня 5 (20 тыс. граней) занимает десятки миллисекунд,
- * каждый кадр её делать нельзя.
+ * Довести очередь сборки за отведённое время (мс). Вызывается раз в кадр.
+ * @returns сколько мешей дособрано
  */
-export function planetMesh(gl, locs, body, level) {
-  if (!body._glMeshes) body._glMeshes = new Map();
-  const cached = body._glMeshes.get(level);
-  if (cached) return cached;
-  const geo = planetGeometry(body, level);
-  const mesh = buildIndexedMesh(gl, locs, geo);
-  mesh.faces = geo.faces;
-  body._glMeshes.set(level, mesh);
-  return mesh;
+export function pumpBuilds(gl, locs, msBudget = 4) {
+  if (!QUEUE.length) return 0;
+  const t0 = performance.now();
+  let built = 0;
+  while (QUEUE.length) {
+    const b = QUEUE[0];
+    // Уровень, который уже неактуален (тело далеко), досчитывать незачем.
+    if (b.body._glLevel !== undefined && Math.abs(b.body._glLevel - b.level) > 1) {
+      b.body._glQueued.delete(b.level);
+      QUEUE.shift();
+      continue;
+    }
+    const done = b.step(2048);
+    if (done) {
+      const geo = b.result;
+      const mesh = buildIndexedMesh(gl, locs, geo);
+      mesh.faces = geo.faces;
+      b.body._glMeshes.set(b.level, mesh);
+      b.body._glQueued.delete(b.level);
+      QUEUE.shift();
+      built++;
+    }
+    if (performance.now() - t0 >= msBudget) break;
+  }
+  return built;
 }
+
+export const pendingBuilds = () => QUEUE.length;
 
 /** Выбор уровня по видимому размеру с гистерезисом. */
 export function planetLevel(body, screenPx) {
@@ -74,23 +154,4 @@ export function planetLevel(body, screenPx) {
   const lv = levelForPixels(screenPx, prev);
   body._glLevel = lv;
   return lv;
-}
-
-/**
- * Локальный базис тела: y — ось вращения, поворот вокруг неё — суточное
- * вращение. Меш статичен, вращение целиком в этой матрице.
- */
-export function bodyBasis(body, out) {
-  const p = body.pole, a = body.eqRef, s = body.eqSide;
-  const c = Math.cos(body.spinPhase), sn = Math.sin(body.spinPhase);
-  // right = eqRef, повёрнутый вокруг полюса; up = полюс.
-  out.right.x = a.x * c + s.x * sn;
-  out.right.y = a.y * c + s.y * sn;
-  out.right.z = a.z * c + s.z * sn;
-  out.up.x = p.x; out.up.y = p.y; out.up.z = p.z;
-  // fwd = right x up (правая тройка, как и у камеры)
-  out.fwd.x = out.right.y * p.z - out.right.z * p.y;
-  out.fwd.y = out.right.z * p.x - out.right.x * p.z;
-  out.fwd.z = out.right.x * p.y - out.right.y * p.x;
-  return out;
 }

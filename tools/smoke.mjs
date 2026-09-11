@@ -271,6 +271,116 @@ await step('пролёт у планеты крупным планом (терм
   frames(3);
 });
 
+await step('телепорт к цели (K) и смена высоты (Shift+K)', () => {
+  if (game.state.mode === 'crashed') { key('Space'); frames(5); }
+  if (game.state.mode === 'docked') { key('Space'); frames(5); }
+  const moon = game.world.bodies.find((b) => b.kind === 'moon');
+  game.nav.index = game.nav.list.indexOf(moon);
+  const alts = [];
+  for (let i = 0; i < 8; i++) {
+    // Shift здесь именно УДЕРЖИВАЕТСЯ через кадр: игра смотрит на клавишу
+    // по коду, а нажатия разбираются внутри кадра, а не в момент события.
+    holdDown('ShiftLeft');
+    key('KeyK');                    // Shift+K: следующая высота и прыжок
+    frames(1);
+    release('ShiftLeft');
+    frames(2);
+    if (game.state.mode !== 'flight') {
+      throw new Error('режим после телепорта ' + game.state.mode + ': ' + game.crashReason);
+    }
+    if (!game.zone || game.zone.body !== moon) {
+      // На больших высотах зоны нет — считаем высоту по сфере.
+      const d = Math.hypot(
+        game.ship.pos.x - moon.pos.x, game.ship.pos.y - moon.pos.y, game.ship.pos.z - moon.pos.z);
+      alts.push(d - moon.radius);
+    } else {
+      alts.push(game.zone.alt);
+    }
+  }
+  // Каждый прыжок должен ставить корабль на свою высоту, и все они разные.
+  if (process.env.TP) console.log('   высоты:', alts.map((a) => a.toFixed(2)).join(', '));
+  if (new Set(alts.map((a) => a.toFixed(3))).size < 5) {
+    throw new Error('высоты телепорта не меняются: ' + alts.map((a) => a.toFixed(2)).join(', '));
+  }
+  if (alts.some((a) => a < 0)) throw new Error('телепорт под поверхность: ' + alts.join(', '));
+  // Скорость гасится в момент прыжка; за следующие кадры она успевает
+  // чуть подрасти от удерживаемого Shift (это же и клавиша тяги).
+  if (game.ship.speed > 0.05) throw new Error('после телепорта осталась скорость ' + game.ship.speed);
+
+  // K без Shift — тот же прыжок на той же высоте.
+  const before = { ...game.ship.pos };
+  key('KeyK'); frames(3);
+  const moved = Math.hypot(
+    game.ship.pos.x - before.x, game.ship.pos.y - before.y, game.ship.pos.z - before.z);
+  if (moved > 1) throw new Error('K без Shift сменил высоту (сдвиг ' + moved.toFixed(1) + ' км)');
+
+  // И к станции — туда телепорт ставит у створа порта.
+  const st = game.world.home.station;
+  game.nav.index = game.nav.list.indexOf(st);
+  key('KeyK'); frames(3);
+  const d = Math.hypot(
+    game.ship.pos.x - st.pos.x, game.ship.pos.y - st.pos.y, game.ship.pos.z - st.pos.z);
+  if (!(d > 3 && d < 12)) throw new Error('телепорт к станции: дистанция ' + d.toFixed(1) + ' км');
+});
+
+await step('шасси выпускается и убирается по G', () => {
+  // Возвращаемся в полёт: предыдущий шаг оставляет корабль внутри звезды.
+  if (game.state.mode === 'crashed') { key('Space'); frames(5); }
+  if (game.state.mode === 'docked') { key('Space'); frames(5); }
+  key('KeyG'); frames(60 * 3);
+  if (!(game.ship.gear.t > 0.99)) throw new Error('шасси не выпустилось: ' + game.ship.gear.t);
+  key('KeyG'); frames(60 * 3);
+  if (game.ship.gear.t !== 0) throw new Error('шасси не убралось: ' + game.ship.gear.t);
+});
+
+await step('посадочный компьютер (L) доводит до грунта луны', () => {
+  const moon = game.world.bodies.find((b) => b.kind === 'moon');
+  game.nav.index = game.nav.list.indexOf(moon);
+  const d = { x: 0.3, y: 0.7, z: 0.6 };
+  const l = Math.hypot(d.x, d.y, d.z);
+  const R = moon.radius * 1.4;
+  game.ship.pos.x = moon.pos.x + d.x / l * R;
+  game.ship.pos.y = moon.pos.y + d.y / l * R;
+  game.ship.pos.z = moon.pos.z + d.z / l * R;
+  game.ship.speed = 0;
+  game.ship.throttle = 0;
+  const b = game.ship.basis;
+  b.fwd = { x: -d.x / l, y: -d.y / l, z: -d.z / l };
+  b.right = { x: -b.fwd.z, y: 0, z: b.fwd.x };
+  const rl = Math.hypot(b.right.x, b.right.y, b.right.z);
+  b.right = { x: b.right.x / rl, y: 0, z: b.right.z / rl };
+  b.up = {
+    x: b.fwd.y * b.right.z - b.fwd.z * b.right.y,
+    y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
+    z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
+  };
+  key('KeyL');
+  frames(30);
+  if (!game.ship.landing) throw new Error('посадочный компьютер не включился');
+  for (let i = 0; i < 400 && game.state.mode === 'flight'; i++) frames(60);
+  if (game.state.mode !== 'landed') {
+    throw new Error('режим ' + game.state.mode + ', фаза ' +
+      (game.ship.landing && game.ship.landing.phase) + ', причина: ' + game.crashReason);
+  }
+  if (!(game.stats.landings > 0)) throw new Error('посадка не засчитана');
+});
+
+await step('стоянка на поверхности и взлёт по Space', () => {
+  frames(60 * 10);
+  if (game.state.mode !== 'landed') throw new Error('режим ' + game.state.mode);
+  // Стоянка обязана попасть в сейв: в локальных осях тела, иначе через
+  // сутки эти координаты указывали бы в пустоту.
+  const saved = JSON.parse(store['solar_trader_save_v1']);
+  if (!saved.landed || !saved.landed.pose || !saved.landed.id) {
+    throw new Error('стоянка не сохранена: ' + JSON.stringify(saved.landed));
+  }
+  if (!saved.gear) throw new Error('состояние шасси не сохранено');
+  key('Space'); frames(30);
+  if (game.state.mode !== 'flight') throw new Error('после взлёта режим ' + game.state.mode);
+  if (!game.ship.vtol) throw new Error('посадочный режим не включён после отрыва');
+  frames(60 * 5);
+});
+
 await step('изменение размера окна', () => {
   window.innerWidth = 640; window.innerHeight = 1000;
   for (const fn of winListeners.resize || []) fn();

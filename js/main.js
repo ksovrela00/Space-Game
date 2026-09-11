@@ -2,14 +2,14 @@
 // обработка глобальных клавиш и отрисовка кадра.
 
 import { v3, normalize, dot, clamp } from './core/vec3.js';
-import { makeBasis, dirToWorld } from './core/basis.js';
+import { makeBasis, dirToWorld, lookAlong } from './core/basis.js';
 import { input } from './core/input.js';
 import { Renderer } from './render/renderer.js';
 import { Camera } from './render/camera.js';
 import { Starfield } from './render/starfield.js';
 import { drawBody } from './render/planetview.js';
 import { GlScene } from './gl/scene.js';
-import { buildCobra } from './models/ships.js';
+import { buildCobra, buildGear } from './models/ships.js';
 import { buildStation, STATION_D } from './models/station.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
@@ -19,14 +19,27 @@ import {
   checkStation, startDockingComputer, stopDockingComputer,
   updateDockingComputer, DOCK_RANGE,
 } from './game/docking.js';
+import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
+import {
+  toggleGear, updateGear, gearLabel, landingContext, syncVtol, manualHover,
+  startLanding, stopLanding, updateLandingComputer, checkTouchdown, settle,
+  updateLandedPose, takeoff, landingReadout, landedInfo, LAND,
+} from './game/landing.js';
 import { makeState, say, updateMessages, ST } from './game/state.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
-import { showDocked, showCrash, showHelp, hideOverlay, drawMap } from './ui/screens.js';
+import {
+  showDocked, showCrash, showHelp, showLanded, hideOverlay, drawMap,
+} from './ui/screens.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 
 const STEP = 1 / 60;
 const SAVE_KEY = 'solar_trader_save_v1';
 const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
+
+// Высоты для телепорта к цели (клавиша K) — от «вся планета в кадре» до
+// «прямо над грунтом». Инструмент для проверки картинки: пройти весь
+// диапазон подлёта за несколько нажатий, не тратя минуты на перелёт.
+const TELEPORT_ALTS = [2000, 400, 100, 20, 3, 0.3, 0.05];
 
 const screenCanvas = document.getElementById('screen');
 const hudCanvas = document.getElementById('hud');
@@ -55,9 +68,10 @@ const world = makeSystem(0x1a7e);
 const ship = makeShip();
 const shipMesh = buildCobra();
 const stationMesh = buildStation();
+const gearMesh = buildGear();
 
 const game = {
-  world, ship, shipMesh, stationMesh,
+  world, ship, shipMesh, stationMesh, gearMesh,
   renderer: hud,
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
@@ -66,12 +80,15 @@ const game = {
   info: null,
   nearest: null,
   dockAssist: null,
+  zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
+  landInfo: null,        // показания посадочного дисплея
   statusLine: null,
   scanBlips: [],
   scannerRange: 120,
-  stats: { docks: 0, crashes: 0, flownKm: 0 },
+  stats: { docks: 0, crashes: 0, flownKm: 0, landings: 0 },
   crashReason: '',
   lastStation: null,
+  teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
 };
 
 const dbg = makeDebug();
@@ -86,7 +103,10 @@ function dockAt(station) {
   game.lastStation = station;
   stopAutopilot(ship);
   stopDockingComputer(ship);
+  stopLanding(ship);
   resetCruise(game.cruise);
+  ship.vtol = null;
+  ship.gear.out = false;
   ship.speed = 0;
   ship.throttle = 0;
   ship.hull = SHIP.maxHull;
@@ -116,6 +136,26 @@ game.launch = () => {
   input.releaseAll();
 };
 
+// --- посадка на поверхность ---------------------------------------------------
+
+function landAt(zone) {
+  settle(ship, zone);
+  game.stats.landings++;
+  resetCruise(game.cruise);
+  game.state.mode = ST.LANDED;
+  input.releaseAll();
+  showLanded(game);
+  save();
+}
+
+game.takeoff = () => {
+  hideOverlay();
+  if (!takeoff(ship)) { game.state.mode = ST.FLIGHT; return; }
+  game.state.mode = ST.FLIGHT;
+  say(game.state, 'ОТРЫВ. ШАССИ ВЫПУЩЕНО — УБРАТЬ КЛАВИШЕЙ G.', '#78e08f');
+  input.releaseAll();
+};
+
 game.respawn = () => {
   hideOverlay();
   ship.hull = SHIP.maxHull;
@@ -124,10 +164,14 @@ game.respawn = () => {
   else { game.state.mode = ST.FLIGHT; }
 };
 
+// Куда возвращаться, закрывая карту или справку.
+const restMode = () => (ship.dockedAt ? ST.DOCKED : (ship.landedAt ? ST.LANDED : ST.FLIGHT));
+
 game.closeOverlay = () => {
   hideOverlay();
-  game.state.mode = ship.dockedAt ? ST.DOCKED : ST.FLIGHT;
+  game.state.mode = restMode();
   if (ship.dockedAt) showDocked(game);
+  else if (ship.landedAt) showLanded(game);
 };
 
 function crash(reason) {
@@ -136,11 +180,104 @@ function crash(reason) {
   ship.hull = 0;
   ship.speed = 0;
   ship.throttle = 0;
+  ship.vtol = null;
+  ship.landedAt = null;
   stopAutopilot(ship);
   stopDockingComputer(ship);
+  stopLanding(ship);
   game.state.mode = ST.CRASHED;
   input.releaseAll();
   showCrash(game);
+}
+
+// --- телепорт к цели (инструмент проверки) -----------------------------------
+
+const _tpDir = v3();
+const _tpPos = v3();
+const _tpAim = v3();
+
+/**
+ * Поставить корабль к выбранной цели на заданную высоту.
+ *
+ * Точка выбирается на освещённой стороне под углом к солнцу около 45°:
+ * в скользящем свете рельеф читается лучше всего, а в подсолнечной
+ * точке теней нет вовсе. Высота считается над РЕЛЬЕФОМ, а не над сферой,
+ * поэтому «50 м» — это действительно 50 метров над грунтом.
+ */
+function teleportToTarget() {
+  const st = game.state;
+  const t = currentTarget(game.nav);
+  if (!t) { say(st, 'ЦЕЛЬ НЕ ВЫБРАНА', '#ff7a66'); return; }
+
+  stopAutopilot(ship);
+  stopDockingComputer(ship);
+  stopLanding(ship);
+  ship.vtol = null;
+  ship.landedAt = null;
+  ship.landedPose = null;
+  resetCruise(game.cruise);
+
+  if (t.isStation) {
+    const b = makeBasis();
+    b.fwd = { x: -t.basis.fwd.x, y: -t.basis.fwd.y, z: -t.basis.fwd.z };
+    b.right = { ...t.basis.right };
+    b.up = normalize(v3(
+      b.fwd.y * b.right.z - b.fwd.z * b.right.y,
+      b.fwd.z * b.right.x - b.fwd.x * b.right.z,
+      b.fwd.x * b.right.y - b.fwd.y * b.right.x));
+    placeShip(ship, v3(
+      t.pos.x + t.basis.fwd.x * 6,
+      t.pos.y + t.basis.fwd.y * 6,
+      t.pos.z + t.basis.fwd.z * 6), b);
+    say(st, 'ТЕЛЕПОРТ: ' + t.name + ', 6 км до порта', '#78e08f');
+    return;
+  }
+
+  const alt = TELEPORT_ALTS[game.teleAlt];
+
+  // Направление на солнце и перпендикуляр к нему — точка ставится между
+  // ними, то есть ближе к терминатору, но на свету.
+  normalize(v3(
+    world.star.pos.x - t.pos.x,
+    world.star.pos.y - t.pos.y,
+    world.star.pos.z - t.pos.z), _tpDir);
+  let perp = normalize(v3(-_tpDir.z, 0, _tpDir.x));
+  if (!isFinite(perp.x) || Math.hypot(perp.x, perp.y, perp.z) < 0.5) {
+    perp = normalize(v3(0, 1, 0));
+  }
+  const k = Math.SQRT1_2;
+  normalize(v3(
+    _tpDir.x * k + perp.x * k,
+    _tpDir.y * k + perp.y * k,
+    _tpDir.z * k + perp.z * k), _tpDir);
+
+  // Мировое направление -> локальное: высота считается по рельефу.
+  const dirLocal = localDir(t, v3(
+    t.pos.x + _tpDir.x * t.radius,
+    t.pos.y + _tpDir.y * t.radius,
+    t.pos.z + _tpDir.z * t.radius));
+  const r = groundRadius(t, dirLocal) + alt;
+  worldPoint(t, dirLocal, r, _tpPos);
+
+  // С высоты смотрим в центр тела, у самой земли — вперёд и вниз, чтобы
+  // в кадр попали и грунт под собой, и горизонт.
+  if (alt > 3) {
+    _tpAim.x = t.pos.x; _tpAim.y = t.pos.y; _tpAim.z = t.pos.z;
+  } else {
+    const side = normalize(v3(
+      -_tpDir.z, _tpDir.y * 0.0001, _tpDir.x));
+    const ahead = localDir(t, v3(
+      _tpPos.x + side.x * alt * 6,
+      _tpPos.y + side.y * alt * 6,
+      _tpPos.z + side.z * alt * 6));
+    worldPoint(t, ahead, groundRadius(t, ahead), _tpAim);
+  }
+
+  const b = makeBasis();
+  lookAlong(b, normalize(v3(
+    _tpAim.x - _tpPos.x, _tpAim.y - _tpPos.y, _tpAim.z - _tpPos.z)), _tpDir);
+  placeShip(ship, _tpPos, b);
+  say(st, 'ТЕЛЕПОРТ: ' + t.name + ', высота ' + fmtDist(alt), '#78e08f');
 }
 
 // --- сохранение --------------------------------------------------------------
@@ -155,6 +292,10 @@ function save() {
       view: game.state.view,
       docked: ship.dockedAt ? ship.dockedAt.id : null,
       last: game.lastStation ? game.lastStation.id : null,
+      // Стоянка на поверхности хранится в локальных осях тела: мировые
+      // координаты через сутки указывали бы в пустоту.
+      landed: ship.landedAt ? { id: ship.landedAt.id, pose: ship.landedPose } : null,
+      gear: ship.gear.out,
       stats: game.stats,
       time: world.time,
     }));
@@ -167,11 +308,27 @@ function load() {
   if (!s) return false;
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
   updateWorld(world, s.time || 0);
-  game.stats = s.stats || game.stats;
+  game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
   game.nav.index = s.target || 0;
   game.state.view = s.view || 'cockpit';
   ship.hull = s.hull || SHIP.maxHull;
   game.lastStation = findStation(s.last);
+  ship.gear.out = !!s.gear;
+  ship.gear.t = s.gear ? 1 : 0;
+
+  if (s.landed && s.landed.pose) {
+    const body = world.bodies.find((b) => b.id === s.landed.id);
+    if (body) {
+      ship.landedAt = body;
+      ship.landedPose = s.landed.pose;
+      ship.gear.out = true;
+      ship.gear.t = 1;
+      updateLandedPose(ship);
+      game.state.mode = ST.LANDED;
+      return 'landed';
+    }
+  }
+
   const dockedStation = findStation(s.docked);
   if (dockedStation) {
     ship.dockedAt = dockedStation;
@@ -197,19 +354,28 @@ function handleKeys() {
 
   if (input.pressed('KeyH')) {
     if (st.mode === ST.HELP) game.closeOverlay();
-    else if (st.mode === ST.FLIGHT || st.mode === ST.MAP) { st.mode = ST.HELP; showHelp(game); }
+    else if (st.mode === ST.FLIGHT || st.mode === ST.MAP || st.mode === ST.LANDED) {
+      st.mode = ST.HELP;
+      showHelp(game);
+    }
     return;
   }
 
   if (input.pressed('KeyM')) {
-    if (st.mode === ST.MAP) st.mode = ship.dockedAt ? ST.DOCKED : ST.FLIGHT;
-    else if (st.mode === ST.FLIGHT) st.mode = ST.MAP;
+    if (st.mode === ST.MAP) st.mode = restMode();
+    else if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) st.mode = ST.MAP;
     if (st.mode === ST.DOCKED) showDocked(game);
+    else if (st.mode === ST.LANDED) showLanded(game);
+    else hideOverlay();
     return;
   }
 
   if (st.mode === ST.DOCKED) {
     if (input.pressed('Space', 'Enter')) game.launch();
+    return;
+  }
+  if (st.mode === ST.LANDED) {
+    if (input.pressed('Space', 'Enter')) game.takeoff();
     return;
   }
   if (st.mode === ST.CRASHED) {
@@ -245,6 +411,35 @@ function handleKeys() {
     }
   }
 
+  // K — телепорт к цели, Shift+K — сменить высоту и телепортироваться.
+  if (input.pressed('KeyK')) {
+    if (input.isDown('ShiftLeft', 'ShiftRight')) {
+      game.teleAlt = (game.teleAlt + 1) % TELEPORT_ALTS.length;
+    }
+    teleportToTarget();
+  }
+
+  if (input.pressed('KeyG')) {
+    const out = toggleGear(ship);
+    say(st, out ? 'ШАССИ: ВЫПУСК' : 'ШАССИ: УБОРКА',
+      out ? '#78e08f' : null);
+  }
+
+  if (input.pressed('KeyL')) {
+    if (ship.landing) { stopLanding(ship); say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН'); }
+    else {
+      // Цель — либо выбранное навигатором тело, либо то, над которым летим.
+      const t = currentTarget(game.nav);
+      const body = isLandable(t) ? t : (game.zone ? game.zone.body : null);
+      if (!body) say(st, 'РЯДОМ НЕТ ТЕЛА, НА КОТОРОЕ МОЖНО СЕСТЬ', '#ff7a66');
+      else {
+        const res = startLanding(ship, body, ship.pos);
+        if (!res.ok) say(st, res.reason, '#ff7a66');
+        else say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР: ' + body.name, '#78e08f');
+      }
+    }
+  }
+
   if (input.pressed('KeyC')) {
     if (ship.docking) { stopDockingComputer(ship); say(st, 'ДОКИНГ-КОМПЬЮТЕР ОТКЛЮЧЁН'); }
     else {
@@ -260,12 +455,13 @@ function handleKeys() {
   }
 
   // Любое ручное вмешательство отключает автоматику.
-  if (ship.autopilot || ship.docking) {
+  if (ship.autopilot || ship.docking || ship.landing) {
     if (input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE',
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
       input.pressed('KeyX', 'KeyF')) {
       if (ship.autopilot) stopAutopilot(ship);
       if (ship.docking) stopDockingComputer(ship);
+      if (ship.landing) stopLanding(ship);
       say(st, 'РУЧНОЕ УПРАВЛЕНИЕ');
     }
   }
@@ -292,12 +488,28 @@ function step(dt) {
     if (s) { ship.pos.x = s.pos.x; ship.pos.y = s.pos.y; ship.pos.z = s.pos.z; }
     return;
   }
+  if (st.mode === ST.LANDED) {
+    // Стоим на грунте и вращаемся вместе с телом.
+    updateLandedPose(ship);
+    return;
+  }
   if (st.mode !== ST.FLIGHT) return;
 
   clearControls(ship);
   game.statusLine = null;
+  updateGear(ship, dt);
 
-  if (ship.docking) {
+  // Обстановка у поверхности считается до управления: от неё зависит и
+  // посадочный режим, и команды посадочного компьютера.
+  let zone = landingContext(world, ship);
+  syncVtol(ship, zone);
+
+  if (ship.landing) {
+    game.statusLine = updateLandingComputer(ship, dt, game.cruise.level);
+    if (ship.landing && ship.landing.wantCruise !== null) {
+      game.cruise.index = ship.landing.wantCruise;
+    }
+  } else if (ship.docking) {
     // Стыковка считает скорости «как есть»: круизный ускоритель обязан
     // быть выключен, иначе подход к створу идёт в десять раз быстрее
     // расчётного и корабль проскакивает порт.
@@ -313,21 +525,45 @@ function step(dt) {
       if (t.isStation) {
         const res = startDockingComputer(ship, t);
         if (res.ok) say(st, 'ДОКИНГ-КОМПЬЮТЕР ВКЛЮЧЁН', '#78e08f');
+      } else if (isLandable(t)) {
+        say(st, 'ПОСАДКА ВОЗМОЖНА — КЛАВИША L', '#78e08f');
       }
     }
   } else {
     readControls(ship);
   }
 
+  // В посадочном режиме вручную двигают посадочные движки; под
+  // управлением компьютера вектор задаёт он сам.
+  if (ship.vtol && !ship.landing && zone) manualHover(ship, zone, dt);
+
   const level = updateCruise(game.cruise, world, ship, dt);
   updateShip(ship, dt, dt * level);
   game.stats.flownKm += ship.speed * level * dt;
 
-  // Столкновения с телами.
+  // Касание поверхности: посадка или удар.
+  zone = landingContext(world, ship);
+  game.zone = zone;
+
+  // Столкновения с гладкими телами (светило, газовый гигант) считаются
+  // по сфере. У всех остальных есть рельеф, и там работает проверка
+  // касания: сферой её не заменить — корабль либо влетал бы в
+  // нарисованные горы без последствий, либо разбивался, летя по дну
+  // кратера.
   game.nearest = nearestBody(world, ship.pos);
-  if (game.nearest.gap <= 0) {
+  if (game.nearest.gap <= 0 && (!zone || zone.body !== game.nearest.body)) {
     crash('Столкновение с ' + game.nearest.body.name + '.');
     return;
+  }
+
+  if (zone) {
+    const touch = checkTouchdown(ship, zone);
+    if (touch && touch.result === 'landed') {
+      say(st, 'ПОСАДКА ВЫПОЛНЕНА: ' + zone.body.name, '#78e08f');
+      landAt(zone);
+      return;
+    }
+    if (touch && touch.result === 'crash') { crash(touch.reason); return; }
   }
 
   // Станции: стыковка либо удар о корпус.
@@ -378,6 +614,12 @@ function prepareHud() {
     if (d < 30) game.dockAssist = makeDockAssist(ship, st);
   }
 
+  // Посадочный дисплей — когда близка поверхность, на которую можно сесть.
+  game.landInfo = game.zone && isLandable(game.zone.body) &&
+    game.zone.alt < LAND.vtolAlt * 4
+    ? landingReadout(ship, game.zone)
+    : null;
+
   if (game.cruise.massLocked && game.cruise.index > 0) {
     say(game.state, 'MASS LOCK: ' + game.cruise.lockedBy.name, '#ff7a66', 1.2);
   }
@@ -420,9 +662,19 @@ function render2d() {
     renderer.drawMesh(stationMesh, s.pos, s.basis, 1, _sun, { outline: d < 30 });
   }
 
-  if (game.state.view === 'chase' && game.state.mode === ST.FLIGHT) {
+  if (game.state.view === 'chase' && game.state.mode !== ST.DOCKED) {
     normalize(v3(sunPos.x - ship.pos.x, sunPos.y - ship.pos.y, sunPos.z - ship.pos.z), _sun);
     renderer.drawMesh(shipMesh, ship.pos, ship.basis, 1, _sun, {});
+    // Стойки шасси — каждая от своей точки крепления.
+    if (ship.gear.t > 0.01) {
+      const b = ship.basis;
+      for (const hp of gearMesh.hardpoints) {
+        _tmp.x = ship.pos.x + b.right.x * hp.x + b.up.x * hp.y + b.fwd.x * hp.z;
+        _tmp.y = ship.pos.y + b.right.y * hp.x + b.up.y * hp.y + b.fwd.y * hp.z;
+        _tmp.z = ship.pos.z + b.right.z * hp.x + b.up.z * hp.y + b.fwd.z * hp.z;
+        renderer.drawMesh(gearMesh, _tmp, b, gearMesh.legLength * ship.gear.t, _sun, {});
+      }
+    }
     if (ship.throttle > 0.03) {
       for (const e of shipMesh.exhausts) {
         dirToWorld(ship.basis, e, _tmp);
@@ -445,6 +697,10 @@ function render() {
   st.polys = scene ? scene.tris : renderer.polys;
   st.items = scene ? scene.draws : renderer.items.length;
   st.gpu = scene ? scene.name : null;
+  st.pending = scene ? scene.pending || 0 : 0;
+  st.detail = scene ? !!scene.detailOn : false;
+  st.patches = scene && scene.patch ? scene.patch.levels : 0;
+  st.patchBuilds = scene && scene.patch ? scene.patch.rebuilds : 0;
 
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();

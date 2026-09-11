@@ -5,6 +5,7 @@ import { v3, dot, clamp, normalize } from '../core/vec3.js';
 import { cruiseLabel } from '../game/cruise.js';
 import { SHIP } from '../game/ship.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
+import { gearLabel } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
 import { targetLabel } from '../game/nav.js';
 
@@ -103,6 +104,13 @@ export function drawHud(r, game) {
   bar(ctx, px + 58, py + 95, 64, 7, ship.hull / SHIP.maxHull,
     ship.hull > 40 ? GREEN : RED);
 
+  // Шасси: строкой над панелью, чтобы состояние было видно всегда.
+  if (ship.gear.t > 0.005 || ship.gear.out) {
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER;
+    ctx.fillText(gearLabel(ship) + (ship.vtol ? '  ·  ПОСАДОЧНЫЙ РЕЖИМ' : ''), px, py - 8);
+  }
+
   // --- правая колонка: цель ---
   const tx = w - 250, ty = h - 132;
   panel(ctx, tx, ty, 232, 112);
@@ -130,8 +138,9 @@ export function drawHud(r, game) {
 
   drawScanner(ctx, w / 2, h - 60, game);
 
-  // --- помощник стыковки ---
+  // --- помощник стыковки и посадочный дисплей ---
   if (game.dockAssist) drawDockAssist(ctx, w / 2, 96, game.dockAssist);
+  else if (game.landInfo) drawLandPanel(ctx, w - 152, 24, game.landInfo, ship);
 
   // --- сообщения ---
   ctx.font = '12px Consolas, monospace';
@@ -340,6 +349,43 @@ function drawDockAssist(ctx, cx, cy, a) {
     ctx.fillText((ok ? '+ ' : '- ') + label, -w / 2, ry);
     ry += 13;
   }
+  ctx.restore();
+}
+
+/**
+ * Посадочный дисплей: высота, вертикальная и боковая скорость, наклон
+ * корабля и уклон площадки. Зелёное — в пределах допусков касания.
+ */
+function drawLandPanel(ctx, x, y, L, ship) {
+  const w = 134, h = 104;
+  ctx.save();
+  panel(ctx, x, y, w, h);
+  ctx.font = '9px Consolas, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('ПОСАДКА · ' + L.body.name.toUpperCase().slice(0, 12), x + 8, y + 13);
+
+  const row = (label, value, ok, ry) => {
+    ctx.font = '9px Consolas, monospace';
+    ctx.fillStyle = CY_DIM;
+    ctx.fillText(label, x + 8, ry);
+    ctx.font = '11px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = ok === null ? '#d8f2ff' : (ok ? GREEN : RED);
+    ctx.fillText(value, x + w - 8, ry);
+    ctx.textAlign = 'left';
+  };
+
+  const tiltDeg = Math.acos(clamp(L.tilt, -1, 1)) * 57.3;
+  row('ВЫСОТА', fmtDist(Math.max(0, L.alt)), null, y + 30);
+  row('ВЕРТ', (L.vspeed * 1000).toFixed(0) + ' м/с', L.vspeedOk, y + 44);
+  row('БОК', (L.hspeed * 1000).toFixed(0) + ' м/с', L.hspeedOk, y + 58);
+  row('НАКЛОН', tiltDeg.toFixed(0) + '°', L.tiltOk, y + 72);
+  row('УКЛОН', (L.slope * 57.3).toFixed(0) + '°', L.slopeOk, y + 86);
+
+  ctx.font = '9px Consolas, monospace';
+  ctx.fillStyle = L.gearOk ? GREEN : AMBER;
+  ctx.fillText(L.gearOk ? 'ШАССИ ГОТОВО' : 'ШАССИ (G)', x + 8, y + 99);
   ctx.restore();
 }
 

@@ -6,7 +6,10 @@ export function createContext(canvas) {
     gl = canvas.getContext('webgl2', {
       alpha: false,
       depth: true,
-      stencil: false,
+      // Трафарет нужен заплаткам поверхности: там, где нарисована
+      // подробная земля, грубая сфера рисоваться не должна (её грани
+      // отклоняются от подробной поверхности на километры).
+      stencil: true,
       antialias: true,
       premultipliedAlpha: false,
       preserveDrawingBuffer: false,

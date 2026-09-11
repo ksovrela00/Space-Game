@@ -4,11 +4,23 @@
 
 import { v3, normalize, dot, len } from '../js/core/vec3.js';
 import { makeBasis, toLocal, rotateBasis, lookAlong } from '../js/core/basis.js';
-import { icosphere, computeNormals, levelForPixels } from '../js/gl/icosphere.js';
-import { makeTerrain, perlin3, fbm } from '../js/gl/terrain.js';
-import { planetGeometry, bodyBasis } from '../js/gl/planetmesh.js';
+import { icosphere, computeNormals, levelForPixels, edgeAngle, ICO_EDGE } from '../js/gl/icosphere.js';
+import {
+  makeTerrain, perlin3, fbm, craterProfile, craterProfileD, craterDepth,
+  craterField, craterLayer, GAIN, LAC, CRATER_DMAX,
+  CRATER_C0, CRATER_STEP, CRATER_SEED, CRATER_RIM, CRATER_RMIN, CRATER_RSPAN,
+  CRATER_REACH, CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W, CRATER_FRESH_MIN,
+} from '../js/gl/terrain.js';
+import { detailWindow, detailUniforms, DETAIL_GLSL } from '../js/gl/detail.js';
+import { patchPlan, patchBuilder, PATCH } from '../js/gl/patches.js';
+import { cubeLookup } from '../js/gl/bake.js';
+import {
+  faceDir, tileBounds, tileChildren, TILE_GRID,
+} from '../js/gl/quadtree.js';
+import { tileBuilder } from '../js/gl/tiles.js';
+import { planetGeometry } from '../js/gl/planetmesh.js';
 import { perspective, modelView, dirToCamera, logDepth, logDepthCoef } from '../js/gl/mat4.js';
-import { makeSystem } from '../js/game/world.js';
+import { makeSystem, bodyBasis } from '../js/game/world.js';
 
 let fails = 0;
 const ok = (cond, msg) => {
@@ -265,10 +277,10 @@ console.log('\n== рельеф ==');
   for (const body of world.bodies) {
     const t = makeTerrain(body);
     const t2 = makeTerrain(body);
-    let maxH = 0, same = true, jump = 0;
+    let maxH = -Infinity, minH = Infinity, same = true, jump = 0;
     const dirs = [];
-    for (let i = 0; i < 600; i++) {
-      const u = -1 + 2 * (i / 599);
+    for (let i = 0; i < 2000; i++) {
+      const u = -1 + 2 * (i / 1999);
       const a = i * 2.399963;
       const s = Math.sqrt(Math.max(0, 1 - u * u));
       dirs.push([s * Math.cos(a), u, s * Math.sin(a)]);
@@ -277,14 +289,17 @@ console.log('\n== рельеф ==');
       const h = t.displace(x, y, z);
       if (Math.abs(h - t2.displace(x, y, z)) > 0) same = false;
       maxH = Math.max(maxH, h);
+      minH = Math.min(minH, h);
       // Непрерывность на сфере: шаг 0.002 рад не должен давать обрыва.
       const h2 = t.displace(x + 0.002, y, z);
       jump = Math.max(jump, Math.abs(h - h2));
     }
-    const limit = t.amp * 1.05 + 1e-9;
-    ok(same && maxH <= limit && jump < t.amp * 0.2 + 1e-9,
-      `${body.name} (${body.kind}): высота до ${(maxH * 100).toFixed(2)}% радиуса ` +
-      `(предел ${(limit * 100).toFixed(2)}%), детерминирована, без обрывов`);
+    if (t.isFlat) { maxH = 0; minH = 0; }
+    const okBounds = maxH <= t.ampUp + 1e-9 && minH >= -t.ampDown - 1e-9;
+    ok(same && okBounds && jump < Math.max(t.amp, 1e-9) * 0.25,
+      `${body.name} (${body.kind}): высота ${(minH * 100).toFixed(2)}..${(maxH * 100).toFixed(2)}% ` +
+      `радиуса (границы -${(t.ampDown * 100).toFixed(2)}..+${(t.ampUp * 100).toFixed(2)}%), ` +
+      `детерминирована, без обрывов`);
   }
 
   const gas = world.planets.find((p) => p.kind === 'gas');
@@ -302,6 +317,542 @@ console.log('\n== рельеф ==');
   const pole = t.color(0, 1, 0, [0, 0, 0]);
   ok(pole[0] > 0.7 && pole[1] > 0.7 && pole[2] > 0.7,
     `на полюсе океанической планеты снежная шапка (${pole.map((v) => v.toFixed(2)).join(', ')})`);
+}
+
+// --- 8b. Кратеры ------------------------------------------------------------
+// Кратеры — главное, что отличает поверхность луны от «каши» из шума.
+console.log('\n== кратеры ==');
+{
+  // Профиль: плоское дно, вал, гладкий сход в ноль.
+  let worstJump = 0, prev = craterProfile(0);
+  for (let t = 0; t <= 2; t += 0.001) {
+    const v = craterProfile(t);
+    worstJump = Math.max(worstJump, Math.abs(v - prev));
+    prev = v;
+  }
+  ok(craterProfile(0) < -0.99 && craterProfile(2) === 0 && worstJump < 0.01,
+    `профиль кратера: дно ${craterProfile(0).toFixed(2)}, вал ` +
+    `${Math.max(craterProfile(0.9), craterProfile(0.95)).toFixed(2)}, ` +
+    `гладкий (макс. шаг ${worstJump.toExponential(1)})`);
+
+  // Глубина: у мелких кратеров — предел DMAX от радиуса, у бассейнов
+  // считанные проценты (у Луны самый глубокий — 0.75% радиуса тела).
+  const small = craterDepth(1e-5) / 1e-5;
+  const basin = craterDepth(0.13) / 0.13;
+  ok(Math.abs(small - CRATER_DMAX) < 1e-9 && basin < 0.08 && basin > 0.02,
+    `глубина: мелкий кратер ${small.toFixed(2)} радиуса, бассейн ${basin.toFixed(3)}`);
+
+  // Разброс размеров: на одном масштабе радиусы должны отличаться в
+  // разы, иначе поверхность выглядит отштампованной.
+  ok(CRATER_RSPAN / CRATER_RMIN > 3,
+    `радиусы на одном масштабе различаются до ${(1 + CRATER_RSPAN / CRATER_RMIN).toFixed(0)} раз`);
+
+  const world2 = makeSystem(0x1a7e);
+  const moon = world2.bodies.find((b) => b.kind === 'moon');
+  const t = makeTerrain(moon);
+
+  // «Моря» и «материки»: кратеры должны быть только на вторых, иначе
+  // тело выглядит как пузырчатая плёнка, а не как луна.
+  let mareN = 0, mareHit = 0, landN = 0, landHit = 0, worstStep = 0, dens = 0;
+  const dirs = [];
+  for (let i = 0; i < 3000; i++) {
+    const u = -1 + 2 * (i / 2999);
+    const a = i * 2.399963;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    dirs.push([s * Math.cos(a), u, s * Math.sin(a)]);
+  }
+  for (const [x, y, z] of dirs) {
+    const d = t.craterDensity(x, y, z);
+    dens += d;
+    const c = t.craterAt(x, y, z);
+    const hit = Math.abs(c) > t.amp * 0.02;
+    if (d < 0.1) { mareN++; if (hit) mareHit++; }
+    if (d > 0.8) { landN++; if (hit) landHit++; }
+    const c2 = t.craterAt(x + 1e-4, y, z);
+    worstStep = Math.max(worstStep, Math.abs(c - c2));
+  }
+  const mareFrac = mareN / dirs.length;
+  ok(mareFrac > 0.05 && mareFrac < 0.45 && mareHit / Math.max(1, mareN) < 0.02 &&
+     landHit / Math.max(1, landN) > 0.25,
+    `${moon.name}: «морей» ${(mareFrac * 100).toFixed(0)}% поверхности и в них ` +
+    `кратеров ${(mareHit / Math.max(1, mareN) * 100).toFixed(0)}%, ` +
+    `на материках — ${(landHit / Math.max(1, landN) * 100).toFixed(0)}% ` +
+    `(средняя плотность ${(dens / dirs.length).toFixed(2)})`);
+
+  ok(worstStep < 0.0008,
+    `поле кратеров непрерывно: шаг 1e-4 рад меняет высоту не более чем на ` +
+    `${(worstStep * moon.radius * 1000).toFixed(0)} м`);
+
+  // У океанического мира кратеров нет — их бы смыло.
+  const ocean = makeTerrain(world2.home);
+  let any = 0;
+  for (let i = 0; i < 200; i++) {
+    const a = i * 0.7;
+    any += Math.abs(ocean.craterAt(Math.cos(a) * 0.6, 0.5, Math.sin(a) * 0.6));
+  }
+  ok(any === 0, 'у мира с атмосферой и океаном кратеров нет');
+}
+
+// --- 8c. Бюджет детализации -------------------------------------------------
+// Ключевое требование: чем мельче ячейка сетки, тем больше деталей, но
+// добавление деталей НЕ должно менять крупный рельеф — иначе горы
+// «дышали» бы при каждой смене LOD.
+console.log('\n== детализация по размеру ячейки ==');
+{
+  const world3 = makeSystem(0x1a7e);
+  const moon = world3.bodies.find((b) => b.kind === 'moon');
+  const t = makeTerrain(moon);
+
+  const cells = [ICO_EDGE, ICO_EDGE / 8, ICO_EDGE / 64, 1e-4, 1e-6];
+  const dets = cells.map((c) => t.detailForCell(c));
+  const octGrow = dets.every((d, i) => i === 0 || d.oct >= dets[i - 1].oct);
+  const csGrow = dets.every((d, i) => i === 0 || d.cs >= dets[i - 1].cs);
+  ok(octGrow && csGrow && dets[0].oct < dets[dets.length - 1].oct,
+    `октав ${dets.map((d) => d.oct).join(' -> ')}, ` +
+    `масштабов кратеров ${dets.map((d) => d.cs).join(' -> ')}`);
+
+  // Расхождение между грубой и полной детализацией не превышает
+  // заявленной границы detailGap — на ней строятся юбки заплаток и
+  // решение «рисовать ли сферу под заплаткой».
+  let worst = 0, bound = Infinity;
+  for (const d of dets) {
+    const g = t.detailGap(d);
+    let w = 0;
+    for (let i = 0; i < 400; i++) {
+      const u = -1 + 2 * (i / 399);
+      const a = i * 2.399963;
+      const s = Math.sqrt(Math.max(0, 1 - u * u));
+      const x = s * Math.cos(a), y = u, z = s * Math.sin(a);
+      w = Math.max(w, Math.abs(t.displace(x, y, z) - t.displace(x, y, z, d)));
+    }
+    if (w > g) { worst = Math.max(worst, w / g); }
+    bound = Math.min(bound, g / Math.max(w, 1e-12));
+  }
+  ok(worst === 0,
+    `граница detailGap соблюдается на всех уровнях (запас не меньше ${bound.toFixed(1)}x)`);
+
+  // И наоборот: на мелкой ячейке расхождение должно быть мизерным,
+  // иначе заплатка «прыгала» бы относительно того, что под ней.
+  const fine = t.detailForCell(1e-6);
+  ok(t.detailGap(fine) * moon.radius * 1000 < 1,
+    `на ячейке 1e-6 рад расхождение с полной детализацией ` +
+    `${(t.detailGap(fine) * moon.radius * 1000).toFixed(2)} м`);
+}
+
+// --- 8c2. Деталь в шейдере ---------------------------------------------------
+// Мелкий рельеф считает фрагментный шейдер. Его код (js/gl/detail.js) —
+// построчный перенос terrain.js, и проверить его на GPU здесь нельзя.
+// Зато можно проверить ТО, из-за чего он был бы неправильным: шейдер
+// обязан считать ровно «хвост» — октавы и масштабы кратеров, не вошедшие
+// в сетку. Ошибка в стартовой амплитуде, частоте или seed слоя даёт
+// двойной или потерянный рельеф, и увидеть это можно только глазами.
+console.log('\n== деталь в шейдере ==');
+{
+  const world5 = makeSystem(0x1a7e);
+  const moon = world5.bodies.find((b) => b.kind === 'moon');
+  const t = makeTerrain(moon);
+  const P = { x: 0.31, y: 0.67, z: 0.675 };
+  const l = Math.hypot(P.x, P.y, P.z);
+  P.x /= l; P.y /= l; P.z /= l;
+
+  // Хвост суммы октав — та же арифметика, что в DETAIL_GLSL.
+  const noiseTail = (seed, from, to, freq) => {
+    let sum = 0, amp = GAIN ** from, f = freq * LAC ** from;
+    for (let o = from; o < to; o++) {
+      sum += amp * perlin3(seed + o * 1013, P.x * f, P.y * f, P.z * f);
+      amp *= GAIN; f *= LAC;
+    }
+    return sum * (1 - GAIN);
+  };
+  let worst = 0;
+  for (const [from, to] of [[1, 4], [3, 7], [4, 10], [2, 12]]) {
+    const diff = fbm(2024, P.x, P.y, P.z, to, 1.7) - fbm(2024, P.x, P.y, P.z, from, 1.7);
+    worst = Math.max(worst, Math.abs(diff - noiseTail(2024, from, to, 1.7)));
+  }
+  ok(worst < 1e-12,
+    `хвост октав шума совпадает с разностью сумм (ошибка ${worst.toExponential(1)})`);
+
+  // Хвост кратерных масштабов.
+  const craterTail = (seed, from, to) => {
+    let sum = 0, c = CRATER_C0 * CRATER_STEP ** from;
+    for (let s = from; s < to; s++) {
+      sum += craterLayer(seed + s * 7717, c, P.x, P.y, P.z);
+      c *= CRATER_STEP;
+    }
+    return sum;
+  };
+  let worstC = 0;
+  for (const [from, to] of [[0, 3], [3, 6], [2, 10]]) {
+    const diff = craterField(777, P.x, P.y, P.z, to) - craterField(777, P.x, P.y, P.z, from);
+    worstC = Math.max(worstC, Math.abs(diff - craterTail(777, from, to)));
+  }
+  ok(worstC < 1e-15,
+    `хвост масштабов кратеров совпадает с разностью полей (ошибка ${worstC.toExponential(1)})`);
+
+  // Производная профиля — по ней шейдер наклоняет нормаль.
+  let worstD = 0;
+  for (let x = 0.01; x < 1.8; x += 0.01) {
+    // Пропускаем излом второй производной на кромке чаши и обрез
+    // профиля на D_REACH (там профиль обрывается с 2e-7, и численная
+    // производная на таком шаге показывает мусор).
+    if (Math.abs(x - CRATER_BOWL) < 0.02 || Math.abs(x - CRATER_REACH) < 0.02) continue;
+    const num = (craterProfile(x + 1e-5) - craterProfile(x - 1e-5)) / 2e-5;
+    worstD = Math.max(worstD, Math.abs(num - craterProfileD(x)));
+  }
+  ok(worstD < 1e-4,
+    `производная профиля кратера совпадает с численной (ошибка ${worstD.toExponential(1)})`);
+
+  // Окно детализации: шейдер продолжает сетку, не перекрывая её.
+  const cell6 = edgeAngle(6);
+  const from = t.detailForCell(cell6);
+  const w = detailWindow(t, cell6, 1e-5);
+  ok(w.octFrom === from.oct && w.csFrom === from.cs && w.octTo > w.octFrom && w.csTo > w.csFrom,
+    `сетка уровня 6 даёт октав ${w.octFrom} и кратеров ${w.csFrom}, шейдер добавляет ` +
+    `до ${w.octTo} и ${w.csTo}`);
+
+  // Чем ближе, тем больше деталей — и никогда меньше, чем в сетке.
+  let mono = true, prevOct = -1, prevCs = -1;
+  for (const fw of [1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5, 1e-6, 1e-7]) {
+    const ww = detailWindow(t, cell6, fw);
+    if (ww.octTo < prevOct || ww.csTo < prevCs) mono = false;
+    if (ww.octTo < ww.octFrom || ww.csTo < ww.csFrom) mono = false;
+    prevOct = ww.octTo; prevCs = ww.csTo;
+  }
+  ok(mono, 'окно детализации растёт при приближении и не уходит ниже сетки');
+
+  // Главное требование задачи: с 1000 км кратеры должны быть видны.
+  // След пикселя на такой дистанции — около километра, и в окно обязаны
+  // попасть масштабы с кратерами в единицы километров.
+  {
+    const dist = 1000;                       // км до поверхности
+    const focal = 800;                       // пикселей (окно ~1080p)
+    const fw = (dist / focal) / moon.radius; // рад на пиксель
+    const ww = detailWindow(t, cell6, fw);
+    const finest = CRATER_C0 * CRATER_STEP ** (ww.csTo - 1) * (CRATER_RMIN + CRATER_RSPAN);
+    const finestKm = finest * moon.radius;
+    ok(ww.csTo - ww.csFrom >= 2 && finestKm < 12,
+      `с 1000 км шейдер добавляет ${ww.csTo - ww.csFrom} масштаба кратеров, ` +
+      `самые мелкие — радиусом ${finestKm.toFixed(1)} км ` +
+      `(след пикселя ${(fw * moon.radius).toFixed(2)} км)`);
+  }
+
+  // У заплатки под кораблём ячейка мелкая, и шейдеру почти нечего
+  // добавлять: иначе деталь считалась бы дважды.
+  {
+    const ww = detailWindow(t, 2e-5, 1e-7);
+    ok(ww.csTo - ww.csFrom <= 1 && ww.octTo - ww.octFrom <= 2,
+      `на подробной заплатке шейдер добавляет ${ww.octTo - ww.octFrom} октав и ` +
+      `${ww.csTo - ww.csFrom} масштабов кратеров`);
+  }
+
+  // Бюджет: сетке, которую почти целиком закрывает что-то другое,
+  // достаётся меньше масштабов (она всё равно платится за пиксели —
+  // логарифмическая глубина отключает early-z).
+  {
+    const full = detailUniforms(t, cell6, 1);
+    const low = detailUniforms(t, cell6, 0.34);
+    ok(full.on === 1 && low.maxCs < full.maxCs && low.maxCs >= 1 &&
+       low.octFrom === full.octFrom,
+      `урезанный бюджет: масштабов кратеров ${low.maxCs} вместо ${full.maxCs}, ` +
+      `начало окна не меняется`);
+    const gasT = makeTerrain(world5.planets.find((p) => p.kind === 'gas'));
+    ok(detailUniforms(gasT, cell6).on === 0,
+      'у тела без рельефа деталь в шейдере выключена');
+  }
+
+  // Текст шейдера: константы обязаны совпадать с JS, иначе картинка
+  // разойдётся с физикой посадки.
+  {
+    const src = DETAIL_GLSL;
+    const need = [
+      ['D_GAIN', GAIN], ['D_LAC', LAC], ['D_C0', CRATER_C0], ['D_STEP', CRATER_STEP],
+      ['D_RIM', CRATER_RIM], ['D_RMIN', CRATER_RMIN], ['D_RSPAN', CRATER_RSPAN],
+      ['D_REACH', CRATER_REACH], ['D_BOWL', CRATER_BOWL],
+      ['D_RIM_AT', CRATER_RIM_AT], ['D_RIM_W', CRATER_RIM_W],
+      ['D_FRESH', CRATER_FRESH_MIN],
+    ];
+    let bad = [];
+    for (const [name, val] of need) {
+      const m = src.match(new RegExp('const float ' + name + ' = ([-0-9.e]+);'));
+      if (!m || Math.abs(Number(m[1]) - val) > 1e-12) bad.push(name);
+    }
+    const hasSeed = src.includes('D_CRATER_SEED = ' + CRATER_SEED);
+    ok(bad.length === 0 && hasSeed,
+      `константы в GLSL совпадают с JS (проверено ${need.length + 1})` +
+      (bad.length ? ' — разошлись: ' + bad.join(', ') : ''));
+  }
+}
+
+// --- 8d. Заплатки поверхности -----------------------------------------------
+console.log('\n== заплатки поверхности ==');
+{
+  const world4 = makeSystem(0x1a7e);
+  const moon = world4.bodies.find((b) => b.kind === 'moon');
+  const t = makeTerrain(moon);
+
+  // План: с высоты заплатки не нужны, у земли — нужны и их много.
+  ok(patchPlan(moon, moon.radius, 5) === null,
+    'с большой высоты заплатки не строятся (сфера не хуже)');
+  const high = patchPlan(moon, 15, 6);
+  const low = patchPlan(moon, 0.01, 6);
+  ok(high && low && low.levels > high.levels && low.half < high.half,
+    `уровней: с 15 км — ${high ? high.levels : '—'}, с 10 м — ${low ? low.levels : '—'}; ` +
+    `полуразмер ${high ? (high.half * moon.radius).toFixed(1) : '—'} км -> ` +
+    `${low ? (low.half * moon.radius * 1000).toFixed(0) + ' м' : '—'}`);
+  const gas = world4.planets.find((p) => p.kind === 'gas');
+  ok(patchPlan(gas, 1, 6) === null, 'у газового гиганта заплаток нет (нет и рельефа)');
+
+  // Заплатка всегда шире горизонта: иначе за её краем была бы видна
+  // грубая сфера, и стык бросался бы в глаза.
+  let coversAll = true;
+  for (const alt of [0.01, 0.1, 1, 5, 15]) {
+    const p = patchPlan(moon, alt, 6);
+    if (!p) continue;
+    const horizon = Math.acos(moon.radius / (moon.radius + alt));
+    if (p.half < horizon) coversAll = false;
+  }
+  ok(coversAll, 'внешний край заплатки всегда за горизонтом');
+
+  // Геометрия: считаем набор целиком и проверяем стыковку уровней.
+  const plan = patchPlan(moon, 0.05, 6);
+  const center = normalize(v3(0.3, 0.7, 0.6));
+  let parent = t.detailForCell(plan.sphereCell);
+  let parentCell = plan.sphereCell;
+  const geos = [];
+  for (let k = 0; k < plan.levels; k++) {
+    const half = plan.half / 2 ** k;
+    const cell = 2 * half / plan.res;
+    const detail = t.detailForCell(cell);
+    const b = patchBuilder(moon, center, half, k < plan.levels - 1 ? plan.hole : 0,
+      detail, parent, parentCell);
+    b.step();
+    geos.push({ geo: b.result, half, cell, detail });
+    parent = detail;
+    parentCell = cell;
+  }
+
+  let bad = 0, nan = 0;
+  for (const { geo } of geos) {
+    for (let i = 0; i < geo.positions.length; i++) if (!Number.isFinite(geo.positions[i])) nan++;
+    for (let i = 0; i < geo.normals.length; i++) if (!Number.isFinite(geo.normals[i])) nan++;
+    for (let i = 0; i < geo.colors.length; i++) {
+      if (!(geo.colors[i] >= 0 && geo.colors[i] <= 1)) bad++;
+    }
+    // Вырожденных треугольников быть не должно.
+    for (let f = 0; f < geo.indices.length; f += 3) {
+      const a = geo.indices[f], b2 = geo.indices[f + 1], c = geo.indices[f + 2];
+      if (a === b2 || b2 === c || a === c) bad++;
+    }
+  }
+  ok(nan === 0 && bad === 0,
+    `${geos.length} уровней, ${geos.reduce((s, g) => s + g.geo.faces, 0)} треугольников: ` +
+    `ни NaN, ни вырожденных граней, цвета в 0..1`);
+
+  // Нормали единичные и смотрят наружу.
+  {
+    let worstLen = 0, inward = 0, n = 0;
+    for (const { geo } of geos) {
+      for (let i = 0; i < geo.positions.length; i += 3) {
+        const nl = Math.hypot(geo.normals[i], geo.normals[i + 1], geo.normals[i + 2]);
+        if (nl < 0.5) continue;                 // вершины внутри выреза
+        n++;
+        worstLen = Math.max(worstLen, Math.abs(nl - 1));
+        const d = geo.normals[i] * geo.positions[i] +
+          geo.normals[i + 1] * geo.positions[i + 1] +
+          geo.normals[i + 2] * geo.positions[i + 2];
+        if (d <= 0) inward++;
+      }
+    }
+    ok(worstLen < 1e-5 && inward === 0,
+      `нормали заплаток единичные (±${worstLen.toExponential(0)}) и наружу (${n} вершин)`);
+  }
+
+  // Стыковка: на кромке заплатка обязана совпадать с тем, что под ней
+  // (с точностью до огранки), а в середине — быть подробнее.
+  {
+    const inner = geos[geos.length - 1];
+    const middleH = t.displace(center.x, center.y, center.z, inner.detail);
+    const rCenter = Math.hypot(
+      ...[0, 1, 2].map((k) => inner.geo.positions[(PATCH.res / 2 * (PATCH.res + 1) + PATCH.res / 2) * 3 + k]));
+    ok(Math.abs(rCenter - (1 + middleH)) < 1e-6,
+      `в центре самой мелкой заплатки высота — полная (${(middleH * moon.radius * 1000).toFixed(0)} м)`);
+
+    // Угловой вершине соответствует высота родительской детализации.
+    const g0 = geos[0];
+    const corner = 0;                           // вершина (0,0) — угол
+    const cx = g0.geo.positions[0], cy = g0.geo.positions[1], cz = g0.geo.positions[2];
+    const rc = Math.hypot(cx, cy, cz);
+    const dir = v3(cx / rc, cy / rc, cz / rc);
+    const hp = t.displace(dir.x, dir.y, dir.z, t.detailForCell(plan.sphereCell));
+    ok(Math.abs(rc - (1 + hp)) < 1e-6 && corner === 0,
+      `на кромке грубой заплатки высота сведена к сферической ` +
+      `(расхождение ${(Math.abs(rc - (1 + hp)) * moon.radius * 1000).toExponential(1)} м)`);
+  }
+
+  // Вырез каждого уровня совпадает с внешней границей следующего:
+  // иначе в земле были бы либо щели, либо наложения.
+  {
+    let worst = 0;
+    for (let k = 0; k + 1 < geos.length; k++) {
+      const holeHalf = geos[k].half * PATCH.hole;
+      worst = Math.max(worst, Math.abs(holeHalf - geos[k + 1].half) / geos[k + 1].half);
+    }
+    ok(worst < 1e-12, `границы выреза и следующего уровня совпадают (ошибка ${worst.toExponential(1)})`);
+  }
+
+  // Юбка должна уходить вниз глубже, чем возможное расхождение высот:
+  // именно она закрывает щель на стыке разрешений.
+  {
+    const g0 = geos[0].geo;
+    const n = PATCH.res + 1;
+    const parentDetail = t.detailForCell(plan.sphereCell);
+    // Юбка идёт по тем же направлениям, что кромка, поэтому глубину
+    // считаем от высоты поверхности в этом направлении.
+    let minSkirt = Infinity, maxSkirt = 0;
+    for (let i = n * n; i < g0.positions.length / 3; i++) {
+      const x = g0.positions[i * 3], y = g0.positions[i * 3 + 1], z = g0.positions[i * 3 + 2];
+      const r = Math.hypot(x, y, z);
+      if (r < 0.5) continue;
+      const hp = t.displace(x / r, y / r, z / r, parentDetail);
+      const drop = (1 + hp) - r;
+      minSkirt = Math.min(minSkirt, drop);
+      maxSkirt = Math.max(maxSkirt, drop);
+    }
+    const need = t.detailGap(parentDetail);
+    ok(minSkirt > need && maxSkirt < 0.05,
+      `юбка уходит вниз на ${(minSkirt * moon.radius * 1000).toFixed(0)}–` +
+      `${(maxSkirt * moon.radius * 1000).toFixed(0)} м — глубже возможного ` +
+      `расхождения детализаций (${(need * moon.radius * 1000).toFixed(0)} м)`);
+  }
+
+  // Стоимость сборки: набор должен укладываться в несколько кадров.
+  {
+    const t0 = Date.now();
+    const p2 = patchPlan(moon, 0.02, 6);
+    let par = t.detailForCell(p2.sphereCell), parCell = p2.sphereCell;
+    let verts = 0;
+    for (let k = 0; k < p2.levels; k++) {
+      const half = p2.half / 2 ** k;
+      const cell = 2 * half / p2.res;
+      const det = t.detailForCell(cell);
+      const b = patchBuilder(moon, center, half, k < p2.levels - 1 ? p2.hole : 0, det, par, parCell);
+      b.step();
+      verts += b.total;
+      par = det; parCell = cell;
+    }
+    const ms = Date.now() - t0;
+    ok(ms < 400, `полная пересборка набора (${p2.levels} уровней, ${verts} вершин) — ${ms} мс`);
+  }
+}
+
+// --- 8e. Плитки поверхности --------------------------------------------------
+// Поверхность нарезана квадродеревом на кубе, натянутом на сферу. Здесь
+// проверяется то, что нельзя увидеть глазами по частям: что таблица
+// граней совпадает с той, по которой выбирает грань само оборудование,
+// что плитки стыкуются без щелей и что геометрия плитки корректна.
+console.log('\n== плитки поверхности ==');
+{
+  const world6 = makeSystem(0x1a7e);
+  const moon = world6.bodies.find((b) => b.kind === 'moon');
+
+  // Таблица граней: направление -> грань и координаты -> обратно то же
+  // направление. Перепутанный знак дал бы поверхность, сшитую наизнанку,
+  // и заметить это можно было бы только глазами.
+  {
+    let worst = 0;
+    for (let i = 0; i < 3000; i++) {
+      const u = -1 + 2 * (i / 2999);
+      const a = i * 2.399963;
+      const r = Math.sqrt(Math.max(0, 1 - u * u));
+      const d = { x: r * Math.cos(a), y: u, z: r * Math.sin(a) };
+      const look = cubeLookup(d.x, d.y, d.z);
+      // cubeLookup даёт координаты куба; параметр грани — их арктангенс.
+      const su = Math.atan(look.s) * 4 / Math.PI;
+      const sv = Math.atan(look.t) * 4 / Math.PI;
+      const back = faceDir(look.face, su, sv, {});
+      worst = Math.max(worst, Math.hypot(back.x - d.x, back.y - d.y, back.z - d.z));
+    }
+    ok(worst < 1e-12,
+      `таблица граней куба совпадает с выбором оборудования (ошибка ${worst.toExponential(1)})`);
+  }
+
+  // Потомки делят родителя ровно: ни щелей, ни нахлёстов.
+  {
+    let bad = 0;
+    for (const [lv, tx, ty] of [[0, 0, 0], [3, 5, 2], [7, 100, 3]]) {
+      const b = tileBounds(lv, tx, ty);
+      const kids = tileChildren(0, lv, tx, ty, []);
+      let area = 0;
+      for (const k of kids) {
+        const kb = tileBounds(k.level, k.tx, k.ty);
+        area += (kb.u1 - kb.u0) * (kb.v1 - kb.v0);
+        if (kb.u0 < b.u0 - 1e-12 || kb.u1 > b.u1 + 1e-12) bad++;
+        if (kb.v0 < b.v0 - 1e-12 || kb.v1 > b.v1 + 1e-12) bad++;
+      }
+      if (Math.abs(area - (b.u1 - b.u0) * (b.v1 - b.v0)) > 1e-12) bad++;
+    }
+    ok(bad === 0, 'четыре потомка делят плитку ровно, без щелей и нахлёстов');
+  }
+
+  // Соседние плитки одного уровня дают на общем ребре одни и те же
+  // вершины: иначе между ними была бы щель в геометрии.
+  {
+    const a = tileBuilder(moon, { face: 2, level: 4, tx: 5, ty: 6 });
+    const b = tileBuilder(moon, { face: 2, level: 4, tx: 6, ty: 6 });
+    a.step(1 << 20); b.step(1 << 20);
+    const ga = a.result, gb = b.result;
+    const n = TILE_GRID + 1;
+    let worst = 0;
+    for (let j = 0; j < n; j++) {
+      const ia = (j * n + TILE_GRID) * 3;     // правый край левой плитки
+      const ib = (j * n) * 3;                 // левый край правой
+      worst = Math.max(worst,
+        Math.abs(ga.positions[ia] - gb.positions[ib]),
+        Math.abs(ga.positions[ia + 1] - gb.positions[ib + 1]),
+        Math.abs(ga.positions[ia + 2] - gb.positions[ib + 2]));
+    }
+    ok(worst === 0, `на общем ребре соседние плитки совпадают вершина в вершину`);
+  }
+
+  // Геометрия плитки: радиусы в пределах рельефа, uv в [0,1], индексы
+  // не выходят за короткий тип, юбка уходит вниз.
+  {
+    const t = makeTerrain(moon);
+    const bld = tileBuilder(moon, { face: 1, level: 6, tx: 20, ty: 41 });
+    bld.step(1 << 20);
+    const g = bld.result;
+    const n = TILE_GRID + 1, grid = n * n;
+    let bad = 0, minR = Infinity, maxR = 0, minSkirt = Infinity;
+    for (let i = 0; i < grid; i++) {
+      const r = Math.hypot(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]);
+      minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+      if (!(g.uv[i * 2] >= 0 && g.uv[i * 2] <= 1)) bad++;
+      if (!(g.uv[i * 2 + 1] >= 0 && g.uv[i * 2 + 1] <= 1)) bad++;
+    }
+    for (let i = grid; i < g.positions.length / 3; i++) {
+      const r = Math.hypot(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]);
+      minSkirt = Math.min(minSkirt, r);
+    }
+    let maxIdx = 0, nan = 0;
+    for (let i = 0; i < g.indices.length; i++) maxIdx = Math.max(maxIdx, g.indices[i]);
+    for (const arr of [g.positions, g.normals, g.colors, g.uv]) {
+      for (let i = 0; i < arr.length; i++) if (!Number.isFinite(arr[i])) nan++;
+    }
+    ok(bad === 0 && nan === 0 && maxIdx < 65536 &&
+       minR > 1 - t.ampDown && maxR < 1 + t.ampUp && minSkirt < minR,
+      `плитка: ${g.faces} граней, радиус ${minR.toFixed(4)}..${maxR.toFixed(4)}, ` +
+      `юбка ниже сетки, индексы влезают в 16 бит`);
+  }
+
+  // Стоимость: одна плитка собирается порциями, чтобы не ронять кадр.
+  {
+    const t0 = Date.now();
+    const bld = tileBuilder(moon, { face: 0, level: 10, tx: 300, ty: 700 });
+    let steps = 0;
+    while (!bld.step(512)) steps++;
+    ok(Date.now() - t0 < 400 && steps > 2,
+      `сборка плитки: ${Date.now() - t0} мс за ${steps + 1} порций`);
+  }
 }
 
 // --- 9. Геометрия планеты ---------------------------------------------------
@@ -341,10 +892,16 @@ console.log('\n== геометрия планеты ==');
 // просто чёрный экран.
 console.log('\n== мок GL: путь отрисовки ==');
 {
-  const state = { nan: 0, nanWhere: [], draws: 0, buffers: 0, programs: 0, vaos: 0 };
+  const state = {
+    nan: 0, nanWhere: [], draws: 0, buffers: 0, programs: 0, vaos: 0, stencils: 0,
+    textures: 0, texturesFreed: 0, bakes: 0, mipmaps: 0,
+  };
   const CONST = {};
   let constCounter = 1;
   let attribIdx = -1;
+  // Статус фреймбуфера читается до того, как кто-либо обратится к
+  // константе, поэтому её надо завести заранее.
+  CONST.FRAMEBUFFER_COMPLETE = constCounter++;
 
   const checkArgs = (name, args) => {
     for (const a of args) {
@@ -371,6 +928,16 @@ console.log('\n== мок GL: путь отрисовки ==');
     createVertexArray: () => { state.vaos++; return {}; },
     drawArrays: () => { state.draws++; },
     drawElements: () => { state.draws++; },
+    stencilFunc: () => { state.stencils++; },
+    stencilOp: () => { state.stencils++; },
+    deleteBuffer: () => {},
+    deleteVertexArray: () => {},
+    createTexture: () => { state.textures++; return {}; },
+    deleteTexture: () => { state.texturesFreed++; },
+    createFramebuffer: () => ({}),
+    checkFramebufferStatus: () => CONST.FRAMEBUFFER_COMPLETE,
+    framebufferTexture2D: () => { state.bakes++; },
+    generateMipmap: () => { state.mipmaps++; },
     getParameter: () => 'mock-gpu',
     getExtension: () => null,
   };
@@ -412,7 +979,8 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 5, `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца)`);
+  ok(state.programs === 6,
+    `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца, запекание)`);
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -478,6 +1046,157 @@ console.log('\n== мок GL: путь отрисовки ==');
   lookAt(v3(world.star.pos.x + world.star.radius * 1.1, 0, 0), world.star.pos);
   frame();
   ok(true, 'крайние случаи (внутри планеты, взгляд наружу, у светила) не падают');
+
+  // Поверхность плитками: главное свойство — плитка привязана к телу,
+  // поэтому при движении камеры не пересчитывается ничего.
+  const { localDir, groundRadius, worldPoint } = await import('../js/game/surface.js');
+  const { buildGear } = await import('../js/models/ships.js');
+  const moon = world.bodies.find((b) => b.kind === 'moon');
+  const dirL = normalize(v3(0.3, 0.7, 0.6));
+  const gr = groundRadius(moon, dirL);
+  const sideL = normalize(v3(dirL.x + 0.02, dirL.y, dirL.z - 0.02));
+  const ahead = worldPoint(moon, sideL, gr, v3());
+  const put = (alt) => {
+    const e = worldPoint(moon, dirL, gr + alt, v3());
+    placeShip(ship, e, null);
+    lookAt(e, ahead);
+  };
+  game.gearMesh = buildGear();
+  game.state.view = 'chase';
+  ship.gear = { t: 1, out: true };
+
+  {
+    // Корни: шесть граней куба — это и есть «вся поверхность тела».
+    // Пока они не готовы, тело рисуется обычной сферой.
+    put(4000);
+    let frames = 0;
+    while (!scene.tiles.rootsReady && frames++ < 200) scene.render(game);
+    ok(scene.tiles.rootsReady && frames < 200,
+      `шесть корневых плиток собраны за ${frames} кадров и держатся в кэше`);
+    ok(scene.tileBody === moon, 'дальше тело рисуется плитками, а не сферой');
+
+    const bakes0 = state.bakes, mips0 = state.mipmaps, built0 = scene.tiles.built;
+    put(0.05);
+    for (let i = 0; i < 300; i++) scene.render(game);
+    const st = scene.tiles.stats;
+    ok(st.drawn > 8 && scene.tris > 5000,
+      `кадр у поверхности: плиток нарисовано ${st.drawn}, треугольников ` +
+      `${scene.tris}, в кэше ${st.tiles}`);
+    const dBake = state.bakes - bakes0, dBuilt = st.built - built0;
+    ok(dBake === dBuilt && state.mipmaps > mips0,
+      `каждая плитка запекается ровно один раз: ${dBake} проходов на ` +
+      `${dBuilt} собранных плиток, мипы строятся`);
+
+    // Ни одной дырки: всё, что выбрано к отрисовке, готово.
+    let holes = 0;
+    for (const t of scene.tiles.draw) {
+      const e = scene.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`);
+      if (!e || !e.mesh) holes++;
+    }
+    ok(holes === 0, `в списке отрисовки нет незаготовленных плиток (${holes})`);
+
+    // Зависание: ничего не строится. Это то, чего принципиально не могли
+    // заплатки — они центрированы на камере и пересобирались от любого
+    // дрожания высоты.
+    {
+      const before = scene.tiles.built;
+      for (let i = 0; i < 120; i++) {
+        put(0.05 * (1 + 0.03 * Math.sin(i * 1.7)));
+        scene.render(game);
+      }
+      ok(scene.tiles.built === before,
+        `120 кадров зависания: новых плиток собрано ${scene.tiles.built - before}`);
+    }
+
+    // Спуск, подъём и повторный спуск: второй раз всё берётся из кэша.
+    {
+      const dive = () => {
+        for (let i = 0; i < 60; i++) {
+          put(20 * Math.pow(0.05 / 20, i / 59));
+          scene.render(game);
+        }
+      };
+      const climb = () => {
+        for (let i = 0; i < 60; i++) {
+          put(0.05 * Math.pow(20 / 0.05, i / 59));
+          scene.render(game);
+        }
+      };
+      dive(); climb();
+      const before = scene.tiles.built;
+      dive();
+      const again = scene.tiles.built - before;
+      ok(again === 0,
+        `повторный спуск по тому же месту не строит ничего заново ` +
+        `(собрано ${again} плиток)`);
+    }
+
+    // Кэш не растёт бесконечно: облёт тела вытесняет далёкие плитки.
+    {
+      const { TILE_BUDGET } = await import('../js/gl/tiles.js');
+      for (let k = 0; k < 40; k++) {
+        const a = k * 0.157;
+        const d = normalize(v3(Math.cos(a) * 0.6, 0.5 + 0.3 * Math.sin(a * 0.7), Math.sin(a) * 0.6));
+        const r = groundRadius(moon, d);
+        const e = worldPoint(moon, d, r + 2, v3());
+        placeShip(ship, e, null);
+        lookAt(e, moon.pos);
+        for (let i = 0; i < 12; i++) scene.render(game);
+      }
+      const st2 = scene.tiles.stats;
+      ok(st2.tiles <= TILE_BUDGET + 8,
+        `после облёта тела в кэше ${st2.tiles} плиток (предел ${TILE_BUDGET}), ` +
+        `вытеснено ${st2.evicted}, освобождено текстур ${state.texturesFreed}`);
+    }
+
+    // Уход от тела освобождает кэш целиком.
+    placeShip(ship, v3(world.star.pos.x, world.star.pos.y + world.star.radius * 3, world.star.pos.z), null);
+    lookAt(ship.pos, world.star.pos);
+    scene.render(game);
+    ok(scene.tileBody === null && scene.tiles.tiles.size === 0,
+      'при уходе от тела кэш плиток освобождается');
+    game.state.view = 'cockpit';
+  }
+
+  // Прежний путь — заплатки под кораблём с процедурной деталью на
+  // пиксель — остаётся по `?surface=clipmap`: он и запасной, и эталон
+  // для сравнения картинки.
+  {
+    globalThis.location = { search: '?surface=clipmap' };
+    const scene2 = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
+    ok(scene2.ok && !scene2.tilesOn, 'сцена с заплатками (?surface=clipmap) собирается');
+
+    put(0.05);
+    const before = state.stencils;
+    let levels = 0;
+    for (let i = 0; i < 40; i++) {
+      scene2.render(game);
+      levels = Math.max(levels, scene2.patch.levels);
+    }
+    ok(levels >= 4 && state.stencils > before,
+      `заплатки: ${levels} уровней, трафарет выставляется ` +
+      `(${state.stencils - before} вызовов)`);
+
+    // Регрессия, из-за которой рельеф «менялся на глазах»: число уровней
+    // округлялось вверх, и на границе округления набор пересобирался
+    // каждый кадр. Высоты ищем именно на границах.
+    const edges = [];
+    for (let k = 0; k < 2000 && edges.length < 4; k++) {
+      const alt = 0.05 * Math.pow(20 / 0.05, k / 1999);
+      const a = patchPlan(moon, alt * 0.98, 6), b = patchPlan(moon, alt * 1.02, 6);
+      if (a && b && a.levels !== b.levels) edges.push(alt);
+    }
+    let worstN = 0;
+    for (const alt of edges.concat([0.06, 0.5, 4])) {
+      for (let i = 0; i < 20; i++) { put(alt * (1 + 0.03 * Math.sin(i * 1.7))); scene2.render(game); }
+      const b0 = scene2.patch.rebuilds;
+      for (let i = 0; i < 12; i++) { put(alt * (1 + 0.03 * Math.sin(i * 1.7))); scene2.render(game); }
+      worstN = Math.max(worstN, scene2.patch.rebuilds - b0);
+    }
+    ok(worstN === 0 && edges.length > 0,
+      `заплатки: зависание на ${edges.length + 3} высотах не пересобирает набор`);
+    globalThis.location = undefined;
+  }
 
   ok(state.nan === 0,
     `ни в одном uniform или буфере нет NaN (проверено ${state.buffers} буферов)` +
