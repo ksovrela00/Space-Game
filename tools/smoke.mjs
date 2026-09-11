@@ -58,6 +58,7 @@ const el = (id) => ({
 
 const nodes = {
   screen: el('screen'),
+  hud: el('hud'),
   overlay: el('overlay'),
   panel: el('panel'),
   boot: el('boot'),
@@ -97,6 +98,17 @@ const key = (code, shift = false) => {
   // отпускаем сразу — нам нужны только «нажатия»
   for (const fn of winListeners.keyup || []) fn({ code });
 };
+// События мыши идут через ОКНО: канвасы для них либо сквозные, либо
+// перекрыты оверлеями (см. Input.attachMouse). Мок про CSS ничего не
+// знает, поэтому слушать здесь надо ровно то же окно, что и в игре —
+// иначе проверка зелёная, а в браузере не работает: так и вышло, когда
+// события вешались на канвас приборов.
+const mouse = (type, opts = {}) => {
+  for (const fn of winListeners[type] || []) {
+    fn({ button: 2, movementX: 0, movementY: 0, preventDefault() {}, ...opts });
+  }
+};
+
 const holdDown = (code) => {
   for (const fn of winListeners.keydown || []) fn({ code, repeat: false, preventDefault() {} });
 };
@@ -184,6 +196,32 @@ await step('подъёмные движки (R/F) и полная тяга (Z)',
   if (game.ship.throttle !== 1) throw new Error('Z не даёт полную тягу: ' + game.ship.throttle);
   key('KeyX'); frames(2);
   if (game.ship.throttle !== 0) throw new Error('X не сбрасывает тягу: ' + game.ship.throttle);
+});
+
+await step('осмотр камерой правой кнопкой из-за спины', () => {
+  const view0 = game.state.view;
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+  const fwd0 = { ...game.camera.basis.fwd };
+  mouse('mousedown');
+  mouse('mousemove', { movementX: 160, movementY: 40 });
+  frames(1);
+  if (!(game.camOrbit.yaw > 0.3)) throw new Error('ПКМ не поворачивает: ' + game.camOrbit.yaw);
+  const turned = Math.acos(Math.max(-1, Math.min(1,
+    fwd0.x * game.camera.basis.fwd.x + fwd0.y * game.camera.basis.fwd.y +
+    fwd0.z * game.camera.basis.fwd.z)));
+  if (!(turned > 0.3)) throw new Error('камера не развернулась: ' + turned.toFixed(2));
+  // Мышь без зажатой кнопки камеру не трогает.
+  mouse('mouseup');
+  const yawAfter = game.camOrbit.yaw;
+  mouse('mousemove', { movementX: 300 });
+  frames(1);
+  if (game.camOrbit.yaw > yawAfter) throw new Error('камера крутится без кнопки');
+  // Отпустили — сама возвращается за спину.
+  frames(120);
+  if (Math.abs(game.camOrbit.yaw) > 0.02 || Math.abs(game.camOrbit.pitch) > 0.02) {
+    throw new Error('камера не вернулась: ' + game.camOrbit.yaw.toFixed(3));
+  }
+  if (game.state.view !== view0) { key('KeyV'); frames(2); }
 });
 
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
@@ -361,17 +399,57 @@ await step('панель подхода: всё в одном месте и во
     if (!has(re)) throw new Error('панель не показывает ' + re);
   }
 
+  // Ничего не продублировано: то, что переехало в центр, из углов ушло.
+  // Две копии одного числа хуже одной — глаз всё равно мечется.
+  const count = (re) => seen.filter((t) => re.test(t.s)).length;
+  for (const [re, name] of [[/^СКОРОСТЬ$/, 'скорость'], [/^ШАССИ/, 'шасси']]) {
+    if (count(re) !== 1) throw new Error(`${name}: ${count(re)} надписей вместо одной`);
+  }
+  if (count(/^ДИСТ/) !== 0) throw new Error('дистанция осталась и в углу');
+
+  // Отметка грунта: кольцо под кораблём и высота рядом с нитью. Это
+  // главный признак масштаба у поверхности, и рисуется он только когда
+  // земля близко.
+  {
+    game.teleAlt = 6;                     // 0.05 км
+    key('KeyK'); frames(3);
+    // Из кабины точка под кораблём остаётся за спиной у камеры — это
+    // верно и так и должно быть; смотрим из-за корпуса.
+    if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+    // Пунктир (setLineDash) в приборах больше никто не рисует, поэтому по
+    // нему отметку видно однозначно; кольцо считаем по отрезкам.
+    const l0 = calls.lineTo || 0, d0 = calls.setLineDash || 0;
+    frames(1);
+    const ring = (calls.lineTo || 0) - l0;
+    const dash = (calls.setLineDash || 0) - d0;
+    if (dash < 2) throw new Error('нити отметки нет: пунктир не рисовался');
+    if (ring < 16) throw new Error('кольцо отметки не нарисовано: ' + ring + ' отрезков');
+
+    game.teleAlt = 0;                     // 2000 км — далеко, отметки быть не должно
+    key('KeyK'); frames(3);
+    const l1 = calls.lineTo || 0, d1 = calls.setLineDash || 0;
+    frames(1);
+    if ((calls.setLineDash || 0) - d1 > 0) throw new Error('отметка рисуется и с орбиты');
+    if ((calls.lineTo || 0) - l1 > ring - 16) throw new Error('кольцо рисуется и с орбиты');
+  }
+
   // Вёрстка: всё внутри рамки вокруг прицела, а сама середина свободна —
   // иначе приборы закрывали бы то, на что целятся.
   const w = window.innerWidth, h = window.innerHeight;
   const cx = w / 2, cy = h / 2;
   const BW = Math.min(Math.max(w * 0.10, 120), 220);
   const BH = Math.min(Math.max(h * 0.13, 92), 160);
-  const mine = seen.filter((t) => Math.abs(t.x - cx) <= BW + 60 && Math.abs(t.y - cy) <= BH + 40);
+  // Приборы занимают рамку вокруг прицела плюс шкалу тяжести справа от
+  // неё; середина рамки обязана остаться пустой.
+  const inFrame = (t) => Math.abs(t.x - cx) <= BW && Math.abs(t.y - cy) <= BH;
+  const inGauge = (t) => t.x > cx + BW && t.x < cx + BW + 130 &&
+    Math.abs(t.y - cy) <= BH + 60;
+  const mine = seen.filter((t) => Math.abs(t.x - cx) <= BW + 160 &&
+    Math.abs(t.y - cy) <= BH + 70);
   if (mine.length < 12) throw new Error('в панели всего ' + mine.length + ' надписей');
   for (const t of mine) {
-    if (Math.abs(t.x - cx) > BW || Math.abs(t.y - cy) > BH) {
-      throw new Error(`надпись «${t.s}» вылезла из рамки: ${(t.x - cx).toFixed(0)}, ${(t.y - cy).toFixed(0)}`);
+    if (!inFrame(t) && !inGauge(t)) {
+      throw new Error(`надпись «${t.s}» вылезла из приборов: ${(t.x - cx).toFixed(0)}, ${(t.y - cy).toFixed(0)}`);
     }
     if (Math.abs(t.x - cx) < 40 && Math.abs(t.y - cy) < 30) {
       throw new Error(`надпись «${t.s}» лезет на прицел`);

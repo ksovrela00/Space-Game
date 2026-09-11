@@ -224,6 +224,40 @@ void main() {
   outColor = vec4(n * 0.5 + 0.5, tint * 0.5 + 0.5);
 }`;
 
+// --- Тень корабля -----------------------------------------------------------
+// Один тёмный многоугольник на грунте (js/game/shadow.js). Рисуется
+// умножением: под тенью от поверхности остаётся только та часть света,
+// которая и так шла не от солнца. Поэтому шейдер и не считает ничего
+// сам — освещение уже посчитано в поверхности.
+
+export const SHADOW_VS = `#version 300 es
+in vec3 aPos;
+
+uniform mat4 uProj;
+uniform mat4 uModelView;
+
+out float vFragDepth;
+
+void main() {
+  vec4 vp = uModelView * vec4(aPos, 1.0);
+  gl_Position = uProj * vp;
+  vFragDepth = 1.0 + gl_Position.w;
+}`;
+
+export const SHADOW_FS = `#version 300 es
+precision highp float;
+
+in float vFragDepth;
+uniform float uLogFC;
+uniform float uDark;     // во сколько раз гасим свет под тенью
+
+out vec4 outColor;
+
+void main() {
+${LOG_DEPTH_FRAG}
+  outColor = vec4(vec3(uDark), 1.0);
+}`;
+
 // --- Звёздный фон -----------------------------------------------------------
 
 export const STARS_VS = `#version 300 es

@@ -83,6 +83,8 @@ const game = {
   dockAssist: null,
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
   capture: null,         // тело, в чьём гравитационном захвате корабль
+  camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
+  camera,                // та же камера, что у рендера: нужна приборам и проверкам
   landInfo: null,        // показания посадочного дисплея
   statusLine: null,
   scanBlips: [],
@@ -96,6 +98,8 @@ const game = {
 const dbg = makeDebug();
 let booted = false;
 const _sun = v3();
+const _camDir = v3();
+const _camRight = v3();
 const _tmp = v3();
 
 // --- переходы состояний ------------------------------------------------------
@@ -500,8 +504,11 @@ function step(dt) {
     return;
   }
   if (st.mode === ST.LANDED) {
-    // Стоим на грунте и вращаемся вместе с телом.
+    // Стоим на грунте и вращаемся вместе с телом. Обстановку у
+    // поверхности всё равно считаем: по ней рисуется тень корабля, а
+    // стоянку видно за экраном посадки.
     updateLandedPose(ship);
+    game.zone = landingContext(world, ship);
     return;
   }
   if (st.mode !== ST.FLIGHT) return;
@@ -633,6 +640,45 @@ function prepareHud() {
 
 // --- отрисовка ---------------------------------------------------------------
 
+// Поворот вектора вокруг оси (формула Родрига).
+function rotAround(v, axis, ang, out) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const d = axis.x * v.x + axis.y * v.y + axis.z * v.z;
+  out.x = v.x * c + (axis.y * v.z - axis.z * v.y) * s + axis.x * d * (1 - c);
+  out.y = v.y * c + (axis.z * v.x - axis.x * v.z) * s + axis.y * d * (1 - c);
+  out.z = v.z * c + (axis.x * v.y - axis.y * v.x) * s + axis.z * d * (1 - c);
+  return out;
+}
+
+// Осмотр камерой: правая кнопка зажата — крутим взгляд вокруг корабля,
+// отпущена — камера сама возвращается за спину.
+const LOOK = 0.0042;        // рад на пиксель
+const _drag = { x: 0, y: 0 };
+function updateCamOrbit(dt) {
+  const o = game.camOrbit;
+  input.takeDrag(_drag);
+  const look = input.mouse.right && game.state.view === 'chase' &&
+    game.state.mode === ST.FLIGHT;
+  if (look) {
+    o.yaw = clamp(o.yaw + _drag.x * LOOK, -Math.PI, Math.PI);
+    o.pitch = clamp(o.pitch + _drag.y * LOOK, -1.2, 1.2);
+  } else {
+    const k = Math.min(1, dt * 6);
+    o.yaw += (0 - o.yaw) * k;
+    o.pitch += (0 - o.pitch) * k;
+  }
+}
+
+// Камера сзади: ближе, чем кажется нужным.
+//
+// Раньше она стояла в 200 метрах позади и в 55 над кораблём — три его
+// длины. На орбите это незаметно, а у поверхности рушит чувство
+// масштаба: прибор показывает 32 метра высоты, а глаз видит землю с
+// точки, которая втрое выше, и читает «пара сотен». Теперь вынос
+// сравним с размером корабля, и высота на приборе совпадает с тем, что
+// видно.
+const CHASE_BACK = 0.105, CHASE_UP = 0.026;
+
 function setupCamera() {
   const cam = camera;
   cam.basis.right = { ...ship.basis.right };
@@ -640,9 +686,14 @@ function setupCamera() {
   cam.basis.fwd = { ...ship.basis.fwd };
   if (game.state.view === 'chase') {
     const b = ship.basis;
-    cam.pos.x = ship.pos.x - b.fwd.x * 0.20 + b.up.x * 0.055;
-    cam.pos.y = ship.pos.y - b.fwd.y * 0.20 + b.up.y * 0.055;
-    cam.pos.z = ship.pos.z - b.fwd.z * 0.20 + b.up.z * 0.055;
+    const o = game.camOrbit;
+    // Направление взгляда = нос корабля, повёрнутый на осмотр.
+    rotAround(b.fwd, b.up, o.yaw, _camDir);
+    rotAround(_camDir, rotAround(b.right, b.up, o.yaw, _camRight), o.pitch, _camDir);
+    lookAlong(cam.basis, _camDir, b.up);
+    cam.pos.x = ship.pos.x - _camDir.x * CHASE_BACK + b.up.x * CHASE_UP;
+    cam.pos.y = ship.pos.y - _camDir.y * CHASE_BACK + b.up.y * CHASE_UP;
+    cam.pos.z = ship.pos.z - _camDir.z * CHASE_BACK + b.up.z * CHASE_UP;
   } else {
     // Кокпит: чуть впереди центра масс, на уровне фонаря.
     const b = ship.basis;
@@ -739,6 +790,7 @@ function frame(now) {
   if (acc > STEP) acc = 0;
 
   updateMessages(game.state, dt);
+  updateCamOrbit(dt);
   if (game.state.mode === ST.FLIGHT) prepareHud();
 
   render();
@@ -781,6 +833,7 @@ function resizeAll() {
 
 function boot() {
   input.attach(window);
+  input.attachMouse(window);
   resizeAll();
   window.addEventListener('resize', resizeAll);
   window.addEventListener('beforeunload', save);

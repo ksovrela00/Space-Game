@@ -1169,8 +1169,9 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 6,
-    `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца, запекание)`);
+  ok(state.programs === 7,
+    `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца, ` +
+    'тень, запекание)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -1354,6 +1355,38 @@ console.log('\n== мок GL: путь отрисовки ==');
       ok(again < 10 && again < first * 0.2,
         `повторный спуск по тому же месту почти ничего не строит заново: ` +
         `${again} плиток против ${first} на первом проходе`);
+    }
+
+    // Тень корабля: силуэт считается на CPU (js/game/shadow.js), а
+    // сцена обязана его залить в буфер и нарисовать. Проверяем всю
+    // цепочку: обстановка у поверхности -> силуэт -> вершины в буфере.
+    {
+      const { landingContext } = await import('../js/game/landing.js');
+      put(0.12);
+      game.zone = landingContext(world, ship);
+      // Солнце над головой: тень ложится прямо под корабль.
+      const up = normalize(v3(
+        ship.pos.x - moon.pos.x, ship.pos.y - moon.pos.y, ship.pos.z - moon.pos.z));
+      const overhead = v3(
+        moon.pos.x + up.x * 1e6, moon.pos.y + up.y * 1e6, moon.pos.z + up.z * 1e6);
+      const saveStar = world.star.pos;
+      world.star.pos = overhead;
+      scene.render(game);
+      const lit = scene.shadowMesh.count;
+      world.star.pos = saveStar;
+
+      // Солнце за горизонтом и большая высота — тени нет вовсе.
+      const { shipShadow, SHADOW_MAX_ALT } = await import('../js/game/shadow.js');
+      const below = v3(
+        moon.pos.x - up.x * 1e6, moon.pos.y - up.y * 1e6, moon.pos.z - up.z * 1e6);
+      const night = shipShadow(game.zone, ship, game.shipMesh, below, {});
+      put(SHADOW_MAX_ALT * 2);
+      const highZone = landingContext(world, ship);
+      const high = shipShadow(highZone, ship, game.shipMesh, overhead, {});
+      game.zone = null;
+      ok(lit >= 3 && night === 0 && high === 0,
+        `тень корабля: ${lit} вершин силуэта при солнце над головой, ` +
+        `ночью ${night}, с ${SHADOW_MAX_ALT * 2} км — ${high}`);
     }
 
     // Сходимость подгрузки с холодного кэша: сколько кадров проходит,

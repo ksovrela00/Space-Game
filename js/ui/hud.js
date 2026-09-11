@@ -18,6 +18,11 @@ const RED = '#ff7a66';
 const TAU = Math.PI * 2;
 
 const _sil = {};
+// Кольцо отметки грунта: радиус и высота, выше которой её не рисуем.
+const MARK_R = 0.030;      // км
+const MARK_MAX = 1.5;      // км
+const _mk = { x: 0, y: 0, z: 0 };
+const _mkc = { x: 0, y: 0, z: 0 };
 const _pt = { x: 0, y: 0 };
 
 export const fmtDist = (km) => {
@@ -80,41 +85,54 @@ export function drawHud(r, game) {
   drawReticle(ctx, cam);
   if (target) drawTargetMarker(ctx, cam, target);
 
-  // --- левая колонка: тяга и скорость ---
-  const px = 18, py = h - 132;
-  panel(ctx, px, py, 132, 112);
+  // Приборы подхода включаются в гравитационном захвате и берут на себя
+  // скорость, высоту, дистанцию и посадочные условия. Угловые панели
+  // при этом ужимаются до того, чего в центре нет: тяга, круиз, корпус,
+  // имя цели с компасом. Дублировать одно и то же в двух местах хуже,
+  // чем не показывать вовсе: глаз всё равно мечется между ними.
+  const approach = !!(game.capture && state.mode === 'flight');
+
+  // --- левая колонка: тяга, круиз, корпус ---
+  const lh = approach ? 68 : 112;
+  const px = 18, py = h - lh - 20;
+  panel(ctx, px, py, 132, lh);
   ctx.font = '10px Consolas, monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = CY;
   ctx.fillText('ТЯГА', px + 10, py + 18);
   bar(ctx, px + 10, py + 24, 112, 8, ship.throttle, CY);
-  ctx.fillStyle = CY;
-  ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
-  ctx.font = '15px Consolas, monospace';
-  ctx.fillStyle = '#d8f2ff';
-  ctx.fillText(fmtSpeed(ship.speed * cruise.level), px + 10, py + 70);
-  ctx.font = '10px Consolas, monospace';
+  if (!approach) {
+    ctx.fillStyle = CY;
+    ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
+    ctx.font = '15px Consolas, monospace';
+    ctx.fillStyle = '#d8f2ff';
+    ctx.fillText(fmtSpeed(ship.speed * cruise.level), px + 10, py + 70);
+    ctx.font = '10px Consolas, monospace';
+  }
+  const cruiseY = approach ? py + 48 : py + 88;
   ctx.fillStyle = cruise.massLocked ? RED : (cruise.level > 1 ? AMBER : CY_DIM);
   ctx.fillText(
     cruise.massLocked
       ? 'MASS LOCK · ' + cruiseLabel(cruise.level)
       : 'КРУИЗ ' + cruiseLabel(cruise.level),
-    px + 10, py + 88);
+    px + 10, cruiseY);
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('КОРПУС', px + 10, py + 102);
-  bar(ctx, px + 58, py + 95, 64, 7, ship.hull / SHIP.maxHull,
+  ctx.fillText('КОРПУС', px + 10, cruiseY + 14);
+  bar(ctx, px + 58, cruiseY + 7, 64, 7, ship.hull / SHIP.maxHull,
     ship.hull > 40 ? GREEN : RED);
 
-  // Шасси: строкой над панелью, чтобы состояние было видно всегда.
-  if (ship.gear.t > 0.005 || ship.gear.out) {
+  // Шасси: строкой над панелью. У поверхности его состояние стоит в
+  // приборах подхода отдельной клеткой, и здесь оно уже лишнее.
+  if ((ship.gear.t > 0.005 || ship.gear.out) && !(approach && game.landInfo)) {
     ctx.font = '10px Consolas, monospace';
     ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER;
     ctx.fillText(gearLabel(ship), px, py - 8);
   }
 
   // --- правая колонка: цель ---
-  const tx = w - 250, ty = h - 132;
-  panel(ctx, tx, ty, 232, 112);
+  const th = approach ? 68 : 112;
+  const tx = w - 250, ty = h - th - 20;
+  panel(ctx, tx, ty, 232, th);
   ctx.font = '10px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
   ctx.fillText('ЦЕЛЬ', tx + 10, ty + 18);
@@ -124,28 +142,28 @@ export function drawHud(r, game) {
 
   if (game.info) {
     ctx.font = '11px Consolas, monospace';
-    ctx.fillStyle = '#9fd9ff';
-    ctx.fillText('ДИСТ  ' + fmtDist(game.info.gap), tx + 10, ty + 56);
-    ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
+    if (!approach) {
+      ctx.fillStyle = '#9fd9ff';
+      ctx.fillText('ДИСТ  ' + fmtDist(game.info.gap), tx + 10, ty + 56);
+      ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
+    }
+    const stateY = approach ? ty + 58 : ty + 90;
     if (ship.autopilot) {
       ctx.fillStyle = GREEN;
-      ctx.fillText('АВТОПИЛОТ', tx + 10, ty + 90);
+      ctx.fillText('АВТОПИЛОТ', tx + 10, stateY);
     } else if (ship.docking) {
       ctx.fillStyle = GREEN;
-      ctx.fillText('ДОКИНГ', tx + 10, ty + 90);
+      ctx.fillText('ДОКИНГ', tx + 10, stateY);
     }
-    drawCompass(ctx, tx + 178, ty + 60, 34, ship, game.info.dir);
+    drawCompass(ctx, tx + 178, ty + th / 2, approach ? 24 : 34, ship, game.info.dir);
   }
 
   drawScanner(ctx, w / 2, h - 60, game);
 
   // --- приборы подхода, помощник стыковки ---
-  // Панель подхода заменяет собой угловой посадочный дисплей: у
-  // поверхности всё нужное должно быть в одном месте.
-  if (game.capture && state.mode === 'flight') {
+  if (approach) {
+    drawGroundMark(ctx, cam, game);
     drawApproachPanel(ctx, w / 2, h / 2, w, h, game);
-  } else if (game.landInfo) {
-    drawLandPanel(ctx, w - 152, 24, game.landInfo, ship);
   }
   if (game.dockAssist) drawDockAssist(ctx, w / 2, 96, game.dockAssist);
 
@@ -249,26 +267,36 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
   stat(left, rowY[2], 'left', 'БОК', ms(hSp), L ? (L.hspeedOk ? GREEN : RED) : null, 13);
   stat(right, rowY[2], 'right', 'ETA', game.info ? fmtTime(game.info.eta) : '—', '#9fd9ff', 13);
 
-  // Гравитация: сколько её здесь и насколько это близко к тому, что на
-  // поверхности. Полоса растёт как R/d — линейно по мере приближения;
-  // по самому ускорению она бы почти всё время стояла в нуле и прыгала
-  // только у грунта.
+  // Гравитация — вертикальной шкалой справа от рамки: она про
+  // «насколько глубоко мы в колодце», и столбик, растущий снизу вверх,
+  // читается как раз так. Внизу — сколько её здесь и сколько у грунта,
+  // чтобы было с чем сравнивать.
+  //
+  // Полоса растёт как R/d, а не как само ускорение: по ускорению она бы
+  // почти весь подлёт стояла в нуле и прыгала только у поверхности.
   const gHere = gravityAt(b, ship.pos) * 1000;          // м/с²
   const frac = Math.sqrt(clamp(gHere / Math.max(b.g0, 1e-6), 0, 1));
-  const by = cy + BH - 56;
+  const gx = cx + BW + 60;
+  const gy0 = cy - BH + 14, gy1 = cy + BH - 14;
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(gx - 6, gy0, 12, gy1 - gy0);
+  const fill = (gy1 - gy0 - 2) * clamp(frac, 0, 1);
+  ctx.fillStyle = frac > 0.75 ? AMBER : CY;
+  ctx.fillRect(gx - 5, gy1 - 1 - fill, 10, fill);
+
   ctx.textAlign = 'center';
   ctx.font = '9px Consolas, monospace';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('ТЯЖЕСТЬ', gx, gy0 - 8);
   ctx.fillStyle = AMBER;
-  ctx.fillText('ЗАХВАТ · ' + b.name.toUpperCase().slice(0, 16), cx, by);
-  bar(ctx, left, by + 8, right - left, 7, frac, frac > 0.75 ? AMBER : CY);
-  ctx.textAlign = 'left';
+  ctx.fillText('ЗАХВАТ · ' + b.name.toUpperCase().slice(0, 14), gx, gy1 + 16);
+  ctx.font = '12px Consolas, monospace';
+  ctx.fillStyle = '#d8f2ff';
+  ctx.fillText(gHere.toFixed(2) + ' м/с²', gx, gy1 + 32);
   ctx.font = '9px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('ТЯЖЕСТЬ', left, by + 27);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#d8f2ff';
-  ctx.font = '11px Consolas, monospace';
-  ctx.fillText(gHere.toFixed(2) + ' м/с²  (у грунта ' + b.g0.toFixed(1) + ')', right, by + 27);
+  ctx.fillText('у грунта ' + b.g0.toFixed(1), gx, gy1 + 45);
 
   // Посадочные условия — теми же цветами, что и скорости выше: зелёное
   // значит «в допуске касания».
@@ -290,6 +318,88 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
       ctx.font = '11px Consolas, monospace';
       ctx.fillText(value, x, cy + BH - 5);
       ctx.font = '9px Consolas, monospace';
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * Отметка грунта под кораблём: кольцо на поверхности, вертикальная нить
+ * до корабля и высота цифрой.
+ *
+ * Это ответ на «прибор показывает 32 метра, а кажется, что двести».
+ * Высоту глаз оценивает не по числу, а по знакомому размеру рядом с
+ * землёй; на пустой поверхности без деревьев и домов такого размера
+ * нет. Кольцо и есть этот размер: оно ровно 30 метров в радиусе, лежит
+ * на грунте и проецируется честной перспективой — по нему сразу видно и
+ * высоту, и куда именно опустится корабль.
+ */
+function drawGroundMark(ctx, cam, game) {
+  const z = game.zone;
+  if (!z || z.alt > MARK_MAX || z.alt < 0) return;
+  const ship = game.ship;
+  const up = z.upWorld;
+
+  // Центр отметки — точка под кораблём: вниз по местной вертикали на
+  // высоту, которую показывает прибор.
+  const gx = ship.pos.x - up.x * z.alt;
+  const gy = ship.pos.y - up.y * z.alt;
+  const gz = ship.pos.z - up.z * z.alt;
+
+  // Оси кольца в плоскости грунта: нос корабля, спроецированный на неё.
+  const f = ship.basis.fwd;
+  const d = f.x * up.x + f.y * up.y + f.z * up.z;
+  let ax = f.x - up.x * d, ay = f.y - up.y * d, az = f.z - up.z * d;
+  const al = Math.hypot(ax, ay, az);
+  if (al < 1e-6) return;
+  ax /= al; ay /= al; az /= al;
+  const bx = up.y * az - up.z * ay, by = up.z * ax - up.x * az, bz = up.x * ay - up.y * ax;
+
+  const N = 16;
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * TAU;
+    const c = Math.cos(a) * MARK_R, s = Math.sin(a) * MARK_R;
+    _mk.x = gx + ax * c + bx * s;
+    _mk.y = gy + ay * c + by * s;
+    _mk.z = gz + az * c + bz * s;
+    cam.toCamera(_mk, _mkc);
+    if (_mkc.z <= cam.near) return;            // кольцо частично за спиной
+    pts.push(cam.project(_mkc, { x: 0, y: 0 }));
+  }
+
+  const close = z.alt < 0.05;
+  ctx.save();
+  ctx.strokeStyle = close ? GREEN : 'rgba(79,179,224,0.75)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
+    else ctx.lineTo(pts[i].x, pts[i].y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Нить от кольца до корабля — она и показывает высоту как отрезок.
+  _mk.x = gx; _mk.y = gy; _mk.z = gz;
+  cam.toCamera(_mk, _mkc);
+  if (_mkc.z > cam.near) {
+    const gp = cam.project(_mkc, { x: 0, y: 0 });
+    cam.toCamera(ship.pos, _mkc);
+    if (_mkc.z > cam.near) {
+      const sp = cam.project(_mkc, { x: 0, y: 0 });
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = close ? GREEN : CY_DIM;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(gp.x, gp.y);
+      ctx.lineTo(sp.x, sp.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '11px Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = close ? GREEN : '#9fd9ff';
+      ctx.fillText(fmtDist(Math.max(0, z.alt)), (gp.x + sp.x) / 2 + 8, (gp.y + sp.y) / 2);
     }
   }
   ctx.restore();
@@ -480,43 +590,6 @@ function drawDockAssist(ctx, cx, cy, a) {
     ctx.fillText((ok ? '+ ' : '- ') + label, -w / 2, ry);
     ry += 13;
   }
-  ctx.restore();
-}
-
-/**
- * Посадочный дисплей: высота, вертикальная и боковая скорость, наклон
- * корабля и уклон площадки. Зелёное — в пределах допусков касания.
- */
-function drawLandPanel(ctx, x, y, L, ship) {
-  const w = 134, h = 104;
-  ctx.save();
-  panel(ctx, x, y, w, h);
-  ctx.font = '9px Consolas, monospace';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = CY_DIM;
-  ctx.fillText('ПОСАДКА · ' + L.body.name.toUpperCase().slice(0, 12), x + 8, y + 13);
-
-  const row = (label, value, ok, ry) => {
-    ctx.font = '9px Consolas, monospace';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(label, x + 8, ry);
-    ctx.font = '11px Consolas, monospace';
-    ctx.textAlign = 'right';
-    ctx.fillStyle = ok === null ? '#d8f2ff' : (ok ? GREEN : RED);
-    ctx.fillText(value, x + w - 8, ry);
-    ctx.textAlign = 'left';
-  };
-
-  const tiltDeg = Math.acos(clamp(L.tilt, -1, 1)) * 57.3;
-  row('ВЫСОТА', fmtDist(Math.max(0, L.alt)), null, y + 30);
-  row('ВЕРТ', (L.vspeed * 1000).toFixed(0) + ' м/с', L.vspeedOk, y + 44);
-  row('БОК', (L.hspeed * 1000).toFixed(0) + ' м/с', L.hspeedOk, y + 58);
-  row('НАКЛОН', tiltDeg.toFixed(0) + '°', L.tiltOk, y + 72);
-  row('УКЛОН', (L.slope * 57.3).toFixed(0) + '°', L.slopeOk, y + 86);
-
-  ctx.font = '9px Consolas, monospace';
-  ctx.fillStyle = L.gearOk ? GREEN : AMBER;
-  ctx.fillText(L.gearOk ? 'ШАССИ ГОТОВО' : 'ШАССИ (G)', x + 8, y + 99);
   ctx.restore();
 }
 

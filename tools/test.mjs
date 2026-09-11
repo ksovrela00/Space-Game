@@ -16,7 +16,7 @@ import {
   startLanding, updateLandingComputer, checkTouchdown, settle, updateLandedPose,
   takeoff, landingReadout,
 } from '../js/game/landing.js';
-import { captureBody, carryShip, gravityField } from '../js/game/gravity.js';
+import { captureBody, carryShip, gravityField, CAPTURE_G } from '../js/game/gravity.js';
 import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
@@ -1010,6 +1010,24 @@ console.log('\n== гравитация и захват ==');
   ok(captureBody(w, near) === moon && captureBody(w, far) !== moon,
     `захват у поверхности луны — ${captureBody(w, near).name}, ` +
     `в трёх сферах от неё — ${(captureBody(w, far) || { name: 'никто' }).name}`);
+
+  // Одной сферы действия мало. У гиганта она четверть миллиона
+  // километров, и формально корабль «в захвате» там, где тяжесть —
+  // тысячные доли м/с². Порог CAPTURE_G отсекает такие места: держать
+  // там нечего, и показывать захват не за что.
+  const at = (mul) => v3(giant.pos.x + giant.radius * mul, giant.pos.y, giant.pos.z);
+  const gAt = (mul) => giant.g0 / (mul * mul);
+  let inside = 0, held = 0;
+  for (let mul = 2; mul * giant.radius < giant.soi; mul++) {
+    inside++;
+    if (captureBody(w, at(mul)) === giant) held++;
+  }
+  const edge = Math.sqrt(giant.g0 / (CAPTURE_G * 1000));
+  ok(captureBody(w, at(edge - 1)) === giant && captureBody(w, at(edge + 1)) !== giant &&
+     held < inside,
+    `у гиганта захват кончается на ${edge.toFixed(1)} радиусах ` +
+    `(тяжесть ${gAt(edge).toFixed(3)} м/с²), а не на ${(giant.soi / giant.radius).toFixed(1)} ` +
+    `по сфере действия: из ${inside} проверенных дистанций держат ${held}`);
 }
 
 // Главное свойство захвата: с нулевой тягой корабль стоит над ТОЧКОЙ

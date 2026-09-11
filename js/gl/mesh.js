@@ -127,6 +127,34 @@ export function buildPointsMesh(gl, locs, dirs, colors) {
   return new GlMesh(gl, vao, dirs.length / 3, gl.POINTS, null);
 }
 
+/**
+ * Меш, который переписывается каждый кадр (тень корабля): буфер
+ * выделяется один раз на максимальное число вершин, дальше меняется
+ * только его содержимое. Пересоздавать буфер на кадр нельзя — это
+ * мусор в видеопамяти и лишняя работа драйвера.
+ */
+export function buildDynamicMesh(gl, loc, maxVerts) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, maxVerts * 3 * 4, gl.DYNAMIC_DRAW);
+  if (loc !== undefined && loc >= 0) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  }
+  gl.bindVertexArray(null);
+  const mesh = new GlMesh(gl, vao, 0, gl.TRIANGLE_FAN, null, [buf]);
+  mesh.maxVerts = maxVerts;
+  mesh.update = (data, count) => {
+    mesh.count = Math.min(count, maxVerts);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, mesh.count * 3);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  };
+  return mesh;
+}
+
 /** Квадрат [-1..1]^2 для экранных ореолов. */
 export function buildQuad(gl, loc) {
   const vao = gl.createVertexArray();

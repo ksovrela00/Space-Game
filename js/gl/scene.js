@@ -13,7 +13,7 @@ import { createContext, rendererName, resizeCanvas, watchContextLoss } from './c
 import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
-  ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS,
+  ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
 } from './shaders.js';
 import { detailUniforms, tileDetailUniforms } from './detail.js';
 import { terrainOf } from './terrain.js';
@@ -21,9 +21,11 @@ import { edgeAngle } from './icosphere.js';
 import { Baker, createBlankTexture } from './bake.js';
 import { TileSet } from './tiles.js';
 import { tileKey, tileTexelAngle } from './quadtree.js';
+import { shipShadow } from '../game/shadow.js';
 import { localDir, altitudeOf } from '../game/surface.js';
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
+  buildDynamicMesh,
 } from './mesh.js';
 import { icosphere } from './icosphere.js';
 import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './planetmesh.js';
@@ -35,6 +37,17 @@ import { bodyBasis } from '../game/world.js';
 const NEAR = 0.004;          // 4 метра
 const FAR = 2e9;             // с запасом на всю систему
 const AMBIENT = 0.14;
+// Во сколько раз тень гасит поверхность. Не в ноль: на безатмосферном
+// теле в тень всё равно светит рассеянный свет от соседнего склона —
+// и тот же ambient, которым освещена ночная сторона.
+const SHADOW_DARK = 0.30;
+// Единичный базис: тень уже посчитана в мировых осях, поворачивать её
+// нечем и незачем.
+const IDENTITY_BASIS = {
+  right: { x: 1, y: 0, z: 0 },
+  up: { x: 0, y: 1, z: 0 },
+  fwd: { x: 0, y: 0, z: 1 },
+};
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
 const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
 const PATCH_MS = 3.0;        // и на заплатки поверхности
@@ -92,6 +105,7 @@ export class GlScene {
     this.pGlow = buildProgram(gl, 'glow', GLOW_VS, GLOW_FS);
     this.pAtmo = buildProgram(gl, 'atmo', ATMO_VS, ATMO_FS);
     this.pRing = buildProgram(gl, 'ring', RING_VS, RING_FS);
+    this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
 
     this.meshLocs = {
       aPos: this.pMesh.attrib('aPos'),
@@ -110,6 +124,10 @@ export class GlScene {
     });
 
     this.quad = buildQuad(gl, this.pGlow.attrib('aQuad'));
+    // Тень корабля переписывается каждый кадр; вершин у её силуэта
+    // немного — это выпуклая оболочка полусотни точек корпуса.
+    this.shadowMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 32);
+    this.shadowBuf = {};
     this.stars = this.buildStars();
     this.blankTex = createBlankTexture(gl);
     this.patch = new SurfacePatch(gl, this.meshLocs);
@@ -491,10 +509,44 @@ export class GlScene {
     }
   }
 
+  /**
+   * Тень корабля на грунте: один многоугольник, нарисованный
+   * УМНОЖЕНИЕМ. Смешивание ZERO/SRC_COLOR оставляет от освещённой
+   * поверхности ту долю, которая пришла не от солнца, — то есть ровно то,
+   * что и означает тень. Складывать сюда чёрный с альфой нельзя: под
+   * тенью тогда и рельеф, и цвет грунта одинаково уходят в серое.
+   */
+  drawShadow(game, sunPos) {
+    const gl = this.gl;
+    const n = shipShadow(game.zone, game.ship, game.shipMesh, sunPos, this.shadowBuf);
+    if (n < 3) return;
+    this.shadowMesh.update(this.shadowBuf.verts, n);
+    const prog = this.pShadow;
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform1f(prog.loc('uDark'), SHADOW_DARK);
+    // Вершины лежат в мировых осях относительно корабля, поэтому базис
+    // объекта — единичный, а сдвиг до камеры считается в двойной
+    // точности, как у всех остальных мешей.
+    modelView(this.camera.basis, this.camera.pos, IDENTITY_BASIS, game.ship.pos, 1,
+      this.mv, this.nrm);
+    gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
+    gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
+    this.shadowMesh.draw();
+    this.draws++;
+  }
+
   drawTransparent(game, world, sunPos) {
     const gl = this.gl;
     gl.depthMask(false);
     gl.enable(gl.BLEND);
+
+    // Тень — первой: всё остальное прозрачное (выхлоп, ореолы) светится
+    // и должно ложиться поверх неё.
+    if (game.state.mode === 'flight' || game.state.mode === 'landed') {
+      this.drawShadow(game, sunPos);
+    }
 
     // Кольца: полупрозрачный слой, поэтому обычное смешивание
     // (цвет уже умножен на альфу в шейдере).
