@@ -100,9 +100,10 @@ export function drawHud(r, game) {
   panel(ctx, px, py, 132, lh);
   ctx.font = '10px Consolas, monospace';
   ctx.textAlign = 'left';
-  ctx.fillStyle = CY;
-  ctx.fillText('ТЯГА', px + 10, py + 18);
-  bar(ctx, px + 10, py + 24, 112, 8, ship.throttle, CY);
+  const back = ship.throttle < -0.001;
+  ctx.fillStyle = back ? AMBER : CY;
+  ctx.fillText(back ? 'ТЯГА НАЗАД' : 'ТЯГА', px + 10, py + 18);
+  bar(ctx, px + 10, py + 24, 112, 8, Math.abs(ship.throttle), back ? AMBER : CY);
   if (!approach) {
     ctx.fillStyle = CY;
     ctx.fillText('СКОРОСТЬ', px + 10, py + 52);

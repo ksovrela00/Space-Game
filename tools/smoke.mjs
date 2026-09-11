@@ -182,6 +182,19 @@ await step('ручное управление: тяга, рыскание, кр�
   if (!(game.ship.speed > 0)) throw new Error('скорость нулевая');
 });
 
+await step('задний ход по длинному Ctrl', () => {
+  key('KeyX'); frames(5);                 // с нуля
+  holdDown('ControlLeft'); frames(120); release('ControlLeft'); frames(10);
+  if (!(game.ship.throttle < -0.3)) {
+    throw new Error('тяга не ушла назад: ' + game.ship.throttle.toFixed(2));
+  }
+  if (!(game.ship.speed < 0)) throw new Error('скорость не стала отрицательной');
+  const back = Math.abs(game.ship.speed);
+  key('KeyX'); frames(120);
+  if (!(back < 0.3)) throw new Error('задний ход слишком быстрый: ' + back);
+  if (Math.abs(game.ship.speed) > 1e-6) throw new Error('X не останавливает на заднем ходу');
+});
+
 await step('подъёмные движки (R/F) и полная тяга (Z)', () => {
   key('KeyX'); frames(20);
   holdDown('KeyR'); frames(40);

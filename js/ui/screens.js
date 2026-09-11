@@ -92,6 +92,7 @@ export function showHelp(game) {
       <tr><td>Q / E</td><td class="v">крен влево / вправо</td></tr>
       <tr><td>&larr; / &rarr;</td><td class="v">крен (схема Elite)</td></tr>
       <tr><td>Shift / Ctrl</td><td class="v">тяга больше / меньше</td></tr>
+      <tr><td>Ctrl (долго)</td><td class="v">задний ход (после остановки)</td></tr>
       <tr><td>X / Z</td><td class="v">тяга в ноль / полная</td></tr>
       <tr><td>R / F</td><td class="v">подъёмные движки: вверх / вниз</td></tr>
       <tr><td>Tab / Shift+Tab</td><td class="v">следующая / предыдущая цель</td></tr>

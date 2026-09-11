@@ -1185,6 +1185,61 @@ console.log('\n== тень ==');
     `а сам грунт под ней гуляет на ${((hiR - loR) * 1000).toFixed(1)} м`);
 }
 
+// --- 5g. Задний ход ----------------------------------------------------------
+console.log('\n== задний ход ==');
+{
+  const sh = makeShip();
+  placeShip(sh, v3(0, 0, 0), makeBasis());
+  const fwd = { ...sh.basis.fwd };
+  sh.throttle = 1;
+  const hold = (seconds, thr) => {
+    for (let i = 0; i < Math.round(seconds / STEP); i++) {
+      clearControls(sh);
+      sh.control.thr = thr;
+      updateShip(sh, STEP, STEP);
+    }
+  };
+
+  // Разгон вперёд, потом Ctrl не отпускаем: тяга падает до нуля, корабль
+  // встаёт — и только потом начинается задний ход.
+  hold(3, 1);
+  const vFwd = sh.speed;
+  hold(1.45, -1);                       // 1.43 с на сброс тяги + защёлка
+  const atZero = sh.speed;
+  const thrZero = sh.throttle;
+  hold(4, -1);
+  const vBack = sh.speed;
+
+  // На защёлке тяга ровно ноль, а скорость ещё гасится: тяга задаёт
+  // цель, а не саму скорость, и корабль доезжает по инерции.
+  ok(vFwd > 1.1 && thrZero === 0 && atZero > 0 && atZero < vFwd * 0.15 && vBack < -0.1,
+    `вперёд ${(vFwd * 1000).toFixed(0)} м/с -> на защёлке тяга ${thrZero}, ` +
+    `скорость догасает до ${(atZero * 1000).toFixed(0)} м/с -> назад ` +
+    `${(vBack * 1000).toFixed(0)} м/с`);
+
+  // Задний ход заметно медленнее переднего, и корабль правда едет назад.
+  const p0 = { ...sh.pos };
+  hold(1, -1);
+  const moved = (sh.pos.x - p0.x) * fwd.x + (sh.pos.y - p0.y) * fwd.y + (sh.pos.z - p0.z) * fwd.z;
+  ok(moved < 0 && Math.abs(vBack) < vFwd * 0.25 &&
+     Math.abs(Math.abs(vBack) - SHIP.maxSpeed * SHIP.reverse) < 0.01,
+    `назад корабль едет носом вперёд: за секунду ${(moved * 1000).toFixed(0)} м, ` +
+    `предел ${(SHIP.maxSpeed * SHIP.reverse * 1000).toFixed(0)} м/с против ` +
+    `${(SHIP.maxSpeed * 1000).toFixed(0)} вперёд`);
+
+  // Защёлка на нуле: коротким нажатием Ctrl назад не уедешь.
+  const sh2 = makeShip();
+  placeShip(sh2, v3(0, 0, 0), makeBasis());
+  sh2.throttle = 0.05;
+  for (let i = 0; i < Math.round(0.4 / STEP); i++) {
+    clearControls(sh2);
+    sh2.control.thr = -1;
+    updateShip(sh2, STEP, STEP);
+  }
+  ok(sh2.throttle === 0,
+    `после короткого сброса тяга стоит на нуле, а не уходит в минус (${sh2.throttle})`);
+}
+
 console.log('\n== столкновения ==');
 {
   const w = makeSystem(0x1a7e);

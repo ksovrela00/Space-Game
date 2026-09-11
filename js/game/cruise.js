@@ -65,7 +65,9 @@ export function updateCruise(cruise, world, ship, dt) {
   } else {
     // Шаг перемещения не должен превышать пятую часть зазора до тела.
     const stepBudget = Math.max(1, gap * 0.15);
-    const perStep = Math.max(1e-6, ship.speed * dt);
+    // По модулю: на заднем ходу скорость отрицательная, и без этого
+    // ограничитель круиза переставал работать вовсе.
+    const perStep = Math.max(1e-6, Math.abs(ship.speed) * dt);
     while (maxIndex > 0 && LEVELS[maxIndex] * perStep > stepBudget) maxIndex--;
   }
 

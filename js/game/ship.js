@@ -8,6 +8,13 @@ import { input } from '../core/input.js';
 
 export const SHIP = {
   maxSpeed: 1.2,      // км/с при круизе x1
+  // Задний ход — маневровый режим, а не полёт: те же движки работают
+  // против своей геометрии, и тяги у них там заметно меньше.
+  reverse: 0.15,      // доля максимальной скорости на заднем ходу
+  // Пауза на нуле при сбросе тяги. Без неё остановиться нельзя: тяга
+  // проскакивает ноль и корабль сразу ползёт назад. С паузой ноль
+  // ощущается как защёлка — задержал Ctrl дольше, поехал назад.
+  zeroDwell: 0.45,    // с
   accel: 0.45,        // км/с²
   brake: 0.75,
   pitchRate: 0.85,    // рад/с
@@ -39,6 +46,7 @@ export function makeShip() {
     throttle: 0,
     cruise: 1,          // множитель круизного ускорителя
     rot: { pitch: 0, yaw: 0, roll: 0 },
+    zeroHold: 0,        // сколько ещё держать тягу на нуле (см. SHIP.zeroDwell)
     hull: SHIP.maxHull,
     dockedAt: null,
     autopilot: null,
@@ -90,7 +98,16 @@ export function clearControls(ship) {
 export function updateShip(ship, dt, moveDt, field = null) {
   const c = ship.control;
 
-  ship.throttle = clamp(ship.throttle + c.thr * SHIP.throttleRate * dt, 0, 1);
+  // Тяга от -1 (полный назад) до +1. Ноль — с защёлкой: сбрасывая тягу,
+  // корабль на нём останавливается и только при дальнейшем удержании
+  // Ctrl трогается назад.
+  let thr = ship.throttle + c.thr * SHIP.throttleRate * dt;
+  if (ship.throttle > 0 && thr <= 0) { thr = 0; ship.zeroHold = SHIP.zeroDwell; }
+  else if (ship.throttle === 0 && c.thr < 0) {
+    ship.zeroHold -= dt;
+    if (ship.zeroHold > 0) thr = 0;
+  } else if (c.thr >= 0) ship.zeroHold = 0;
+  ship.throttle = clamp(thr, -1, 1);
 
   const r = ship.rot;
   r.pitch = approach(r.pitch, c.pitch * SHIP.pitchRate, SHIP.rotSharp, dt);
@@ -99,11 +116,11 @@ export function updateShip(ship, dt, moveDt, field = null) {
   rotateBasis(ship.basis, r.pitch * dt, r.yaw * dt, r.roll * dt);
 
   // С выпущенным шасси скорость ограничена — на нём не летают.
-  const target = ship.throttle * SHIP.maxSpeed *
-    (ship.gear && ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
+  const lim = SHIP.maxSpeed * (ship.gear && ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
+  const target = ship.throttle * lim * (ship.throttle < 0 ? SHIP.reverse : 1);
   const a = (target > ship.speed ? SHIP.accel : SHIP.brake) * dt;
   ship.speed += clamp(target - ship.speed, -a, a);
-  if (ship.speed < 1e-5) ship.speed = 0;
+  if (Math.abs(ship.speed) < 1e-5) ship.speed = 0;
 
   // Вертикальный канал: подъёмные движки вдоль «верха» корабля плюс
   // просадка вдоль местной вертикали. Второе включается только с
@@ -133,6 +150,7 @@ export function placeShip(ship, pos, basis) {
   }
   ship.speed = 0;
   ship.throttle = 0;
+  ship.zeroHold = 0;
   ship.lift = 0;
   ship.sink = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
