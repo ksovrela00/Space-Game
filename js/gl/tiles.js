@@ -19,11 +19,23 @@ import {
   tileCellAngle, tileTexelAngle, selectTiles,
 } from './quadtree.js';
 
-export const TILE_BUDGET = 280;      // сколько плиток держим в памяти
+export const TILE_BUDGET = 440;      // сколько плиток держим в памяти (~200 КБ каждая)
 const BUILD_CHUNK = 512;             // вершин за один заход
 const TILE_TOL = 5;                  // допустимая ошибка геометрии, пикселей
+// Допуск на тексель: он держит соседние плитки в пределах двух уровней
+// друг от друга (см. selectTiles). В отличие от допуска на геометрию,
+// под заполненность кэша НЕ подстраивается — иначе на стыке разных
+// уровней снова поедут нормали.
+//
+// Величина не с потолка: шейдер добавляет к текстуре ровно столько
+// масштабов, сколько влезает в его бюджет (D_FIT в js/gl/detail.js), и
+// при 40 пикселях на тексель этого хватает, чтобы дотянуть деталь до
+// пары пикселей на любой нарисованной плитке. Замер на настоявшемся
+// кадре: расхождение нормали на стыке уровней ≤1.1° против 33° без
+// этого условия, ценой роста числа плиток примерно в полтора раза.
+export const TILE_TEXEL_TOL = 40;    // пикселей на тексель
 const KEEP_FRAMES = 180;             // сколько кадров плитка живёт без надобности
-const TARGET_DRAW = 90;              // сколько плиток в кадре считаем нормой
+const TARGET_DRAW = 220;             // сколько плиток в кадре считаем нормой
 
 /**
  * Порционный сборщик геометрии плитки. Меш живёт в единичном радиусе, в
@@ -189,10 +201,12 @@ export class TileSet {
       // набор не влезает, плитки вытесняются и тут же строятся снова —
       // кэш молотит вхолостую, а картинка дёргается.
       tol: TILE_TOL * this.tolScale * Math.max(1, (this.tiles.size / TILE_BUDGET) ** 2),
+      texelTol: TILE_TEXEL_TOL,
       maxLevel: TILE_MAX_LEVEL,
       relief: terrain.ampUp,
       errorOf: (level) => terrain.meshError(terrain.detailForCell(tileCellAngle(level)))
         + tileCellAngle(level) * tileCellAngle(level) / 8,
+      texelOf: (level) => tileTexelAngle(level),
       ready: (t) => {
         const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
         return !!(e && e.mesh);
@@ -296,6 +310,8 @@ export class TileSet {
       gl.uniform1f(prog.loc('uCraterW'), u.craterW);
       gl.uniform1i(prog.loc('uOctFrom'), u.octFrom);
       gl.uniform1i(prog.loc('uCsFrom'), u.csFrom);
+      // Сверху окно не обрезано: в текстуру пишется вся поверхность.
+      gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw);
       gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
       gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
       this.quad.draw();

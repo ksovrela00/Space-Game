@@ -15,12 +15,12 @@ import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS,
 } from './shaders.js';
-import { detailUniforms } from './detail.js';
+import { detailUniforms, tileDetailUniforms } from './detail.js';
 import { terrainOf } from './terrain.js';
 import { edgeAngle } from './icosphere.js';
 import { Baker, createBlankTexture } from './bake.js';
 import { TileSet } from './tiles.js';
-import { tileKey } from './quadtree.js';
+import { tileKey, tileTexelAngle } from './quadtree.js';
 import { localDir, altitudeOf } from '../game/surface.js';
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
@@ -213,10 +213,14 @@ export class GlScene {
    */
   setDetail(prog, body, meshCell, budget = 1) {
     if (!this.detailOn) return;
-    const gl = this.gl;
     const u = body && body.isBody
       ? detailUniforms(terrainOf(body), meshCell, budget)
       : { on: 0 };
+    this.applyDetail(prog, u);
+  }
+
+  applyDetail(prog, u) {
+    const gl = this.gl;
     gl.uniform1f(prog.loc('uDetail'), u.on);
     if (!u.on) return;
     gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
@@ -229,6 +233,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uCraterW'), u.craterW);
     gl.uniform1i(prog.loc('uOctFrom'), u.octFrom);
     gl.uniform1i(prog.loc('uCsFrom'), u.csFrom);
+    gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw || 0);
   }
 
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
@@ -337,21 +342,30 @@ export class GlScene {
     this.tileBody = this.tiles.rootsReady ? body : null;
   }
 
-  // Плитки рисуются одной матрицей тела: меняется только текстура.
+  // Плитки рисуются одной матрицей тела: меняется только текстура и —
+  // при смене уровня — окно мелкой детали, которую шейдер добавляет
+  // ниже текселя этой текстуры.
   drawTiles(prog, sunPos) {
     const gl = this.gl;
     const body = this.tileBody;
+    const terrain = terrainOf(body);
     bodyBasis(body, this.basisTmp);
     gl.uniform1f(prog.loc('uSurfMode'), 1);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.activeTexture(gl.TEXTURE0);
+    let lastLevel = -1;
     for (const t of this.tiles.draw) {
       const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
       if (!e || !e.mesh) continue;
+      if (this.detailOn && t.level !== lastLevel) {
+        this.applyDetail(prog, tileDetailUniforms(terrain, tileTexelAngle(t.level)));
+        lastLevel = t.level;
+      }
       gl.bindTexture(gl.TEXTURE_2D, e.tex.tex);
       this.drawObject(prog, e.mesh, body.pos, this.basisTmp, body.radius, sunPos);
     }
     gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.setDetail(prog, null, 0);
   }
 
   drawStars() {

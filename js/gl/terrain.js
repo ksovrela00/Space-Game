@@ -107,7 +107,13 @@ export function ridged(seed, x, y, z, octaves = 6, freq = 1) {
 
 export const CRATER_C0 = 0.44;        // шаг самого крупного масштаба, рад
 export const CRATER_STEP = 0.4;       // во сколько раз мельче следующий
-export const CRATER_MAX_SCALES = 10;
+// Масштабов двенадцать, а не десять: десятый обрывал лестницу на
+// ячейке 1.1e-4 рад — на луне в 2400 км это 280 м, то есть кратеры
+// мельче ~14 м не существовали вовсе. С высоты этого не видно, а на
+// посадке грунт выходил гладким, как залитый. Нижние два масштаба
+// стоят дорого только для самых подробных плиток: detailForCell
+// отсекает их для всех остальных.
+export const CRATER_MAX_SCALES = 12;
 export const CRATER_SEED = 4441;      // сдвиг seed для кратерного слоя
 // Глубина кратера: min(DMAX, DK·sqrt(DREF/rc))·rc — см. craterDepth.
 // Показатель ровно 1/2 не случайно: в шейдере это один inversesqrt
@@ -229,10 +235,28 @@ export function craterLayer(seed, scale, x, y, z) {
   return h;
 }
 
-export function craterField(seed, x, y, z, scales) {
+// Насколько «моря» подавляют кратеры данного масштаба.
+//
+// Крупные кратеры в залитых лавой низинах стёрты — они древнее заливки.
+// Мелкие же выбиты уже ПОСЛЕ неё, и их там примерно столько же, сколько
+// на материках: настоящее море вблизи — не гладкая плита, а тот же
+// изрытый реголит. Поэтому маска работает целиком только на крупных
+// масштабах и сходит на нет к мелким. Без этого посадочный компьютер,
+// который ищет ровную площадку, всегда сажал корабль ровно туда, где
+// поверхность выглядит залитой бетоном.
+export const CRATER_MARE_FROM = 6;    // докуда маска действует целиком
+export const CRATER_MARE_TO = 9;     // где она перестаёт действовать вовсе
+
+export const mareWeight = (s, dens) => {
+  const k = smooth01((s - CRATER_MARE_FROM) / (CRATER_MARE_TO - CRATER_MARE_FROM));
+  return dens + (1 - dens) * k;
+};
+
+export function craterField(seed, x, y, z, scales, dens = 1) {
   let h = 0, c = CRATER_C0;
   for (let s = 0; s < scales; s++) {
-    h += craterLayer(seed + s * 7717, c, x, y, z);
+    const w = mareWeight(s, dens);
+    if (w > 0.002) h += w * craterLayer(seed + s * 7717, c, x, y, z);
     c *= CRATER_STEP;
   }
   return h;
@@ -417,8 +441,8 @@ export function makeTerrain(body) {
     }
     const r = flat ? 0 : raw(x, y, z, d.oct);
     const dens = !flat && craterW > 0 ? mare(x, y, z) : 0;
-    const cr = dens > 0 && d.cs > 0
-      ? craterW * dens * craterField(seed + CRATER_SEED, x, y, z, d.cs)
+    const cr = craterW > 0 && d.cs > 0
+      ? craterW * craterField(seed + CRATER_SEED, x, y, z, d.cs, dens)
       : 0;
     // Ниже уровня моря — ровная водная сфера, а не дно.
     const h = flat ? 0 : clamp01((r - cfg.sea) / span) * cfg.amp + cr;
@@ -455,8 +479,8 @@ export function makeTerrain(body) {
   // Вклад кратеров отдельно — нужен проверкам.
   const craterAt = flat || craterW === 0
     ? () => 0
-    : (x, y, z, detail) => craterW * mare(x, y, z) *
-      craterField(seed + CRATER_SEED, x, y, z, (detail || FULL).cs);
+    : (x, y, z, detail) => craterW *
+      craterField(seed + CRATER_SEED, x, y, z, (detail || FULL).cs, mare(x, y, z));
 
   const heightNorm = (x, y, z, oct) => normOf(flat ? 0 : raw(x, y, z, oct || FULL.oct));
 

@@ -10,14 +10,19 @@ import {
   craterField, craterLayer, GAIN, LAC, CRATER_DMAX,
   CRATER_C0, CRATER_STEP, CRATER_SEED, CRATER_RIM, CRATER_RMIN, CRATER_RSPAN,
   CRATER_REACH, CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W, CRATER_FRESH_MIN,
+  CRATER_MAX_SCALES, CRATER_MARE_FROM, CRATER_MARE_TO, mareWeight,
 } from '../js/gl/terrain.js';
-import { detailWindow, detailUniforms, DETAIL_GLSL } from '../js/gl/detail.js';
+import {
+  detailWindow, detailUniforms, tileDetailUniforms, DETAIL_GLSL,
+  DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
+} from '../js/gl/detail.js';
 import { patchPlan, patchBuilder, PATCH } from '../js/gl/patches.js';
 import { cubeLookup } from '../js/gl/bake.js';
 import {
-  faceDir, tileBounds, tileChildren, TILE_GRID,
+  faceDir, tileBounds, tileChildren, TILE_GRID, tileTexelAngle, tileCellAngle,
+  selectTiles, TILE_MAX_LEVEL,
 } from '../js/gl/quadtree.js';
-import { tileBuilder } from '../js/gl/tiles.js';
+import { tileBuilder, TILE_TEXEL_TOL } from '../js/gl/tiles.js';
 import { planetGeometry } from '../js/gl/planetmesh.js';
 import { perspective, modelView, dirToCamera, logDepth, logDepthCoef } from '../js/gl/mat4.js';
 import { makeSystem, bodyBasis } from '../js/game/world.js';
@@ -383,6 +388,43 @@ console.log('\n== кратеры ==');
     `поле кратеров непрерывно: шаг 1e-4 рад меняет высоту не более чем на ` +
     `${(worstStep * moon.radius * 1000).toFixed(0)} м`);
 
+  // Крупных кратеров в «морях» нет, а мелкие есть: их выбило уже после
+  // заливки. Проверка предметная — размах рельефа на полукилометре,
+  // то есть ровно то, что видно с высоты посадки. Именно такие ровные
+  // места выбирает посадочный компьютер, и без мелких кратеров грунт
+  // под кораблём выглядел залитым бетоном.
+  {
+    const mareDir = dirs.find(([x, y, z]) => t.craterDensity(x, y, z) < 0.08);
+    const spanM = (detail) => {
+      const [x, y, z] = mareDir;
+      const a = Math.atan2(z, x);
+      const ux = -Math.sin(a), uz = Math.cos(a);
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i <= 200; i++) {
+        const s = (i / 200) * 0.5 / moon.radius;      // дуга 500 м
+        const qx = x + ux * s, qy = y, qz = z + uz * s;
+        const l = Math.hypot(qx, qy, qz);
+        const h = t.craterAt(qx / l, qy / l, qz / l, detail) * moon.radius * 1000;
+        if (h < lo) lo = h;
+        if (h > hi) hi = h;
+      }
+      return hi - lo;
+    };
+    const fine = spanM(null);                          // все масштабы кратеров
+    const coarse = spanM({ oct: t.FULL.oct, cs: 7 });  // только масштабы крупнее 1.7 км
+    let mono = true;
+    for (let s = 1; s < CRATER_MAX_SCALES; s++) {
+      if (mareWeight(s, 0) < mareWeight(s - 1, 0) - 1e-12) mono = false;
+      if (Math.abs(mareWeight(s, 1) - 1) > 1e-12) mono = false;   // на материке маски нет
+    }
+    ok(mono && mareWeight(CRATER_MARE_FROM, 0) === 0 && mareWeight(CRATER_MARE_TO, 0) === 1,
+      `маска «морей» растёт от масштаба ${CRATER_MARE_FROM} к ${CRATER_MARE_TO} ` +
+      'и не трогает материки');
+    ok(fine > 5 && coarse < 2,
+      `в «море» на 500 м рельефа ${fine.toFixed(1)} м, и он весь от мелких ` +
+      `масштабов (без них ${coarse.toFixed(1)} м)`);
+  }
+
   // У океанического мира кратеров нет — их бы смыло.
   const ocean = makeTerrain(world2.home);
   let any = 0;
@@ -536,13 +578,49 @@ console.log('\n== деталь в шейдере ==');
       `(след пикселя ${(fw * moon.radius).toFixed(2)} км)`);
   }
 
-  // У заплатки под кораблём ячейка мелкая, и шейдеру почти нечего
-  // добавлять: иначе деталь считалась бы дважды.
+  // Окно всегда начинается ровно там, где кончается сетка, и не уходит
+  // ниже предела точности float32: первое — чтобы деталь не считалась
+  // дважды, второе — чтобы решётка не проступала ступеньками.
   {
-    const ww = detailWindow(t, 2e-5, 1e-7);
-    ok(ww.csTo - ww.csFrom <= 1 && ww.octTo - ww.octFrom <= 2,
-      `на подробной заплатке шейдер добавляет ${ww.octTo - ww.octFrom} октав и ` +
-      `${ww.csTo - ww.csFrom} масштабов кратеров`);
+    const cell = 2e-5;
+    const from = t.detailForCell(cell);
+    const ww = detailWindow(t, cell, 1e-9);
+    const finest = CRATER_C0 * CRATER_STEP ** (ww.csTo - 1);
+    ok(ww.octFrom === from.oct && ww.csFrom === from.cs &&
+       ww.octTo - ww.octFrom <= DETAIL_MAX_OCT && ww.csTo - ww.csFrom <= DETAIL_MAX_CS &&
+       finest >= DETAIL_MIN_SCALE,
+      `на подробной заплатке окно начинается с сетки и добавляет ` +
+      `${ww.octTo - ww.octFrom} октав и ${ww.csTo - ww.csFrom} масштабов кратеров ` +
+      `(самый мелкий ${finest.toExponential(1)} рад)`);
+  }
+
+  // Плитка: шейдер продолжает не сетку, а ЗАПЕЧЁННУЮ ТЕКСТУРУ, и должен
+  // начинаться ровно там, где её собственный вес перестаёт быть полным.
+  // Вес в текстуре — smoothstep(LO·тексель, HI·тексель, масштаб), то
+  // есть масштабы крупнее HI·текселя лежат в ней целиком, а всё, что
+  // мельче, шейдер обязан посчитать сам. Разъехались бы эти две границы
+  // — на стыке уровней плиток был бы либо шов, либо двойной рельеф.
+  {
+    let okStart = true, okFw = true, worst = '';
+    for (let level = 2; level <= 14; level++) {
+      const texel = tileTexelAngle(level);
+      const u = tileDetailUniforms(t, texel);
+      if (u.bakeFw !== texel) okFw = false;
+      const cAt = (s) => CRATER_C0 * CRATER_STEP ** s;
+      const full = DETAIL_FADE_HI * texel;
+      // Первый не вошедший целиком масштаб — и предыдущий, который вошёл.
+      if (u.csFrom < CRATER_MAX_SCALES &&
+          !(cAt(u.csFrom) < full && (u.csFrom === 0 || cAt(u.csFrom - 1) >= full))) {
+        okStart = false; worst = `ур.${level}: кратеры с ${u.csFrom}`;
+      }
+      const wave = (o) => 1 / (t.shaderParams().freq * LAC ** o);
+      if (!(wave(u.octFrom) < full && (u.octFrom === 0 || wave(u.octFrom - 1) >= full))) {
+        okStart = false; worst = `ур.${level}: октавы с ${u.octFrom}`;
+      }
+    }
+    ok(okStart && okFw,
+      'окно шейдера на плитке стыкуется с запечённой текстурой без нахлёста' +
+      (worst ? ' — ' + worst : ''));
   }
 
   // Бюджет: сетке, которую почти целиком закрывает что-то другое,
@@ -570,6 +648,8 @@ console.log('\n== деталь в шейдере ==');
       ['D_REACH', CRATER_REACH], ['D_BOWL', CRATER_BOWL],
       ['D_RIM_AT', CRATER_RIM_AT], ['D_RIM_W', CRATER_RIM_W],
       ['D_FRESH', CRATER_FRESH_MIN],
+      ['D_MIN_SCALE', DETAIL_MIN_SCALE],
+      ['D_MARE_FROM', CRATER_MARE_FROM], ['D_MARE_TO', CRATER_MARE_TO],
     ];
     let bad = [];
     for (const [name, val] of need) {
@@ -844,6 +924,71 @@ console.log('\n== плитки поверхности ==');
       `юбка ниже сетки, индексы влезают в 16 бит`);
   }
 
+  // Стык уровней: соседние плитки должны доводить деталь до одной и той
+  // же мелкости.
+  //
+  // Мелочь под текселем считает шейдер, и бюджет у него конечный:
+  // DETAIL_MAX_CS масштабов кратеров и DETAIL_MAX_OCT октав, то есть
+  // окно шириной не больше D_FIT. Если тексель плитки во столько-то раз
+  // крупнее пикселя, что окно не дотягивается до пикселя, деталь на ней
+  // обрывается раньше — и рядом с подробным соседом это видно швом:
+  // одна плитка зернистая, другая гладкая, граница прямая.
+  //
+  // Отсюда и взялся допуск на тексель в выборе уровня: два числа из
+  // разных файлов обязаны быть согласованы, и проверка тут именно об
+  // этом. Само расхождение нормали проверить headless нельзя.
+  {
+    const FIT = 2 / Math.min(CRATER_STEP ** -DETAIL_MAX_CS, LAC ** DETAIL_MAX_OCT);
+    const finestPx = TILE_TEXEL_TOL * FIT;
+    ok(finestPx <= 2.5,
+      `бюджет шейдера (${DETAIL_MAX_CS} масштабов, ${DETAIL_MAX_OCT} октав) дотягивает деталь ` +
+      `до ${finestPx.toFixed(1)} px на самой грубой разрешённой плитке ` +
+      `(${TILE_TEXEL_TOL} px на тексель)`);
+  }
+
+  // ...и второе условие того же: соседи по кадру не должны отличаться
+  // больше чем на два уровня. Без допуска на тексель уровень выбирался
+  // только по крупному рельефу, и рядом оказывались плитки, у которых
+  // тексель отличался в восемь раз.
+  {
+    const tt = makeTerrain(moon);
+    const R = moon.radius, focal = 1000, alt = 0.25;
+    const camDir = normalize(v3(0.3, 0.5, 0.81));
+    const mk = (tolScale) => ({
+      radius: R, camDir, camAlt: alt, focal, tol: 5 * tolScale, texelTol: TILE_TEXEL_TOL,
+      maxLevel: TILE_MAX_LEVEL, relief: tt.ampUp,
+      errorOf: (lv) => tt.meshError(tt.detailForCell(tileCellAngle(lv))) + tileCellAngle(lv) ** 2 / 8,
+      texelOf: (lv) => tileTexelAngle(lv), ready: () => true, want: () => {},
+    });
+    let tolScale = 1, out = selectTiles(mk(1), []);
+    while (out.length > 220 && tolScale < 80) {
+      tolScale = Math.min(80, tolScale * 1.12);
+      out = selectTiles(mk(tolScale), []);
+    }
+    let gap = 0, where = '';
+    for (let i = 0; i < out.length; i++) {
+      for (let j = i + 1; j < out.length; j++) {
+        const a = out[i], b = out[j];
+        if (a.face !== b.face || a.level === b.level) continue;
+        const ba = tileBounds(a.level, a.tx, a.ty), bb = tileBounds(b.level, b.tx, b.ty);
+        const e = 1e-12;
+        let adj = false;
+        if (Math.abs(ba.u1 - bb.u0) < e || Math.abs(bb.u1 - ba.u0) < e) {
+          adj = Math.min(ba.v1, bb.v1) > Math.max(ba.v0, bb.v0);
+        } else if (Math.abs(ba.v1 - bb.v0) < e || Math.abs(bb.v1 - ba.v0) < e) {
+          adj = Math.min(ba.u1, bb.u1) > Math.max(ba.u0, bb.u0);
+        }
+        if (adj && Math.abs(a.level - b.level) > gap) {
+          gap = Math.abs(a.level - b.level);
+          where = `${a.level}/${b.level}`;
+        }
+      }
+    }
+    ok(gap <= 2,
+      `с 250 м в кадре ${out.length} плиток, соседи отличаются не больше ` +
+      `чем на ${gap} уровня (худшая пара ${where})`);
+  }
+
   // Стоимость: одна плитка собирается порциями, чтобы не ронять кадр.
   {
     const t0 = Date.now();
@@ -895,6 +1040,10 @@ console.log('\n== мок GL: путь отрисовки ==');
   const state = {
     nan: 0, nanWhere: [], draws: 0, buffers: 0, programs: 0, vaos: 0, stencils: 0,
     textures: 0, texturesFreed: 0, bakes: 0, mipmaps: 0,
+    // Размах значений каждого скалярного uniform-а за всё время: по
+    // нему видно и то, дошёл ли параметр до шейдера вообще, и то,
+    // меняется ли он от плитки к плитке.
+    uni: {}, uniMin: {},
   };
   const CONST = {};
   let constCounter = 1;
@@ -924,6 +1073,11 @@ console.log('\n== мок GL: путь отрисовки ==');
     getProgramInfoLog: () => '',
     getAttribLocation: () => { attribIdx = (attribIdx + 1) % 8; return attribIdx; },
     getUniformLocation: (p, name) => ({ name }),
+    uniform1f: (loc, v) => {
+      if (!loc) return;
+      state.uni[loc.name] = Math.max(state.uni[loc.name] ?? -Infinity, v);
+      state.uniMin[loc.name] = Math.min(state.uniMin[loc.name] ?? Infinity, v);
+    },
     createBuffer: () => { state.buffers++; return {}; },
     createVertexArray: () => { state.vaos++; return {}; },
     drawArrays: () => { state.draws++; },
@@ -1087,6 +1241,25 @@ console.log('\n== мок GL: путь отрисовки ==');
       `каждая плитка запекается ровно один раз: ${dBake} проходов на ` +
       `${dBuilt} собранных плиток, мипы строятся`);
 
+    // Мелкая деталь на плитке: шейдер должен получить угловой размер
+    // текселя. Забыть этот uniform — значит либо не увидеть у земли
+    // ничего мельче текселя, либо посчитать рельеф дважды; и то и
+    // другое видно только глазами, поэтому проверяется здесь.
+    {
+      let deepest = 0, shallow = 99;
+      for (const t of scene.tiles.draw) {
+        deepest = Math.max(deepest, t.level);
+        shallow = Math.min(shallow, t.level);
+      }
+      // Ноль приходит с плиток без рельефа и с остальной сцены, поэтому
+      // минимум берём среди положительных.
+      const lo = tileTexelAngle(deepest), hi = tileTexelAngle(shallow);
+      const seen = state.uni.uBakeFw;
+      ok(seen >= hi * 0.999 && state.uniMin.uBakeFw === 0 && deepest > shallow,
+        `шейдеру передан тексель каждой плитки: от ${(lo * moon.radius * 1000).toFixed(1)} м ` +
+        `(уровень ${deepest}) до ${(seen * moon.radius * 1000 / 1000).toFixed(1)} км`);
+    }
+
     // Ни одной дырки: всё, что выбрано к отрисовке, готово.
     let holes = 0;
     for (const t of scene.tiles.draw) {
@@ -1122,13 +1295,48 @@ console.log('\n== мок GL: путь отрисовки ==');
           scene.render(game);
         }
       };
-      dive(); climb();
+      // Первый спуск — с ожиданием: на каждой высоте даём очереди
+      // опустеть, иначе сравнивать не с чем (за 60 кадров набор у
+      // поверхности всё равно не успевает собраться).
+      const first0 = scene.tiles.built;
+      for (let i = 0; i < 30; i++) {
+        put(20 * Math.pow(0.05 / 20, i / 29));
+        for (let k = 0; k < 60; k++) {
+          scene.render(game);
+          if (!scene.tiles.stats.pending) break;
+        }
+      }
+      const first = scene.tiles.built - first0;
+      climb();
       const before = scene.tiles.built;
       dive();
       const again = scene.tiles.built - before;
-      ok(again === 0,
-        `повторный спуск по тому же месту не строит ничего заново ` +
-        `(собрано ${again} плиток)`);
+      // Единицы плиток тут — не пересборка, а следствие того, что допуск
+      // на геометрию подстраивается под число плиток в кадре: на втором
+      // проходе он чуть другой, и у самой границы набор отличается на
+      // пару плиток. Пересборка кэша выглядела бы как десятки.
+      ok(again < 10 && again < first * 0.2,
+        `повторный спуск по тому же месту почти ничего не строит заново: ` +
+        `${again} плиток против ${first} на первом проходе`);
+    }
+
+    // Сходимость подгрузки с холодного кэша: сколько кадров проходит,
+    // пока под кораблём не окажется плитка с текселем мельче 20 м.
+    // Пока её нет, рисуется грубый предок, и вся мелкая деталь висит на
+    // шейдере — картинка правильная, но рельеф под кораблём плоский.
+    {
+      scene.tiles.clear();
+      put(0.25);
+      let frames = 0, best = 0;
+      while (frames++ < 900) {
+        scene.render(game);
+        for (const t of scene.tiles.draw) best = Math.max(best, t.level);
+        if (tileTexelAngle(best) * moon.radius < 0.02) break;
+      }
+      const texelM = tileTexelAngle(best) * moon.radius * 1000;
+      ok(frames < 900,
+        `с 250 м подробная плитка (тексель ${texelM.toFixed(1)} м, уровень ${best}) ` +
+        `подгружается за ${frames} кадров`);
     }
 
     // Кэш не растёт бесконечно: облёт тела вытесняет далёкие плитки.

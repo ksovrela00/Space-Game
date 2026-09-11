@@ -30,16 +30,20 @@ import {
   CRATER_RIM, CRATER_RMIN, CRATER_RSPAN, CRATER_REACH, CRATER_FRESH_MIN,
   CRATER_DMAX, CRATER_DK, CRATER_DREF,
   CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W,
+  CRATER_MARE_FROM, CRATER_MARE_TO,
 } from './terrain.js';
 
 // Бюджет на пиксель. Каждый масштаб кратеров — это 27 ячеек решётки,
 // поэтому их число ограничено; при нехватке производительности крутить
 // надо в первую очередь DETAIL_MAX_CS.
-export const DETAIL_MAX_CS = 3;
-export const DETAIL_MAX_OCT = 4;
-// Мельче этого в шейдере не считаем: во float32 координаты решётки
-// начинают терять точность, а такую мелочь уже несёт геометрия заплаток.
-export const DETAIL_MIN_SCALE = 2e-5;
+export const DETAIL_MAX_CS = 4;
+export const DETAIL_MAX_OCT = 5;
+// Мельче этого не считаем ни в шейдере, ни при запекании: координата
+// решётки — это направление (по модулю 1) делённое на масштаб, а во
+// float32 у единицы шаг 6e-8. При масштабе 5e-6 на ячейку приходится
+// ещё около восьмидесяти различимых положений — этого хватает; ниже
+// решётка начинает «ступеньками» проступать в нормали.
+export const DETAIL_MIN_SCALE = 5e-6;
 // След пикселя меньше половины детали — деталь показываем целиком;
 // меньше 2.5 — не показываем вовсе. Между ними плавное появление.
 export const DETAIL_FADE_LO = 2.5;
@@ -93,6 +97,8 @@ export function bakeUniforms(terrain) {
     csFrom: 0,
     maxCs: BAKE_MAX_CS,
     maxOct: BAKE_MAX_OCT,
+    // Сверху окно не обрезано: в текстуру пишется вся поверхность.
+    bakeFw: 0,
   };
 }
 
@@ -117,7 +123,27 @@ export function detailUniforms(terrain, meshCell, budget = 1) {
     craterW: p.craterW,
     octFrom: d.oct,
     csFrom: d.cs,
+    bakeFw: 0,
   };
+}
+
+/**
+ * Uniform-ы для плитки с запечённой текстурой.
+ *
+ * Текстура содержит рельеф крупнее своего текселя — шейдер продолжает
+ * её вниз, с того масштаба, где её собственный вес начинает падать
+ * (он обнуляется на 5·тексель, поэтому окно открывается как для сетки
+ * с ячейкой в два текселя). Дальше вниз всё решает след пикселя:
+ * далеко от камеры тексель мельче пикселя, вес нулевой, и вся эта
+ * арифметика пропускается целиком.
+ *
+ * @param texel угловой размер текселя плитки, рад
+ */
+export function tileDetailUniforms(terrain, texel, budget = 1) {
+  const u = detailUniforms(terrain, texel * 2, budget);
+  if (!u.on) return u;
+  u.bakeFw = texel;
+  return u;
 }
 
 // --- GLSL --------------------------------------------------------------------
@@ -140,6 +166,10 @@ uniform int uOctFrom;       // октавы, уже вошедшие в геом
 uniform int uCsFrom;        // масштабы кратеров, уже вошедшие в геометрию
 uniform int uMaxCs;         // предел на масштабы кратеров (цена кадра)
 uniform int uMaxOct;        // предел на октавы шума
+// Угловой размер текселя запечённой текстуры, если она под этим
+// пикселем есть (0 — нет). Всё, что крупнее, уже лежит в текстуре, и
+// добавлять это второй раз нельзя.
+uniform float uBakeFw;
 
 const float D_GAIN = ${f(GAIN)};
 const float D_LAC = ${f(LAC)};
@@ -160,7 +190,13 @@ const float D_FADE_LO = ${f(DETAIL_FADE_LO)};
 const float D_FADE_HI = ${f(DETAIL_FADE_HI)};
 const int D_MAX_CS = ${maxCs};
 const int D_MAX_OCT = ${maxOct};
+// Во сколько раз окно детали шире следа пикселя, если выбрать весь
+// бюджет: масштабов кратеров maxCs (каждый в 1/STEP раз мельче),
+// октав maxOct. Ограничение берётся по тому, что кончается первым.
+const float D_FIT = ${f(2 / Math.min(CRATER_STEP ** -maxCs, LAC ** maxOct))};
 const int D_CRATER_SEED = ${CRATER_SEED};
+const float D_MARE_FROM = ${f(CRATER_MARE_FROM)};
+const float D_MARE_TO = ${f(CRATER_MARE_TO)};
 
 // Тот же хеш, что в js/gl/terrain.js: imul в JS и умножение uint здесь
 // дают одни и те же 32 бита.
@@ -222,6 +258,24 @@ float dNoiseRaw(int seed, vec3 p, int oct) {
   return sum * (1.0 - D_GAIN);
 }
 
+/**
+ * Вес масштаба детали.
+ *
+ * Снизу его обрезает след пикселя: то, что мельче него, дало бы рябь.
+ * Сверху — запечённая текстура: она содержит всё крупнее своего
+ * текселя, и вес здесь ровно дополняет её собственный (та же
+ * smoothstep, взятая наоборот). Поэтому сумма «текстура + шейдер» не
+ * зависит от того, плитка какого уровня оказалась под пикселем, и на
+ * стыке уровней нет ни шва, ни удвоенного рельефа.
+ */
+float dWeight(float scale, float fw) {
+  float w = smoothstep(D_FADE_LO * fw, D_FADE_HI * fw, scale);
+  if (uBakeFw > 0.0) {
+    w *= 1.0 - smoothstep(D_FADE_LO * uBakeFw, D_FADE_HI * uBakeFw, scale);
+  }
+  return w;
+}
+
 // Октавы шума мельче тех, что уже в сетке. Появляются плавно: вес
 // зависит от того, насколько длина волны больше следа пикселя.
 float dNoiseSum(vec3 p, int octTo, float fw) {
@@ -231,7 +285,7 @@ float dNoiseSum(vec3 p, int octTo, float fw) {
   for (int o = 0; o < D_MAX_OCT; o++) {
     int oi = uOctFrom + o;
     if (o >= uMaxOct || oi >= octTo) break;
-    float w = smoothstep(D_FADE_LO * fw, D_FADE_HI * fw, 1.0 / fq);
+    float w = dWeight(1.0 / fq, fw);
     if (w > 0.001) {
       if (uRidge > 0.5) {
         float n = 1.0 - abs(dPerlin(uSeed + oi * 7919, p * fq));
@@ -275,14 +329,17 @@ float dProfileD(float t) {
  * Центры — узлы трёхмерной решётки у поверхности сферы, как на CPU,
  * поэтому проверяются 27 соседних ячеек: дальше кратер не дотянется.
  */
-void dCraters(vec3 p, vec3 U, vec3 V, int csTo, float fw, out float h, out vec2 g) {
+void dCraters(vec3 p, vec3 U, vec3 V, int csTo, float fw, float dens, out float h, out vec2 g) {
   h = 0.0;
   g = vec2(0.0);
   float c = D_C0 * pow(D_STEP, float(uCsFrom));
   for (int si = 0; si < D_MAX_CS; si++) {
     int s = uCsFrom + si;
     if (si >= uMaxCs || s >= csTo || s >= D_MAX_SCALES) break;
-    float w = smoothstep(D_FADE_LO * fw, D_FADE_HI * fw, c);
+    // Маска «морей» действует на крупные масштабы целиком, на мелкие —
+    // уже нет (см. mareWeight в js/gl/terrain.js).
+    float mw = mix(dens, 1.0, smoothstep(D_MARE_FROM, D_MARE_TO, float(s)));
+    float w = dWeight(c, fw) * mw;
     if (w > 0.001) {
       int layerSeed = uSeed + D_CRATER_SEED + s * 7717;
       // Отсев ячеек: далеко от сферы или далеко от точки. Профиль вала
@@ -368,18 +425,25 @@ void dLimits(float fw, out int octTo, out int csTo) {
  * с нулевой октавы, и по шумовой части восстанавливается абсолютная
  * высота — а по ней видно, где вода.
  */
-void dDetail(vec3 p, vec3 U, vec3 V, float fw, out float hn, out vec2 g, out float cr) {
+void dDetail(vec3 p, vec3 U, vec3 V, float fwIn, out float hn, out vec2 g, out float cr) {
+  // Окно не может быть шире бюджета. Если тексель плитки настолько
+  // крупнее пикселя, что разница в бюджет не влезает, добавлять
+  // «сколько успеется» НЕЛЬЗЯ: частичная сумма — это не менее подробная
+  // поверхность, а смещённая. На грубой плитке вблизи нормаль уезжала
+  // на тридцать градусов, и на стыке с подробным соседом это читалось
+  // прямой границей света и тени поперёк грунта.
+  //
+  // Вместо этого расширяем след пикселя: поверхность выходит та же,
+  // только сглаженная, — ровно как более крупный мип. Соседние уровни
+  // тогда отличаются резкостью, а не наклоном, и стык не виден.
+  float fw = max(fwIn, uBakeFw * D_FIT);
   int octTo, csTo;
   dLimits(fw, octTo, csTo);
   float dens = dMare(p);
 
   vec2 gc = vec2(0.0);
   cr = 0.0;
-  if (dens > 0.02) {
-    dCraters(p, U, V, csTo, fw, cr, gc);
-    cr *= dens;
-    gc *= dens;
-  }
+  dCraters(p, U, V, csTo, fw, dens, cr, gc);
 
   float k = uAmp / max(uSpan, 1e-6);
   float n0 = dNoiseSum(p, octTo, fw) * k;
