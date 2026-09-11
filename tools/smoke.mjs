@@ -188,8 +188,13 @@ await step('задний ход по длинному Ctrl', () => {
   if (!(game.ship.throttle < -0.3)) {
     throw new Error('тяга не ушла назад: ' + game.ship.throttle.toFixed(2));
   }
-  if (!(game.ship.speed < 0)) throw new Error('скорость не стала отрицательной');
-  const back = Math.abs(game.ship.speed);
+  // Скорость — вектор, ship.speed её модуль; ход назад читается
+  // проекцией на нос.
+  const f = game.ship.basis.fwd, v = game.ship.vel;
+  if (!(v.x * f.x + v.y * f.y + v.z * f.z < 0)) {
+    throw new Error('корабль не поехал назад');
+  }
+  const back = game.ship.speed;
   key('KeyX'); frames(120);
   if (!(back < 0.3)) throw new Error('задний ход слишком быстрый: ' + back);
   if (Math.abs(game.ship.speed) > 1e-6) throw new Error('X не останавливает на заднем ходу');
@@ -203,8 +208,9 @@ await step('подъёмные движки (R/F) и полная тяга (Z)',
   holdDown('KeyF'); frames(60);
   const down = game.ship.lift;
   release('KeyF'); frames(30);
-  if (!(up > 0.01)) throw new Error('R не поднимает: lift ' + up);
-  if (!(down < -0.01)) throw new Error('F не опускает: lift ' + down);
+  // lift — это ТЯГА подъёмных движков (км/с²), а не скорость.
+  if (!(up > 0)) throw new Error('R не даёт тяги вверх: ' + up);
+  if (!(down < 0)) throw new Error('F не даёт тяги вниз: ' + down);
   key('KeyZ'); frames(2);
   if (game.ship.throttle !== 1) throw new Error('Z не даёт полную тягу: ' + game.ship.throttle);
   key('KeyX'); frames(2);
@@ -470,6 +476,44 @@ await step('панель подхода: всё в одном месте и во
   }
 });
 
+await step('удар о грунт: отскок, урон и потеря управления', () => {
+  const moon = game.world.bodies.find((b) => b.kind === 'moon');
+  game.nav.index = game.nav.list.indexOf(moon);
+  game.teleAlt = 6;                       // 0.05 км над грунтом
+  key('KeyK'); frames(3);
+  const ship = game.ship;
+  ship.gear.out = true; ship.gear.t = 1;
+  ship.hull = 100;
+  // Разгоняем вдоль грунта и подталкиваем вниз: приход с ходу.
+  const up = { x: ship.pos.x - moon.pos.x, y: ship.pos.y - moon.pos.y, z: ship.pos.z - moon.pos.z };
+  const l = Math.hypot(up.x, up.y, up.z);
+  up.x /= l; up.y /= l; up.z /= l;
+  const f = ship.basis.fwd;
+  const v = 0.12;
+  ship.vel.x = f.x * v - up.x * 0.01;
+  ship.vel.y = f.y * v - up.y * 0.01;
+  ship.vel.z = f.z * v - up.z * 0.01;
+  ship.throttle = 1;
+
+  let stunSeen = false, hull0 = ship.hull;
+  for (let i = 0; i < 600 && game.state.mode === 'flight'; i++) {
+    frames(1);
+    if (game.ship.stun > 0) stunSeen = true;
+    if (game.ship.hull < hull0) break;
+  }
+  if (game.state.mode === 'crashed') {
+    // Тоже допустимый исход, но корпус должен был кончиться, а не
+    // «разрушиться от касания».
+    if (!/корпус/i.test(game.crashReason || '')) {
+      throw new Error('разрушение не от корпуса: ' + game.crashReason);
+    }
+  } else {
+    if (!(game.ship.hull < hull0)) throw new Error('удар не снял ни процента корпуса');
+    if (!stunSeen) throw new Error('после удара не было потери управления');
+    if (game.ship.hull <= 0) throw new Error('корпус ушёл в минус без крушения');
+  }
+});
+
 await step('шасси выпускается и убирается по G', () => {
   // Возвращаемся в полёт: предыдущий шаг оставляет корабль внутри звезды.
   if (game.state.mode === 'crashed') { key('Space'); frames(5); }
@@ -524,7 +568,17 @@ await step('стоянка на поверхности и взлёт по Space'
   if (!saved.gear) throw new Error('состояние шасси не сохранено');
   key('Space'); frames(30);
   if (game.state.mode !== 'flight') throw new Error('после взлёта режим ' + game.state.mode);
-  if (!(game.ship.lift > 0)) throw new Error('после отрыва нет хода подъёмных движков');
+  // Отрыв — это импульс по местной вертикали, а не «ход движков».
+  {
+    const b = game.ship.landedAt || game.zone && game.zone.body;
+    const p = game.ship.pos, c = b ? b.pos : { x: 0, y: 0, z: 0 };
+    const ux = p.x - c.x, uy = p.y - c.y, uz = p.z - c.z;
+    const l = Math.hypot(ux, uy, uz) || 1;
+    const v = game.ship.vel;
+    if (!((v.x * ux + v.y * uy + v.z * uz) / l > 0.001)) {
+      throw new Error('после отрыва корабль не идёт вверх');
+    }
+  }
   frames(60 * 5);
 });
 

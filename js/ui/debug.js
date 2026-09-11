@@ -28,7 +28,7 @@ export function drawDebug(r, game, dbg) {
     `круиз лимит x${[1, 10, 100, 1000, 10000, 50000][game.cruise.limitedTo]}  masslock ${game.cruise.massLocked ? game.cruise.lockedBy.name : 'нет'}`,
     `rot ${s.rot.pitch.toFixed(3)} ${s.rot.yaw.toFixed(3)} ${s.rot.roll.toFixed(3)}`,
     `режим ${game.state.mode}  вид ${game.state.view}` +
-      (s.lift || s.sink ? `  верт ${((s.lift - s.sink) * 1000).toFixed(1)} м/с` : ''),
+      (s.lift ? `  подъём ${(s.lift * 1000).toFixed(1)} м/с²` : ''),
     game.capture
       ? `захват ${game.capture.name}: g ${game.capture.g0.toFixed(2)} м/с², ` +
         `сфера ${(game.capture.soi / game.capture.radius).toFixed(1)} радиусов`

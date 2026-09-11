@@ -1,5 +1,5 @@
 // Headless-проверка игровой логики: мир, полёт, автопилот, стыковка.
-import { v3, normalize, dot, len } from '../js/core/vec3.js';
+import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis } from '../js/core/basis.js';
 import { makeSystem, updateWorld, nearestBody } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
@@ -12,7 +12,7 @@ import {
   worldPoint, surfaceVelocity, localDir, dirToWorldBody,
 } from '../js/game/surface.js';
 import {
-  toggleGear, updateGear, gearReady, landingContext,
+  toggleGear, updateGear, gearReady, landingContext, bounceOff, LAND,
   startLanding, updateLandingComputer, checkTouchdown, settle, updateLandedPose,
   takeoff, landingReadout,
 } from '../js/game/landing.js';
@@ -22,6 +22,7 @@ import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
 import { Camera } from '../js/render/camera.js';
+import { velocityMarker } from '../js/ui/hud.js';
 import { Renderer } from '../js/render/renderer.js';
 import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
@@ -914,8 +915,12 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     const z2 = landingContext(w, sh);
     if (z2) res = checkTouchdown(sh, z2);
   }
-  ok(res && res.result === 'crash' && /шасси/i.test(res.reason),
-    `мягкое касание с убранным шасси — авария: ${res ? res.reason : 'не произошло'}`);
+  // Касание брюхом на 24 м/с — уже не мгновенная смерть, а удар: корабль
+  // отскакивает и теряет часть корпуса. Считать разрушением сам факт
+  // касания неверно — с этого и началась правка.
+  ok(res && res.result === 'bounce' && res.damage > 5 && res.damage < 100,
+    `касание брюхом на ${res ? (res.hit * 1000).toFixed(0) : '?'} м/с — удар, ` +
+    `а не смерть: корпусу −${res && res.damage ? res.damage.toFixed(0) : '?'}%`);
 }
 
 // Слишком быстрое касание: падаем на грунт без посадочного режима.
@@ -930,7 +935,10 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   lookAlong(sh.basis, normalize(v3(
     moon.pos.x - sh.pos.x, moon.pos.y - sh.pos.y, moon.pos.z - sh.pos.z)));
   sh.gear.out = true; sh.gear.t = 1;
-  sh.throttle = 1; sh.speed = SHIP.maxSpeed * SHIP.gearSpeed;
+  sh.throttle = 1;
+  const f0 = sh.basis.fwd, v0 = SHIP.maxSpeed * SHIP.gearSpeed;
+  sh.vel.x = f0.x * v0; sh.vel.y = f0.y * v0; sh.vel.z = f0.z * v0;
+  sh.speed = v0;
   let res = null;
   for (let i = 0; i < 60 * 60 && !res; i++) {
     updateWorld(w, STEP);
@@ -942,8 +950,11 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     const z2 = landingContext(w, sh);
     if (z2) res = checkTouchdown(sh, z2);
   }
-  ok(res && res.result === 'crash' && /скорость/i.test(res.reason),
-    `удар о поверхность на скорости — авария: ${res ? res.reason : 'не произошло'}`);
+  // 420 м/с — это уже не удар, а разрушение: урона больше, чем весь
+  // корпус, и в игре такой отскок сразу кончается экраном крушения.
+  ok(res && res.damage >= SHIP.maxHull,
+    `удар на ${res ? (res.hit * 1000).toFixed(0) : '?'} м/с сносит корпус целиком: ` +
+    `−${res && res.damage ? res.damage.toFixed(0) : '?'}% при запасе ${SHIP.maxHull}`);
 }
 
 // Касание планеты с атмосферой — всегда удар, даже идеально мягкое:
@@ -1053,8 +1064,9 @@ console.log('\n== гравитация и захват ==');
     const cap = captureBody(w, sh.pos);
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
-    // Держим высоту: ровно столько движков, сколько нужно против веса.
-    sh.control.lift = sh.sink / SHIP.liftRate;
+    // Держим высоту: подъёмные движки дают тягу, и зависание — ровно
+    // треть хода (полный ход втрое больше веса, SHIP.liftTWR).
+    sh.control.lift = 1 / SHIP.liftTWR;
     updateShip(sh, STEP, STEP, gravityField(cap, sh));
     if (i % 600 === 0) {
       const z = landingContext(w, sh);
@@ -1091,11 +1103,72 @@ console.log('\n== гравитация и захват ==');
   };
   const withGear = drop(true, 20);
   const noGear = drop(false, 20);
-  const want = moon.g0 / 1000 * SHIP.sinkTime * 20;     // км за 20 с
-  ok(Math.abs(withGear - want) < want * 0.15 && Math.abs(noGear) < 0.001,
-    `за 20 с на шасси просели на ${(withGear * 1000).toFixed(0)} м ` +
-    `(по тяге тела ${(want * 1000).toFixed(0)} м), с убранным шасси — ` +
-    `${(noGear * 1000).toFixed(0)} м`);
+  // Падение теперь ничем не ограничено: чистое gt²/2. Потолка скорости
+  // больше нет — с выпущенным шасси тяготение действует как есть.
+  const g = moon.g0 / 1000;
+  const want = g * 20 * 20 / 2;
+  ok(Math.abs(withGear - want) < want * 0.05 && Math.abs(noGear) < 0.001,
+    `за 20 с свободного падения просели на ${(withGear * 1000).toFixed(0)} м ` +
+    `(gt²/2 = ${(want * 1000).toFixed(0)} м, скорость ${(g * 20 * 1000).toFixed(0)} м/с), ` +
+    `с убранным шасси — ${(noGear * 1000).toFixed(0)} м`);
+}
+
+// Тяготение действует на сам ВЕКТОР скорости: горизонтальный бросок с
+// выпущенным шасси идёт по параболе, а не по прямой. Это и есть разница
+// между «гравитация как заданная скорость снижения» и настоящей.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const dir = normalize(v3(0.31, -0.62, 0.72));
+  const sh = makeShip();
+  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 2, v3()), makeBasis());
+  const up = dirToWorldBody(moon, dir, v3());
+  const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
+  const fwd = normalize(horizontal(axis, up, v3()));
+  lookAlong(sh.basis, fwd, up);
+  sh.gear.out = true; sh.gear.t = 1;
+  const v0 = 0.1;                       // 100 м/с строго по горизонту
+  sh.vel.x = fwd.x * v0; sh.vel.y = fwd.y * v0; sh.vel.z = fwd.z * v0;
+  sh.throttle = v0 / (SHIP.maxSpeed * SHIP.gearSpeed);
+
+  // Мерить надо в осях ТЕЛА: система отсчёта рядом с ним вращается
+  // вместе с поверхностью, и в мировых координатах к броску добавилась
+  // бы окружная скорость грунта.
+  const d0 = localDir(moon, sh.pos, v3());
+  const r0 = Math.hypot(sh.pos.x - moon.pos.x, sh.pos.y - moon.pos.y, sh.pos.z - moon.pos.z);
+  const track = [];
+  for (let i = 0; i < 60 * 10; i++) {
+    updateWorld(w, STEP);
+    const cap = captureBody(w, sh.pos);
+    if (cap) carryShip(sh, cap, STEP);
+    clearControls(sh);
+    sh.control.thr = 0;                 // тягу держим как есть
+    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    if ((i + 1) % 120 === 0) {
+      const dd = localDir(moon, sh.pos, v3());
+      const rr = Math.hypot(
+        sh.pos.x - moon.pos.x, sh.pos.y - moon.pos.y, sh.pos.z - moon.pos.z);
+      track.push({
+        t: (i + 1) / 60,
+        down: r0 - rr,
+        along: Math.acos(clamp(dot(d0, dd), -1, 1)) * moon.radius,
+      });
+    }
+  }
+  const g = moon.g0 / 1000;
+  const last = track[track.length - 1];
+  const want = g * last.t * last.t / 2;
+  // Проседание растёт как квадрат времени: за вдвое большее время —
+  // вчетверо глубже. По прямой оно росло бы линейно.
+  const half = track[Math.floor(track.length / 2) - 1];
+  const ratio = last.down / Math.max(1e-9, half.down);
+  const square = (last.t / half.t) ** 2;          // так растёт парабола
+  ok(Math.abs(last.down - want) < want * 0.12 &&
+     Math.abs(ratio - square) < square * 0.15 && last.along > 0.9,
+    `бросок на 100 м/с: за ${last.t} с прошли ${last.along.toFixed(2)} км и просели ` +
+    `${(last.down * 1000).toFixed(0)} м (gt²/2 = ${(want * 1000).toFixed(0)}); ` +
+    `к ${half.t} с проседание было в ${ratio.toFixed(1)} раза меньше — ` +
+    `парабола даёт ${square.toFixed(1)}`);
 }
 
 // Вертикальный ход доступен всегда и не мешает лететь вперёд: это и
@@ -1124,9 +1197,12 @@ console.log('\n== гравитация и захват ==');
   const moved = v3(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
   const climb = z.alt - 2;
   const fwd = Math.hypot(moved.x, moved.y, moved.z);
-  ok(climb > 0.3 && fwd > 3,
+  // Подъём идёт с ускорением (liftTWR − 1)·g: полная тяга движков втрое
+  // больше веса, вес её частично съедает.
+  const want = (SHIP.liftTWR - 1) * moon.g0 / 1000 * 100 / 2;
+  ok(climb > want * 0.7 && climb < want * 1.3 && fwd > 3,
     `с выпущенным шасси за 10 с: вперёд ${fwd.toFixed(1)} км и вверх ` +
-    `${(climb * 1000).toFixed(0)} м одновременно`);
+    `${(climb * 1000).toFixed(0)} м (по тяге ${(want * 1000).toFixed(0)}) одновременно`);
 }
 
 // --- 5f. Тень корабля --------------------------------------------------------
@@ -1208,7 +1284,9 @@ console.log('\n== задний ход ==');
   const atZero = sh.speed;
   const thrZero = sh.throttle;
   hold(4, -1);
-  const vBack = sh.speed;
+  // Скорость теперь вектор, а ship.speed — его модуль; знак хода читается
+  // проекцией на нос.
+  const vBack = dot(sh.vel, sh.basis.fwd);
 
   // На защёлке тяга ровно ноль, а скорость ещё гасится: тяга задаёт
   // цель, а не саму скорость, и корабль доезжает по инерции.
@@ -1238,6 +1316,174 @@ console.log('\n== задний ход ==');
   }
   ok(sh2.throttle === 0,
     `после короткого сброса тяга стоит на нуле, а не уходит в минус (${sh2.throttle})`);
+}
+
+// --- 5h. Инерция и удар ------------------------------------------------------
+console.log('\n== инерция и удар ==');
+{
+  // Разворот на скорости больше не переставляет вектор движения мгновенно:
+  // корабль сносит по старому курсу, и только маневровые движки постепенно
+  // разворачивают саму скорость. Это и есть векторная скорость.
+  const sh = makeShip();
+  placeShip(sh, v3(0, 0, 0), makeBasis());
+  for (let i = 0; i < 60 * 5; i++) {
+    clearControls(sh);
+    sh.control.thr = 1;
+    updateShip(sh, STEP, STEP);
+  }
+  const v0 = Math.hypot(sh.vel.x, sh.vel.y, sh.vel.z);
+  // Разворот носа на 90° «рывком»: дальше смотрим, что делает скорость.
+  lookAlong(sh.basis, v3(1, 0, 0));
+  const angleTo = () => {
+    const l = Math.hypot(sh.vel.x, sh.vel.y, sh.vel.z) || 1;
+    return Math.acos(clamp(
+      (sh.vel.x * sh.basis.fwd.x + sh.vel.y * sh.basis.fwd.y + sh.vel.z * sh.basis.fwd.z) / l,
+      -1, 1)) * 57.3;
+  };
+  const run = (sec) => {
+    for (let i = 0; i < Math.round(sec / STEP); i++) {
+      clearControls(sh);
+      sh.control.thr = 1;
+      updateShip(sh, STEP, STEP);
+    }
+  };
+  run(0.5);
+  const soon = angleTo();
+  run(6);
+  const later = angleTo();
+  ok(v0 > 1.1 && soon > 45 && later < 10,
+    `инерция: через полсекунды после разворота скорость всё ещё под ${soon.toFixed(0)}° ` +
+    `к носу, через шесть секунд — ${later.toFixed(0)}°`);
+}
+
+// Приход на грунт с ходу: отскок, урон и определённый исход. Главное,
+// что проверяется, — корабль не зависает в бесконечных отскоках и не
+// умирает от самого факта касания.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = moonPick(w);
+  const run = (ms) => {
+    const sh = makeShip();
+    const dir = normalize(v3(0.42, 0.55, 0.72));
+    placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 0.12, v3()), makeBasis());
+    const up = dirToWorldBody(moon, dir, v3());
+    const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
+    lookAlong(sh.basis, normalize(horizontal(axis, up, v3())), up);
+    sh.gear.out = true; sh.gear.t = 1;
+    const fwd = sh.basis.fwd, v = ms / 1000;
+    sh.throttle = v / (SHIP.maxSpeed * SHIP.gearSpeed);
+    sh.vel.x = fwd.x * v - up.x * 0.004;
+    sh.vel.y = fwd.y * v - up.y * 0.004;
+    sh.vel.z = fwd.z * v - up.z * 0.004;
+
+    let bounces = 0, landed = false, crashed = null, maxUp = 0;
+    for (let i = 0; i < 60 * 90 && !landed && !crashed; i++) {
+      updateWorld(w, STEP);
+      const cap = captureBody(w, sh.pos);
+      if (cap) carryShip(sh, cap, STEP);
+      clearControls(sh);
+      updateGear(sh, STEP);
+      updateShip(sh, STEP, STEP, gravityField(cap, sh));
+      const z = landingContext(w, sh);
+      if (!z) continue;
+      const t = checkTouchdown(sh, z);
+      if (!t) continue;
+      if (t.result === 'bounce') {
+        bounces++;
+        bounceOff(sh, z);
+        sh.hull -= t.damage;
+        maxUp = Math.max(maxUp, dot(sh.vel, z.upWorld) - dot(z.surfVel, z.upWorld));
+        if (sh.hull <= 0) { crashed = 'корпус разрушен'; break; }
+      } else if (t.result === 'landed') {
+        landed = true;
+        if (t.damage) sh.hull -= t.damage;
+        settle(sh, z);
+      } else crashed = t.reason;
+    }
+    return { bounces, landed, crashed, hull: sh.hull, maxUp };
+  };
+
+  const soft = run(40);
+  ok(soft.landed && soft.hull === SHIP.maxHull && soft.bounces > 0,
+    `юз на 40 м/с: ${soft.bounces} отскок(ов), корпус цел (${soft.hull}%), посадка`);
+
+  const hard = run(100);
+  ok(hard.bounces > 0 && (hard.landed || hard.crashed) && hard.hull < 95 && hard.hull > 40 &&
+     hard.maxUp > 0.001,
+    `приход на 100 м/с: ${hard.bounces} отскок(ов) вверх до ` +
+    `${(hard.maxUp * 1000).toFixed(0)} м/с, корпус ${hard.hull.toFixed(0)}%, ` +
+    `исход — ${hard.landed ? 'посадка' : hard.crashed}`);
+
+  const fatal = run(300);
+  ok(!!fatal.crashed && fatal.hull <= 0,
+    `приход на 300 м/с: корпус ${fatal.hull.toFixed(0)}% — ${fatal.crashed}`);
+}
+
+// Шкала урона: квадрат скорости, шасси и поза. Проверяем не цифры, а
+// смысл — касание безвредно, тяжёлый удар смертелен, между ними рост.
+{
+  const w = makeSystem(0x1a7e);
+  const moon = moonPick(w);
+  const sh = makeShip();
+  const dir = normalize(v3(0.2, 0.6, -0.7));
+  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + SHIP.gearClear * 0.5, v3()),
+    makeBasis());
+  const up = dirToWorldBody(moon, dir, v3());
+  const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
+  lookAlong(sh.basis, normalize(horizontal(axis, up, v3())), up);
+  const zone = landingContext(w, sh);
+  const hurt = (ms, gear) => {
+    sh.gear.out = gear; sh.gear.t = gear ? 1 : 0;
+    zone.relVel.x = -up.x * ms / 1000;
+    zone.relVel.y = -up.y * ms / 1000;
+    zone.relVel.z = -up.z * ms / 1000;
+    const t = checkTouchdown(sh, zone);
+    if (!t) return null;
+    return t.result === 'landed' ? (t.damage || 0) : (t.damage || 0);
+  };
+  const g1 = hurt(1, true), g25 = hurt(25, true), g50 = hurt(50, true), g95 = hurt(95, true);
+  const b1 = hurt(1, false), b10 = hurt(10, false), b30 = hurt(30, false);
+  ok(g1 === 0 && g25 === 0 && g50 > 5 && g50 < 40 && g95 >= SHIP.maxHull &&
+     b1 <= LAND.belly && b10 >= b1 && b30 > b10 && b30 < SHIP.maxHull,
+    `на шасси: 1 м/с — ${g1}%, 25 — ${g25}%, 50 — ${g50.toFixed(0)}%, ` +
+    `95 — ${g95.toFixed(0)}%; брюхом: 1 — ${b1.toFixed(0)}%, 10 — ${b10.toFixed(0)}%, ` +
+    `30 — ${b30.toFixed(0)}%`);
+}
+
+// --- 5i. Указатель вектора скорости ------------------------------------------
+console.log('\n== указатель вектора ==');
+{
+  const cam = new Camera();
+  cam.resize(1600, 900);
+  lookAlong(cam.basis, v3(0, 0, 1));
+  cam.pos.x = cam.pos.y = cam.pos.z = 0;
+
+  // Летим ровно по носу — указатель ложится на прицел.
+  const ahead = velocityMarker(cam, v3(0, 0, 1));
+  ok(ahead && Math.abs(ahead.x - cam.cx) < 0.001 && Math.abs(ahead.y - cam.cy) < 0.001 &&
+     !ahead.back,
+    `полёт по носу: указатель в центре (${ahead.x.toFixed(1)}, ${ahead.y.toFixed(1)})`);
+
+  // Под 30° вправо: смещение ровно focal·tg30°, как и положено проекции.
+  const a = 30 * Math.PI / 180;
+  const side = velocityMarker(cam, v3(Math.sin(a), 0, Math.cos(a)));
+  const want = cam.focal * Math.tan(a);
+  ok(side && Math.abs((side.x - cam.cx) - want) < 0.01 && Math.abs(side.y - cam.cy) < 0.01,
+    `снос на 30°: указатель ушёл вправо на ${(side.x - cam.cx).toFixed(1)} px ` +
+    `(ожидание ${want.toFixed(1)})`);
+
+  // Вверх — вверх по экрану (ось Y там растёт вниз, знак легко перепутать).
+  const upM = velocityMarker(cam, v3(0, Math.sin(a), Math.cos(a)));
+  ok(upM && upM.y < cam.cy - 100, `движение вверх поднимает указатель (y ${upM.y.toFixed(0)} при центре ${cam.cy})`);
+
+  // Задний ход: отметка перечёркнутая и с той стороны, откуда летим.
+  const back = velocityMarker(cam, v3(0, 0, -1));
+  ok(back && back.back && Math.abs(back.x - cam.cx) < 0.001,
+    'задний ход: указатель помечен как «назад»');
+
+  // Почти стоим — указателя нет, иначе он прыгал бы от шума.
+  ok(velocityMarker(cam, v3(0, 0, 0.0005)) === null,
+    'на месте указатель не рисуется');
 }
 
 console.log('\n== столкновения ==');

@@ -23,7 +23,7 @@ import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.j
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import {
   toggleGear, updateGear, gearLabel, landingContext,
-  startLanding, stopLanding, updateLandingComputer, checkTouchdown, settle,
+  startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
   updateLandedPose, takeoff, landingReadout, landedInfo, LAND,
 } from './game/landing.js';
 import { makeState, say, updateMessages, ST } from './game/state.js';
@@ -112,7 +112,6 @@ function dockAt(station) {
   stopLanding(ship);
   resetCruise(game.cruise);
   ship.lift = 0;
-  ship.sink = 0;
   ship.gear.out = false;
   ship.speed = 0;
   ship.throttle = 0;
@@ -188,7 +187,6 @@ function crash(reason) {
   ship.speed = 0;
   ship.throttle = 0;
   ship.lift = 0;
-  ship.sink = 0;
   ship.landedAt = null;
   stopAutopilot(ship);
   stopDockingComputer(ship);
@@ -221,7 +219,6 @@ function teleportToTarget() {
   stopDockingComputer(ship);
   stopLanding(ship);
   ship.lift = 0;
-  ship.sink = 0;
   ship.landedAt = null;
   ship.landedPose = null;
   resetCruise(game.cruise);
@@ -572,11 +569,33 @@ function step(dt) {
   if (zone) {
     const touch = checkTouchdown(ship, zone);
     if (touch && touch.result === 'landed') {
-      say(st, 'ПОСАДКА ВЫПОЛНЕНА: ' + zone.body.name, '#78e08f');
+      if (touch.damage) {
+        ship.hull = Math.max(1, ship.hull - touch.damage);
+        say(st, 'ПОСАДКА БЕЗ ШАССИ · −' + Math.round(touch.damage) + '% КОРПУСА', '#ffcc66', 2);
+      } else {
+        say(st, 'ПОСАДКА ВЫПОЛНЕНА: ' + zone.body.name, '#78e08f');
+      }
       landAt(zone);
       return;
     }
     if (touch && touch.result === 'crash') { crash(touch.reason); return; }
+    if (touch && touch.result === 'bounce') {
+      // Удар, но не смерть: корабль отскакивает, теряет часть корпуса и
+      // на время лишается управления. Разрушение теперь наступает не от
+      // самого факта касания, а когда корпуса больше нет.
+      const hadComputer = !!ship.landing;
+      bounceOff(ship, zone);
+      ship.hull -= touch.damage;
+      game.stats.hits = (game.stats.hits || 0) + 1;
+      if (ship.hull <= 0) {
+        ship.hull = 0;
+        crash(touch.reason + ' Корпус разрушен.');
+        return;
+      }
+      say(st, `УДАР · −${Math.round(touch.damage)}% КОРПУСА`,
+        touch.damage > 15 ? '#ff7a66' : '#ffcc66', 1.6);
+      if (hadComputer) say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН', '#ffcc66', 1.6);
+    }
   }
 
   // Станции: стыковка либо удар о корпус.

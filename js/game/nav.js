@@ -42,7 +42,9 @@ export function navInfo(ship, target, cruiseLevel) {
   const dist = Math.hypot(dx, dy, dz);
   const gap = Math.max(0, dist - target.radius);
   const dir = normalize(v3(dx, dy, dz));
-  const closing = ship.speed * cruiseLevel * dot(dir, ship.basis.fwd);
+  // Сближение считается по ВЕКТОРУ скорости: с инерцией корабль может
+  // лететь не туда, куда смотрит нос, и проекция на нос врала бы.
+  const closing = (ship.vel.x * dir.x + ship.vel.y * dir.y + ship.vel.z * dir.z) * cruiseLevel;
   const eta = closing > 0.001 ? gap / closing : Infinity;
   return { dist, gap, dir, closing, eta, offAxis: Math.acos(clamp(dot(dir, ship.basis.fwd), -1, 1)) };
 }

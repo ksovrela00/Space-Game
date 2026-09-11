@@ -25,6 +25,10 @@ const MARK_MAX = 1.5;      // км
 const _mk = { x: 0, y: 0, z: 0 };
 const _mkc = { x: 0, y: 0, z: 0 };
 const _mkAlt = { dir: { x: 0, y: 0, z: 0 } };
+// Ниже этой скорости указатель вектора не показываем: на месте он
+// прыгал бы от шума в последних знаках.
+const VMARK_MIN = 0.002;      // км/с
+const _vm = { x: 0, y: 0 };
 const _pt = { x: 0, y: 0 };
 
 export const fmtDist = (km) => {
@@ -85,6 +89,15 @@ export function drawHud(r, game) {
 
   if (state.view === 'cockpit') drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam);
+  drawVelocityMarker(ctx, cam, ship);
+  // После удара корабль какое-то время летит сам по себе — об этом надо
+  // сказать, иначе непонятно, почему он не слушается.
+  if (ship.stun > 0) {
+    ctx.textAlign = 'center';
+    ctx.font = '13px Consolas, monospace';
+    ctx.fillStyle = RED;
+    ctx.fillText('БЕЗ УПРАВЛЕНИЯ', w / 2, h / 2 + 56);
+  }
   if (target) drawTargetMarker(ctx, cam, target);
 
   // Приборы подхода включаются в гравитационном захвате и берут на себя
@@ -446,6 +459,69 @@ function drawReticle(ctx, cam) {
   ctx.beginPath();
   ctx.arc(x, y, 3, 0, TAU);
   ctx.stroke();
+}
+
+/**
+ * Куда корабль ЛЕТИТ на самом деле — в экранных координатах.
+ *
+ * Прицел в центре показывает, куда смотрит нос. С векторной скоростью это
+ * уже не одно и то же: на развороте корабль несёт по старому курсу, и без
+ * второй отметки понять, куда он движется, нельзя. В авиации это называется
+ * указателем вектора скорости и висит ровно на той точке горизонта, в
+ * которую машина придёт, если ничего не менять.
+ *
+ * @returns {x, y, back, speed} или null, если скорость слишком мала.
+ *          back = скорость направлена НАЗАД от камеры: тогда точка на
+ *          экране — это направление «откуда», и рисуется она иначе.
+ */
+export function velocityMarker(cam, vel, out = { x: 0, y: 0 }) {
+  const sp = Math.hypot(vel.x, vel.y, vel.z);
+  if (sp < VMARK_MIN) return null;
+  const b = cam.basis;
+  const dx = vel.x / sp, dy = vel.y / sp, dz = vel.z / sp;
+  const rx = dx * b.right.x + dy * b.right.y + dz * b.right.z;
+  const uy = dx * b.up.x + dy * b.up.y + dz * b.up.z;
+  const fz = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
+
+  // Скорость назад: проецируем противоположное направление, иначе точка
+  // улетает в бесконечность и знак путается.
+  const back = fz <= 0;
+  const s = back ? -1 : 1;
+  const z = Math.max(0.02, s * fz);          // у самого горизонта не делим на ноль
+  out.x = cam.cx + (s * rx / z) * cam.focal;
+  out.y = cam.cy - (s * uy / z) * cam.focal;
+  out.back = back;
+  out.speed = sp;
+  return out;
+}
+
+// Отметка вектора скорости: кружок с тремя усами, как на авиационном ИЛС.
+// Назад — тот же знак, перечёркнутый: «летим отсюда».
+function drawVelocityMarker(ctx, cam, ship) {
+  const m = velocityMarker(cam, ship.vel, _vm);
+  if (!m) return;
+  const pad = 26;
+  const x = clamp(m.x, pad, cam.w - pad);
+  const y = clamp(m.y, pad, cam.h - pad);
+  const edge = x !== m.x || y !== m.y;       // отметка ушла за край экрана
+
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = m.back ? RED : (edge ? 'rgba(120,224,143,0.5)' : GREEN);
+  const r = 7;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU);
+  ctx.moveTo(x - r, y); ctx.lineTo(x - r - 7, y);
+  ctx.moveTo(x + r, y); ctx.lineTo(x + r + 7, y);
+  ctx.moveTo(x, y - r); ctx.lineTo(x, y - r - 7);
+  ctx.stroke();
+  if (m.back) {
+    ctx.beginPath();
+    ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5);
+    ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // Рамка вокруг цели или стрелка к ней у края экрана.

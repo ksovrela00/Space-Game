@@ -23,7 +23,7 @@ import {
   isLandable, isSolid, altitudeOf, surfaceNormal, worldPoint,
   dirToWorldBody, groundRadius, findSite, bodyFrame, latLon,
 } from './surface.js';
-import { groundDrift } from './gravity.js';
+import { groundDrift, gravityAt } from './gravity.js';
 
 export const LAND = {
   vspeed: 0.030,    // км/с — предельная вертикальная скорость касания (30 м/с)
@@ -33,13 +33,37 @@ export const LAND = {
   landAlt: 6,       // км — ниже этой высоты компьютер переходит к спуску
   range: 3,         // в радиусах тела: дальше посадочный компьютер не берётся
   hold: 2.5,        // км — высота, на которую компьютер выводит перед спуском
+  // --- Удар о грунт.
+  // Урон растёт как КВАДРАТ скорости: это энергия, и так оно и есть на
+  // самом деле. Ниже hitSoft удар безвреден — на то и амортизаторы; на
+  // hitKill корпус кончается за один раз. Между ними вся шкала, и
+  // полоса корпуса наконец что-то значит.
+  // Шкала урона начинается ровно там, где кончается допуск на касание:
+  // сел в допуске — цел, чуть быстрее — первые проценты, и дальше по
+  // квадрату. Иначе на границе была бы ступенька в десяток процентов.
+  hitSoft: 0.030,   // км/с — совпадает с vspeed
+  hitKill: 0.090,   // км/с — 90 м/с разносят корабль целиком
+  bareSoft: 0.001,  // км/с — без шасси прощается только касание
+  bareMul: 4,       // во столько раз больнее брюхом, чем на шасси
+  scrapeK: 0.6,     // с каким весом в удар идёт боковая скорость
+  restitution: 0.3, // упругость отскока
+  friction: 0.55,   // сколько касательной скорости съедает грунт
+  settle: 0.004,    // км/с — ниже этого корабль считается остановившимся
+  belly: 5,         // % корпуса за посадку на брюхо, без шасси — и он же
+                    // нижняя граница урона для любого касания без шасси
+  tumble: 9,        // рад/с на км/с касательной — сила кувырка от удара
   closeSpeed: 0.09, // км/с — предел скорости, с которой доводится снос
   // Снос доводится тягой вдоль носа, а разворот идёт с конечной угловой
   // скоростью: радиус разворота v/ω. Чтобы не кружить вокруг площадки,
   // скорость подхода держим такой, чтобы этот радиус был вчетверо
   // меньше оставшегося сноса — отсюда и коэффициент (ω ≈ 0.55 рад/с).
   closeGain: 0.12,  // км/с на километр сноса
-  liftGain: 20,     // обратная связь по вертикальной скорости
+  descent: 0.05,    // км/с — быстрее компьютер не снижается
+  brakeMargin: 0.6, // какую долю предельной скорости торможения берём
+  liftoff: 0.03,    // км/с — импульс отрыва при взлёте
+  // Обратная связь по вертикальной скорости, 1/с: ошибка в 5 м/с даёт
+  // поправку около 6 м/с² — больше веса на любом теле, где можно сесть.
+  liftGain: 1.2,
 };
 
 // Рабочие векторы модуля: в шаге физики их трогают каждый кадр, поэтому
@@ -186,6 +210,19 @@ export function startLanding(ship, body, pos) {
 export function stopLanding(ship) { ship.landing = null; }
 
 /**
+ * С какой скоростью можно идти вниз на высоте h, чтобы успеть
+ * остановиться подъёмными движками: √(2·a·h) с запасом.
+ *
+ * a — то, что остаётся от их тяги после веса. Это и есть главное
+ * ограничение спуска при настоящем тяготении.
+ */
+function brakeLimit(body, pos, alt) {
+  const g = gravityAt(body, pos);
+  const a = Math.max(1e-6, Math.max(SHIP.liftMin, g * SHIP.liftTWR) - g);
+  return Math.sqrt(2 * a * Math.max(0, alt)) * LAND.brakeMargin + 0.002;
+}
+
+/**
  * Ведёт корабль на площадку. Пишет в ship.control / ship.throttle и
  * выбирает уровень круиза (ship.landing.wantCruise).
  * @param zone обстановка у поверхности (landingContext) — из неё берётся
@@ -212,8 +249,8 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
     levelRoll(ship);
 
     // Шасси на подходе убрано: с ним скорость втрое ниже, а спуск с
-    // орбиты и так самая долгая часть. Выпускается ниже (см. ниже).
-    ship.gear.out = alt.alt < LAND.landAlt * 2;
+    // орбиты и так самая долгая часть. Выпускается перед самым спуском.
+    ship.gear.out = alt.alt < LAND.landAlt * 1.5;
     const vMax = SHIP.maxSpeed * (ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
 
     // Экспоненциальный подход, как у автопилота: чем ближе, тем медленнее.
@@ -227,7 +264,16 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
     // Тягу считаем по уровню круиза, который РЕАЛЬНО действует: рядом с
     // телом mass lock урезает его до x10, и тяга, рассчитанная на x1000,
     // давала спуск в шесть раз медленнее возможного.
-    ship.throttle = clamp(vEff / (vMax * Math.min(cruiseLevel, LEVELS[idx])), 0, 1);
+    const level = Math.min(cruiseLevel, LEVELS[idx]);
+
+    // Главное ограничение спуска при настоящем тяготении: гасить
+    // скорость нечем, кроме подъёмных движков, и на высоте h она не
+    // должна превышать √(2·a·h). Ограничение на СОБСТВЕННУЮ скорость
+    // корабля, поэтому с круизом оно и сравнивается через его уровень:
+    // ускоритель множит пройденный путь, а тормозить придётся то, что
+    // корабль везёт на самом деле.
+    vEff = Math.min(vEff, brakeLimit(b, ship.pos, alt.alt) * level);
+    ship.throttle = clamp(vEff / (vMax * level), 0, 1);
     return `ПОСАДКА: ПОДХОД, высота ${fmtKm(alt.alt)}, до площадки ${fmtKm(dist)}`;
   }
 
@@ -284,9 +330,11 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
   // Допуск по сносу жёсткий: на склоне корабль «догоняет» поднимающийся
   // грунт, и спуск встаёт.
   const ready = lateral < 0.05 && attErr < 0.08;
-  // Быстрее, чем могут движки, снижаться бессмысленно: команда просто
-  // насытится, а в строке состояния будет стоять недостижимое число.
-  let rate = clamp(alt.alt * 0.22, 0.004, SHIP.liftRate * 0.9);
+  // Быстрее компьютер не снижается: с настоящим тяготением разгон вниз
+  // ничем не ограничен, и гасить его потом пришлось бы дольше, чем
+  // длился сам спуск.
+  let rate = clamp(alt.alt * 0.22, 0.004,
+    Math.min(LAND.descent, brakeLimit(b, ship.pos, alt.alt)));
   if (alt.alt < 0.20) rate = Math.min(rate, 0.010);      // подтормаживание
   if (alt.alt < 0.05) rate = Math.min(rate, 0.005);      // касание
   // Не готовы — держим высоту и доводим снос. Возвращаться на высоту
@@ -295,13 +343,13 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
   if (ready) vert = -rate;
   else if (alt.alt < 0.08) vert = 0.004;                 // чуть отойти от грунта
 
-  // Вертикаль — подъёмными движками. Основная часть команды считается
-  // наперёд (сколько надо, чтобы удержать вес: ship.sink — это как раз
-  // текущая просадка), а разница с фактической скоростью добирается
-  // обратной связью.
+  // Вертикаль — подъёмными движками, а они дают ТЯГУ. Основная её часть
+  // уходит на удержание веса (потому и считается наперёд по местному g),
+  // остаток — обратная связь по вертикальной скорости.
   const vUp = zone ? dot(zone.relVel, _up) : 0;
-  ship.control.lift = clamp(
-    (vert + ship.sink) / SHIP.liftRate + (vert - vUp) * LAND.liftGain, -1, 1);
+  const g = gravityAt(b, ship.pos);
+  const full = Math.max(SHIP.liftMin, g * SHIP.liftTWR);
+  ship.control.lift = clamp((g + (vert - vUp) * LAND.liftGain) / full, -1, 1);
 
   L.phase = ready ? 'спуск' : 'выравнивание';
   return ready
@@ -325,40 +373,106 @@ export function checkTouchdown(ship, zone) {
     return { result: 'crash', reason: 'Столкновение с поверхностью ' + zone.body.name + '.' };
   }
 
-  // Скорости — относительно грунта: он сам движется со скоростью до
-  // сотен метров в секунду.
+  // Скорости — относительно грунта: он сам может двигаться.
   const vUp = dot(zone.relVel, zone.upWorld);
   horizontal(zone.relVel, zone.upWorld, _h);
   const hSpeed = Math.hypot(_h.x, _h.y, _h.z);
   const tilt = dot(ship.basis.up, zone.normalWorld);
+  const gear = gearReady(ship);
+  const poseOk = tilt >= LAND.tilt && zone.slope <= LAND.slope;
 
-  if (!gearReady(ship)) {
-    return { result: 'crash', reason: 'Касание поверхности без выпущенного шасси.' };
+  // Штатное касание: шасси, брюхом вниз, в допусках по скорости.
+  if (gear && poseOk && -vUp <= LAND.vspeed && hSpeed <= LAND.hspeed) {
+    return { result: 'landed' };
   }
-  if (-vUp > LAND.vspeed) {
-    return {
-      result: 'crash',
-      reason: `Вертикальная скорость при касании ${(-vUp * 1000).toFixed(0)} м/с ` +
-        `(предел ${(LAND.vspeed * 1000).toFixed(0)} м/с).`,
-    };
-  }
-  if (hSpeed > LAND.hspeed) {
-    return {
-      result: 'crash',
-      reason: `Боковая скорость при касании ${(hSpeed * 1000).toFixed(0)} м/с ` +
-        `(предел ${(LAND.hspeed * 1000).toFixed(0)} м/с).`,
-    };
-  }
-  if (tilt < LAND.tilt) {
-    return { result: 'crash', reason: 'Корабль не выровнен по площадке — опрокидывание.' };
-  }
-  if (zone.slope > LAND.slope) {
+
+  // Всё остальное — удар. Его сила считается по энергии: нормальная
+  // составляющая целиком, касательная с меньшим весом (по грунту
+  // корабль скорее чиркает, чем бьётся).
+  const norm = Math.max(0, -vUp);
+  const hit = Math.hypot(norm, hSpeed * LAND.scrapeK);
+  const soft = gear ? LAND.hitSoft : LAND.bareSoft;
+  const t = Math.max(0, (hit - soft) / (LAND.hitKill - soft));
+  let damage = 100 * t * t * (gear ? 1 : LAND.bareMul);
+  // Без шасси удар не бывает бесплатным: корпус не для того, чтобы им
+  // касались грунта. Заодно шкала остаётся монотонной — иначе мягкое
+  // касание брюхом стоило бы дороже быстрого.
+  if (!gear) damage = Math.max(damage, LAND.belly);
+  // Неудачная поза бьёт по корпусу сильнее: удар приходится не в
+  // амортизаторы, а в край корпуса.
+  if (!poseOk) damage = Math.max(damage, 4) * 1.6;
+
+  // Остановился в плохой позе — это уже не удар, а опрокидывание: ждать
+  // нечего, корабль так и останется лежать.
+  if (hit < LAND.settle) {
+    // Лёг на брюхо, но аккуратно: корабль на грунте, корпус помят.
+    // Разрушать за это нельзя — с этого и началась правка: касание на
+    // метре в секунду не должно стоить корабля.
+    if (!gear && poseOk) {
+      return { result: 'landed', damage: LAND.belly, reason: 'Посадка без шасси.' };
+    }
+    if (!gear) {
+      return { result: 'crash', reason: 'Касание поверхности без шасси, с перекосом.' };
+    }
+    if (tilt < LAND.tilt) {
+      return { result: 'crash', reason: 'Корабль не выровнен по площадке — опрокидывание.' };
+    }
     return {
       result: 'crash',
       reason: `Уклон площадки ${(zone.slope * 57.3).toFixed(0)}° — шасси не держит.`,
     };
   }
-  return { result: 'landed' };
+
+  return {
+    result: 'bounce',
+    damage,
+    hit,
+    reason: gear
+      ? `Жёсткое касание: ${(hit * 1000).toFixed(0)} м/с.`
+      : `Удар корпусом: ${(hit * 1000).toFixed(0)} м/с.`,
+  };
+}
+
+/**
+ * Отскок от грунта.
+ *
+ * Нормальная составляющая скорости отражается с потерей энергии,
+ * касательную ест трение, а от касательной же корабль получает кувырок —
+ * иначе удар выглядит как аккуратный прыжок мячика. На это время
+ * управление отключается (ship.stun), и корабль летит свободно: без
+ * паузы стабилизация гасит отскок за десятую долю секунды.
+ */
+export function bounceOff(ship, zone) {
+  const n = zone.normalWorld;
+  // Скорость относительно грунта: отражать надо именно её.
+  const rel = _want;
+  rel.x = zone.relVel.x; rel.y = zone.relVel.y; rel.z = zone.relVel.z;
+  const vn = dot(rel, n);
+  const tx = rel.x - n.x * vn, ty = rel.y - n.y * vn, tz = rel.z - n.z * vn;
+  const tang = Math.hypot(tx, ty, tz);
+
+  const out = vn < 0 ? -vn * LAND.restitution : 0;
+  const keep = 1 - LAND.friction;
+  ship.vel.x = zone.surfVel.x + tx * keep + n.x * out;
+  ship.vel.y = zone.surfVel.y + ty * keep + n.y * out;
+  ship.vel.z = zone.surfVel.z + tz * keep + n.z * out;
+  ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
+
+  // Кувырок: нос заваливается в ту сторону, куда корабль скользил.
+  const kick = Math.min(1.6, tang * LAND.tumble);
+  ship.rot.pitch += kick * clamp(dot(_h, ship.basis.fwd) / Math.max(tang, 1e-6), -1, 1);
+  ship.rot.roll += kick * 0.6 * clamp(dot(_h, ship.basis.right) / Math.max(tang, 1e-6), -1, 1);
+
+  // Вытолкнуть из грунта: иначе на следующем кадре снова «касание», и
+  // удары считаются каждый кадр подряд.
+  worldPoint(zone.body, zone.dir, zone.groundR + SHIP.gearClear * 1.05, ship.pos);
+
+  const hard = Math.min(1, Math.abs(vn) / LAND.hitKill);
+  ship.stun = SHIP.stunMin + (SHIP.stunMax - SHIP.stunMin) * hard;
+  ship.lift = 0;
+  ship.throttle = 0;
+  ship.landing = null;              // компьютер после удара не продолжает
+  return ship.stun;
 }
 
 /**
@@ -370,9 +484,12 @@ export function settle(ship, zone) {
   const f = bodyFrame(b);
   const loc = (v) => v3(dot(v, f.right), dot(v, f.up), dot(v, f.fwd));
   ship.landedAt = b;
+  // Высота стоянки: на выпущенном шасси — по стойкам, на брюхе — по
+  // корпусу. Иначе корабль без шасси висел бы над грунтом.
+  const clear = Math.max(SHIP.hullClear, SHIP.gearClear * ship.gear.t);
   ship.landedPose = {
     dir: v3(zone.dir.x, zone.dir.y, zone.dir.z),
-    radius: zone.groundR + SHIP.gearClear,
+    radius: zone.groundR + clear,
     right: loc(ship.basis.right),
     up: loc(ship.basis.up),
     fwd: loc(ship.basis.fwd),
@@ -381,7 +498,6 @@ export function settle(ship, zone) {
   ship.speed = 0;
   ship.throttle = 0;
   ship.lift = 0;
-  ship.sink = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
   updateLandedPose(ship);
   return ship.landedPose;
@@ -413,10 +529,15 @@ export function takeoff(ship) {
   ship.throttle = 0;
   ship.speed = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
-  // Половина хода движков вверх: этого хватает, чтобы оторваться от
-  // грунта на любом теле, где вообще можно сесть.
-  ship.lift = SHIP.liftRate * 0.5;
-  ship.sink = 0;
+  // Отрыв: короткий импульс вверх по местной вертикали. Дальше корабль
+  // подчиняется тяготению, и держать высоту приходится движками (R) —
+  // шасси-то выпущено.
+  dirToWorldBody(b, p.dir, _up);
+  ship.vel.x = _up.x * LAND.liftoff;
+  ship.vel.y = _up.y * LAND.liftoff;
+  ship.vel.z = _up.z * LAND.liftoff;
+  ship.speed = LAND.liftoff;
+  ship.lift = 0;
   return true;
 }
 
