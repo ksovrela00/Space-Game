@@ -1,5 +1,7 @@
 // Отладочный оверлей (клавиша ~): fps, полигоны, координаты, состояние.
 
+import { audioLine } from '../game/audio.js';
+
 export function makeDebug() {
   return { on: false, fps: 60, acc: 0, frames: 0 };
 }
@@ -45,6 +47,7 @@ export function drawDebug(r, game, dbg) {
         `уклон ${(game.zone.slope * 57.3).toFixed(0)}°, шасси ${s.gear.t.toFixed(2)}`
       : '',
     game.nearest ? `ближайшее ${game.nearest.body.name} зазор ${game.nearest.gap.toFixed(1)} км` : '',
+    game.audio ? audioLine(game.audio, game.sound) : '',
     game.dockAssist
       ? `порт x${game.dockAssist.q.local.x.toFixed(3)} y${game.dockAssist.q.local.y.toFixed(3)} z${game.dockAssist.q.local.z.toFixed(3)} align ${game.dockAssist.q.align.toFixed(2)} roll ${game.dockAssist.q.roll.toFixed(2)}`
       : '',

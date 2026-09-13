@@ -105,6 +105,8 @@ export function showHelp(game) {
       <tr><td>ПКМ (зажать)</td><td class="v">осмотр камерой от 3-го лица</td></tr>
       <tr><td>M</td><td class="v">карта системы</td></tr>
       <tr><td>H</td><td class="v">эта справка</td></tr>
+      <tr><td>N</td><td class="v">звук: включить / выключить</td></tr>
+      <tr><td>- / =</td><td class="v">громкость тише / громче</td></tr>
       <tr><td>~</td><td class="v">отладочный оверлей</td></tr>
       <tr><td>K / Shift+K</td><td class="v">телепорт к цели / смена высоты телепорта</td></tr>
       <tr><td>Space</td><td class="v">вылет со станции, взлёт, рестарт после крушения</td></tr>

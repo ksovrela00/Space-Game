@@ -4,6 +4,7 @@
 import { v3, normalize, dot, clamp } from './core/vec3.js';
 import { makeBasis, dirToWorld, lookAlong } from './core/basis.js';
 import { input } from './core/input.js';
+import { sound } from './core/sound.js';
 import { Renderer } from './render/renderer.js';
 import { Camera } from './render/camera.js';
 import { Starfield } from './render/starfield.js';
@@ -27,6 +28,7 @@ import {
   updateLandedPose, takeoff, landingReadout, landedInfo, LAND,
 } from './game/landing.js';
 import { makeState, say, updateMessages, ST } from './game/state.js';
+import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import {
   showDocked, showCrash, showHelp, showLanded, hideOverlay, drawMap,
@@ -78,6 +80,8 @@ const game = {
   nav: makeNav(world),
   cruise: makeCruise(),
   state: makeState(),
+  audio: makeAudio(),
+  sound,                 // нужен отладочному оверлею: сэмплы или синтез
   info: null,
   nearest: null,
   dockAssist: null,
@@ -117,6 +121,8 @@ function dockAt(station) {
   ship.throttle = 0;
   ship.hull = SHIP.maxHull;
   game.state.mode = ST.DOCKED;
+  audioCue(game.audio, 'dock');
+  audioReset(game.audio, ship);
   input.releaseAll();
   showDocked(game);
   save();
@@ -138,14 +144,18 @@ game.launch = () => {
       st.pos.z + st.basis.fwd.z * (STATION_D + 1.5)), b);
   }
   ship.dockedAt = null;
+  audioReset(game.audio, ship);
+  audioCue(game.audio, 'launch');
   say(game.state, 'ВЫЛЕТ РАЗРЕШЁН. УДАЧНОГО ПОЛЁТА.', '#78e08f');
   input.releaseAll();
 };
 
 // --- посадка на поверхность ---------------------------------------------------
 
-function landAt(zone) {
+function landAt(zone, belly = false) {
   settle(ship, zone);
+  audioCue(game.audio, belly ? 'belly' : 'land');
+  audioReset(game.audio, ship);
   game.stats.landings++;
   resetCruise(game.cruise);
   game.state.mode = ST.LANDED;
@@ -158,6 +168,8 @@ game.takeoff = () => {
   hideOverlay();
   if (!takeoff(ship)) { game.state.mode = ST.FLIGHT; return; }
   game.state.mode = ST.FLIGHT;
+  audioReset(game.audio, ship);
+  audioCue(game.audio, 'takeoff');
   say(game.state, 'ОТРЫВ. ШАССИ ВЫПУЩЕНО — УБРАТЬ КЛАВИШЕЙ G.', '#78e08f');
   input.releaseAll();
 };
@@ -192,6 +204,8 @@ function crash(reason) {
   stopDockingComputer(ship);
   stopLanding(ship);
   game.state.mode = ST.CRASHED;
+  audioCue(game.audio, 'crash');
+  audioReset(game.audio, ship);
   input.releaseAll();
   showCrash(game);
 }
@@ -235,6 +249,7 @@ function teleportToTarget() {
       t.pos.x + t.basis.fwd.x * 6,
       t.pos.y + t.basis.fwd.y * 6,
       t.pos.z + t.basis.fwd.z * 6), b);
+    audioReset(game.audio, ship);
     say(st, 'ТЕЛЕПОРТ: ' + t.name + ', 6 км до порта', '#78e08f');
     return;
   }
@@ -283,6 +298,7 @@ function teleportToTarget() {
   lookAlong(b, normalize(v3(
     _tpAim.x - _tpPos.x, _tpAim.y - _tpPos.y, _tpAim.z - _tpPos.z)), _tpDir);
   placeShip(ship, _tpPos, b);
+  audioReset(game.audio, ship);
   say(st, 'ТЕЛЕПОРТ: ' + t.name + ', высота ' + fmtDist(alt), '#78e08f');
 }
 
@@ -302,6 +318,7 @@ function save() {
       // координаты через сутки указывали бы в пустоту.
       landed: ship.landedAt ? { id: ship.landedAt.id, pose: ship.landedPose } : null,
       gear: ship.gear.out,
+      audio: { on: game.audio.on, vol: game.audio.vol },
       stats: game.stats,
       time: world.time,
     }));
@@ -321,6 +338,10 @@ function load() {
   game.lastStation = findStation(s.last);
   ship.gear.out = !!s.gear;
   ship.gear.t = s.gear ? 1 : 0;
+  if (s.audio) {
+    game.audio.on = s.audio.on !== false;
+    game.audio.vol = typeof s.audio.vol === 'number' ? s.audio.vol : game.audio.vol;
+  }
 
   if (s.landed && s.landed.pose) {
     const body = world.bodies.find((b) => b.id === s.landed.id);
@@ -357,6 +378,22 @@ function handleKeys() {
   const st = game.state;
 
   if (input.pressed('Backquote')) dbg.on = !dbg.on;
+
+  // Звук. Клавиши намеренно вне разбора режимов ниже: выключать гул
+  // надо и на карте, и в порту, а не только в полёте.
+  if (input.pressed('KeyN')) {
+    game.audio.on = !game.audio.on;
+    sound.setMuted(!game.audio.on);
+    say(st, game.audio.on ? 'ЗВУК ВКЛЮЧЁН' : 'ЗВУК ВЫКЛЮЧЕН');
+    save();
+  }
+  if (input.pressed('Minus', 'Equal', 'NumpadSubtract', 'NumpadAdd')) {
+    const up = input.pressed('Equal', 'NumpadAdd');
+    game.audio.vol = clamp(game.audio.vol + (up ? 0.1 : -0.1), 0, 1);
+    sound.setVolume(game.audio.vol);
+    say(st, 'ГРОМКОСТЬ ' + Math.round(game.audio.vol * 100) + '%');
+    save();
+  }
 
   if (input.pressed('KeyH')) {
     if (st.mode === ST.HELP) game.closeOverlay();
@@ -427,6 +464,7 @@ function handleKeys() {
 
   if (input.pressed('KeyG')) {
     const out = toggleGear(ship);
+    audioCue(game.audio, 'gear', { out });
     say(st, out ? 'ШАССИ: ВЫПУСК' : 'ШАССИ: УБОРКА',
       out ? '#78e08f' : null);
   }
@@ -575,7 +613,7 @@ function step(dt) {
       } else {
         say(st, 'ПОСАДКА ВЫПОЛНЕНА: ' + zone.body.name, '#78e08f');
       }
-      landAt(zone);
+      landAt(zone, !!touch.damage);
       return;
     }
     if (touch && touch.result === 'crash') { crash(touch.reason); return; }
@@ -585,6 +623,7 @@ function step(dt) {
       // самого факта касания, а когда корпуса больше нет.
       const hadComputer = !!ship.landing;
       bounceOff(ship, zone);
+      audioCue(game.audio, 'hit', { damage: touch.damage });
       ship.hull -= touch.damage;
       game.stats.hits = (game.stats.hits || 0) + 1;
       if (ship.hull <= 0) {
@@ -810,6 +849,11 @@ function frame(now) {
 
   updateMessages(game.state, dt);
   updateCamOrbit(dt);
+  // Звук идёт по времени игрока, а не по шагам физики: круизный
+  // ускоритель множит перемещение, но не частоту кадров, и гул движков
+  // от него меняться не должен.
+  updateAudio(game.audio, game, dt);
+  playAudio(game.audio, sound);
   if (game.state.mode === ST.FLIGHT) prepareHud();
 
   render();
@@ -853,6 +897,16 @@ function resizeAll() {
 function boot() {
   input.attach(window);
   input.attachMouse(window);
+
+  // Файлы качаем сразу — сеть жеста не требует. А вот звуковой контекст
+  // до жеста создавать нельзя: браузер поднимет его в состоянии
+  // suspended, и игра проиграет весь полёт в тишину. Поэтому контекст
+  // ждёт первого щелчка или нажатия клавиши, какими бы они ни были.
+  sound.prefetch();
+  const wake = () => { if (sound.start()) sound.adopt(); };
+  window.addEventListener('keydown', wake);
+  window.addEventListener('mousedown', wake);
+  window.addEventListener('touchstart', wake);
   resizeAll();
   window.addEventListener('resize', resizeAll);
   window.addEventListener('beforeunload', save);
@@ -873,10 +927,14 @@ function boot() {
     if (away) game.nav.index = game.nav.list.indexOf(away);
   }
 
+  sound.setMuted(!game.audio.on);
+  sound.setVolume(game.audio.vol);
+
   const bootEl = document.getElementById('boot');
   const startBtn = document.getElementById('bootBtn');
   const start = () => {
     booted = true;
+    wake();
     bootEl.classList.add('hidden');
     if (game.state.mode === ST.DOCKED) game.launch();
     else hideOverlay();

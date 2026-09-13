@@ -18,6 +18,9 @@ import {
 } from '../js/game/landing.js';
 import { captureBody, carryShip, gravityField, CAPTURE_G } from '../js/game/gravity.js';
 import { shipShadow } from '../js/game/shadow.js';
+import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '../js/game/audio.js';
+import { Sound } from '../js/core/sound.js';
+import { ST as AST } from '../js/game/state.js';
 import { STATION_D } from '../js/models/station.js';
 import { buildCobra } from '../js/models/ships.js';
 import { buildStation } from '../js/models/station.js';
@@ -1316,6 +1319,408 @@ console.log('\n== задний ход ==');
   }
   ok(sh2.throttle === 0,
     `после короткого сброса тяга стоит на нуле, а не уходит в минус (${sh2.throttle})`);
+}
+
+// --- 5g2. Подъёмные движки (R/F) ---------------------------------------------
+console.log('\n== подъёмные движки ==');
+{
+  // Ход R/F обязан РАЗГОНЯТЬ по вертикали, а не дёргать корабль на месте:
+  // тяга движков идёт в тот же вектор скорости, что и всё остальное, и
+  // гашение заноса (0.5 км/с²) съедало её целиком в следующем же кадре.
+  const hold = (lift, secs, field = null, throttle = 0) => {
+    const sh = makeShip();
+    placeShip(sh, v3(0, 0, 0), makeBasis());
+    sh.throttle = throttle;
+    for (let i = 0; i < Math.round(secs / STEP); i++) {
+      clearControls(sh);
+      sh.control.lift = lift;
+      updateShip(sh, STEP, STEP, field);
+    }
+    return sh;
+  };
+  const vUp = (sh) => dot(sh.vel, sh.basis.up);
+
+  const upShip = hold(1, 2);
+  const dnShip = hold(-1, 2);
+  const want = SHIP.liftMin * 2;
+  ok(Math.abs(vUp(upShip) - want) < want * 0.05 &&
+     Math.abs(vUp(dnShip) + want) < want * 0.05,
+    `вдали от тел за 2 с ходу: R ${(vUp(upShip) * 1000).toFixed(1)} м/с вверх, ` +
+    `F ${(vUp(dnShip) * 1000).toFixed(1)} м/с (ожидание ±${(want * 1000).toFixed(1)})`);
+
+  // Отпустил ход — вертикаль снова общий канал, и стабилизатор её гасит.
+  {
+    const sh = hold(1, 2);
+    for (let i = 0; i < Math.round(0.5 / STEP); i++) {
+      clearControls(sh);
+      updateShip(sh, STEP, STEP);
+    }
+    ok(Math.abs(vUp(sh)) < 1e-4,
+      `отпущенный ход гасится стабилизатором (${(vUp(sh) * 1000).toFixed(2)} м/с)`);
+  }
+
+  // Над телом с убранным шасси тяга привязана к местной тяжести, а вес
+  // снимает компенсатор высоты: чистый разгон вверх.
+  {
+    const field = { up: v3(0, 1, 0), g: 0.0098 };
+    const sh = makeShip();
+    placeShip(sh, v3(0, 0, 0), makeBasis());
+    sh.basis.right = v3(1, 0, 0); sh.basis.up = v3(0, 1, 0); sh.basis.fwd = v3(0, 0, 1);
+    for (let i = 0; i < Math.round(2 / STEP); i++) {
+      clearControls(sh);
+      sh.control.lift = 1;
+      updateShip(sh, STEP, STEP, field);
+    }
+    const wantG = field.g * SHIP.liftTWR * 2;
+    ok(Math.abs(sh.vel.y - wantG) < wantG * 0.05,
+      `над телом (шасси убрано) за 2 с ходу: ${(sh.vel.y * 1000).toFixed(1)} м/с вверх ` +
+      `(ожидание ${(wantG * 1000).toFixed(1)})`);
+  }
+
+  // Вертикальный ход — отдельный канал: он не отнимает ход вперёд.
+  {
+    const sh = hold(0, 6, null, 1);
+    const fwd0 = dot(sh.vel, sh.basis.fwd);
+    for (let i = 0; i < Math.round(2 / STEP); i++) {
+      clearControls(sh);
+      sh.control.lift = 1;
+      updateShip(sh, STEP, STEP);
+    }
+    ok(Math.abs(dot(sh.vel, sh.basis.fwd) - fwd0) < 1e-6 && vUp(sh) > want * 0.9,
+      `на крейсерском ходу R не съедает скорость вперёд: ` +
+      `${dot(sh.vel, sh.basis.fwd).toFixed(3)} км/с при ${(vUp(sh) * 1000).toFixed(1)} м/с вверх`);
+  }
+}
+
+// --- 5g3. Звук -----------------------------------------------------------------
+console.log('\n== звук ==');
+{
+  // Звук считается отдельно от синтеза именно для того, чтобы его можно
+  // было проверить здесь: микс — это числа, события — это список.
+  const mkGame = (over = {}) => ({
+    ship: Object.assign(makeShip(), { control: { pitch: 0, roll: 0, yaw: 0, thr: 0, lift: 0 } }),
+    state: { mode: AST.FLIGHT },
+    cruise: { index: 0, level: 1, massLocked: false, lockedBy: null },
+    ...over,
+  });
+  // Кадр целиком, как в main.js: посчитали -> разобрали очередь.
+  // Без разбора одно и то же событие считалось бы каждый кадр заново.
+  const run = (a, g, secs, dt = 1 / 60) => {
+    const seen = [];
+    for (let i = 0; i < Math.round(secs / dt); i++) {
+      updateAudio(a, g, dt);
+      seen.push(...a.events);
+      playAudio(a, null);
+    }
+    return seen;
+  };
+
+  // Тяга слышна: на полном ходу и громче, и выше, чем на холостых.
+  {
+    const a = makeAudio(1), g = mkGame();
+    run(a, g, 1.5);
+    const idle = { e: a.mix.engine, p: a.mix.pitch };
+    g.ship.throttle = 1;
+    run(a, g, 1.5);
+    ok(a.mix.engine > idle.e + 0.4 && a.mix.pitch > idle.p + 0.4 && idle.e > 0.1,
+      `движки: холостые ${idle.e.toFixed(2)}/${idle.p.toFixed(2)} -> полный ход ` +
+      `${a.mix.engine.toFixed(2)}/${a.mix.pitch.toFixed(2)}`);
+  }
+
+  // Задний ход звучит ниже переднего при той же величине тяги.
+  {
+    const a = makeAudio(2), g = mkGame();
+    g.ship.throttle = 1; run(a, g, 1.5);
+    const fwd = a.mix.pitch;
+    g.ship.throttle = -1; run(a, g, 1.5);
+    ok(a.mix.pitch < fwd * 0.75,
+      `задний ход ниже переднего: ${a.mix.pitch.toFixed(2)} против ${fwd.toFixed(2)}`);
+  }
+
+  // Круизный ускоритель: ступень слышна, mass lock её глушит.
+  {
+    const a = makeAudio(3), g = mkGame();
+    g.cruise.index = 5; const up = run(a, g, 1.2);
+    const loud = a.mix.drive;
+    g.cruise.massLocked = true; run(a, g, 1.2);
+    ok(loud > 0.9 && a.mix.drive < 0.15 && up.some((e) => e.kind === 'spool' && e.up),
+      `ускоритель: x50000 даёт ${loud.toFixed(2)}, mass lock сбивает до ` +
+      `${a.mix.drive.toFixed(2)}, ступень отмечена свистом`);
+  }
+
+  // Подъёмные движки: R и F шипят по-разному, и это тот самый канал,
+  // который до правки не делал ничего.
+  {
+    const a = makeAudio(4), g = mkGame();
+    g.ship.control.lift = 1; run(a, g, 0.6);
+    const upLvl = a.mix.thrust, upPitch = a.mix.thrustPitch;
+    g.ship.control.lift = -1; run(a, g, 0.6);
+    ok(upLvl > 0.85 && a.mix.thrust > 0.85 && upPitch > 0.85 && a.mix.thrustPitch < 0.15,
+      `подъёмные: R ${upLvl.toFixed(2)}@${upPitch.toFixed(2)}, ` +
+      `F ${a.mix.thrust.toFixed(2)}@${a.mix.thrustPitch.toFixed(2)}`);
+  }
+
+  // Скрежет от нагрузки: ровный полёт молчит, рывок — нет.
+  {
+    const a = makeAudio(5), g = mkGame();
+    g.ship.vel = v3(0.4, 0, 0);
+    const calm = run(a, g, 2);
+    g.ship.vel = v3(0.4, 0.09, 0);        // 5.4 км/с² за один кадр
+    const hard = run(a, g, 0.2);
+    ok(calm.length === 0 && hard.some((e) => e.kind === 'creak'),
+      `ровный полёт молчит (${calm.length} событий), рывок даёт скрежет`);
+  }
+
+  // Порог взят выше штатной тяги: разгон и торможение сами по себе
+  // скрипеть не должны, иначе скрежет перестанет что-либо значить.
+  {
+    const a = makeAudio(6), g = mkGame();
+    let heard = 0;
+    for (let i = 0; i < 120; i++) {
+      g.ship.vel = v3(SHIP.accel * (i + 1) / 60, 0, 0);   // разгон в полную силу
+      updateAudio(a, g, 1 / 60);
+      heard += a.events.length;
+    }
+    const both = Math.hypot(SHIP.brake, SHIP.lateral);   // тормоз и занос сразу
+    ok(heard === 0 && SHIP.brake < AUDIO.jerkFloor && both > AUDIO.jerkFloor,
+      `порог ${AUDIO.jerkFloor} км/с² выше любого одного канала тяги ` +
+      `(разгон ${SHIP.accel}, тормоз ${SHIP.brake}, занос ${SHIP.lateral}) и ниже ` +
+      `их суммы ${both.toFixed(2)}: штатный разгон молчит (${heard})`);
+  }
+
+  // Телепорт и вылет не должны читаться как удар.
+  {
+    const a = makeAudio(7), g = mkGame();
+    g.ship.vel = v3(1.2, 0, 0); run(a, g, 0.5);
+    g.ship.vel = v3(0, 0, 0);
+    audioReset(a, g.ship);
+    const after = run(a, g, 0.5);
+    ok(after.every((e) => e.kind !== 'creak'),
+      'после audioReset скачок скорости не даёт скрежета');
+  }
+
+  // Побитый корпус скрипит сам, целый — молчит.
+  {
+    const a = makeAudio(8), g = mkGame();
+    g.ship.hull = 100;
+    const whole = run(a, g, 40);
+    const b = makeAudio(8), g2 = mkGame();
+    g2.ship.hull = 12;
+    const beat = run(b, g2, 40);
+    ok(whole.length === 0 && beat.filter((e) => e.kind === 'creak').length >= 4,
+      `за 40 с целый корпус молчит (${whole.length}), побитый скрипит ` +
+      `${beat.length} раз(а)`);
+  }
+
+  // Удар: чем больше урон, тем ниже и дольше. Это единственный способ
+  // отличить на слух «помяли» от «чуть не убились».
+  {
+    const a = makeAudio(9);
+    audioCue(a, 'hit', { damage: 2 });
+    const soft = a.events.slice();
+    a.events.length = 0;
+    audioCue(a, 'hit', { damage: 30 });
+    const hard = a.events.slice();
+    const cr = (l) => l.find((e) => e.kind === 'creak');
+    ok(cr(hard).freq < cr(soft).freq && cr(hard).dur > cr(soft).dur &&
+       hard.some((e) => e.kind === 'clunk'),
+      `лёгкий удар ${cr(soft).freq.toFixed(0)} Гц / ${cr(soft).dur.toFixed(2)} с, ` +
+      `тяжёлый ${cr(hard).freq.toFixed(0)} Гц / ${cr(hard).dur.toFixed(2)} с`);
+  }
+
+  // В порту двигатели молчат, но фон есть; на грунте молчит всё, кроме
+  // остывающего металла.
+  {
+    const a = makeAudio(10), g = mkGame({ state: { mode: AST.DOCKED } });
+    run(a, g, 3);
+    const docked = { e: a.mix.engine, s: a.mix.station };
+    const b = makeAudio(11), g2 = mkGame({ state: { mode: AST.LANDED } });
+    const cool = run(b, g2, 60);
+    ok(docked.e < 0.05 && docked.s > 0.8 && b.mix.engine < 0.05 &&
+       cool.filter((e) => e.kind === 'creak').length > 0,
+      `в порту движки ${docked.e.toFixed(2)}, станция ${docked.s.toFixed(2)}; ` +
+      `на грунте тихо, но металл щёлкает ${cool.length} раз(а) за минуту`);
+  }
+
+  // Явное событие кладётся в очередь ДО updateAudio (в main.js это шаг
+  // физики и разбор клавиш) и обязано дожить до playAudio. Чистка
+  // очереди в начале кадра съедала бы все удары и стыковки разом.
+  {
+    const a = makeAudio(20), g = mkGame();
+    audioCue(a, 'hit', { damage: 20 });
+    audioCue(a, 'gear', { out: true });
+    const before = a.events.length;
+    updateAudio(a, g, 1 / 60);
+    const kinds = a.events.map((e) => e.kind);
+    playAudio(a, null);
+    ok(before === 4 && a.events.length === 0 &&
+       kinds.includes('clunk') && kinds.includes('creak') && kinds.includes('servo'),
+      `события кадра доживают до разбора: ${kinds.join(', ')}; после разбора очередь пуста`);
+  }
+
+  // Очередь не растёт без конца, если её никто не разбирает.
+  {
+    const a = makeAudio(21), g = mkGame();
+    for (let i = 0; i < 200; i++) { audioCue(a, 'hit', { damage: 5 }); updateAudio(a, g, 1 / 60); }
+    ok(a.events.length <= 32, `неразобранная очередь ограничена: ${a.events.length}`);
+  }
+
+  // Выключенный звук не копит событий: глушится источник, а не выход.
+  {
+    const a = makeAudio(12), g = mkGame();
+    a.on = false;
+    g.ship.vel = v3(0, 0, 0); run(a, g, 0.2);
+    g.ship.vel = v3(0.5, 0, 0);
+    const off = run(a, g, 0.3);
+    audioCue(a, 'crash');
+    ok(off.length === 0 && a.events.length === 0, 'с выключенным звуком событий нет');
+  }
+}
+
+// --- 5g4. Синтез звука на моке WebAudio -----------------------------------------
+console.log('\n== синтез звука ==');
+{
+  // WebAudio в node нет, поэтому контекст подменяется — ровно так же,
+  // как GL-контекст в tools/gl.mjs. Проверяется не «как звучит» (это
+  // ухом), а что граф собирается, параметры конечны и ни один вызов не
+  // падает: без этого весь синтез существует только на словах.
+  const calls = { node: {}, param: 0, bad: [], rates: [] };
+  const param = (name, v = 0) => {
+    const check = (x, where) => {
+      if (typeof x === 'number' && !Number.isFinite(x)) calls.bad.push(`${name}.${where}: ${x}`);
+      if (name === 'rate' && typeof x === 'number') calls.rates.push(x);
+      calls.param++;
+      return p;
+    };
+    const p = {
+      get value() { return v; },
+      set value(x) { check(x, 'value'); v = x; },
+      setValueAtTime: (x, t) => check(x, 'setValueAtTime') && check(t, 'time'),
+      setTargetAtTime: (x, t, c) => check(x, 'setTargetAtTime') && check(t, 'time') && check(c, 'tau'),
+      linearRampToValueAtTime: (x, t) => check(x, 'linearRamp') && check(t, 'time'),
+      exponentialRampToValueAtTime: (x, t) => {
+        if (x === 0) calls.bad.push(`${name}: экспоненциальный спад в ноль`);
+        return check(x, 'expRamp') && check(t, 'time');
+      },
+      cancelScheduledValues: () => p,
+    };
+    return p;
+  };
+  const node = (kind, extra = {}) => {
+    calls.node[kind] = (calls.node[kind] || 0) + 1;
+    return Object.assign({
+      connect() {}, disconnect() {},
+      start(t) { if (t !== undefined && !Number.isFinite(t)) calls.bad.push(kind + '.start'); },
+      stop(t) { if (t !== undefined && !Number.isFinite(t)) calls.bad.push(kind + '.stop'); },
+    }, extra);
+  };
+  globalThis.AudioContext = class {
+    constructor() { this.currentTime = 0; this.sampleRate = 48000; this.state = 'running'; this.destination = node('destination'); }
+    createGain() { return node('gain', { gain: param('gain', 1) }); }
+    createBiquadFilter() { return node('filter', { type: 'lowpass', frequency: param('freq', 1000), Q: param('Q', 1) }); }
+    createOscillator() { return node('osc', { type: 'sine', frequency: param('osc.freq', 440), detune: param('detune', 0) }); }
+    createBufferSource() { return node('bufsrc', { buffer: null, loop: false, playbackRate: param('rate', 1) }); }
+    createDynamicsCompressor() {
+      return node('comp', { threshold: param('thr', 0), ratio: param('ratio', 1), attack: param('atk', 0), release: param('rel', 0) });
+    }
+    createBuffer(ch, len, rate) {
+      const data = new Float32Array(len);
+      return { numberOfChannels: ch, length: len, sampleRate: rate, duration: len / rate, getChannelData: () => data };
+    }
+    resume() {} suspend() {}
+  };
+
+  const s = new Sound();
+  const started = s.start();
+  ok(started && s.ok && !s.sampled,
+    `контекст поднялся, узлов: ${Object.entries(calls.node).map(([k, v]) => k + ' ' + v).join(', ')}`);
+
+  // Полный ход движков по всему диапазону: тяга, круиз, подъёмные.
+  for (let i = 0; i <= 20; i++) {
+    const k = i / 20;
+    s.engine(k, k, 1 - k);
+    s.drive(k, 1 - k);
+    s.thrust(k, k);
+    s.ambient(k);
+    s.ctx.currentTime += 0.05;
+  }
+  // Разовые: от еле слышного щелчка до скрежета в полную силу.
+  for (const [g, f, r, d] of [[0.1, 90, 0.2, 0.2], [0.5, 300, 0.7, 0.8], [1, 900, 1, 2.4]]) {
+    s.creak(g, f, r, d);
+    s.clunk(g, f, d);
+    s.ctx.currentTime += 3;
+  }
+  s.clamp(0.6);
+  s.servo(2.4, true);
+  s.servo(1.6, false);
+  s.spool(true, 1);
+  s.spool(false, 0);
+  ok(calls.bad.length === 0,
+    `ни одного нечислового или нулевого параметра за ${calls.param} вызовов` +
+    (calls.bad.length ? ': ' + calls.bad.slice(0, 3).join('; ') : ''));
+
+  // Голоса не должны копиться: у разовых звуков обязан отрабатывать
+  // счётчик, иначе после сотни ударов замолкает вообще всё.
+  const live0 = s.live;
+  for (let i = 0; i < 60; i++) s.creak(0.4, 250, 0.6, 0.4);
+  ok(s.live <= 12 && live0 <= 12,
+    `предел одновременных голосов держится: ${s.live} из 12 после 60 скрипов подряд`);
+
+  // --- путь на сэмплах. Здесь и жила ошибка: частота события шла прямо
+  // в playbackRate, у тяжёлого удара выходило 0.53, и вместо большого
+  // листа обшивки было слышно вдвое замедленную запись двери.
+  {
+    const fakeBuf = (dur) => ({
+      duration: dur, length: Math.round(dur * 48000), sampleRate: 48000,
+      numberOfChannels: 1, getChannelData: () => new Float32Array(8),
+    });
+    s.buf.creak = [fakeBuf(2.78), fakeBuf(2.64), fakeBuf(2.47), fakeBuf(0.69)];
+    s.buf.hit = [fakeBuf(0.4), fakeBuf(0.37)];
+    s.buf.slam = fakeBuf(0.57);
+    s.v.sample = { low: null, mid: null, exhaust: null, drive: null, thrust: null, station: null };
+    s.sampled = true;
+    calls.rates.length = 0;
+    calls.bad.length = 0;
+    // Предыдущая проверка намеренно забила все слоты, а onended в моке
+    // никто не вызывает — без сброса ни один звук бы не проиграл, и
+    // проверки ниже прошли бы вхолостую (так и случилось при написании).
+    s.live = 0;
+
+    // Весь диапазон, который умеет порождать игра: от щелчка остывающего
+    // металла до разрушения корпуса.
+    const events = [
+      [0.12, 700, 0.85, 0.2], [0.18, 380, 0.5, 0.3], [0.3, 300, 0.8, 0.9],
+      [0.42, 250, 0.7, 1.1], [0.68, 190, 0.8, 1.0], [0.95, 160, 0.75, 1.25],
+      [1, 130, 0.95, 2.2], [0.75, 320, 0.9, 1.5],
+    ];
+    for (const [g, f, r, d] of events) { s.creak(g, f, r, d); s.ctx.currentTime += 3; }
+    for (const f of [90, 120, 190, 220]) { s.clunk(0.6, f, 0.3); s.ctx.currentTime += 1; }
+
+    const lo = Math.min(...calls.rates), hi = Math.max(...calls.rates);
+    ok(calls.rates.length >= events.length && lo >= 0.8 && hi <= 1.35,
+      `скорость воспроизведения держится у единицы: ${lo.toFixed(2)}..${hi.toFixed(2)} ` +
+      `по ${calls.rates.length} звукам (за её пределами ухо слышит замедленную ` +
+      'запись, а не размер железа)');
+    ok(calls.bad.length === 0, `на сэмплах параметры конечны (${calls.rates.length} скоростей)`);
+
+    // Длинному стону — длинная запись, короткому скрипу — короткая.
+    const pickDur = (d) => { const b = s._pickCreak(d); return b ? b.duration : 0; };
+    const longs = [pickDur(2.2), pickDur(1.2), pickDur(1.0)];
+    const shorts = [pickDur(0.3), pickDur(0.25), pickDur(0.2)];
+    ok(longs.every((d) => d > 1.4) && shorts.every((d) => d < 1.4),
+      `подбор записи по длине: стоны ${longs.map((d) => d.toFixed(1)).join('/')} с, ` +
+      `скрипы ${shorts.map((d) => d.toFixed(2)).join('/')} с`);
+
+    // Разные записи подряд: один и тот же скрип дважды сразу слышен.
+    const seq = [pickDur(2), pickDur(2), pickDur(2)];
+    ok(new Set(seq).size > 1, `подряд идут разные записи (${seq.join(', ')})`);
+    s.sampled = false;
+  }
+
+  // Громкость и немота идут через мастер-узел, а не через источники.
+  s.setVolume(0.3); s.setMuted(true);
+  ok(s.vol === 0.3 && s.muted === true, 'громкость и немота применяются');
+  delete globalThis.AudioContext;
 }
 
 // --- 5h. Инерция и удар ------------------------------------------------------

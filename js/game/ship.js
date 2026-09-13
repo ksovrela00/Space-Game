@@ -183,11 +183,20 @@ export function updateShip(ship, dt, moveDt, field = null) {
   const up = field ? field.up : null;
   const g = field ? field.g : 0;
 
-  // Вертикаль (только в посадочной конфигурации) считается отдельно.
+  // Ось подъёмных движков: в посадочной конфигурации это местная
+  // вертикаль (по ней же работает тяготение), иначе — «верх» самого
+  // корабля, то есть ровно то, куда движки толкают.
+  const la = free ? up : u;
+  // Вертикаль считается отдельным каналом — и в посадочной
+  // конфигурации, и всегда, пока отклонена ручка подъёмных движков.
+  // Иначе их тяга бессмысленна: гашение заноса ниже видит набранную
+  // вертикальную скорость как снос и стирает её в следующем же кадре
+  // (0.5 км/с² против 0.004), и R/F не делают ровно ничего.
+  const liftOn = free || c.lift !== 0;
   let vUp = 0;
-  if (free) {
-    vUp = ship.vel.x * up.x + ship.vel.y * up.y + ship.vel.z * up.z;
-    ship.vel.x -= up.x * vUp; ship.vel.y -= up.y * vUp; ship.vel.z -= up.z * vUp;
+  if (liftOn) {
+    vUp = ship.vel.x * la.x + ship.vel.y * la.y + ship.vel.z * la.z;
+    ship.vel.x -= la.x * vUp; ship.vel.y -= la.y * vUp; ship.vel.z -= la.z * vUp;
   }
 
   // Направление тяги: нос, а в посадочной конфигурации — его проекция на
@@ -232,13 +241,14 @@ export function updateShip(ship, dt, moveDt, field = null) {
     // отпустил ход, и корабль падает.
     const lu = u.x * up.x + u.y * up.y + u.z * up.z;     // куда смотрит «верх»
     vUp += (liftAcc * lu - g) * dt;
-    ship.vel.x += up.x * vUp; ship.vel.y += up.y * vUp; ship.vel.z += up.z * vUp;
-  } else {
-    // Шасси убрано: вес в точности гасит компенсатор высоты, и
-    // подъёмные движки работают как обычная тяга вдоль «верха».
-    ship.vel.x += u.x * liftAcc * dt;
-    ship.vel.y += u.y * liftAcc * dt;
-    ship.vel.z += u.z * liftAcc * dt;
+    ship.vel.x += la.x * vUp; ship.vel.y += la.y * vUp; ship.vel.z += la.z * vUp;
+  } else if (liftOn) {
+    // Шасси убрано: вес в точности гасит компенсатор высоты, и движки
+    // разгоняют корабль вдоль «верха» — вертикальная скорость КОПИТСЯ,
+    // пока ручка отклонена. Отпустил — канал снова общий, и стабилизатор
+    // гасит набранное так же, как любой другой снос.
+    vUp += liftAcc * dt;
+    ship.vel.x += la.x * vUp; ship.vel.y += la.y * vUp; ship.vel.z += la.z * vUp;
   }
 
   ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);

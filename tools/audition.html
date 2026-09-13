@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Solar Trader :: прослушивание звуков</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 24px 20px 60px; background: #0b0f14; color: #cfe3f2;
+         font: 14px/1.5 Consolas, monospace; }
+  h1 { font-size: 18px; letter-spacing: 2px; margin: 0 0 4px; color: #78e08f; }
+  h2 { font-size: 13px; letter-spacing: 2px; margin: 28px 0 8px; color: #ffcc66;
+       border-bottom: 1px solid #1d2a36; padding-bottom: 4px; }
+  p.sub { color: #7d93a6; margin: 0 0 18px; max-width: 62em; }
+  button { font: inherit; background: #16202b; color: #cfe3f2; border: 1px solid #2b3b4c;
+           padding: 7px 12px; margin: 0 6px 6px 0; cursor: pointer; }
+  button:hover { background: #1e2c3a; border-color: #456b85; }
+  button.go { background: #1d3d29; border-color: #2f6b43; color: #a8e6bb; }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+  label { color: #7d93a6; }
+  input[type=range] { width: 190px; vertical-align: middle; }
+  table { border-collapse: collapse; margin-top: 6px; }
+  td { padding: 3px 14px 3px 0; }
+  .k { color: #7d93a6; }
+  code { color: #ffcc66; }
+  #log { margin-top: 22px; color: #7d93a6; white-space: pre-wrap; min-height: 3em; }
+</style>
+</head>
+<body>
+
+<h1>ПРОСЛУШИВАНИЕ ЗВУКОВ</h1>
+<p class="sub">
+  Страница гоняет <b>тот же код</b>, что и игра: события идут через
+  <code>audioCue</code> и <code>playAudio</code> из <code>js/game/audio.js</code>, звук
+  выдаёт <code>js/core/sound.js</code>. То, что слышно здесь, слышно и в полёте.
+  Нужна она для одного: подобрать скрежет ухом, не летая. Понравился вариант из
+  <code>alt/</code> — переименуйте его файл в <code>creak_0N.ogg</code> в
+  <code>assets/sound/</code>, и он станет основным.
+</p>
+
+<button id="on" class="go">ВКЛЮЧИТЬ ЗВУК</button>
+<span id="state" class="k">контекст не поднят — браузер требует жеста</span>
+
+<h2>СОБЫТИЯ ИГРЫ</h2>
+<div class="row" id="cues"></div>
+
+<h2>СКРЕЖЕТ: ОТДЕЛЬНО</h2>
+<div class="row">
+  <label>размер железа <span id="fLab">190</span> Гц</label>
+  <input type="range" id="f" min="90" max="900" value="190">
+  <label>длина <span id="dLab">1.0</span> с</label>
+  <input type="range" id="d" min="15" max="250" value="100">
+  <label>сила <span id="gLab">0.60</span></label>
+  <input type="range" id="g" min="5" max="100" value="60">
+  <button id="play">СКРИПНУТЬ</button>
+  <button id="burst">ПЯТЬ ПОДРЯД</button>
+</div>
+
+<h2>КАКАЯ ЗАПИСЬ СКРИПИТ</h2>
+<p class="sub">Выбор подменяет банк скрипов на лету. «Все основные» — то, что стоит
+  в игре сейчас; остальное — по одной записи, чтобы сравнить в лоб.</p>
+<div class="row" id="bank"></div>
+
+<h2>НЕПРЕРЫВНЫЕ ГОЛОСА</h2>
+<div class="row">
+  <label>тяга <span id="tLab">0.00</span></label>
+  <input type="range" id="thr" min="0" max="100" value="0">
+  <label>круиз <span id="cLab">0</span></label>
+  <input type="range" id="cru" min="0" max="5" value="0">
+  <label>подъёмные <span id="lLab">0</span></label>
+  <input type="range" id="lift" min="-100" max="100" value="0">
+  <button id="stop">ЗАГЛУШИТЬ</button>
+</div>
+
+<div id="log"></div>
+
+<script type="module">
+import { Sound } from '../js/core/sound.js';
+import { makeAudio, audioCue, playAudio } from '../js/game/audio.js';
+
+const s = new Sound();
+const a = makeAudio();
+const log = (t) => { document.getElementById('log').textContent = t; };
+const fire = () => playAudio(a, s);
+
+document.getElementById('on').onclick = async () => {
+  if (!s.start()) { log('WebAudio недоступен: ' + s.error); return; }
+  await s.adopt();
+  document.getElementById('state').textContent =
+    s.sampled ? 'звук идёт на сэмплах (assets/sound)' : 'файлы не отдались — играет синтез';
+  document.getElementById('on').disabled = true;
+  loop();
+};
+
+// --- события игры: ровно те, что бывают в полёте.
+const CUES = [
+  ['лёгкий удар', 'hit', { damage: 2 }],
+  ['средний удар', 'hit', { damage: 12 }],
+  ['тяжёлый удар', 'hit', { damage: 30 }],
+  ['посадка', 'land', {}],
+  ['посадка брюхом', 'belly', {}],
+  ['крушение', 'crash', {}],
+  ['стыковка', 'dock', {}],
+  ['шасси', 'gear', { out: true }],
+  ['взлёт', 'takeoff', {}],
+  ['ступень круиза +', 'cruise', { dir: 1, level: 0.6 }],
+  ['ступень круиза −', 'cruise', { dir: -1, level: 0.2 }],
+];
+const cues = document.getElementById('cues');
+for (const [name, kind, opts] of CUES) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => { audioCue(a, kind, opts); fire(); log(name + ' -> ' + kind); };
+  cues.appendChild(b);
+}
+
+// --- скрежет отдельно.
+const f = document.getElementById('f'), d = document.getElementById('d'), g = document.getElementById('g');
+const sync = () => {
+  document.getElementById('fLab').textContent = f.value;
+  document.getElementById('dLab').textContent = (d.value / 100).toFixed(2);
+  document.getElementById('gLab').textContent = (g.value / 100).toFixed(2);
+};
+[f, d, g].forEach((el) => { el.oninput = sync; });
+sync();
+const creak = () => s.creak(g.value / 100, Number(f.value), 0.8, d.value / 100);
+document.getElementById('play').onclick = () => { creak(); log('скрип'); };
+document.getElementById('burst').onclick = () => {
+  for (let i = 0; i < 5; i++) setTimeout(creak, i * 420);
+  log('пять подряд: слышно ли повтор одной и той же записи');
+};
+
+// --- подмена банка скрипов.
+const BANKS = [
+  ['все основные', ['creak_01.ogg', 'creak_02.ogg', 'creak_03.ogg', 'creak_04.ogg']],
+  ['creak_01 (дверь, 2.8 с)', ['creak_01.ogg']],
+  ['creak_02 (дверь, 2.6 с)', ['creak_02.ogg']],
+  ['creak_03 (визг, 2.5 с)', ['creak_03.ogg']],
+  ['creak_04 (короткий, 0.7 с)', ['creak_04.ogg']],
+  ['alt_01 (3.2 с)', ['alt/creak_alt_01.ogg']],
+  ['alt_02 (2.0 с)', ['alt/creak_alt_02.ogg']],
+  ['alt_03 (лист железа)', ['alt/creak_alt_03.ogg']],
+  ['alt_04 (падение железа)', ['alt/creak_alt_04.ogg']],
+];
+const bank = document.getElementById('bank');
+for (const [name, files] of BANKS) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = async () => {
+    if (!s.ok) { log('сначала включите звук'); return; }
+    const bufs = [];
+    for (const file of files) {
+      const r = await fetch('../assets/sound/' + file);
+      if (!r.ok) { log('нет файла: ' + file); return; }
+      bufs.push(await s.ctx.decodeAudioData(await r.arrayBuffer()));
+    }
+    s.buf.creak = bufs;
+    s.sampled = true;
+    log('банк скрипов: ' + files.join(', ') +
+      ' (' + bufs.map((b2) => b2.duration.toFixed(2) + ' с').join(', ') + ')');
+  };
+  bank.appendChild(b);
+}
+
+// --- непрерывные голоса: крутятся, пока страница открыта.
+const thr = document.getElementById('thr'), cru = document.getElementById('cru'), lift = document.getElementById('lift');
+function loop() {
+  const t = thr.value / 100, c = cru.value / 5, l = lift.value / 100;
+  document.getElementById('tLab').textContent = t.toFixed(2);
+  document.getElementById('cLab').textContent = cru.value;
+  document.getElementById('lLab').textContent = l.toFixed(2);
+  s.engine(0.22 + 0.78 * t, 0.08 + 0.72 * t, 0.25 + 0.75 * t);
+  s.drive(c, c);
+  s.thrust(Math.abs(l), l > 0 ? 1 : (l < 0 ? 0 : 0.5));
+  requestAnimationFrame(loop);
+}
+document.getElementById('stop').onclick = () => {
+  thr.value = 0; cru.value = 0; lift.value = 0;
+  log('непрерывные голоса на нуле');
+};
+</script>
+</body>
+</html>
