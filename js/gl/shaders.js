@@ -379,6 +379,93 @@ ${LOG_DEPTH_FRAG}
   outColor = vec4(uColor * a, a);
 }`;
 
+// --- Плазма входа в атмосферу ------------------------------------------------
+//
+// Оболочка ударной волны: поверхность вращения вокруг вектора СКОРОСТИ
+// (не носа — горит набегающий поток, и ему всё равно, как повёрнут
+// корабль). Меш единичный, размер задают uRad и uLen: так одна и та же
+// геометрия годится и для лёгкого свечения на входе, и для факела во
+// весь экран.
+//
+// Рисуется аддитивно и по кромке (френель): яркими выходят края
+// силуэта, а середина остаётся прозрачной — иначе оболочка закрыла бы
+// собой корабль, ради которого всё и затевалось.
+
+export const PLUME_VS = `#version 300 es
+in vec3 aPos;            // xy — профиль сечения, z — вдоль оси, [-1..0]
+in float aT;             // 0 у лобовой точки, 1 в хвосте следа
+
+uniform mat4 uProj;
+uniform mat4 uModelView;
+uniform mat3 uNormalMat;
+uniform float uRad;
+uniform float uLen;
+
+out float vT;
+out float vAng;
+out vec3 vNormal;
+out vec3 vViewPos;
+out float vFragDepth;
+
+void main() {
+  vec3 p = vec3(aPos.xy * uRad, aPos.z * uLen);
+  vec4 vp = uModelView * vec4(p, 1.0);
+  gl_Position = uProj * vp;
+  vFragDepth = 1.0 + gl_Position.w;
+  vViewPos = vp.xyz;
+  // Нормаль поверхности вращения — радиальная; для свечения по кромке
+  // этого приближения достаточно.
+  vNormal = uNormalMat * normalize(vec3(aPos.xy, 0.18));
+  vT = aT;
+  vAng = atan(aPos.y, aPos.x);
+}`;
+
+export const PLUME_FS = `#version 300 es
+precision mediump float;
+
+in float vT;
+in float vAng;
+in vec3 vNormal;
+in vec3 vViewPos;
+in float vFragDepth;
+
+uniform vec3 uColor;     // цвет по нагреву (js/game/entry.js)
+uniform float uHeat;     // 0..1
+uniform float uTime;     // с — только для дрожания
+uniform float uNear;     // с какого расстояния оболочка проявляется
+uniform float uLogFC;
+
+out vec4 outColor;
+
+void main() {
+${LOG_DEPTH_FRAG}
+  vec3 n = normalize(vNormal);
+  vec3 v = normalize(-vViewPos);
+  // Кромка: в профиль оболочка ярче, в лоб — прозрачнее.
+  float rim = pow(1.0 - abs(dot(n, v)), 1.6);
+
+  // Вдоль оси: лобовая точка раскалена, след тянется и гаснет.
+  float head = exp(-vT * 5.0);
+  float tail = exp(-vT * 1.6) * 0.55;
+  float along = head + tail;
+
+  // Дрожание: поток срывается лоскутами, и ровное свечение сразу
+  // читается как стекло, а не как пламя.
+  float flick = 0.78 + 0.22 * sin(vAng * 5.0 + vT * 14.0 - uTime * 11.0)
+                     * sin(vAng * 2.0 - uTime * 7.0);
+
+  // Вблизи камеры оболочка гасится. Это не украшение: в виде из
+  // кокпита камера оказывается ВНУТРИ волны, и без затухания её
+  // изнанка залила бы весь экран ровным светом. Так остаётся то, что и
+  // должно быть видно из кабины, — зарево впереди.
+  float near = smoothstep(uNear, uNear * 2.6, length(vViewPos));
+
+  float a = rim * along * flick * near * uHeat;
+  // В хвосте цвет уходит в красноту: газ остывает, отставая от корабля.
+  vec3 col = mix(uColor, vec3(0.85, 0.16, 0.05), clamp(vT * 1.2, 0.0, 1.0));
+  outColor = vec4(col * a, a);
+}`;
+
 // --- Кольца -----------------------------------------------------------------
 
 export const RING_VS = `#version 300 es

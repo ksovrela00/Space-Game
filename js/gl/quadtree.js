@@ -84,6 +84,14 @@ export function tileChildren(face, level, tx, ty, out = []) {
   return out;
 }
 
+// Во сколько раз ошибка должна упасть ниже допуска, чтобы уже
+// раздробленную плитку схлопнуть обратно.
+const HYST = 1.35;
+// Насколько за горизонт заглядываем при заказе плиток (в их угловых
+// радиусах). Заказанное там в кадр ещё не попадает, но к моменту, когда
+// попадёт, уже готово.
+const PREFETCH = 1.6;
+
 /**
  * Выбор плиток для отрисовки.
  *
@@ -102,9 +110,22 @@ export function tileChildren(face, level, tx, ty, out = []) {
  * стык читался прямой границей света и тени поперёк грунта. С этим
  * условием соседи отличаются не больше чем на два уровня.
  *
- * Дробление происходит ТОЛЬКО если все четыре потомка уже готовы: иначе
- * рисуется сама плитка. Поэтому в кадре никогда не бывает дырок, а
+ * Дробление происходит ТОЛЬКО если все ВИДИМЫЕ потомки уже готовы:
+ * иначе рисуется сама плитка. Поэтому в кадре никогда не бывает дырок, а
  * подгрузка выглядит как постепенное уточнение.
+ *
+ * Слово «видимые» тут стоило мерцания. Раньше требовались все четыре, и
+ * потомок за горизонтом тоже. Такой потомок не попадает в кадр, значит
+ * не помечается нужным, значит через три секунды вытесняется — и в этот
+ * момент разваливается ВСЁ поддерево под ним, разом на несколько
+ * уровней, хотя мелкие плитки целы и лежат в кэше. Потом он строится
+ * заново, поддерево возвращается. Со стороны это ровно то, на что это
+ * похоже: деталь на миг подменяется грубой и тут же возвращается.
+ *
+ * Плюс к тому дробление держится с ЗАПАСОМ (hyst): раз раздробив
+ * плитку, мы не схлопываем её обратно, пока ошибка не упадёт заметно
+ * ниже допуска. Без запаса плитка, стоящая ровно на границе, щёлкает
+ * туда-сюда от любого шевеления допуска.
  *
  * @param ctx {radius, camPos, camDir(локальное направление на камеру),
  *             camAlt, focal, tol, texelTol, maxLevel, errorOf(level),
@@ -113,6 +134,15 @@ export function tileChildren(face, level, tx, ty, out = []) {
  */
 export function selectTiles(ctx, out = []) {
   out.length = 0;
+  // Отчёт о том, почему набор такой: сколько узлов схлопнуто по допуску,
+  // сколько ждут потомков, сколько подменено грубым предком. По этим
+  // трём числам видно, чем вызвана смена картинки, — без них причину
+  // мерцания приходится угадывать.
+  const diag = ctx.diag;
+  if (diag) {
+    diag.merged = 0; diag.waiting = 0; diag.fallback = 0; diag.visited = 0;
+    if (diag.collapses) diag.collapses.length = 0;
+  }
   const stack = [];
   for (let f = 0; f < 6; f++) stack.push({ face: f, level: 0, tx: 0, ty: 0 });
 
@@ -123,6 +153,29 @@ export function selectTiles(ctx, out = []) {
   const relief = ctx.relief || 0;
   const horizon = Math.acos(Math.max(-1, Math.min(1, R / (R + alt))))
     + Math.acos(Math.max(-1, Math.min(1, 1 / (1 + relief)))) + 0.02;
+
+  // Насколько плитка вылезает за горизонт, в долях своего углового
+  // радиуса: <=1 — она попадёт в кадр, больше — нет.
+  //
+  // Отсюда растут ДВА разных ответа, и путать их нельзя.
+  //
+  //  - Будет ли плитка нарисована. Только от этого зависит, требовать
+  //    ли её готовности для дробления: то, чего в кадре нет, щели дать
+  //    не может. Условие обязано совпадать с отсечением при отрисовке
+  //    ТОЧНО. Мягче — и мы снова ждём плитку, которую никто не рисует и
+  //    потому не помечает нужной: она вытесняется, и поддерево рушится.
+  //    Строже — и мы дробим, не дождавшись плитки, которая всё-таки
+  //    рисуется: это уже дырка в грунте.
+  //  - Стоит ли её заказать заранее. Здесь запас как раз нужен: плитка
+  //    у кромки успеет собраться до того, как выплывет из-за горизонта.
+  const beyond = (level, face, tx, ty) => {
+    if (level === 0) return 0;
+    const c = tileCenter(face, level, tx, ty, _c2);
+    const rad = tileRadius(level);
+    const ang = Math.acos(Math.max(-1, Math.min(1,
+      c.x * ctx.camDir.x + c.y * ctx.camDir.y + c.z * ctx.camDir.z)));
+    return rad > 0 ? (ang - horizon) / rad : 0;
+  };
 
   let guard = 0;
   while (stack.length && guard++ < 20000) {
@@ -145,8 +198,20 @@ export function selectTiles(ctx, out = []) {
       ctx.errorOf(t.level) * k / ctx.tol,
       ctx.texelOf ? ctx.texelOf(t.level) * k / ctx.texelTol : 0);
 
+    // Раз раздробленную плитку схлопываем только с запасом (см. HYST).
+    const limit = ctx.wasSplit && ctx.wasSplit(t) ? 1 / HYST : 1;
     const deep = t.level >= ctx.maxLevel;
-    if (err <= 1 || deep) {
+    if (diag) diag.visited++;
+    if (err <= limit || deep) {
+      if (diag && !deep) {
+        diag.merged++;
+        // Схлопывание того, что в прошлом кадре было раздроблено, —
+        // единственный вид смены набора, который глаз читает как рывок
+        // на ровном месте. Его и записываем поимённо.
+        if (limit < 1 && diag.collapses && diag.collapses.length < 8) {
+          diag.collapses.push({ key: tileKey(t.face, t.level, t.tx, t.ty), err, limit });
+        }
+      }
       if (ctx.ready(t)) out.push(t);
       else pushReady(ctx, t, out, err);
       continue;
@@ -156,12 +221,23 @@ export function selectTiles(ctx, out = []) {
     // готовы. Иначе рисуем то, что есть.
     const kids = tileChildren(t.face, t.level, t.tx, t.ty, []);
     let allReady = true;
-    for (const k of kids) if (!ctx.ready(k)) { allReady = false; ctx.want(k, err); }
+    for (const k of kids) {
+      const out = beyond(k.level, k.face, k.tx, k.ty);
+      if (out > PREFETCH) continue;              // далеко за горизонтом — не нужен вовсе
+      if (ctx.ready(k)) continue;
+      // Заказываем и то, что пока за кромкой: пусть соберётся заранее.
+      ctx.want(k, err);
+      // А вот ЖДАТЬ можно только то, что попадёт в кадр.
+      if (out <= 1) allReady = false;
+    }
     if (allReady) {
+      if (ctx.markSplit) ctx.markSplit(t);
       for (const k of kids) stack.push(k);
     } else if (ctx.ready(t)) {
+      if (diag) diag.waiting++;
       out.push(t);
     } else {
+      if (diag) diag.fallback++;
       pushReady(ctx, t, out, err);
     }
   }

@@ -172,6 +172,12 @@ export function updateAudio(a, game, dt) {
   const strain = clamp(a.accel / SHIP.accel, 0, 1.4);
   const thr = Math.abs(ship.throttle);
 
+  // Вход в атмосферу слышно раньше, чем видно: сначала шум обшивки,
+  // потом уже свечение. Отдельного голоса не заводим — это тот же шум
+  // сопел, только его источник другой, и он громче всего, что может
+  // выдать двигатель.
+  const entry = flying && game.entry ? game.entry.heat : 0;
+
   const m = a.mix;
   let engine = 0, pitch = 0, roar = 0;
   if (flying) {
@@ -182,6 +188,11 @@ export function updateAudio(a, game, dt) {
     // шума больше. Об этом прямо сказано в модели корабля, и звук
     // обязан это подтверждать, иначе задний ход неотличим на слух.
     if (ship.throttle < 0) { pitch *= 0.55; roar = Math.min(1, roar + 0.3); }
+    if (entry > 0) {
+      roar = Math.min(1, roar + entry * 1.2);
+      engine = Math.min(1, engine + entry * 0.5);
+      pitch = Math.min(1, pitch + entry * 0.25);
+    }
   }
   // В порту двигатели заглушены — вместо них фоном идёт сама станция.
   // Смена фона и есть признак того, что корабль больше не свой хозяин.

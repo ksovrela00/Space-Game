@@ -1,8 +1,16 @@
-// Модель корабля игрока: клиновидный корпус в духе Cobra Mk III.
-// Все размеры в километрах (полная длина ~65 м).
+// Модели кораблей. Все размеры в километрах (длина корпуса ~65 м).
+//
+// Корпус игрока приходит готовой моделью (js/models/hull.data.js,
+// собирается из CC0-пака: npm run ship). Процедурный клин, с которого
+// всё начиналось, остался рядом — buildWedge: по нему видно, каких
+// обводов ждёт остальной код, и он же запасной вариант, если данных
+// корпуса нет.
 
 import { v3 } from '../core/vec3.js';
-import { loft, box, prismZ, mergeMeshes, transformMesh } from './geometry.js';
+import { loft, box, prismZ, makeMesh, mergeMeshes, transformMesh } from './geometry.js';
+import {
+  HULL_NAME, HULL_LENGTH, HULL_VERTS, HULL_FACES, HULL_EXHAUSTS, HULL_GEAR,
+} from './hull.data.js';
 
 const HULL_TOP = [198, 206, 220];
 const HULL_SIDE = [150, 158, 172];
@@ -18,7 +26,38 @@ const boundOf = (mesh) => {
   return mesh;
 };
 
+// Данные корпуса лежат в целых миллиметрах — так файл втрое короче.
+const MM = 1e-6;
+const pt = (p) => v3(p[0] * MM, p[1] * MM, p[2] * MM);
+
+/**
+ * Корпус игрока из готовой модели.
+ *
+ * Формат распаковывается здесь, а не хранится готовым: массив чисел
+ * парсится мгновенно, а вот тысяча объектов {x,y,z} в исходнике весила
+ * бы втрое больше и читалась бы глазами ничуть не лучше.
+ */
 export function buildCobra() {
+  const verts = [];
+  for (let i = 0; i < HULL_VERTS.length; i += 3) {
+    verts.push(v3(HULL_VERTS[i] * MM, HULL_VERTS[i + 1] * MM, HULL_VERTS[i + 2] * MM));
+  }
+  const defs = [];
+  for (let i = 0; i < HULL_FACES.length;) {
+    const n = HULL_FACES[i++];
+    const v = HULL_FACES.slice(i, i + n); i += n;
+    const c = HULL_FACES.slice(i, i + 3); i += 3;
+    defs.push({ v, c });
+  }
+  const mesh = makeMesh(verts, defs);
+  mesh.exhausts = HULL_EXHAUSTS.map(pt);
+  mesh.length = HULL_LENGTH;
+  mesh.name = HULL_NAME;
+  return boundOf(mesh);
+}
+
+/** Процедурный клин в духе Cobra Mk III — исходный корпус игрока. */
+export function buildWedge() {
   const L = 0.0325, W = 0.026, H = 0.010;
 
   // Планформа: нос, изломы кромки крыла, срез кормы (в плоскости XZ).
@@ -72,15 +111,50 @@ export function buildGear() {
   const pad = box(0.34, 0.07, 0.30, GEAR_PAD, v3(0, -0.98, 0));
   const mesh = mergeMeshes([strut, pad]);
 
-  const L = 0.0325, W = 0.026, H = 0.010;
-  mesh.legLength = 0.0075;                      // 7.5 м
-  mesh.hardpoints = [
-    v3(0, -H * 0.10, L * 0.42),                 // передняя
-    v3(-W * 0.42, -H * 0.26, -L * 0.34),        // основные
-    v3(W * 0.42, -H * 0.26, -L * 0.34),
-  ];
+  // Точки крепления идут вместе с корпусом: конвертер ставит их по
+  // самому низкому месту днища, иначе стойка растёт из воздуха или из
+  // середины обшивки.
+  mesh.hardpoints = HULL_GEAR.map(pt);
+  // Длина стойки — ровно то, что остаётся между днищем и грунтом при
+  // посадочном просвете SHIP.gearClear. Считается отсюда, а не задаётся
+  // числом: сменили корпус — стойки подстроились.
+  const floor = Math.min(...mesh.hardpoints.map((p) => p.y));
+  mesh.legLength = Math.max(0.001, GEAR_CLEAR + floor);
   return boundOf(mesh);
 }
+
+/**
+ * Просветы под кораблём, км: на шасси и на брюхе. Живут здесь, рядом с
+ * обводами, потому что это свойство КОРПУСА, а не физики; физика берёт
+ * их через SHIP.gearClear и SHIP.hullClear.
+ *
+ * HULL_CLEAR — это ровно низ корпуса: лёг на брюхо, значит обшивка на
+ * грунте. GEAR_CLEAR выше на длину стойки.
+ */
+export const HULL_CLEAR = hullFloor();
+export const GEAR_CLEAR = HULL_CLEAR + 0.004;
+
+/** Насколько низко корпус свисает под центром масс. */
+function hullFloor() {
+  let low = 0;
+  for (let i = 1; i < HULL_VERTS.length; i += 3) low = Math.min(low, HULL_VERTS[i]);
+  return -low * MM;
+}
+
+/**
+ * Полуразмеры корпуса поперёк курса, км. Ими проверяется, лезет ли
+ * корабль в щель порта (js/game/docking.js): раньше там стояло число
+ * «полуразмер корабля 6 м», не связанное ни с какой моделью, — у клина
+ * полуразмах был 26 метров, и рама прощала то, что прощать не должна.
+ */
+export const HULL_HALF = (() => {
+  let x = 0, y = 0;
+  for (let i = 0; i < HULL_VERTS.length; i += 3) {
+    x = Math.max(x, Math.abs(HULL_VERTS[i]));
+    y = Math.max(y, Math.abs(HULL_VERTS[i + 1]));
+  }
+  return { x: x * MM, y: y * MM };
+})();
 
 // Небольшой транспорт — понадобится для NPC и как «чужой» силуэт.
 export function buildShuttle() {

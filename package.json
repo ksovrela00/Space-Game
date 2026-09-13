@@ -10,6 +10,7 @@
     "smoke": "node tools/smoke.mjs",
     "shot": "node tools/shot.mjs",
     "check": "node tools/test.mjs && node tools/gl.mjs && node tools/smoke.mjs && node tools/shot.mjs && node tools/sounds.mjs --check",
-    "sounds": "node tools/sounds.mjs"
+    "sounds": "node tools/sounds.mjs",
+    "ship": "node tools/ship.mjs"
   }
 }

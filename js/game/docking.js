@@ -6,6 +6,7 @@ import { toLocal, toWorld } from '../core/basis.js';
 import { SHIP } from './ship.js';
 import { aimAt, flyVelocity, levelRoll } from './pilot.js';
 import { STATION_R, STATION_D, SLOT } from '../models/station.js';
+import { HULL_HALF } from '../models/ships.js';
 
 export const LIMITS = {
   speed: 0.28,     // км/с — максимальная относительная скорость входа
@@ -54,8 +55,10 @@ export function checkStation(ship, station) {
   const rad = Math.hypot(p.x, p.y);
   if (rad > DRUM_RI) return null;              // проходим мимо, снаружи барабана
 
-  const margin = 0.006;                        // полуразмер корабля
-  const inSlot = Math.abs(p.x) < SLOT.hw - margin && Math.abs(p.y) < SLOT.hh - margin;
+  // Зазор в створе — по реальным обводам корпуса, а не по числу из
+  // воздуха: в щель проходит корабль целиком, а не его центр.
+  const inSlot = Math.abs(p.x) < SLOT.hw - HULL_HALF.x
+    && Math.abs(p.y) < SLOT.hh - HULL_HALF.y;
   if (!inSlot) return 'crash';                 // впечатались в раму или в борт
 
   // В створе порта: считаем стыковку состоявшейся, когда прошли раму.

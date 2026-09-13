@@ -294,6 +294,40 @@ game.state.view = 'cockpit';
 lookAt(game.world.home, 2.4);
 show('планета-океан: терминатор, континенты, атмосфера');
 
+// Вход в атмосферу: корабль падает на планету с воздухом, и вокруг него
+// разгорается ударная волна. На запасном пути (Canvas 2D) шейдера нет, и
+// рисуются ореолы по потоку — по ним и видно, что нагрев дошёл до
+// отрисовки и стоит там, где надо: впереди корабля, а не вокруг него.
+{
+  const air = game.world.planets.find((p) => p.atmo && p.kind !== 'gas') || game.world.home;
+  const { entryState } = await import('../js/game/entry.js');
+  const dir = { x: 0.3, y: 0.5, z: 0.81 };
+  const dl = Math.hypot(dir.x, dir.y, dir.z);
+  dir.x /= dl; dir.y /= dl; dir.z /= dl;
+  const alt = air.radius * 0.004;                 // глубоко в воздухе
+  game.ship.pos.x = air.pos.x + dir.x * (air.radius + alt);
+  game.ship.pos.y = air.pos.y + dir.y * (air.radius + alt);
+  game.ship.pos.z = air.pos.z + dir.z * (air.radius + alt);
+  // Падаем почти отвесно на полном ходу.
+  game.ship.vel.x = -dir.x * 1.2; game.ship.vel.y = -dir.y * 1.2; game.ship.vel.z = -dir.z * 1.2;
+  game.ship.basis.fwd = { x: -dir.x, y: -dir.y, z: -dir.z };
+  const rl = Math.hypot(-game.ship.basis.fwd.z, 0, game.ship.basis.fwd.x) || 1;
+  game.ship.basis.right = { x: -game.ship.basis.fwd.z / rl, y: 0, z: game.ship.basis.fwd.x / rl };
+  const b = game.ship.basis;
+  b.up = {
+    x: b.fwd.y * b.right.z - b.fwd.z * b.right.y,
+    y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
+    z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
+  };
+  game.entry = entryState(game.world, game.ship, 1);
+  game.state.view = 'chase';
+  show('вход в атмосферу: плазма впереди корабля, нагрев ' +
+    (game.entry ? game.entry.heat.toFixed(2) : '—'));
+  game.state.view = 'cockpit';
+  game.entry = null;
+  game.ship.vel.x = game.ship.vel.y = game.ship.vel.z = 0;
+}
+
 const gasP = game.world.planets.find((p) => p.kind === 'gas');
 lookAt(gasP, 3.2);
 show('газовый гигант с кольцами и полосами');

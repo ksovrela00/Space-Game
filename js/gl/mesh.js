@@ -117,6 +117,47 @@ export function buildIndexedMesh(gl, locs, data) {
   return new GlMesh(gl, vao, data.indices.length, gl.TRIANGLES, type, bufs);
 }
 
+/**
+ * Оболочка ударной волны для входа в атмосферу.
+ *
+ * Поверхность вращения: от лобовой точки (z = 0) назад по следу
+ * (z = -1). Профиль — корень: у лба радиус растёт круто, дальше почти
+ * не меняется. Это форма головной волны у ТУПОГО тела, а корабль на
+ * гиперзвуке ведёт себя именно так: волна отходит от него и обнимает
+ * корпус, а не тянется тонкой иглой от носа.
+ *
+ * Меш единичный; настоящие размеры задают uRad и uLen в шейдере.
+ */
+export function buildPlumeMesh(gl, locs, rings = 14, segments = 28) {
+  const verts = (rings + 1) * (segments + 1);
+  const positions = new Float32Array(verts * 3);
+  const t = new Float32Array(verts);
+  for (let i = 0; i <= rings; i++) {
+    const s = i / rings;
+    // Радиус: круто от нуля, потом полого; к хвосту след чуть сужается.
+    const r = Math.sqrt(s) * (1 - 0.28 * s * s);
+    for (let j = 0; j <= segments; j++) {
+      const a = (j / segments) * Math.PI * 2;
+      const o = i * (segments + 1) + j;
+      positions[o * 3] = Math.cos(a) * r;
+      positions[o * 3 + 1] = Math.sin(a) * r;
+      positions[o * 3 + 2] = -s;
+      t[o] = s;
+    }
+  }
+  const indices = new Uint16Array(rings * segments * 6);
+  let o = 0;
+  for (let i = 0; i < rings; i++) {
+    for (let j = 0; j < segments; j++) {
+      const a = i * (segments + 1) + j, b = a + 1;
+      const c = a + segments + 1, d = c + 1;
+      indices[o++] = a; indices[o++] = c; indices[o++] = b;
+      indices[o++] = b; indices[o++] = c; indices[o++] = d;
+    }
+  }
+  return buildIndexedMesh(gl, locs, { positions, t, indices });
+}
+
 /** Звёзды: облако точек с направлением и цветом. */
 export function buildPointsMesh(gl, locs, dirs, colors) {
   const vao = gl.createVertexArray();

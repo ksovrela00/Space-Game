@@ -22,6 +22,7 @@ import {
 } from './game/docking.js';
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
+import { entryState } from './game/entry.js';
 import {
   toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
@@ -86,6 +87,8 @@ const game = {
   nearest: null,
   dockAssist: null,
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
+  entry: null,           // вход в атмосферу: нагрев, цвет и ось факела
+  entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
   capture: null,         // тело, в чьём гравитационном захвате корабль
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   camera,                // та же камера, что у рендера: нужна приборам и проверкам
@@ -109,6 +112,7 @@ const _tmp = v3();
 // --- переходы состояний ------------------------------------------------------
 
 function dockAt(station) {
+  game.entry = null;
   ship.dockedAt = station;
   game.lastStation = station;
   stopAutopilot(ship);
@@ -193,6 +197,7 @@ game.closeOverlay = () => {
 };
 
 function crash(reason) {
+  game.entry = null;
   game.crashReason = reason;
   game.stats.crashes++;
   ship.hull = 0;
@@ -589,6 +594,10 @@ function step(dt) {
   updateShip(ship, dt, dt * level, gravityField(game.capture, ship));
   game.stats.flownKm += ship.speed * level * dt;
 
+  // Вход в атмосферу: считается по скорости ОТНОСИТЕЛЬНО воздуха и с
+  // учётом круиза — он умножает перемещение, а значит и обдув.
+  game.entry = entryState(world, ship, game.cruise.level, game.entryBuf);
+
   // Касание поверхности: посадка или удар.
   zone = landingContext(world, ship);
   game.zone = zone;
@@ -799,6 +808,21 @@ function render2d() {
     }
   }
 
+  // Плазма входа: на запасном пути без шейдеров — ореолы по потоку.
+  // Форму ударной волны так не показать, но «горим» видно, и видно с
+  // любого вида: из кокпита зарево впереди как раз и есть главное.
+  const en = game.entry;
+  if (en) {
+    const L = shipMesh.length || 0.065;
+    const c = en.color.map((v) => Math.round(Math.min(1, v) * 255));
+    for (const [ahead, k] of [[0.75, 1], [0.1, 0.7], [-0.9, 0.45]]) {
+      _tmp.x = ship.pos.x + en.dir.x * L * ahead;
+      _tmp.y = ship.pos.y + en.dir.y * L * ahead;
+      _tmp.z = ship.pos.z + en.dir.z * L * ahead;
+      renderer.drawGlow(_tmp, (14 + 70 * en.heat) * k, `rgb(${c[0]},${c[1]},${c[2]})`);
+    }
+  }
+
   renderer.end();
 }
 
@@ -816,6 +840,9 @@ function render() {
   st.detail = scene ? !!scene.detailOn : false;
   st.patches = scene && scene.patch ? scene.patch.levels : 0;
   st.patchBuilds = scene && scene.patch ? scene.patch.rebuilds : 0;
+  // Состояние кэша плиток: по нему в отладке видно и загрузку рельефа,
+  // и то, в потоках ли она считается.
+  st.tiles = scene && scene.tiles && scene.tiles.body ? scene.tiles.stats : null;
 
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();

@@ -1169,9 +1169,9 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 7,
+  ok(state.programs === 8,
     `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца, ` +
-    'тень, запекание)');
+    'плазма входа, тень, запекание)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -1222,6 +1222,30 @@ console.log('\n== мок GL: путь отрисовки ==');
   ok(grows && levels[levels.length - 1] > levels[0],
     `LOD растёт при подлёте: ${levels.join(' -> ')}`);
 
+  // Плазма входа: лишний вызов отрисовки появляется ровно тогда, когда
+  // есть нагрев, и исчезает вместе с ним. Заодно это проверяет, что
+  // шейдер собрался: несобранная программа уронила бы сцену выше.
+  {
+    // Проверяем не число вызовов (оно плавает, пока сцена догружается),
+    // а сам факт: uniform нагрева доходит до шейдера ровно тогда, когда
+    // нагрев есть, и с тем самым значением.
+    delete state.uni.uHeat;
+    scene.render(game);
+    const coldSeen = 'uHeat' in state.uni;
+    game.entry = {
+      heat: 0.8, color: [1, 0.6, 0.2], dir: { x: 0, y: 0, z: 1 },
+      alt: 12, rho: 0.4, speed: 1.1, body: planet,
+    };
+    const before = state.draws;
+    scene.render(game);
+    const drew = state.draws - before;
+    const hotSeen = state.uni.uHeat;
+    game.entry = null;
+    ok(!coldSeen && hotSeen === 0.8 && drew > 0,
+      `плазма входа: без нагрева шейдер не зовётся, с нагревом uHeat=${hotSeen} ` +
+      `(${drew} вызовов в кадре)`);
+  }
+
   // Газовый гигант с кольцами и атмосферой.
   const gas = world.planets.find((p) => p.kind === 'gas');
   lookAt(v3(gas.pos.x + gas.radius * 4, gas.pos.y + gas.radius, gas.pos.z), gas.pos);
@@ -1268,7 +1292,19 @@ console.log('\n== мок GL: путь отрисовки ==');
 
     const bakes0 = state.bakes, mips0 = state.mipmaps, built0 = scene.tiles.built;
     put(0.05);
-    for (let i = 0; i < 300; i++) scene.render(game);
+    // Ждём, пока набор ДОСТРОИТСЯ, а не «триста кадров и хватит».
+    // Фиксированное число кадров и было причиной плавающей проверки
+    // ниже: сборка ещё шла, а зависание уже засчитывало её плитки себе.
+    // Заодно это мера того, за сколько кадров поверхность выходит на
+    // детализацию с холодного кэша, — и её полезно держать под глазом.
+    let load = 0;
+    while (load++ < 900) {
+      scene.render(game);
+      if (scene.tiles.stats.pending === 0 && load > 3) break;
+    }
+    ok(load < 900,
+      `с холодного кэша поверхность выходит на детализацию за ${load} кадров ` +
+      `(${(load / 60).toFixed(1)} с при 60 к/с), собрано ${scene.tiles.built - built0} плиток`);
     const st = scene.tiles.stats;
     ok(st.drawn > 8 && scene.tris > 5000,
       `кадр у поверхности: плиток нарисовано ${st.drawn}, треугольников ` +
@@ -1355,6 +1391,95 @@ console.log('\n== мок GL: путь отрисовки ==');
       ok(again < 10 && again < first * 0.2,
         `повторный спуск по тому же месту почти ничего не строит заново: ` +
         `${again} плиток против ${first} на первом проходе`);
+    }
+
+    // Сборка в рабочих потоках. Настоящий Worker в node недоступен, но
+    // его код — обычная функция (js/gl/tileworker.js: runJob), и её
+    // можно подсунуть заглушке. Тогда через пул проходит ровно тот же
+    // путь, что и в браузере: задание -> буферы -> перенос -> загрузка
+    // в GL. Без этой проверки весь путь существовал бы только на словах.
+    {
+      const { runJob } = await import('../js/gl/tileworker.js');
+      const pending = [];
+      let jobs = 0;
+      class FakeWorker {
+        constructor() { this.onmessage = null; this.onerror = null; }
+        postMessage(msg) {
+          jobs++;
+          // Как настоящий: ответ приходит не сразу, а позже.
+          pending.push(() => { if (this.onmessage) this.onmessage({ data: runJob(msg) }); });
+        }
+        terminate() {}
+      }
+      globalThis.Worker = FakeWorker;
+
+      const cam2 = new Camera();
+      cam2.resize(1600, 900);
+      const scene2 = new GlScene(canvas, cam2, new Starfield(950, 0x51ee7));
+      const cores = (globalThis.navigator && navigator.hardwareConcurrency) || 4;
+      const wantWorkers = Math.max(1, Math.min(3, cores - 1));
+      ok(scene2.tiles.pool.ok && scene2.tiles.pool.workers.length === wantWorkers,
+        `пул поднялся: потоков ${scene2.tiles.pool.workers.length} при ${cores} ядрах ` +
+        `(на одно меньше, но не больше трёх)`);
+
+      // Кадр + доставка ответов: столько раз, сколько нужно до сходимости.
+      const step = () => {
+        scene2.render(game);
+        const q = pending.splice(0, pending.length);
+        for (const f of q) f();
+      };
+      const savedCam = game.camera;
+      const pos = worldPoint(moon, dirL, gr + 0.05, v3());
+      placeShip(ship, pos, null);
+      lookAt(pos, ahead);
+      cam2.pos.x = pos.x; cam2.pos.y = pos.y; cam2.pos.z = pos.z;
+      cam2.basis.right = { ...cam.basis.right };
+      cam2.basis.up = { ...cam.basis.up };
+      cam2.basis.fwd = { ...cam.basis.fwd };
+
+      let frames = 0;
+      while (frames++ < 900) {
+        step();
+        if (scene2.tiles.stats.pending === 0 && frames > 5) break;
+      }
+      game.camera = savedCam;
+
+      // Разница в единицы плиток — это задания, ответ на которые ещё в
+      // пути на момент замера: главный поток геометрию не считает вовсе.
+      ok(jobs > 100 && scene2.tiles.built > jobs - 8 && scene2.tiles.built <= jobs,
+        `геометрия посчитана потоками: заданий ${jobs}, собранных плиток ` +
+        `${scene2.tiles.built} (в кадре не посчитано ни одной)`);
+      ok(frames < 900 && scene2.tiles.draw.length > 8,
+        `через пул поверхность сходится за ${frames} кадров, в кадре ` +
+        `${scene2.tiles.draw.length} плиток`);
+
+      let holes = 0;
+      for (const t of scene2.tiles.draw) {
+        const e = scene2.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`);
+        if (!e || !e.mesh) holes++;
+      }
+      ok(holes === 0, `в наборе из потоков нет незаготовленных плиток (${holes})`);
+
+      // Геометрия из потока обязана совпасть с посчитанной в кадре до
+      // бита: иначе рельеф зависел бы от того, где его считали.
+      const { tileBuilder } = await import('../js/gl/tilegeo.js');
+      const spec = { kind: moon.kind, name: moon.name, id: moon.id };
+      const t = { face: 2, level: 9, tx: 271, ty: 300 };
+      const b = tileBuilder({ ...spec }, t);
+      while (!b.step(1e9)) { /* целиком */ }
+      const direct = b.result;
+      const viaWorker = runJob({ id: 1, key: 'k', spec, t });
+      const same = new Float32Array(viaWorker.geo.positions);
+      let diff = 0;
+      for (let i = 0; i < direct.positions.length; i++) {
+        if (direct.positions[i] !== same[i]) diff++;
+      }
+      ok(diff === 0 && viaWorker.geo.faces === direct.faces,
+        `поток и кадр дают одну и ту же геометрию: ${direct.positions.length / 3} вершин, ` +
+        `${direct.faces} граней, расхождений ${diff}`);
+
+      scene2.tiles.pool.dispose();
+      delete globalThis.Worker;
     }
 
     // Тень корабля: силуэт считается на CPU (js/game/shadow.js), а

@@ -16,14 +16,15 @@ import {
   startLanding, updateLandingComputer, checkTouchdown, settle, updateLandedPose,
   takeoff, landingReadout,
 } from '../js/game/landing.js';
-import { captureBody, carryShip, gravityField, CAPTURE_G } from '../js/game/gravity.js';
+import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '../js/game/gravity.js';
+import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
 import { shipShadow } from '../js/game/shadow.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '../js/game/audio.js';
 import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
 import { STATION_D } from '../js/models/station.js';
-import { buildCobra } from '../js/models/ships.js';
-import { buildStation } from '../js/models/station.js';
+import { buildCobra, buildGear, HULL_HALF } from '../js/models/ships.js';
+import { buildStation, SLOT } from '../js/models/station.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker } from '../js/ui/hud.js';
 import { Renderer } from '../js/render/renderer.js';
@@ -1321,6 +1322,85 @@ console.log('\n== задний ход ==');
     `после короткого сброса тяга стоит на нуле, а не уходит в минус (${sh2.throttle})`);
 }
 
+// --- 5f2. Корпус корабля -------------------------------------------------------
+console.log('\n== корпус ==');
+{
+  // Корпус пришёл готовой моделью (js/models/hull.data.js). Проверяется
+  // не красота, а контракт: оси, обводы и точки, на которые опирается
+  // остальной код — посадка, факелы, стыковка.
+  const hull = buildCobra();
+  const gear = buildGear();
+  const ext = (axis) => {
+    const v = hull.verts.map((p) => p[axis]);
+    return { min: Math.min(...v), max: Math.max(...v), size: Math.max(...v) - Math.min(...v) };
+  };
+  const X = ext('x'), Y = ext('y'), Z = ext('z');
+
+  ok(hull.verts.length > 300 && hull.faces.length > 300 &&
+     hull.faces.every((f) => f.v.every((i) => i >= 0 && i < hull.verts.length)),
+    `корпус «${hull.name}»: ${hull.verts.length} вершин, ${hull.faces.length} граней, ` +
+    'все номера вершин в пределах');
+
+  ok(hull.faces.every((f) => f.c.length === 3 && f.c.every((c) => c >= 0 && c <= 255)) &&
+     new Set(hull.faces.map((f) => f.c.join(','))).size > 20,
+    `цвет снят с текстуры на каждую грань: различных цветов ` +
+    `${new Set(hull.faces.map((f) => f.c.join(','))).size}`);
+
+  ok(hull.faces.every((f) => Number.isFinite(f.n.x) &&
+      Math.abs(Math.hypot(f.n.x, f.n.y, f.n.z) - 1) < 1e-6),
+    'у каждой грани есть единичная нормаль');
+
+  // Длина по носу — то, на что рассчитаны камера, тень и посадка.
+  ok(Math.abs(Z.size - hull.length) < 1e-6 && Math.abs(Z.min + Z.max) < 1e-6,
+    `длина ${(Z.size * 1000).toFixed(1)} м по оси Z, корпус отцентрован`);
+
+  // Нос — узкий конец. Сечение у носа обязано быть уже, чем у кормы:
+  // иначе модель развёрнута задом наперёд, и это единственная ошибка
+  // перегона, которую не видно ни по одному другому признаку.
+  const widthNear = (from, to) => {
+    let lo = 1e9, hi = -1e9;
+    for (const p of hull.verts) {
+      const t = (p.z - Z.min) / Z.size;
+      if (t < from || t > to) continue;
+      lo = Math.min(lo, p.x); hi = Math.max(hi, p.x);
+    }
+    return hi - lo;
+  };
+  const nose = widthNear(0.8, 1), tail = widthNear(0, 0.2);
+  ok(nose < tail * 0.7,
+    `нос смотрит в +Z: сечение у носа ${(nose * 1000).toFixed(1)} м против ` +
+    `${(tail * 1000).toFixed(1)} м у кормы`);
+
+  // Факелы: в корме, попарно симметрично.
+  const ex = hull.exhausts;
+  ok(ex.length >= 1 && ex.every((p) => p.z < Z.min + Z.size * 0.25) &&
+     (ex.length < 2 || Math.abs(ex[0].x + ex[1].x) < Math.abs(ex[0].x) * 0.3),
+    `сопла (${ex.length}) стоят в корме и симметричны: ` +
+    ex.map((p) => `(${(p.x * 1000).toFixed(1)}, ${(p.z * 1000).toFixed(1)})`).join(' '));
+
+  // Шасси: точки под днищем, одна впереди и две сзади по бортам.
+  const hp = gear.hardpoints;
+  const front = hp.filter((p) => p.z > 0), back = hp.filter((p) => p.z < 0);
+  ok(hp.length === 3 && front.length === 1 && back.length === 2 &&
+     Math.abs(back[0].x + back[1].x) < 1e-9 && hp.every((p) => p.y <= 0),
+    `шасси: одна стойка впереди, две сзади по бортам, все под днищем`);
+
+  // Просветы обязаны соответствовать корпусу: на шасси днище над
+  // грунтом, на брюхе — ровно на нём.
+  ok(Math.abs(SHIP.hullClear + Y.min) < 1e-9 && SHIP.gearClear > SHIP.hullClear &&
+     gear.legLength > 0.0005,
+    `просветы от модели: брюхо ${(SHIP.hullClear * 1000).toFixed(1)} м = низ корпуса, ` +
+    `на шасси ${(SHIP.gearClear * 1000).toFixed(1)} м, стойка ` +
+    `${(gear.legLength * 1000).toFixed(1)} м`);
+
+  // Корабль обязан пролезать в щель порта — иначе состыковаться нельзя
+  // в принципе, и докинг-компьютер будет вечно бить корабль о раму.
+  ok(HULL_HALF.x < SLOT.hw * 0.8 && HULL_HALF.y < SLOT.hh * 0.8,
+    `в створ порта проходит с запасом: корпус ${(HULL_HALF.x * 2000).toFixed(0)}x` +
+    `${(HULL_HALF.y * 2000).toFixed(0)} м, щель ${(SLOT.hw * 2000).toFixed(0)}x` +
+    `${(SLOT.hh * 2000).toFixed(0)} м`);
+}
+
 // --- 5g2. Подъёмные движки (R/F) ---------------------------------------------
 console.log('\n== подъёмные движки ==');
 {
@@ -1389,6 +1469,155 @@ console.log('\n== подъёмные движки ==');
     ok(Math.abs(dot(sh.vel, sh.basis.fwd) - fwd0) < 1e-6 && vUp(sh) > want * 0.9,
       `на крейсерском ходу R не съедает скорость вперёд: ` +
       `${dot(sh.vel, sh.basis.fwd).toFixed(3)} км/с при ${(vUp(sh) * 1000).toFixed(1)} м/с вверх`);
+  }
+}
+
+// --- 5g2b. Вход в атмосферу ---------------------------------------------------
+console.log('\n== вход в атмосферу ==');
+{
+  const air = world.planets.find((p) => p.atmo);
+  const bare = world.planets.find((p) => !p.atmo) || world.planets[0].moons[0];
+
+  // Плотность: единица у земли, ноль на верхней кромке, между ними
+  // экспонента. Без этого нагрев был бы либо везде, либо нигде.
+  const top = air.radius * ENTRY.top;
+  const d0 = airDensity(air, 0), dMid = airDensity(air, top * 0.5), dTop = airDensity(air, top);
+  ok(d0 === 1 && dTop === 0 && dMid > 0.05 && dMid < 0.15 &&
+     airDensity(bare, 0) === 0,
+    `плотность: у земли ${d0}, на половине ${dMid.toFixed(3)}, на кромке ${dTop}; ` +
+    `у тела без воздуха ${airDensity(bare, 0)}`);
+
+  // Куб скорости — то самое «краснота зависит от скорости входа».
+  // Вдвое быстрее обязано быть примерно вшестеро-ввосьмеро горячее.
+  const h1 = entryHeat(0.05, 0.6), h2 = entryHeat(0.05, 0.95);
+  ok(entryHeat(0.05, ENTRY.vFloor) === 0 && h1 > 0 && h2 / h1 > 3,
+    `нагрев растёт кубом скорости: на пороге ${ENTRY.vFloor} км/с нуль, ` +
+    `на 0.6 — ${h1.toFixed(4)}, на 0.95 — ${h2.toFixed(4)} (в ${(h2 / h1).toFixed(1)} раза)`);
+
+  ok(entryHeat(0, 2) === 0 && entryHeat(1, 9) === 1,
+    'в вакууме нагрева нет при любой скорости, у земли на большой он в полную силу');
+
+  // Цвет зависит от СКОРОСТИ, а не от силы свечения: на околозвуковых
+  // белый конус уплотнения, на гиперзвуке красная плазма. Проверяем,
+  // что шкала идёт именно в эту сторону и нигде не разворачивается.
+  {
+    const at = (v) => heatColor(v);
+    const slow = at(ENTRY.vWhite), mid = at(0.85), fast = at(ENTRY.vRed * 1.5);
+    const rgb = (c) => 'rgb(' + c.map((x) => Math.round(Math.max(0, x) * 255)).join(', ') + ')';
+    // Белое: все три канала высоко. Красное: синий почти ушёл.
+    const white = slow[2] > 0.8 && slow[1] > 0.9;
+    const red = fast[2] < 0.1 && fast[1] < 0.35 && fast[0] > 0.9;
+    // Монотонность: синий обязан падать со скоростью без ям.
+    let mono = true;
+    let prev = 2;
+    for (let v = 0.3; v <= 2; v += 0.05) {
+      const b = heatColor(v)[2];
+      if (b > prev + 1e-9) mono = false;
+      prev = b;
+    }
+    ok(white && red && mono && mid[2] < slow[2] && mid[2] > fast[2],
+      `цвет по скорости: ${ENTRY.vWhite} км/с ${rgb(slow)}, 0.85 ${rgb(mid)}, ` +
+      `${(ENTRY.vRed * 1.5).toFixed(2)} ${rgb(fast)}`);
+  }
+
+  // Обстановка целиком. Корабль падает на планету с воздухом.
+  const shipAt = (body, alt, vel, cruise = 1) => {
+    const sh = makeShip();
+    const dir = normalize(v3(0.3, 0.5, 0.81));
+    placeShip(sh, v3(
+      body.pos.x + dir.x * (body.radius + alt),
+      body.pos.y + dir.y * (body.radius + alt),
+      body.pos.z + dir.z * (body.radius + alt)), makeBasis());
+    sh.vel.x = -dir.x * vel; sh.vel.y = -dir.y * vel; sh.vel.z = -dir.z * vel;
+    return entryState(world, sh, cruise);
+  };
+
+  ok(shipAt(air, air.radius * ENTRY.top * 2, 1.2) === null,
+    'выше атмосферы нагрева нет даже на полном ходу');
+  ok(shipAt(bare, 1, 1.2) === null, 'над телом без воздуха — тоже');
+  ok(shipAt(air, 5, 0.05) === null, 'медленное снижение в воздухе не жжёт');
+
+  const fast = shipAt(air, 5, 1.2);
+  ok(fast && fast.heat > 0.2 && fast.body === air,
+    `быстрый вход на 5 км: нагрев ${fast ? fast.heat.toFixed(2) : '—'}, ` +
+    `скорость обдува ${fast ? fast.speed.toFixed(2) : '—'} км/с`);
+
+  // Ось факела — по потоку: корабль падает вниз, значит и волна снизу.
+  const down = normalize(v3(0.3, 0.5, 0.81));
+  ok(Math.abs(dot(fast.dir, down) + 1) < 1e-6,
+    'ось волны совпадает с вектором скорости, а не с носом');
+
+  // Круиз множит перемещение, значит и обдув: нырять в атмосферу на
+  // ускорителе должно быть заметно горячее.
+  const cruised = shipAt(air, 5, 0.3, 10);
+  const plain = shipAt(air, 5, 0.3, 1);
+  ok(!plain && cruised && cruised.heat > 0.5,
+    `круиз x10 греет там, где на x1 нагрева нет вовсе (${cruised.heat.toFixed(2)})`);
+
+  // Калибровочная таблица: по ней видно баланс целиком, а не по одному
+  // числу. Это не столько проверка, сколько то, что должно быть на
+  // глазах при любой правке порогов.
+  {
+    const body = { atmo: [1, 1, 1], radius: 6000 };
+    const speeds = [0.4, 0.8, 1.2, 3];
+    const rows = [200, 60, 20, 0].map((alt) => {
+      const rho = airDensity(body, alt);
+      return `${String(alt).padStart(3)} км: ` +
+        speeds.map((v) => entryHeat(rho, v).toFixed(2)).join(' ');
+    });
+    const ground = entryHeat(1, 1.2), high = entryHeat(airDensity(body, 200), 1.2);
+    ok(ground > high * 5 && ground < 0.75 && entryHeat(1, 3) > 0.9,
+      `нагрев при 0.4 / 0.8 / 1.2 / 3 км/с — ${rows.join(' | ')}`);
+  }
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: корабль висит над планетой со своей скоростью
+  // 0.00, но включён круиз x10. Ускоритель множил и снос воздуха от
+  // вращения планеты (200 м/с превращались в 2 км/с), и корабль горел,
+  // стоя на месте. Множиться должна скорость КОРАБЛЯ и только она.
+  {
+    const sh = makeShip();
+    const dir = normalize(v3(0.3, 0.5, 0.81));
+    placeShip(sh, v3(
+      air.pos.x + dir.x * (air.radius + 70),
+      air.pos.y + dir.y * (air.radius + 70),
+      air.pos.z + dir.z * (air.radius + 70)), makeBasis());
+    // Своя скорость нулевая; грунт под кораблём уезжает.
+    const drift = Math.hypot(...['x', 'y', 'z'].map((k) => groundDrift(air, sh.pos, v3())[k]));
+    const still = entryState(world, sh, 10);
+    ok(still === null,
+      `висящий на круизе x10 не горит: своя скорость 0, снос воздуха ` +
+      `${(drift * 1000).toFixed(0)} м/с — ниже порога ${(ENTRY.vFloor * 1000).toFixed(0)} м/с`);
+  }
+
+  // И это должно быть верно для ВСЕХ планет системы, а не только для
+  // той, на которой поймали ошибку: порог обязан перекрывать вращение
+  // самой быстрой из них.
+  {
+    let worst = 0, worstName = '';
+    for (const b of world.bodies) {
+      if (!b.atmo) continue;
+      const alt = b.radius * ENTRY.top * 0.9;
+      const d = groundDrift(b, v3(b.pos.x + b.radius + alt, b.pos.y, b.pos.z), v3());
+      const sp = Math.hypot(d.x, d.y, d.z);
+      if (sp > worst) { worst = sp; worstName = b.name; }
+    }
+    ok(worst < ENTRY.vFloor * 0.8,
+      `порог ${(ENTRY.vFloor * 1000).toFixed(0)} м/с с запасом перекрывает вращение ` +
+      `самой быстрой планеты с воздухом (${worstName}, ${(worst * 1000).toFixed(0)} м/с)`);
+  }
+
+  // Воздух вращается с телом: кто летит вместе с ним, не горит.
+  {
+    const sh = makeShip();
+    const dir = normalize(v3(0.3, 0.5, 0.81));
+    const pos = v3(
+      air.pos.x + dir.x * (air.radius + 3),
+      air.pos.y + dir.y * (air.radius + 3),
+      air.pos.z + dir.z * (air.radius + 3));
+    placeShip(sh, pos, makeBasis());
+    groundDrift(air, pos, sh.vel);
+    ok(entryState(world, sh, 1) === null,
+      'летящий вместе с воздухом не горит, хотя грунт под ним уезжает');
   }
 }
 

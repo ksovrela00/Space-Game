@@ -10,17 +10,23 @@
 // строятся сразу и не вытесняются — это «поверхность планеты целиком».
 
 import { terrainOf } from './terrain.js';
-import { computeNormals } from './icosphere.js';
 import { buildIndexedMesh } from './mesh.js';
+import { tileBuilder, geoFromTransfer, BUILD_CHUNK } from './tilegeo.js';
+import { TilePool } from './tilepool.js';
 import { bakeUniforms } from './detail.js';
 import { createBakeTexture, CUBE_FACES } from './bake.js';
 import {
-  TILE_GRID, TILE_TEX, TILE_MAX_LEVEL, faceDir, tileBounds, tileKey,
+  TILE_TEX, TILE_MAX_LEVEL, tileBounds, tileKey,
   tileCellAngle, tileTexelAngle, selectTiles,
 } from './quadtree.js';
 
+export { tileBuilder };
+
 export const TILE_BUDGET = 440;      // сколько плиток держим в памяти (~200 КБ каждая)
-const BUILD_CHUNK = 512;             // вершин за один заход
+// Сколько готовых плиток забираем у потоков за кадр. Счёт идёт не у нас,
+// но загрузка в буферы и запекание — у нас, и вываливать их десятками за
+// кадр значит менять одну дёрганность на другую.
+const FINISH_PER_FRAME = 6;
 const TILE_TOL = 5;                  // допустимая ошибка геометрии, пикселей
 // Допуск на тексель: он держит соседние плитки в пределах двух уровней
 // друг от друга (см. selectTiles). В отличие от допуска на геометрию,
@@ -36,107 +42,6 @@ const TILE_TOL = 5;                  // допустимая ошибка гео
 export const TILE_TEXEL_TOL = 40;    // пикселей на тексель
 const KEEP_FRAMES = 180;             // сколько кадров плитка живёт без надобности
 const TARGET_DRAW = 220;             // сколько плиток в кадре считаем нормой
-
-/**
- * Порционный сборщик геометрии плитки. Меш живёт в единичном радиусе, в
- * локальных осях тела, поэтому рисуется той же матрицей, что и сфера.
- */
-export function tileBuilder(body, t) {
-  const terrain = terrainOf(body);
-  const detail = terrain.detailForCell(tileCellAngle(t.level));
-  const b = tileBounds(t.level, t.tx, t.ty);
-  const g = TILE_GRID, n = g + 1;
-  const gridVerts = n * n;
-  const ring = 4 * g;                              // юбка по краю
-
-  const positions = new Float32Array((gridVerts + ring) * 3);
-  const normals = new Float32Array((gridVerts + ring) * 3);
-  const colors = new Float32Array((gridVerts + ring) * 4);
-  const uv = new Float32Array((gridVerts + ring) * 2);
-  // Вершин меньше 65536, поэтому индексы короткие: на плитку это 13 КБ
-  // вместо 26, а плиток в кэше сотни.
-  const indices = new Uint16Array((g * g + ring) * 6);
-
-  // Юбка уходит вниз на то, что этот уровень не в состоянии показать:
-  // на стыке с более грубым соседом иначе видна щель.
-  const cell = tileCellAngle(t.level);
-  const drop = terrain.detailGap(detail) * 1.5 + cell * cell / 8 * 3 + 1e-7;
-
-  const rgb = [0, 0, 0];
-  const dir = { x: 0, y: 0, z: 0 };
-  let i = 0;
-  let result = null;
-
-  return {
-    total: gridVerts,
-    step(count = BUILD_CHUNK) {
-      const end = Math.min(gridVerts, i + count);
-      for (; i < end; i++) {
-        const ix = i % n, iy = (i - ix) / n;
-        const su = b.u0 + (b.u1 - b.u0) * (ix / g);
-        const sv = b.v0 + (b.v1 - b.v0) * (iy / g);
-        faceDir(t.face, su, sv, dir);
-        const h = 1 + terrain.sample(dir.x, dir.y, dir.z, detail, rgb);
-        positions[i * 3] = dir.x * h;
-        positions[i * 3 + 1] = dir.y * h;
-        positions[i * 3 + 2] = dir.z * h;
-        colors[i * 4] = rgb[0];
-        colors[i * 4 + 1] = rgb[1];
-        colors[i * 4 + 2] = rgb[2];
-        colors[i * 4 + 3] = 0;
-        uv[i * 2] = ix / g;
-        uv[i * 2 + 1] = iy / g;
-      }
-      if (i < gridVerts) return false;
-
-      let o = 0;
-      for (let y = 0; y < g; y++) {
-        for (let x = 0; x < g; x++) {
-          const a = y * n + x, b2 = a + 1, c = a + n, d = c + 1;
-          indices[o++] = a; indices[o++] = b2; indices[o++] = d;
-          indices[o++] = a; indices[o++] = d; indices[o++] = c;
-        }
-      }
-      computeNormals(positions, indices.subarray(0, o), normals);
-
-      // Юбка по периметру: те же вершины, опущенные вниз.
-      const path = [];
-      for (let x = 0; x < g; x++) path.push(x);
-      for (let y = 0; y < g; y++) path.push(y * n + g);
-      for (let x = g; x > 0; x--) path.push(g * n + x);
-      for (let y = g; y > 0; y--) path.push(y * n);
-      const first = gridVerts;
-      for (let k = 0; k < path.length; k++) {
-        const src = path[k], s = first + k;
-        const r = Math.hypot(
-          positions[src * 3], positions[src * 3 + 1], positions[src * 3 + 2]);
-        const k2 = (r - drop) / (r || 1);
-        for (let c2 = 0; c2 < 3; c2++) {
-          positions[s * 3 + c2] = positions[src * 3 + c2] * k2;
-          normals[s * 3 + c2] = normals[src * 3 + c2];
-        }
-        for (let c2 = 0; c2 < 4; c2++) colors[s * 4 + c2] = colors[src * 4 + c2];
-        uv[s * 2] = uv[src * 2];
-        uv[s * 2 + 1] = uv[src * 2 + 1];
-      }
-      for (let k = 0; k < path.length; k++) {
-        const a = path[k], b2 = path[(k + 1) % path.length];
-        const sa = first + k, sb = first + (k + 1) % path.length;
-        indices[o++] = a; indices[o++] = b2; indices[o++] = sb;
-        indices[o++] = a; indices[o++] = sb; indices[o++] = sa;
-      }
-
-      result = {
-        positions, normals, colors, uv,
-        indices: indices.subarray(0, o),
-        faces: o / 3,
-        level: t.level,
-      };
-      return true;
-    },
-    get result() { return result; },
-  };
-}
 
 /**
  * Набор плиток одного тела: выбор, сборка по бюджету, кэш с вытеснением.
@@ -156,16 +61,33 @@ export class TileSet {
     this.draw = [];
     this.built = 0;
     this.tolScale = 1;
+    this.load = 1;                // сглаженная нагрузка для регулятора допуска
+    // Что было раздроблено в прошлом кадре: по этому списку выбор
+    // держит дробление с запасом и не щёлкает на границе допуска.
+    this.splitPrev = new Set();
+    this.splitNow = new Set();
+    // Почему набор плиток такой (заполняет selectTiles).
+    this.diag = { merged: 0, waiting: 0, fallback: 0, visited: 0, collapses: [] };
     this.evicted = 0;
     this.tris = 0;
+    // Счёт геометрии уезжает в отдельные потоки; если их нет — считаем
+    // в кадре, как раньше (см. js/gl/tilepool.js).
+    this.pool = new TilePool();
+    this.jobId = 0;
+    // Смена тела не должна принимать чужие плитки: у заданий есть номер
+    // поколения, и всё, что пришло от прошлого, выбрасывается.
+    this.gen = 0;
   }
 
   clear() {
+    this.gen++;
     for (const t of this.tiles.values()) this.release(t);
     this.tiles.clear();
     this.wanted.length = 0;
     this.building = null;
     this.draw.length = 0;
+    this.splitPrev.clear();
+    this.splitNow.clear();
     this.body = null;
   }
 
@@ -190,17 +112,21 @@ export class TileSet {
     const terrain = terrainOf(body);
     this.frame++;
     this.wanted.length = 0;
+    const tmp = this.splitPrev;
+    this.splitPrev = this.splitNow;
+    this.splitNow = tmp;
+    this.splitNow.clear();
 
     const ctx = {
       radius: body.radius,
       camDir,
       camAlt,
       focal,
-      // Допуск подстраивается под заполненность кэша: когда плиток
-      // больше, чем можно держать, требования снижаются сами. Иначе
-      // набор не влезает, плитки вытесняются и тут же строятся снова —
-      // кэш молотит вхолостую, а картинка дёргается.
-      tol: TILE_TOL * this.tolScale * Math.max(1, (this.tiles.size / TILE_BUDGET) ** 2),
+      // Допуск ведёт один регулятор (см. ниже), и заполненность кэша
+      // учтена в нём же. Отдельного быстрого множителя здесь больше
+      // нет: их было два, оба реагировали на свой сигнал за кадр, и
+      // вместе они раскачивали допуск, а вместе с ним и уровень плиток.
+      tol: TILE_TOL * this.tolScale,
       texelTol: TILE_TEXEL_TOL,
       maxLevel: TILE_MAX_LEVEL,
       relief: terrain.ampUp,
@@ -217,29 +143,47 @@ export class TileSet {
         const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
         if (e) e.used = this.frame;
       },
+      diag: this.diag,
+      wasSplit: (t) => this.splitPrev.has(tileKey(t.face, t.level, t.tx, t.ty)),
+      markSplit: (t) => { this.splitNow.add(tileKey(t.face, t.level, t.tx, t.ty)); },
     };
 
     selectTiles(ctx, this.draw);
 
-    // Допуск подстраивается под число плиток в кадре. У процедурного
-    // рельефа деталь есть на любом масштабе, поэтому фиксированный
-    // допуск в пикселях у поверхности требует дробления почти без дна:
-    // выходит миллион треугольников и сотни вызовов там, где глазу
-    // хватает сотни плиток.
-    if (this.draw.length > TARGET_DRAW) {
-      this.tolScale = Math.min(80, this.tolScale * 1.12);
-    } else if (this.draw.length < TARGET_DRAW * 0.65) {
-      this.tolScale = Math.max(1, this.tolScale * 0.97);
-    }
+    // Регулятор допуска. У процедурного рельефа деталь есть на любом
+    // масштабе, поэтому фиксированный допуск в пикселях у поверхности
+    // требует дробления почти без дна: выходит миллион треугольников
+    // там, где глазу хватает сотни плиток. Отсюда и подстройка.
+    //
+    // Но допуск — это ручка КАЧЕСТВА, а не то, что должно шевелиться
+    // каждый кадр: любое его движение переставляет границу дробления, а
+    // вместе с ней и уровень у всех плиток, стоящих рядом с границей.
+    // Поэтому нагрузка сглаживается, а сам множитель ходит медленно и
+    // почти симметрично. Раньше он прыгал на 12% за кадр вверх и полз
+    // на 3% вниз — эта асимметрия и раскачивала картинку.
+    const pressure = Math.max(this.draw.length / TARGET_DRAW, this.tiles.size / TILE_BUDGET);
+    this.load += (pressure - this.load) * 0.05;
+    if (this.load > 1.05) this.tolScale = Math.min(80, this.tolScale * 1.02);
+    else if (this.load < 0.8) this.tolScale = Math.max(1, this.tolScale * 0.995);
 
     this.tris = 0;
     for (const t of this.draw) {
       const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
       if (e) { e.used = this.frame; this.tris += e.mesh.faces || 0; }
       // Предки нарисованной плитки — её запасной вариант на случай
-      // вытеснения потомков; их тоже держим.
+      // вытеснения потомков; их тоже держим. Вместе с ними держим и
+      // СОСЕДЕЙ по каждому узлу: дробление разрешено только когда
+      // готовы все четверо, поэтому вытеснение соседа роняет всё
+      // поддерево, хотя сам он в кадре и не появлялся.
       let lv = t.level, x = t.tx, y = t.ty;
       while (lv > 0) {
+        const bx = (x >> 1) << 1, by = (y >> 1) << 1;
+        for (let dy = 0; dy < 2; dy++) {
+          for (let dx = 0; dx < 2; dx++) {
+            const sib = this.tiles.get(tileKey(t.face, lv, bx + dx, by + dy));
+            if (sib) sib.used = this.frame;
+          }
+        }
         lv--; x >>= 1; y >>= 1;
         const p2 = this.tiles.get(tileKey(t.face, lv, x, y));
         if (p2) p2.used = this.frame;
@@ -251,8 +195,21 @@ export class TileSet {
     return this.draw;
   }
 
+  /** Забрать самую нужную плитку из заказа (наибольшая ошибка). */
+  takeBest() {
+    if (!this.wanted.length) return null;
+    let best = 0;
+    for (let i = 1; i < this.wanted.length; i++) {
+      if (this.wanted[i].err > this.wanted[best].err) best = i;
+    }
+    const t = this.wanted[best].t;
+    this.wanted.splice(best, 1);
+    return t;
+  }
+
   // Сборка: самая нужная плитка (наибольшая ошибка) — первой.
   pump(body, msBudget) {
+    if (this.pool.ok) { this.pumpWorkers(body); return; }
     const t0 = performance.now();
     while (performance.now() - t0 < msBudget) {
       if (!this.building) {
@@ -275,15 +232,54 @@ export class TileSet {
     }
   }
 
+  /**
+   * То же самое, но счёт идёт в рабочих потоках. В кадре остаётся
+   * только раздать задания и забрать готовое.
+   */
+  pumpWorkers(body) {
+    // Сначала — что уже посчитано. Больше FINISH_PER_FRAME за кадр не
+    // берём: загрузка в буферы и запекание всё-таки наши.
+    let taken = 0;
+    const ready = this.pool.take();
+    for (const r of ready) {
+      if (r.gen !== this.gen) continue;            // это от прошлого тела
+      const entry = this.tiles.get(r.key);
+      if (!entry || entry.mesh) continue;
+      if (taken >= FINISH_PER_FRAME) { this.pool.done.push(r); continue; }
+      this.attach(body, entry, geoFromTransfer(r.geo));
+      taken++;
+    }
+    // Задание, которое поток не осилил: снимаем заглушку, иначе плитка
+    // навсегда останется «строящейся» и родитель не раздробится.
+    for (const f of this.pool.takeFailed()) {
+      const e = this.tiles.get(f.key);
+      if (e && !e.mesh) this.tiles.delete(f.key);
+    }
+
+    const spec = { kind: body.kind, name: body.name, id: body.id };
+    while (this.pool.free && this.wanted.length) {
+      const t = this.takeBest();
+      if (!t) break;
+      const key = tileKey(t.face, t.level, t.tx, t.ty);
+      if (this.tiles.has(key)) continue;
+      this.tiles.set(key, { ...t, key, mesh: null, tex: null, used: this.frame });
+      this.pool.post({ id: this.jobId++, gen: this.gen, key, spec, t });
+    }
+  }
+
   finish(body, job) {
-    const geo = job.builder.result;
     const entry = this.tiles.get(job.key);
     if (!entry) return;
+    this.attach(body, entry, job.builder.result);
+  }
+
+  /** Готовую геометрию — в буферы GL и в свою текстуру. */
+  attach(body, entry, geo) {
     const mesh = buildIndexedMesh(this.gl, this.locs, geo);
     mesh.faces = geo.faces;
     entry.mesh = mesh;
     entry.tex = createBakeTexture(this.gl, TILE_TEX);
-    this.bake(body, job.t, entry.tex);
+    this.bake(body, entry, entry.tex);
     this.built++;
   }
 
@@ -358,7 +354,10 @@ export class TileSet {
       drawn: this.draw.length,
       built: this.built,
       evicted: this.evicted,
-      pending: this.wanted.length + (this.building ? 1 : 0),
+      pending: this.wanted.length + (this.building ? 1 : 0) + this.pool.busy,
+      workers: this.pool.workers.length,
+      waiting: this.diag.waiting,
+      fallback: this.diag.fallback,
     };
   }
 }

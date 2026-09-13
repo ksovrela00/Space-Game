@@ -38,7 +38,9 @@ export function drawDebug(r, game, dbg) {
     rs.tiles
       ? `плитки: в кадре ${rs.tiles.drawn}, в кэше ${rs.tiles.tiles}, ` +
         `собрано ${rs.tiles.built}, вытеснено ${rs.tiles.evicted}` +
-        (rs.tiles.pending ? `, в очереди ${rs.tiles.pending}` : '')
+        (rs.tiles.pending ? `, в очереди ${rs.tiles.pending}` : '') +
+        (rs.tiles.workers ? `, потоков ${rs.tiles.workers}` : ', СЧЁТ В КАДРЕ') +
+        (rs.tiles.waiting ? `, ждут потомков ${rs.tiles.waiting}` : '')
       : (rs.patches
         ? `заплатки поверхности: ${rs.patches} уровней, пересборок ${rs.patchBuilds}`
         : (rs.pending ? `мешей в очереди ${rs.pending}` : '')),
@@ -47,6 +49,11 @@ export function drawDebug(r, game, dbg) {
         `уклон ${(game.zone.slope * 57.3).toFixed(0)}°, шасси ${s.gear.t.toFixed(2)}`
       : '',
     game.nearest ? `ближайшее ${game.nearest.body.name} зазор ${game.nearest.gap.toFixed(1)} км` : '',
+    game.entry
+      ? `вход в атмосферу: нагрев ${(game.entry.heat * 100).toFixed(0)}%, ` +
+        `обдув ${(game.entry.speed * 1000).toFixed(0)} м/с, плотность ` +
+        `${game.entry.rho.toFixed(3)}, высота ${(game.entry.alt).toFixed(1)} км`
+      : '',
     game.audio ? audioLine(game.audio, game.sound) : '',
     game.dockAssist
       ? `порт x${game.dockAssist.q.local.x.toFixed(3)} y${game.dockAssist.q.local.y.toFixed(3)} z${game.dockAssist.q.local.z.toFixed(3)} align ${game.dockAssist.q.align.toFixed(2)} roll ${game.dockAssist.q.roll.toFixed(2)}`

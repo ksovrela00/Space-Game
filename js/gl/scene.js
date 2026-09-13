@@ -14,6 +14,7 @@ import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
+  PLUME_VS, PLUME_FS,
 } from './shaders.js';
 import { detailUniforms, tileDetailUniforms } from './detail.js';
 import { terrainOf } from './terrain.js';
@@ -24,14 +25,14 @@ import { tileKey, tileTexelAngle } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
 import { localDir, altitudeOf } from '../game/surface.js';
 import {
-  buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
+  buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh, buildPlumeMesh,
   buildDynamicMesh,
 } from './mesh.js';
 import { icosphere } from './icosphere.js';
 import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './planetmesh.js';
 import { SurfacePatch } from './patches.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
-import { makeBasis } from '../core/basis.js';
+import { makeBasis, lookAlong } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
 
 const NEAR = 0.004;          // 4 метра
@@ -105,6 +106,7 @@ export class GlScene {
     this.pGlow = buildProgram(gl, 'glow', GLOW_VS, GLOW_FS);
     this.pAtmo = buildProgram(gl, 'atmo', ATMO_VS, ATMO_FS);
     this.pRing = buildProgram(gl, 'ring', RING_VS, RING_FS);
+    this.pPlume = buildProgram(gl, 'plume', PLUME_VS, PLUME_FS);
     this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
 
     this.meshLocs = {
@@ -115,6 +117,10 @@ export class GlScene {
     };
     this.atmoLocs = { aPos: this.pAtmo.attrib('aPos') };
     this.ringLocs = { aPos: this.pRing.attrib('aPos'), aT: this.pRing.attrib('aT') };
+    this.plumeLocs = { aPos: this.pPlume.attrib('aPos'), aT: this.pPlume.attrib('aT') };
+    this.plumeMesh = buildPlumeMesh(gl, this.plumeLocs);
+    // Оси факела строятся по вектору скорости, поэтому свой базис.
+    this.plumeBasis = makeBasis();
 
     // Оболочка атмосферы — одна на все планеты, масштаб задаёт матрица.
     const shell = icosphere(3);
@@ -589,9 +595,52 @@ export class GlScene {
         body.radius * 1.035, sunPos);
     }
 
+    this.drawEntryPlume(game, sunPos);
     this.drawGlows(game, world);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Плазма входа в атмосферу.
+   *
+   * Оболочка строится вокруг вектора СКОРОСТИ, а не носа: горит
+   * набегающий поток, и ему всё равно, как повёрнут корабль. Влетел
+   * боком — факел идёт вдоль борта, и это видно.
+   *
+   * Размер растёт с нагревом: у порога это тонкая кромка вокруг носа, в
+   * полную силу — след в несколько длин корпуса. Само свечение и его
+   * цвет считает js/game/entry.js, здесь только рисование.
+   */
+  drawEntryPlume(game, sunPos) {
+    const e = game.entry;
+    if (!e || !(e.heat > 0)) return;
+    const gl = this.gl;
+    const ship = game.ship;
+    const prog = this.pPlume;
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform3fv(prog.loc('uColor'), new Float32Array(e.color));
+    gl.uniform1f(prog.loc('uHeat'), e.heat);
+    // Время нужно только дрожанию; секунды по настенным часам годятся.
+    gl.uniform1f(prog.loc('uTime'), (Date.now() % 1000000) / 1000);
+
+    const L = (game.shipMesh && game.shipMesh.length) || 0.065;
+    gl.uniform1f(prog.loc('uRad'), L * (0.42 + 0.5 * e.heat));
+    gl.uniform1f(prog.loc('uLen'), L * (1.5 + 7 * e.heat));
+    // Порог затухания вблизи: четверть длины корпуса.
+    gl.uniform1f(prog.loc('uNear'), L * 0.25);
+
+    // Базис факела: вперёд — по потоку, «верх» берём у корабля, чтобы
+    // дрожание не крутилось вокруг оси при развороте.
+    lookAlong(this.plumeBasis, e.dir, ship.basis.up);
+    // Лобовая точка чуть впереди носа: волна отходит от тела.
+    const head = this._plumePos || (this._plumePos = { x: 0, y: 0, z: 0 });
+    head.x = ship.pos.x + e.dir.x * L * 0.55;
+    head.y = ship.pos.y + e.dir.y * L * 0.55;
+    head.z = ship.pos.z + e.dir.z * L * 0.55;
+    this.drawObject(prog, this.plumeMesh, head, this.plumeBasis, 1, sunPos);
   }
 
   drawGlows(game, world) {
