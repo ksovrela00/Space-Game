@@ -116,11 +116,12 @@ export function buildGear() {
   // самому низкому месту днища, иначе стойка растёт из воздуха или из
   // середины обшивки.
   mesh.hardpoints = HULL_GEAR.map(pt);
-  // Длина стойки — ровно то, что остаётся между днищем и грунтом при
-  // посадочном просвете SHIP.gearClear. Считается отсюда, а не задаётся
-  // числом: сменили корпус — стойки подстроились.
-  const floor = Math.min(...mesh.hardpoints.map((p) => p.y));
-  mesh.legLength = Math.max(0.001, GEAR_CLEAR + floor);
+  // Длина у КАЖДОЙ стойки своя — такая, чтобы все пяты оказались на
+  // одной высоте (ровно GEAR_CLEAR под центром масс). С общей длиной
+  // пяты висели на разной высоте, и корабль на ровной площадке стоял бы
+  // на двух стойках из трёх, а третья уходила бы в грунт.
+  mesh.legLengths = mesh.hardpoints.map((h) => Math.max(0.001, GEAR_CLEAR + h.y));
+  mesh.legLength = Math.max(...mesh.legLengths);
   return boundOf(mesh);
 }
 
@@ -217,6 +218,15 @@ export function rcsPorts(verts, half) {
   }
   return out;
 }
+
+/**
+ * Пяты шасси в осях корпуса: то, чем корабль касается грунта.
+ *
+ * Все три на одной высоте — ровно GEAR_CLEAR под центром масс, — поэтому
+ * по ним можно и ставить корабль на склон, и проверять касание: какая
+ * пята первой дошла до земли, та и коснулась (js/game/landing.js).
+ */
+export const GEAR_FEET = HULL_GEAR.map((p) => v3(p[0] * MM, -GEAR_CLEAR, p[2] * MM));
 
 // Небольшой транспорт — понадобится для NPC и как «чужой» силуэт.
 export function buildShuttle() {

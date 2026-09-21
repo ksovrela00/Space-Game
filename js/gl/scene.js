@@ -689,12 +689,15 @@ export class GlScene {
     if (!mesh || !ship.gear || ship.gear.t < 0.01) return;
     const legMesh = this.glMeshFor(mesh);
     const b = ship.basis;
-    for (const hp of mesh.hardpoints) {
+    mesh.hardpoints.forEach((hp, i) => {
       this.tmpPos.x = ship.pos.x + b.right.x * hp.x + b.up.x * hp.y + b.fwd.x * hp.z;
       this.tmpPos.y = ship.pos.y + b.right.y * hp.x + b.up.y * hp.y + b.fwd.y * hp.z;
       this.tmpPos.z = ship.pos.z + b.right.z * hp.x + b.up.z * hp.y + b.fwd.z * hp.z;
-      this.drawObject(prog, legMesh, this.tmpPos, b, mesh.legLength * ship.gear.t, sunPos);
-    }
+      const nominal = mesh.legLengths ? mesh.legLengths[i] : mesh.legLength;
+      const drop = ship.gear.drop ? ship.gear.drop[i] : 0;
+      this.drawObject(prog, legMesh, this.tmpPos, b,
+        Math.max(0.001, nominal + drop) * ship.gear.t, sunPos);
+    });
   }
 
   /**

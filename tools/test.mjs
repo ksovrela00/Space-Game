@@ -24,6 +24,8 @@ import {
 import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '../js/game/gravity.js';
 import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
 import { shipShadow, convexHull } from '../js/game/shadow.js';
+import { feetGround, feetClearance } from '../js/game/landing.js';
+import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
 import {
@@ -1113,15 +1115,21 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     // проваливается в неё.
     const { w, sh, body } = r1;
     const p0 = { ...sh.pos };
-    let worstAlt = 0;
+    // Корабль стоит НА ТРЁХ ПЯТАХ, поэтому высота его центра над
+    // грунтом под ним уже не равна просвету в точности: пяты разнесены
+    // на тридцать метров, и площадка под ними своя. Важно, что она не
+    // МЕНЯЕТСЯ: проседание или всплытие на стоянке — это и есть провал
+    // сквозь грунт.
+    let loAlt = Infinity, hiAlt = -Infinity;
     for (let i = 0; i < 60 * 120; i++) {
       updateWorld(w, STEP);
       updateLandedPose(sh);
       if (i % 60 === 0) {
         const z = landingContext(w, sh);
-        worstAlt = Math.max(worstAlt, Math.abs(z.alt - SHIP.gearClear));
+        loAlt = Math.min(loAlt, z.alt); hiAlt = Math.max(hiAlt, z.alt);
       }
     }
+    const worstAlt = hiAlt - loAlt;
     const moved = Math.hypot(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
     ok(worstAlt < 1e-6 && moved > 1,
       `за 2 минуты стоянки корабль проехал с поверхностью ${moved.toFixed(1)} км, ` +
@@ -1324,9 +1332,8 @@ console.log('\n== гравитация и захват ==');
     const cap = captureBody(w, sh.pos);
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
-    // Держим высоту: подъёмные движки дают тягу, и зависание — ровно
-    // треть хода (полный ход втрое больше веса, SHIP.liftTWR).
-    sh.control.lift = 1 / SHIP.liftTWR;
+    // Ручки не трогаем вовсе: высоту держит компенсатор, и это его
+    // работа — не проваливаться ни с каким шасси.
     updateShip(sh, STEP, gravityField(cap, sh));
     if (i % 600 === 0) {
       const z = landingContext(w, sh);
@@ -1342,40 +1349,60 @@ console.log('\n== гравитация и захват ==');
     `высота ушла на ${(worstAlt * 1000).toFixed(0)} м`);
 }
 
-// Гравитация как сила: с выпущенным шасси корабль проседает тем быстрее,
-// чем тяжелее тело, а с убранным высоту держит компенсатор.
+// ТО, ЧТО БЫЛО СЛОМАНО: выпуск шасси менял модель полёта целиком —
+// выключался компенсатор высоты, и корабль начинал проваливаться сам.
+// Одна клавиша, и аппарат перестаёт слушаться так, как слушался секунду
+// назад: читалось это как поломка, а не как «почувствуй вес». Теперь
+// шасси меняет ровно одно — предел скорости.
 {
   const w = makeSystem(0x1a7e);
   const moon = w.bodies.find((b) => b.kind === 'moon');
   const dir = normalize(v3(-0.4, 0.5, 0.76));
-  const drop = (gearOut, seconds) => {
+  const fly = (gearOut, seconds, lift = 0, thr = 0) => {
     const sh = makeShip();
     placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 3, v3()), makeBasis());
+    const up = dirToWorldBody(moon, dir, v3());
+    lookAlong(sh.basis, normalize(horizontal(v3(1, 0, 0), up, v3())), up);
     sh.gear.out = gearOut; sh.gear.t = gearOut ? 1 : 0;
+    sh.throttle = thr;
     for (let i = 0; i < 60 * seconds; i++) {
       updateWorld(w, STEP);
       const cap = captureBody(w, sh.pos);
       if (cap) carryShip(sh, cap, STEP);
       clearControls(sh);
+      sh.control.lift = lift;
       updateShip(sh, STEP, gravityField(cap, sh));
     }
-    return 3 - landingContext(w, sh).alt;
+    return { drop: 3 - landingContext(w, sh).alt, speed: sh.speed };
   };
-  const withGear = drop(true, 20);
-  const noGear = drop(false, 20);
-  // Падение теперь ничем не ограничено: чистое gt²/2. Потолка скорости
-  // больше нет — с выпущенным шасси тяготение действует как есть.
-  const g = moon.g0 / 1000;
-  const want = g * 20 * 20 / 2;
-  ok(Math.abs(withGear - want) < want * 0.05 && Math.abs(noGear) < 0.001,
-    `за 20 с свободного падения просели на ${(withGear * 1000).toFixed(0)} м ` +
-    `(gt²/2 = ${(want * 1000).toFixed(0)} м, скорость ${(g * 20 * 1000).toFixed(0)} м/с), ` +
-    `с убранным шасси — ${(noGear * 1000).toFixed(0)} м`);
+  // Висим без тяги: высоту держит компенсатор, и шасси ему не указ.
+  const withGear = fly(true, 20);
+  const noGear = fly(false, 20);
+  ok(Math.abs(withGear.drop) < 0.01 && Math.abs(noGear.drop) < 0.01,
+    `корабль не проваливается сам ни с каким шасси: за 20 с зависания высота ушла на ` +
+    `${(withGear.drop * 1000).toFixed(1)} м с выпущенным и ` +
+    `${(noGear.drop * 1000).toFixed(1)} м с убранным`);
+
+  // Единственное, что меняет шасси, — предел скорости.
+  const fastGear = fly(true, 20, 0, 1).speed;
+  const fastClean = fly(false, 20, 0, 1).speed;
+  ok(Math.abs(fastGear - SHIP.maxSpeed * SHIP.gearSpeed) < 0.02 && fastClean > fastGear * 2,
+    `шасси меняет только предел скорости: ${(fastGear * 1000).toFixed(0)} м/с ` +
+    `против ${(fastClean * 1000).toFixed(0)} м/с`);
+
+  // Ручка подъёмных работает одинаково в обеих конфигурациях.
+  const upGear = fly(true, 10, 1 / 3).drop;
+  const upClean = fly(false, 10, 1 / 3).drop;
+  ok(upGear < -0.05 && Math.abs(upGear - upClean) < Math.abs(upGear) * 0.25,
+    `R/F работают одинаково: с шасси набрали ${(-upGear * 1000).toFixed(0)} м, ` +
+    `без шасси ${(-upClean * 1000).toFixed(0)} м`);
 }
 
-// Тяготение действует на сам ВЕКТОР скорости: горизонтальный бросок с
-// выпущенным шасси идёт по параболе, а не по прямой. Это и есть разница
-// между «гравитация как заданная скорость снижения» и настоящей.
+// Тяготение действует на сам ВЕКТОР скорости — там, где оно вообще
+// действует. В полёте вес держит компенсатор высоты, а вот ОГЛУШЁННЫЙ
+// после удара корабль летит свободно: ни тяги, ни стабилизации, только
+// тяжесть. Горизонтальный бросок тогда идёт по параболе, а не по прямой,
+// и это ровно та разница, ради которой гравитация тут и считается.
 {
   const w = makeSystem(0x1a7e);
   const moon = w.bodies.find((b) => b.kind === 'moon');
@@ -1389,7 +1416,7 @@ console.log('\n== гравитация и захват ==');
   sh.gear.out = true; sh.gear.t = 1;
   const v0 = 0.1;                       // 100 м/с строго по горизонту
   sh.vel.x = fwd.x * v0; sh.vel.y = fwd.y * v0; sh.vel.z = fwd.z * v0;
-  sh.throttle = v0 / (SHIP.maxSpeed * SHIP.gearSpeed);
+  sh.throttle = 0;
 
   // Мерить надо в осях ТЕЛА: система отсчёта рядом с ним вращается
   // вместе с поверхностью, и в мировых координатах к броску добавилась
@@ -1402,7 +1429,7 @@ console.log('\n== гравитация и захват ==');
     const cap = captureBody(w, sh.pos);
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
-    sh.control.thr = 0;                 // тягу держим как есть
+    sh.stun = 1;                        // корабль всё это время без управления
     updateShip(sh, STEP, gravityField(cap, sh));
     if ((i + 1) % 120 === 0) {
       const dd = localDir(moon, sh.pos, v3());
@@ -1457,9 +1484,9 @@ console.log('\n== гравитация и захват ==');
   const moved = v3(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
   const climb = z.alt - 2;
   const fwd = Math.hypot(moved.x, moved.y, moved.z);
-  // Подъём идёт с ускорением (liftTWR − 1)·g: полная тяга движков втрое
-  // больше веса, вес её частично съедает.
-  const want = (SHIP.liftTWR - 1) * moon.g0 / 1000 * 100 / 2;
+  // Подъём идёт с полным ускорением движков (liftTWR·g): вес держит
+  // компенсатор высоты, и на него тяга больше не тратится.
+  const want = SHIP.liftTWR * moon.g0 / 1000 * 100 / 2;
   ok(climb > want * 0.7 && climb < want * 1.3 && fwd > 3,
     `с выпущенным шасси за 10 с: вперёд ${fwd.toFixed(1)} км и вверх ` +
     `${(climb * 1000).toFixed(0)} м (по тяге ${(want * 1000).toFixed(0)}) одновременно`);
@@ -2507,7 +2534,7 @@ console.log('\n== инерция и удар ==');
   const run = (ms) => {
     const sh = makeShip();
     const dir = normalize(v3(0.42, 0.55, 0.72));
-    placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 0.12, v3()), makeBasis());
+    placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 0.06, v3()), makeBasis());
     const up = dirToWorldBody(moon, dir, v3());
     const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
     lookAlong(sh.basis, normalize(horizontal(axis, up, v3())), up);
@@ -2524,6 +2551,9 @@ console.log('\n== инерция и удар ==');
       const cap = captureBody(w, sh.pos);
       if (cap) carryShip(sh, cap, STEP);
       clearControls(sh);
+      // Снижение ЗАДАЁТ пилот: компенсатор высоты сам вниз не тянет, и
+      // приход на грунт — это всегда чьё-то решение, а не падение.
+      sh.control.lift = -0.15;
       updateGear(sh, STEP);
       updateShip(sh, STEP, gravityField(cap, sh));
       const z = landingContext(w, sh);
@@ -2532,6 +2562,9 @@ console.log('\n== инерция и удар ==');
       if (!t) continue;
       if (t.result === 'bounce') {
         bounces++;
+        // После первого же отскока пилот сбрасывает тягу — иначе корабль
+        // просто улетает дальше по своим делам.
+        sh.throttle = 0;
         bounceOff(sh, z);
         sh.hull -= t.damage;
         maxUp = Math.max(maxUp, dot(sh.vel, z.upWorld) - dot(z.surfVel, z.upWorld));
@@ -2549,12 +2582,15 @@ console.log('\n== инерция и удар ==');
   ok(soft.landed && soft.hull === SHIP.maxHull && soft.bounces > 0,
     `юз на 40 м/с: ${soft.bounces} отскок(ов), корпус цел (${soft.hull}%), посадка`);
 
+  // Сто метров в секунду — это уже удар: корабль отскакивает, теряет
+  // треть корпуса и остаётся висеть на движках. Садиться после такого
+  // приходится заново, и это правильный исход: посадкой такое касание
+  // не считается.
   const hard = run(100);
-  ok(hard.bounces > 0 && (hard.landed || hard.crashed) && hard.hull < 95 && hard.hull > 40 &&
-     hard.maxUp > 0.001,
+  ok(hard.bounces > 0 && hard.hull < 95 && hard.hull > 40 && hard.maxUp > 0.001,
     `приход на 100 м/с: ${hard.bounces} отскок(ов) вверх до ` +
-    `${(hard.maxUp * 1000).toFixed(0)} м/с, корпус ${hard.hull.toFixed(0)}%, ` +
-    `исход — ${hard.landed ? 'посадка' : hard.crashed}`);
+    `${(hard.maxUp * 1000).toFixed(0)} м/с, корпус ${hard.hull.toFixed(0)}% — ` +
+    `${hard.crashed || (hard.landed ? 'сел со второй попытки' : 'остался в воздухе')}`);
 
   const fatal = run(300);
   ok(!!fatal.crashed && fatal.hull <= 0,
@@ -3215,6 +3251,97 @@ console.log('\n== пыль из-под движков ==');
       `подъём пыли задаёт тяжесть тела: ${onMoon.toFixed(1)} м на луне ` +
       `(${moon.g0.toFixed(2)} м/с²) против ${onRock.toFixed(1)} м на ${heavy.name} ` +
       `(${heavy.g0.toFixed(2)} м/с²)`);
+  }
+}
+
+// --- 17. Шасси касается грунта ------------------------------------------------
+//
+// Корабль стоял по высоте центра масс, а стойки разнесены на тридцать
+// метров: на склоне одна уходила в грунт, другая висела в воздухе. Теперь
+// и касание, и поза считаются по трём пятам.
+console.log('\n== шасси на грунте ==');
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const gear = buildGear();
+
+  // Пяты модели и пяты физики — одни и те же точки: иначе корабль стоит
+  // не там, где его нарисовали.
+  {
+    const feetY = GEAR_FEET.map((f) => f.y);
+    const same = feetY.every((y) => Math.abs(y + SHIP.gearClear) < 1e-9);
+    const drawn = gear.hardpoints.map((h, i) => h.y - gear.legLengths[i]);
+    const match = drawn.every((y) => Math.abs(y + SHIP.gearClear) < 1e-9);
+    ok(same && match && new Set(gear.legLengths.map((l) => l.toFixed(6))).size > 1,
+      `пяты на одной высоте (${(SHIP.gearClear * 1000).toFixed(2)} м под центром), ` +
+      `стойки разной длины: ${gear.legLengths.map((l) => (l * 1000).toFixed(2)).join(' / ')} м`);
+  }
+
+  // Ищем склон покруче: на ровной площадке разницы не увидеть.
+  let dir = null, best = 0;
+  for (let i = 0; i < 300; i++) {
+    const u = -1 + 2 * ((i + 0.5) / 300);
+    const a = i * 2.399963;
+    const r = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = normalize(v3(r * Math.cos(a), u, r * Math.sin(a)));
+    const site = { slope: slopeAt(moon, d, 0.03) };
+    if (site.slope > best && site.slope < LAND.slope * 0.9) { best = site.slope; dir = d; }
+  }
+
+  const put = () => {
+    const sh = makeShip();
+    placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + SHIP.gearClear, v3()), makeBasis());
+    const up = dirToWorldBody(moon, dir, v3());
+    lookAlong(sh.basis, normalize(horizontal(v3(1, 0, 0), up, v3())), up);
+    sh.gear.out = true; sh.gear.t = 1;
+    return sh;
+  };
+
+  // Поставленный «по центру масс» корабль на склоне стоит криво: одна
+  // пята в грунте, другая над ним. Это и было видно как стойки, уходящие
+  // сквозь землю.
+  const raw = put();
+  const { alts } = feetGround(raw, moon);
+  const spread = Math.max(...alts) - Math.min(...alts);
+  ok(spread > 0.003 && Math.min(...alts) < 0,
+    `на склоне ${(best * 57.3).toFixed(0)}° пяты расходятся по высоте на ` +
+    `${(spread * 1000).toFixed(1)} м, самая низкая уходит в грунт на ` +
+    `${(-Math.min(...alts) * 1000).toFixed(1)} м`);
+
+  // А после постановки на стоянку все три стоят на земле.
+  const sh = put();
+  const zone = landingContext(w, sh);
+  settle(sh, zone);
+  const after = feetGround(sh, moon).alts;
+  // Пята стоит на грунте с точностью до хода стойки: разницу выбирают
+  // сами стойки (ship.gear.drop), и после их выдвижения зазора нет.
+  const rest = after.map((a, i) => a - sh.gear.drop[i]);
+  const worst = Math.max(...rest.map(Math.abs));
+  ok(worst < 0.0005 && sh.gear.drop.some((d) => Math.abs(d) > 0.0002),
+    `все три пяты дотянулись до грунта: остаточные зазоры ` +
+    `${rest.map((a) => (a * 1000).toFixed(2)).join(' / ')} м при ходе стоек ` +
+    `${sh.gear.drop.map((d) => (d * 1000).toFixed(2)).join(' / ')} м`);
+
+  // И корабль стоит по площадке, а не по вертикали: на склоне это разные
+  // вещи, и разница — ровно уклон.
+  const vert = dirToWorldBody(moon, localDir(moon, sh.pos, v3()), v3());
+  const tilt = Math.acos(clamp(dot(sh.basis.up, vert), -1, 1));
+  ok(tilt > best * 0.4,
+    `корабль наклонён по площадке: ${(tilt * 57.3).toFixed(1)}° при уклоне ` +
+    `${(best * 57.3).toFixed(1)}°`);
+
+  // Касание считается по нижней пяте: на склоне корабль встречает грунт
+  // раньше, чем это увидела бы высота центра масс.
+  {
+    const high = put();
+    const upW = dirToWorldBody(moon, dir, v3());
+    const lift = 0.004;                       // подняли на четыре метра
+    high.pos.x += upW.x * lift; high.pos.y += upW.y * lift; high.pos.z += upW.z * lift;
+    const z = landingContext(w, high);
+    ok(feetClearance(high, z) < z.alt - SHIP.gearClear + 0.001,
+      `нижняя пята ближе к грунту, чем центр масс: просвет ` +
+      `${(feetClearance(high, z) * 1000).toFixed(1)} м против ` +
+      `${((z.alt - SHIP.gearClear) * 1000).toFixed(1)} м по центру`);
   }
 }
 

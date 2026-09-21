@@ -7,7 +7,9 @@
 // продолжать лететь вперёд, и то и другое одновременно.
 //
 // Гравитация настоящая (js/game/gravity.js): с выпущенным шасси
-// компенсатор высоты выключается, и корабль проседает тем быстрее, чем
+// корабль снижается только своей тягой (компенсатор высоты держит вес
+// всегда), и проседать сам он не начинает — раньше это делал выпуск
+// шасси, и читалось это как поломка. Дальше по тексту: чем
 // тяжелее тело. Держать высоту приходится движками — в этом и состоит
 // посадка.
 //
@@ -23,6 +25,8 @@ import {
   dirToWorldBody, groundRadius, findSite, bodyFrame, latLon,
 } from './surface.js';
 import { groundDrift, gravityAt } from './gravity.js';
+import { GEAR_FEET } from '../models/ships.js';
+import { lookAlong } from '../core/basis.js';
 
 export const LAND = {
   vspeed: 0.030,    // км/с — предельная вертикальная скорость касания (30 м/с)
@@ -59,7 +63,10 @@ export const LAND = {
   closeGain: 0.12,  // км/с на километр сноса
   descent: 0.05,    // км/с — быстрее компьютер не снижается
   brakeMargin: 0.6, // какую долю предельной скорости торможения берём
-  liftoff: 0.03,    // км/с — импульс отрыва при взлёте
+  liftoff: 0.9,     // с — столько движки работают на отрыве сами
+  // Ход посадочной стойки, км. Им выбирается неровность грунта под
+  // колеёй: без хода одна из трёх пят всегда либо висит, либо в земле.
+  strut: 0.0015,    // 1.5 м
   // Обратная связь по вертикальной скорости, 1/с: ошибка в 5 м/с даёт
   // поправку около 6 м/с² — больше веса на любом теле, где можно сесть.
   liftGain: 1.2,
@@ -218,23 +225,21 @@ function brakeLimit(body, pos, alt, gearOut = true) {
   const g = gravityAt(body, pos);
   // Тормозить можно двумя разными способами, и это две разные цифры.
   //
-  // С ВЫПУЩЕННЫМ шасси корабль в посадочной конфигурации: маршевые
-  // движки работают только по горизонту, вертикаль держат подъёмные, а
-  // их тяга привязана к местной тяжести. На лёгкой луне она мала, и
-  // снижаться приходится медленно — это и есть посадка.
+  // На СПУСКЕ высоту держат подъёмные движки, а их тяга привязана к
+  // местной тяжести: на лёгкой луне она мала, и снижаться приходится
+  // спокойнее. Вес при этом уже держит компенсатор высоты, так что в
+  // запас идёт вся тяга, а не её остаток.
   //
-  // С УБРАННЫМ шасси работает компенсатор высоты, а маршевые движки
-  // тянут в любую сторону: запас торможения SHIP.brake, вдвое с лишним
-  // больше, и от тела он не зависит.
+  // На ПОДХОДЕ корабль идёт носом вниз, и тормозят маршевые: запас
+  // SHIP.brake, вдвое с лишним больше, и от тела он не зависит.
   //
   // Поэтому спуск считается в два колена: до высоты выпуска шасси
   // тормозим маршевыми, а к ней приходим уже на той скорости, которую
   // потянут подъёмные. На стыке обе формулы дают одно и то же, и
-  // ступеньки нет. Раньше здесь всегда считались подъёмные, и спуск с
-  // 500 км на слабой луне занимал шестнадцать минут; если же считать
-  // всегда маршевыми, корабль приходит к шасси на километре в секунду и
-  // уходит под грунт.
-  const aLift = Math.max(1e-6, Math.max(SHIP.liftMin, g * SHIP.liftTWR) - g);
+  // ступеньки нет. Если считать везде по подъёмным, спуск с 250 км
+  // растягивается на десять минут; если везде по маршевым — корабль
+  // приходит к земле на сотнях метров в секунду.
+  const aLift = Math.max(SHIP.liftMin, g * SHIP.liftTWR);
   const vLift = (h) => Math.sqrt(2 * aLift * Math.max(0, h)) * LAND.brakeMargin + 0.002;
   if (gearOut) return vLift(alt);
   const hGear = LAND.landAlt * 1.5;          // высота выпуска шасси
@@ -347,13 +352,15 @@ export function updateLandingComputer(ship, dt, zone = null) {
   if (ready) vert = -rate;
   else if (alt.alt < 0.08) vert = 0.004;                 // чуть отойти от грунта
 
-  // Вертикаль — подъёмными движками, а они дают ТЯГУ. Основная её часть
-  // уходит на удержание веса (потому и считается наперёд по местному g),
-  // остаток — обратная связь по вертикальной скорости.
+  // Вертикаль — подъёмными движками, а они дают ТЯГУ. Вес держит
+  // компенсатор высоты, поэтому упреждения по местному g здесь больше
+  // нет: вся ручка уходит в обратную связь по вертикальной скорости.
+  // Оставленное упреждение работало как постоянный ход вверх — корабль
+  // с ним не садился вовсе.
   const vUp = zone ? dot(zone.relVel, _up) : 0;
   const g = gravityAt(b, ship.pos);
   const full = Math.max(SHIP.liftMin, g * SHIP.liftTWR);
-  ship.control.lift = clamp((g + (vert - vUp) * LAND.liftGain) / full, -1, 1);
+  ship.control.lift = clamp((vert - vUp) * LAND.liftGain / full, -1, 1);
 
   L.phase = ready ? 'спуск' : 'выравнивание';
   return ready
@@ -363,13 +370,55 @@ export function updateLandingComputer(ship, dt, zone = null) {
 
 // --- Касание ------------------------------------------------------------------
 
+// Пяты шасси в мировых осях и высота каждой над грунтом.
+//
+// Касание считается ПО НИМ, а не по высоте центра масс: на склоне или у
+// края кратера одна пята приходит к земле заметно раньше остальных, и
+// корабль, поставленный по центру, втыкал стойки в грунт. Отсюда же
+// берётся и поза на стоянке — плоскость через три точки касания.
+const _feet = [v3(), v3(), v3()];
+const _falt = [0, 0, 0];
+const _fdir = { dir: v3() };
+
+export function feetGround(ship, body, out = _feet, alts = _falt) {
+  const b = ship.basis;
+  for (let i = 0; i < GEAR_FEET.length; i++) {
+    const f = GEAR_FEET[i];
+    const p = out[i];
+    p.x = ship.pos.x + b.right.x * f.x + b.up.x * f.y + b.fwd.x * f.z;
+    p.y = ship.pos.y + b.right.y * f.x + b.up.y * f.y + b.fwd.y * f.z;
+    p.z = ship.pos.z + b.right.z * f.x + b.up.z * f.y + b.fwd.z * f.z;
+    const a = altitudeOf(body, p, _fdir);
+    alts[i] = a.alt;
+    // Точка грунта прямо под пятой — по ней ставят корабль на стоянку.
+    worldPoint(body, a.dir, a.groundR, p);
+  }
+  return { feet: out, alts };
+}
+
+/** Просвет под самой низкой пятой, км. Минус — стойка уже в грунте. */
+export function feetClearance(ship, zone) {
+  const { alts } = feetGround(ship, zone.body);
+  return Math.min(alts[0], alts[1], alts[2]);
+}
+
 /**
  * Проверка контакта с поверхностью.
  * @returns null | {result: 'landed'} | {result: 'crash', reason}
  */
 export function checkTouchdown(ship, zone) {
   if (ship.landedAt) return null;
-  if (zone.alt > SHIP.gearClear) return null;
+  // Идёт отрыв: корабль как раз уходит с грунта, и касание засчитывать
+  // нечего — иначе он садится обратно в том же кадре, в котором взлетел.
+  if (ship.liftHold > 0) return null;
+  // Грубая отсечка по центру масс: считать три высоты рельефа на каждом
+  // кадре полёта незачем, а дальше габарита корабля касаться нечем.
+  if (zone.alt > SHIP.gearClear * 2) return null;
+  // На шасси касание считается по пятам, без него — по днищу.
+  const touch = gearReady(ship)
+    ? feetClearance(ship, zone)
+    : zone.alt - SHIP.hullClear;
+  if (touch > 0) return null;
 
   // На планету с атмосферой сесть нельзя — касание её поверхности
   // означает удар, каким бы мягким он ни был.
@@ -488,16 +537,73 @@ export function settle(ship, zone) {
   const f = bodyFrame(b);
   const loc = (v) => v3(dot(v, f.right), dot(v, f.up), dot(v, f.fwd));
   ship.landedAt = b;
+
+  // Корабль встаёт НА ТРИ ПЯТЫ: плоскость через точки грунта под ними и
+  // задаёт и наклон, и высоту. Ставить его по высоте центра масс нельзя
+  // — на склоне одна стойка тогда висит в воздухе, а другая в грунте.
+  // Два захода: встав по плоскости, корабль поворачивается, и пяты
+  // переезжают на новые точки грунта — второй заход считает их уже там.
+  for (let pass = 0; pass < 2 && gearReady(ship); pass++) {
+    const { feet } = feetGround(ship, b);
+    const ax = feet[1].x - feet[0].x, ay = feet[1].y - feet[0].y, az = feet[1].z - feet[0].z;
+    const bx = feet[2].x - feet[0].x, by = feet[2].y - feet[0].y, bz = feet[2].z - feet[0].z;
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const nl = Math.hypot(nx, ny, nz);
+    if (nl > 1e-12) {
+      nx /= nl; ny /= nl; nz /= nl;
+      // Нормаль наружу, а не внутрь тела.
+      if (nx * zone.upWorld.x + ny * zone.upWorld.y + nz * zone.upWorld.z < 0) {
+        nx = -nx; ny = -ny; nz = -nz;
+      }
+      _up.x = nx; _up.y = ny; _up.z = nz;
+      // Курс сохраняем, «верх» кладём по плоскости стоянки.
+      horizontal(ship.basis.fwd, _up, _fwd);
+      if (Math.hypot(_fwd.x, _fwd.y, _fwd.z) > 1e-9) {
+        lookAlong(ship.basis, normalize(_fwd), _up);
+      }
+      // Центр масс — на просвете над центром треугольника пят.
+      const cx = (feet[0].x + feet[1].x + feet[2].x) / 3;
+      const cy = (feet[0].y + feet[1].y + feet[2].y) / 3;
+      const cz = (feet[0].z + feet[1].z + feet[2].z) / 3;
+      ship.pos.x = cx + nx * SHIP.gearClear;
+      ship.pos.y = cy + ny * SHIP.gearClear;
+      ship.pos.z = cz + nz * SHIP.gearClear;
+      altitudeOf(b, ship.pos, zone);
+    }
+  }
+
+  // Грунт под тридцатью метрами колеи не плоский, и ЖЁСТКИЙ треножник
+  // сесть всеми тремя пятами на него не может в принципе: на склоне с
+  // метровыми воронками одна стойка всё равно повисает. У настоящих
+  // посадочных стоек для этого есть ход — он и здесь есть.
+  //
+  // Корабль садится по средней из трёх точек, а разницу выбирают сами
+  // стойки: каждая доходит до своего грунта, в пределах LAND.strut.
+  if (gearReady(ship)) {
+    const { alts } = feetGround(ship, b);
+    const mean = (alts[0] + alts[1] + alts[2]) / 3;
+    if (isFinite(mean)) {
+      const u = ship.basis.up;
+      ship.pos.x -= u.x * mean; ship.pos.y -= u.y * mean; ship.pos.z -= u.z * mean;
+      altitudeOf(b, ship.pos, zone);
+    }
+    const now = feetGround(ship, b).alts;
+    ship.gear.drop = now.map((a) => clamp(a, -LAND.strut, LAND.strut));
+  } else {
+    ship.gear.drop = null;
+  }
+
   // Высота стоянки: на выпущенном шасси — по стойкам, на брюхе — по
   // корпусу. Иначе корабль без шасси висел бы над грунтом.
   const clear = Math.max(SHIP.hullClear, SHIP.gearClear * ship.gear.t);
   ship.landedPose = {
     dir: v3(zone.dir.x, zone.dir.y, zone.dir.z),
-    radius: zone.groundR + clear,
+    radius: Math.hypot(ship.pos.x - b.pos.x, ship.pos.y - b.pos.y, ship.pos.z - b.pos.z),
     right: loc(ship.basis.right),
     up: loc(ship.basis.up),
     fwd: loc(ship.basis.fwd),
   };
+  if (!gearReady(ship)) ship.landedPose.radius = zone.groundR + clear;
   ship.landing = null;
   ship.speed = 0;
   ship.throttle = 0;
@@ -530,17 +636,15 @@ export function takeoff(ship) {
   ship.landedAt = null;
   ship.landedPose = null;
   ship.gear.out = true;            // шасси убирает пилот, когда сочтёт нужным
+  ship.gear.drop = null;           // стойки распрямились
   ship.throttle = 0;
   ship.speed = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
-  // Отрыв: короткий импульс вверх по местной вертикали. Дальше корабль
-  // подчиняется тяготению, и держать высоту приходится движками (R) —
-  // шасси-то выпущено.
-  dirToWorldBody(b, p.dir, _up);
-  ship.vel.x = _up.x * LAND.liftoff;
-  ship.vel.y = _up.y * LAND.liftoff;
-  ship.vel.z = _up.z * LAND.liftoff;
-  ship.speed = LAND.liftoff;
+  // Отрыв: подъёмные движки на полный ход на секунду (ship.liftHold).
+  // Импульсом это делать нельзя — набранную скорость тут же съест
+  // стабилизатор, как любой другой снос, и корабль осядет обратно.
+  ship.vel.x = 0; ship.vel.y = 0; ship.vel.z = 0;
+  ship.liftHold = LAND.liftoff;
   ship.lift = 0;
   return true;
 }

@@ -1052,12 +1052,13 @@ function render2d() {
     // Стойки шасси — каждая от своей точки крепления.
     if (ship.gear.t > 0.01) {
       const b = ship.basis;
-      for (const hp of gearMesh.hardpoints) {
+      gearMesh.hardpoints.forEach((hp, i) => {
         _tmp.x = ship.pos.x + b.right.x * hp.x + b.up.x * hp.y + b.fwd.x * hp.z;
         _tmp.y = ship.pos.y + b.right.y * hp.x + b.up.y * hp.y + b.fwd.y * hp.z;
         _tmp.z = ship.pos.z + b.right.z * hp.x + b.up.z * hp.y + b.fwd.z * hp.z;
-        renderer.drawMesh(gearMesh, _tmp, b, gearMesh.legLength * ship.gear.t, _sun, {});
-      }
+        const len = gearMesh.legLengths[i] + (ship.gear.drop ? ship.gear.drop[i] : 0);
+        renderer.drawMesh(gearMesh, _tmp, b, Math.max(0.001, len) * ship.gear.t, _sun, {});
+      });
     }
     if (ship.throttle > 0.03) {
       for (const e of shipMesh.exhausts) {
