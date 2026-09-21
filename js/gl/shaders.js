@@ -287,6 +287,127 @@ void main() {
   outColor = vec4(vColor.rgb, 1.0) * (0.25 + vColor.a * 0.75);
 }`;
 
+// --- Поток частиц в прыжке ---------------------------------------------------
+//
+// Первая версия растягивала в полосы сам звёздный фон. Выглядело это
+// ровно так, как и должно было: полосы СТОЯЛИ на месте. Звёзды
+// бесконечно далеко, у них есть только направление, и двигаться
+// относительно корабля они не могут ни при какой скорости — растянуть
+// их можно, а заставить лететь мимо нельзя.
+//
+// Поэтому здесь не звёзды, а отдельный поток частиц вокруг оси
+// движения. У каждой своя азимутальная сторона (phi), своё удаление от
+// оси (rp) и своя фаза (seed). Частица летит НА камеру: продольная
+// координата убывает от uZ0 к нулю, и угол от оси растёт как
+// atan(rp/z) — то есть именно так, как растёт он у предмета, мимо
+// которого пролетаешь. Отсюда и вся картинка: у точки схода частицы
+// почти стоят, к краю кадра разгоняются и вытягиваются в длинные
+// полосы. Дошла до нуля — родилась заново у точки схода.
+
+export const WARP_VS = `#version 300 es
+in vec3 aParam;          // phi — сторона, rp — удаление от оси, seed — фаза
+in float aT;             // 0 — голова частицы, 1 — конец хвоста
+
+uniform mat3 uView;      // мир -> камера, только поворот
+uniform mat4 uProj;
+uniform vec3 uAxis;      // ось движения (мировая)
+uniform vec3 uE1;        // и два перпендикуляра к ней
+uniform vec3 uE2;
+uniform float uPhase;    // общая фаза потока, растёт со временем
+uniform float uTail;     // насколько хвост отстаёт по фазе
+uniform float uZ0;       // с какой глубины частица начинает путь
+
+out float vFade;
+
+void main() {
+  float t = fract(uPhase + aParam.z);
+  // Хвост — та же частица, но чуть раньше по времени.
+  float z = uZ0 * (1.0 - (t - aT * uTail));
+  vec3 dirW = uAxis * z + (uE1 * cos(aParam.x) + uE2 * sin(aParam.x)) * aParam.y;
+  vec3 c = uView * normalize(dirW);
+  gl_Position = uProj * vec4(c * 1.0e8, 1.0);
+  // Гаснет при рождении и у самого края: иначе видно, как частицы
+  // возникают из ничего и обрываются на границе кадра.
+  vFade = smoothstep(0.0, 0.12, t) * (1.0 - smoothstep(0.70, 1.0, t))
+        * (1.0 - aT * 0.85);
+}`;
+
+export const WARP_FS = `#version 300 es
+precision mediump float;
+in float vFade;
+uniform float uPower;
+uniform vec3 uColor;
+out vec4 outColor;
+void main() {
+  float a = vFade * uPower;
+  outColor = vec4(uColor * a, a);
+}`;
+
+// --- Квантовый тоннель ------------------------------------------------------
+//
+// Полноэкранный аддитивный проход вокруг точки схода. Волокна текут ОТ
+// неё к краям: координата вдоль потока — логарифм радиуса, поэтому
+// скорость разбегания растёт к краю сама собой, как в перспективе.
+//
+// Угловая координата берётся кратной 2π (K = 24/2π), иначе на луче
+// a = ±π был бы виден шов.
+
+export const TUNNEL_VS = `#version 300 es
+in vec2 aQuad;
+out vec2 vUv;
+void main() {
+  gl_Position = vec4(aQuad, 0.0, 1.0);
+  vUv = aQuad;
+}`;
+
+export const TUNNEL_FS = `#version 300 es
+precision highp float;
+
+in vec2 vUv;
+
+uniform vec2 uCenter;    // точка схода в NDC
+uniform float uAspect;
+uniform float uTime;
+uniform float uPower;    // 0..1
+uniform vec3 uColor;
+
+out vec4 outColor;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i), b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0)), d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+  vec2 p = (vUv - uCenter) * vec2(uAspect, 1.0);
+  float r = max(length(p), 1.0e-4);
+  float ang = atan(p.y, p.x);
+  float K = 24.0 / 6.2831853;           // кратно 2π: без шва на ±π
+
+  float flow = log(r) * 2.4 - uTime * 2.6;
+  float n = vnoise(vec2(ang * K, flow)) * 0.65
+          + vnoise(vec2(ang * K * 2.7, flow * 2.1 + 11.0)) * 0.35;
+  n = pow(max(0.0, n - 0.30) / 0.70, 2.0);
+
+  // Оболочка: в самой точке схода дыра (туда смотришь), к краю кадра
+  // всё сходит на нет — иначе углы экрана заливает ровным светом.
+  float env = smoothstep(0.02, 0.45, r) * (1.0 - smoothstep(0.9, 2.0, r));
+  // Ядро: яркая точка там, куда летим.
+  float core = exp(-r * r * 22.0);
+
+  float v = (n * env * 1.5 + core * 0.55) * uPower;
+  outColor = vec4(uColor * v, v);
+}`;
+
 // --- Аддитивный ореол (солнце, факелы двигателей) ---------------------------
 
 export const GLOW_VS = `#version 300 es

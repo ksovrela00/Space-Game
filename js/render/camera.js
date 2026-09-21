@@ -21,6 +21,17 @@ export class Camera {
     this.focal = (h / 2) / Math.tan(this.fov / 2);
   }
 
+  /**
+   * Сменить поле зрения на ходу. Пересчитать focal обязательно: по нему
+   * считает не только 3D-сцена, но и всё, что рисует HUD, — рамки цели,
+   * указатель вектора, отметка грунта. Забыть его значит получить
+   * приборы, съехавшие относительно картинки.
+   */
+  setFov(fov) {
+    this.fov = fov;
+    this.focal = (this.h / 2) / Math.tan(fov / 2);
+  }
+
   // Мир -> координаты камеры.
   toCamera(p, out = v3()) { return toLocal(this.basis, this.pos, p, out); }
 

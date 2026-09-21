@@ -1169,8 +1169,8 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 8,
-    `собрано программ: ${state.programs} (меш, звёзды, ореол, атмосфера, кольца, ` +
+  ok(state.programs === 10,
+    `собрано программ: ${state.programs} (меш, звёзды, полосы, тоннель, ореол, атмосфера, кольца, ` +
     'плазма входа, тень, запекание)');
 
   const world = makeSystem(0x1a7e);
@@ -1244,6 +1244,54 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(!coldSeen && hotSeen === 0.8 && drew > 0,
       `плазма входа: без нагрева шейдер не зовётся, с нагревом uHeat=${hotSeen} ` +
       `(${drew} вызовов в кадре)`);
+  }
+
+  // Квантовый прыжок: тоннель и полосы звёзд.
+  //
+  // Проверяется не картинка (её отсюда не видно), а то, от чего она
+  // зависит: сила эффекта, ось движения и ТОЧКА СХОДА. Последнее
+  // важнее всего — тоннель обязан стоять там, куда корабль летит, а не
+  // в центре кадра: в виде от третьего лица камеру можно отвернуть.
+  {
+    const q = { phase: 'jump', speed: 60000, dist: 1e6, target: planet, flash: 0, punch: 0 };
+    game.quantum = q;
+    lookAt(v3(planet.pos.x + planet.radius * 40, planet.pos.y, planet.pos.z), planet.pos);
+    // Скорость — точно по взгляду.
+    const b = cam.basis;
+    ship.vel.x = b.fwd.x * 60000; ship.vel.y = b.fwd.y * 60000; ship.vel.z = b.fwd.z * 60000;
+    ship.pos.x = cam.pos.x; ship.pos.y = cam.pos.y; ship.pos.z = cam.pos.z;
+    const base = state.draws;
+    scene.render(game);
+    const drewJump = state.draws - base;
+    const j = scene.jump;
+    ok(j.power > 0.9 && Math.abs(j.cx) < 0.02 && Math.abs(j.cy) < 0.02,
+      `прыжок: сила ${j.power.toFixed(2)}, точка схода в центре ` +
+      `(${j.cx.toFixed(3)}, ${j.cy.toFixed(3)}), ${drewJump} вызовов`);
+
+    // Отворачиваем камеру — точка схода обязана уехать вбок вслед за
+    // вектором скорости, а не остаться в прицеле.
+    const side = normalize(v3(b.fwd.x + b.right.x * 0.35, b.fwd.y + b.right.y * 0.35,
+      b.fwd.z + b.right.z * 0.35));
+    lookAlong(cam.basis, side);
+    scene.render(game);
+    ok(scene.jump.cx < -0.2,
+      `камера отвёрнута: точка схода ушла в сторону (${scene.jump.cx.toFixed(2)})`);
+
+    // Фаза потока частиц берётся из состояния привода, а не из часов:
+    // иначе картинка зависела бы от частоты кадров.
+    q.warp = 0.42;
+    scene.render(game);
+    ok(scene.jump.phase === 0.42, `фаза потока пришла из привода: ${scene.jump.phase}`);
+
+    // На торможении эффект гаснет вместе со скоростью.
+    q.speed = 300;
+    scene.render(game);
+    const slow = scene.jump.power;
+    game.quantum = null;
+    scene.render(game);
+    ok(slow < 0.3 && scene.jump.power === 0,
+      `эффект гаснет со скоростью: на 300 км/с ${slow.toFixed(2)}, вне прыжка 0`);
+    ship.vel.x = ship.vel.y = ship.vel.z = 0;
   }
 
   // Газовый гигант с кольцами и атмосферой.

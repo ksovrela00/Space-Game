@@ -1,9 +1,9 @@
-// Приборная панель: прицел, тяга, корпус, круиз, сканер, компас цели,
-// маркер цели и помощник стыковки.
+// Приборная панель: прицел, тяга, корпус, форсаж, сканер, компас цели,
+// маркер цели, помощник стыковки и квантовый привод.
 
 import { v3, dot, clamp, normalize } from '../core/vec3.js';
-import { cruiseLabel } from '../game/cruise.js';
 import { SHIP } from '../game/ship.js';
+import { QUANTUM } from '../game/quantum.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
 import { gearLabel } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
@@ -80,12 +80,22 @@ const bar = (ctx, x, y, w, h, frac, color, label) => {
 export function drawHud(r, game) {
   const ctx = r.ctx;
   const cam = r.camera;
-  const { ship, nav, cruise, state } = game;
+  const { ship, nav, state } = game;
+  const q = game.quantum;
   const w = cam.w, h = cam.h;
   const target = nav.list[nav.index];
 
   ctx.save();
   ctx.textBaseline = 'alphabetic';
+
+  // В прыжке приборов нет: смотреть на них некогда и не на что. Остаётся
+  // то, что в прыжке вообще что-то значит, — остаток и скорость.
+  if (q && q.phase === 'jump') {
+    drawJumpPanel(ctx, w, h, q, state);
+    drawFlash(ctx, w, h, q);
+    ctx.restore();
+    return;
+  }
 
   if (state.view === 'cockpit') drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam);
@@ -102,12 +112,12 @@ export function drawHud(r, game) {
 
   // Приборы подхода включаются в гравитационном захвате и берут на себя
   // скорость, высоту, дистанцию и посадочные условия. Угловые панели
-  // при этом ужимаются до того, чего в центре нет: тяга, круиз, корпус,
+  // при этом ужимаются до того, чего в центре нет: тяга, форсаж, корпус,
   // имя цели с компасом. Дублировать одно и то же в двух местах хуже,
   // чем не показывать вовсе: глаз всё равно мечется между ними.
   const approach = !!(game.capture && state.mode === 'flight');
 
-  // --- левая колонка: тяга, круиз, корпус ---
+  // --- левая колонка: тяга, форсаж, корпус ---
   const lh = approach ? 68 : 112;
   const px = 18, py = h - lh - 20;
   panel(ctx, px, py, 132, lh);
@@ -122,19 +132,20 @@ export function drawHud(r, game) {
     ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
     ctx.font = '15px Consolas, monospace';
     ctx.fillStyle = '#d8f2ff';
-    ctx.fillText(fmtSpeed(ship.speed * cruise.level), px + 10, py + 70);
+    ctx.fillText(fmtSpeed(ship.speed), px + 10, py + 70);
     ctx.font = '10px Consolas, monospace';
   }
-  const cruiseY = approach ? py + 48 : py + 88;
-  ctx.fillStyle = cruise.massLocked ? RED : (cruise.level > 1 ? AMBER : CY_DIM);
-  ctx.fillText(
-    cruise.massLocked
-      ? 'MASS LOCK · ' + cruiseLabel(cruise.level)
-      : 'КРУИЗ ' + cruiseLabel(cruise.level),
-    px + 10, cruiseY);
+  // Форсаж: шкала разряда и зарядки. Цвет говорит о состоянии — жгут,
+  // накопилось, пусто, — потому что смотреть на длину полоски в бою
+  // некогда.
+  const boostY = approach ? py + 48 : py + 88;
+  ctx.fillStyle = ship.boosting ? AMBER : (ship.boost > 0.999 ? CY : CY_DIM);
+  ctx.fillText('ФОРСАЖ', px + 10, boostY);
+  bar(ctx, px + 58, boostY - 7, 64, 7, ship.boost,
+    ship.boosting ? AMBER : (ship.boost < 0.2 ? RED : CY));
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('КОРПУС', px + 10, cruiseY + 14);
-  bar(ctx, px + 58, cruiseY + 7, 64, 7, ship.hull / SHIP.maxHull,
+  ctx.fillText('КОРПУС', px + 10, boostY + 14);
+  bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
     ship.hull > 40 ? GREEN : RED);
 
   // Шасси: строкой над панелью. У поверхности его состояние стоит в
@@ -164,9 +175,12 @@ export function drawHud(r, game) {
       ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
     }
     const stateY = approach ? ty + 58 : ty + 90;
-    if (ship.autopilot) {
-      ctx.fillStyle = GREEN;
-      ctx.fillText('АВТОПИЛОТ', tx + 10, stateY);
+    if (q && q.phase === 'calib') {
+      // Калибровка: полоса и прямая подсказка, чего привод ждёт. Без
+      // подсказки «почему не стартует» — самый частый вопрос к нему.
+      ctx.fillStyle = q.aligned ? GREEN : AMBER;
+      ctx.fillText(q.aligned ? 'КАЛИБРОВКА' : 'НАВЕДИСЬ НА ЦЕЛЬ', tx + 10, stateY);
+      bar(ctx, tx + 10, stateY + 4, 120, 6, q.calib, q.aligned ? GREEN : AMBER);
     } else if (ship.docking) {
       ctx.fillStyle = GREEN;
       ctx.fillText('ДОКИНГ', tx + 10, stateY);
@@ -202,7 +216,78 @@ export function drawHud(r, game) {
     ctx.fillText(game.statusLine, w / 2, h - 148);
   }
 
+  // Вспышка выхода рисуется и здесь: к этому моменту привод уже
+  // выключен, и панель прыжка не работает.
+  if (q) drawFlash(ctx, w, h, q);
+
   ctx.restore();
+}
+
+/**
+ * Вспышка входа и выхода. Рисуется на приборном слое, а не в сцене:
+ * это заливка всего кадра, и городить ради неё ещё один проход в GL
+ * незачем.
+ */
+function drawFlash(ctx, w, h, q) {
+  if (!(q.flash > 0.002)) return;
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = 'rgba(214,238,255,' + (q.flash * q.flash * 0.8).toFixed(3) + ')';
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
+/**
+ * Приборы в прыжке. Их намеренно почти нет: управления в прыжке нет
+ * тоже, а всё, что можно сделать, — дождаться выхода или сорвать его.
+ * Поэтому на экране только то, что в эти секунды меняется.
+ */
+function drawJumpPanel(ctx, w, h, q, state) {
+  const cx = w / 2, cy = h / 2;
+  // Виньетка: края кадра гаснут в синеву. Тоннель в сцене аддитивный,
+  // темнить им нечем, а без затемнения по краям он читается как
+  // наложенная картинка, а не как стены вокруг корабля.
+  const g = ctx.createRadialGradient(cx, cy, Math.min(w, h) * 0.12,
+    cx, cy, Math.max(w, h) * 0.62);
+  g.addColorStop(0, 'rgba(4,14,30,0)');
+  g.addColorStop(1, 'rgba(4,14,30,0.78)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.textAlign = 'center';
+
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = CY;
+  ctx.fillText('КВАНТОВЫЙ ПРЫЖОК · ' + (q.target ? q.target.name : '—'), cx, 40);
+
+  ctx.font = '28px Consolas, monospace';
+  ctx.fillStyle = '#d8f2ff';
+  ctx.fillText(fmtDist(q.dist), cx, h - 96);
+
+  ctx.font = '14px Consolas, monospace';
+  ctx.fillStyle = AMBER;
+  ctx.fillText(fmtSpeed(q.speed), cx, h - 72);
+
+  // Полоса скорости: по ней видно, что привод ещё разгоняется или уже
+  // тормозит, — само число на десятках тысяч читается плохо.
+  const bw = clamp(w * 0.25, 160, 380);
+  bar(ctx, cx - bw / 2, h - 60, bw, 5, q.speed / QUANTUM.speed, CY);
+
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('B — СОРВАТЬ ПРЫЖОК', cx, h - 40);
+
+  // Сообщения в прыжке всё же нужны: ими говорится о срыве.
+  ctx.textAlign = 'left';
+  ctx.font = '12px Consolas, monospace';
+  let my = 26;
+  for (const m of state.messages) {
+    ctx.globalAlpha = clamp(m.t, 0, 1);
+    ctx.fillStyle = m.color || AMBER;
+    ctx.fillText(m.text, 20, my);
+    my += 16;
+    ctx.globalAlpha = 1;
+  }
 }
 
 /**
@@ -220,7 +305,7 @@ export function drawHud(r, game) {
  * служит признаком захвата.
  */
 function drawApproachPanel(ctx, cx, cy, w, h, game) {
-  const { ship, cruise } = game;
+  const { ship } = game;
   const b = game.capture;
   const zone = game.zone;
   const L = game.landInfo;
@@ -275,7 +360,7 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
   }
   const ms = (v) => (v === null ? '—' : (v * 1000).toFixed(0) + ' м/с');
 
-  stat(left, rowY[0], 'left', 'СКОРОСТЬ', fmtSpeed(ship.speed * cruise.level), '#d8f2ff', 16);
+  stat(left, rowY[0], 'left', 'СКОРОСТЬ', fmtSpeed(ship.speed), '#d8f2ff', 16);
   stat(right, rowY[0], 'right', 'ВЫСОТА', fmtDist(Math.max(0, alt)), '#d8f2ff', 16);
   stat(left, rowY[1], 'left', 'ВЕРТ', ms(vUp), L ? (L.vspeedOk ? GREEN : RED) : null, 13);
   stat(right, rowY[1], 'right', 'ДО ЦЕЛИ',

@@ -14,8 +14,10 @@ import { buildCobra, buildGear } from './models/ships.js';
 import { buildStation, STATION_D } from './models/station.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
-import { makeCruise, updateCruise, stepCruise, resetCruise, LEVELS } from './game/cruise.js';
-import { makeNav, cycleTarget, currentTarget, navInfo, startAutopilot, stopAutopilot, updateAutopilot } from './game/nav.js';
+import { makeNav, refreshNav, cycleTarget, currentTarget, navInfo, targetById } from './game/nav.js';
+import {
+  makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump, suggestHop, QUANTUM,
+} from './game/quantum.js';
 import {
   checkStation, startDockingComputer, stopDockingComputer,
   updateDockingComputer, DOCK_RANGE,
@@ -79,7 +81,7 @@ const game = {
   renderer: hud,
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
-  cruise: makeCruise(),
+  quantum: makeQuantum(),
   state: makeState(),
   audio: makeAudio(),
   sound,                 // нужен отладочному оверлею: сэмплы или синтез
@@ -116,10 +118,9 @@ function dockAt(station) {
   game.entry = null;
   ship.dockedAt = station;
   game.lastStation = station;
-  stopAutopilot(ship);
   stopDockingComputer(ship);
   stopLanding(ship);
-  resetCruise(game.cruise);
+  stopQuantum(game.quantum);
   ship.lift = 0;
   ship.gear.out = false;
   ship.speed = 0;
@@ -162,7 +163,7 @@ function landAt(zone, belly = false) {
   audioCue(game.audio, belly ? 'belly' : 'land');
   audioReset(game.audio, ship);
   game.stats.landings++;
-  resetCruise(game.cruise);
+  stopQuantum(game.quantum);
   game.state.mode = ST.LANDED;
   input.releaseAll();
   showLanded(game);
@@ -202,7 +203,6 @@ const RESTART_CONFIRM = 3;
  * держат ссылки и сцена, и приборы, и звук.
  */
 game.restart = () => {
-  stopAutopilot(ship);
   stopDockingComputer(ship);
   stopLanding(ship);
   ship.landedAt = null;
@@ -215,11 +215,13 @@ game.restart = () => {
   ship.lift = 0;
   ship.stun = 0;
   ship.zeroHold = 0;
+  ship.boost = 1;
+  ship.boosting = false;
   placeShip(ship, v3(), makeBasis());
 
   world.time = 0;
   updateWorld(world, 0);
-  resetCruise(game.cruise);
+  stopQuantum(game.quantum);
   game.stats = { docks: 0, crashes: 0, flownKm: 0, landings: 0 };
   game.zone = null;
   game.capture = null;
@@ -234,7 +236,7 @@ game.restart = () => {
 
   const home = world.home.station;
   const away = world.stations.find((x) => x !== home);
-  if (away) game.nav.index = game.nav.list.indexOf(away);
+  if (away) selectTarget(away);
   try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* приватный режим */ }
   dockAt(home);                 // ставит режим, экран порта и пишет сейв
   say(game.state, 'НОВАЯ ИГРА', '#78e08f', 3);
@@ -259,7 +261,6 @@ function crash(reason) {
   ship.throttle = 0;
   ship.lift = 0;
   ship.landedAt = null;
-  stopAutopilot(ship);
   stopDockingComputer(ship);
   stopLanding(ship);
   game.state.mode = ST.CRASHED;
@@ -288,13 +289,12 @@ function teleportToTarget() {
   const t = currentTarget(game.nav);
   if (!t) { say(st, 'ЦЕЛЬ НЕ ВЫБРАНА', '#ff7a66'); return; }
 
-  stopAutopilot(ship);
   stopDockingComputer(ship);
   stopLanding(ship);
   ship.lift = 0;
   ship.landedAt = null;
   ship.landedPose = null;
-  resetCruise(game.cruise);
+  stopQuantum(game.quantum);
 
   if (t.isStation) {
     const b = makeBasis();
@@ -361,6 +361,19 @@ function teleportToTarget() {
   say(st, 'ТЕЛЕПОРТ: ' + t.name + ', высота ' + fmtDist(alt), '#78e08f');
 }
 
+/**
+ * Выбрать цель объектом, а не номером: список целей пересобирается на
+ * ходу. Маркер тела, рядом с которым корабль не находится, в список не
+ * попадает — тогда встаём на само тело.
+ */
+function selectTarget(t) {
+  if (!t) return;
+  refreshNav(game.nav, world, ship);
+  let i = game.nav.list.indexOf(t);
+  if (i < 0 && t.isMarker) i = game.nav.list.indexOf(t.body);
+  if (i >= 0) game.nav.index = i;
+}
+
 // --- сохранение --------------------------------------------------------------
 
 function save() {
@@ -369,7 +382,10 @@ function save() {
       pos: ship.pos,
       basis: ship.basis,
       hull: ship.hull,
-      target: game.nav.index,
+      // Цель хранится идентификатором, а не номером в списке: список
+      // теперь меняется на ходу (у ближнего тела появляются маркеры), и
+      // номер после загрузки указывал бы в произвольное место.
+      target: currentTarget(game.nav) ? currentTarget(game.nav).id : null,
       view: game.state.view,
       docked: ship.dockedAt ? ship.dockedAt.id : null,
       last: game.lastStation ? game.lastStation.id : null,
@@ -391,7 +407,7 @@ function load() {
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
   updateWorld(world, s.time || 0);
   game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
-  game.nav.index = s.target || 0;
+  selectTarget(targetById(world, s.target));
   game.state.view = s.view || 'cockpit';
   ship.hull = s.hull || SHIP.maxHull;
   game.lastStation = findStation(s.last);
@@ -503,22 +519,41 @@ function handleKeys() {
     const dir = input.isDown('ShiftLeft', 'ShiftRight') ? -1 : 1;
     const t = cycleTarget(game.nav, dir);
     say(st, 'ЦЕЛЬ: ' + (t ? t.name : '—'));
-    if (ship.autopilot) { stopAutopilot(ship); say(st, 'АВТОПИЛОТ ОТКЛЮЧЁН'); }
+    // Смена цели на калибровке — это выбор другого маршрута, а не отказ
+    // от прыжка: привод просто начинает считать заново.
+    const q = game.quantum;
+    if (q.phase === 'calib') startCalibration(q, t);
+    else if (q.phase === 'jump') { stopQuantum(q); say(st, 'ПРЫЖОК СОРВАН', '#ff7a66'); }
   }
 
-  if (input.pressed('KeyT')) {
-    stepCruise(game.cruise, 1);
-    if (game.cruise.massLocked) say(st, 'MASS LOCK — КРУИЗ НЕДОСТУПЕН', '#ff7a66');
-  }
-  if (input.pressed('KeyY')) stepCruise(game.cruise, -1);
-
-  if (input.pressed('KeyJ')) {
-    if (ship.autopilot) { stopAutopilot(ship); say(st, 'АВТОПИЛОТ ОТКЛЮЧЁН'); }
+  // B — квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
+  if (input.pressed('KeyB')) {
+    const q = game.quantum;
+    if (q.phase === 'jump') { stopQuantum(q); say(st, 'ПРЫЖОК СОРВАН', '#ff7a66'); }
+    else if (q.phase === 'calib') { stopQuantum(q); say(st, 'ПРИВОД ОТКЛЮЧЁН'); }
     else {
       const t = currentTarget(game.nav);
-      startAutopilot(ship, t);
-      stopDockingComputer(ship);
-      say(st, 'АВТОПИЛОТ: КУРС НА ' + (t ? t.name : '—'), '#78e08f');
+      // Коридор проверяется и здесь, до калибровки: держать прицел три
+      // секунды, чтобы узнать «перекрыто», — издевательство.
+      const res = canJump(world, ship, t);
+      if (!res.ok) {
+        say(st, res.reason, '#ff7a66');
+        // Помеху обходят через орбитальный маркер. Какой именно из шести
+        // открыт, глазом не определить, поэтому привод сам выбирает ход
+        // и сам ставит его целью: игроку остаётся нажать B ещё раз.
+        if (res.block) {
+          const hop = suggestHop(world, ship, t);
+          if (hop) {
+            selectTarget(hop);
+            say(st, 'ОБХОД ЧЕРЕЗ ' + hop.name + ' — B ЕЩЁ РАЗ', '#ffcc66', 4);
+          }
+        }
+      } else {
+        stopDockingComputer(ship);
+        stopLanding(ship);
+        startCalibration(q, t);
+        say(st, 'ПРИВОД: КАЛИБРОВКА НА ' + t.name, '#78e08f');
+      }
     }
   }
 
@@ -566,12 +601,13 @@ function handleKeys() {
     }
   }
 
-  // Любое ручное вмешательство отключает автоматику.
-  if (ship.autopilot || ship.docking || ship.landing) {
+  // Любое ручное вмешательство отключает автоматику. Привода это не
+  // касается: на калибровке ручка как раз и нужна, чтобы навестись, а в
+  // прыжке она всё равно ничего не делает.
+  if (ship.docking || ship.landing) {
     if (input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE',
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
-      input.isDown('KeyR', 'KeyF') || input.pressed('KeyX', 'KeyZ')) {
-      if (ship.autopilot) stopAutopilot(ship);
+      input.isDown('KeyR', 'KeyF', 'Space') || input.pressed('KeyX', 'KeyZ')) {
       if (ship.docking) stopDockingComputer(ship);
       if (ship.landing) stopLanding(ship);
       say(st, 'РУЧНОЕ УПРАВЛЕНИЕ');
@@ -620,46 +656,50 @@ function step(dt) {
   game.statusLine = null;
   updateGear(ship, dt);
 
+  // --- квантовый прыжок: корабль ведёт привод, и больше в этом шаге не
+  // происходит ничего. Ни столкновений, ни атмосферы, ни посадки —
+  // коридор проверен заранее, а лететь на 60 000 км/с мимо проверок
+  // касания всё равно нельзя: за кадр корабль проходит тысячу километров.
+  const q = game.quantum;
+  if (q.phase === 'jump') {
+    const ev = updateQuantum(q, ship, world, dt);
+    game.stats.flownKm += ship.speed * dt;
+    game.entry = null;
+    game.zone = null;
+    if (ev === 'arrive') {
+      say(st, 'ВЫХОД ИЗ ПРЫЖКА', '#78e08f');
+      audioReset(game.audio, ship);
+    }
+    return;
+  }
+
   // Обстановка у поверхности считается до управления: от неё зависит и
   // посадочный режим, и команды посадочного компьютера.
   let zone = landingContext(world, ship);
 
   if (ship.landing) {
-    game.statusLine = updateLandingComputer(ship, dt, game.cruise.level, zone);
-    if (ship.landing && ship.landing.wantCruise !== null) {
-      game.cruise.index = ship.landing.wantCruise;
-    }
+    game.statusLine = updateLandingComputer(ship, dt, zone);
   } else if (ship.docking) {
-    // Стыковка считает скорости «как есть»: круизный ускоритель обязан
-    // быть выключен, иначе подход к створу идёт в десять раз быстрее
-    // расчётного и корабль проскакивает порт.
-    game.cruise.index = 0;
     game.statusLine = updateDockingComputer(ship, dt);
-  } else if (ship.autopilot) {
-    const wantIdx = updateAutopilot(ship, world, dt);
-    if (wantIdx !== null) game.cruise.index = wantIdx;
-    if (ship.autopilot.arrived) {
-      const t = ship.autopilot.target;
-      stopAutopilot(ship);
-      say(st, 'ПРИБЫЛИ: ' + t.name, '#78e08f');
-      if (t.isStation) {
-        const res = startDockingComputer(ship, t);
-        if (res.ok) say(st, 'ДОКИНГ-КОМПЬЮТЕР ВКЛЮЧЁН', '#78e08f');
-      } else if (isLandable(t)) {
-        say(st, 'ПОСАДКА ВОЗМОЖНА — КЛАВИША L', '#78e08f');
-      }
-    }
   } else {
     readControls(ship);
   }
 
-  const level = updateCruise(game.cruise, world, ship, dt);
-  updateShip(ship, dt, dt * level, gravityField(game.capture, ship));
-  game.stats.flownKm += ship.speed * level * dt;
+  // Калибровка идёт параллельно обычному полёту: корабль слушается,
+  // привод копит готовность. Событие 'engage' поймает следующий кадр.
+  if (q.phase === 'calib') {
+    const ev = updateQuantum(q, ship, world, dt);
+    if (ev === 'abort') say(st, q.reason || 'ПРЫЖОК ОТМЕНЁН', '#ff7a66');
+    else if (ev === 'engage') say(st, 'ПРЫЖОК', '#78e08f', 1.2);
+  } else {
+    updateQuantum(q, ship, world, dt);      // только затухание вспышки
+  }
 
-  // Вход в атмосферу: считается по скорости ОТНОСИТЕЛЬНО воздуха и с
-  // учётом круиза — он умножает перемещение, а значит и обдув.
-  game.entry = entryState(world, ship, game.cruise.level, game.entryBuf);
+  updateShip(ship, dt, gravityField(game.capture, ship));
+  game.stats.flownKm += ship.speed * dt;
+
+  // Вход в атмосферу: считается по скорости ОТНОСИТЕЛЬНО воздуха.
+  game.entry = entryState(world, ship, game.entryBuf);
 
   // Касание поверхности: посадка или удар.
   zone = landingContext(world, ship);
@@ -730,8 +770,11 @@ function step(dt) {
 // --- подготовка данных для HUD ----------------------------------------------
 
 function prepareHud() {
+  // Список целей пересобирается каждый кадр: маркеры показываются только
+  // у того тела, рядом с которым корабль сейчас находится.
+  refreshNav(game.nav, world, ship);
   const target = currentTarget(game.nav);
-  game.info = navInfo(ship, target, game.cruise.level);
+  game.info = navInfo(ship, target);
 
   // Блипы сканера: станции, планеты, луны.
   game.scanBlips.length = 0;
@@ -763,9 +806,6 @@ function prepareHud() {
     ? landingReadout(ship, game.zone)
     : null;
 
-  if (game.cruise.massLocked && game.cruise.index > 0) {
-    say(game.state, 'MASS LOCK: ' + game.cruise.lockedBy.name, '#ff7a66', 1.2);
-  }
 }
 
 // --- отрисовка ---------------------------------------------------------------
@@ -797,6 +837,25 @@ function updateCamOrbit(dt) {
     o.yaw += (0 - o.yaw) * k;
     o.pitch += (0 - o.pitch) * k;
   }
+}
+
+// Поле зрения: удар в момент разгона привода и широкий угол на ходу.
+//
+// Это то, что физически продаёт скорость. Полосы звёзд без него
+// выглядят обоями: глаз читает разгон именно по тому, как раздвигается
+// картинка по краям. Удар короткий (punch гаснет за полсекунды), а
+// широкий угол держится, пока привод разогнан.
+const FOV_BASE = 68 * Math.PI / 180;
+const FOV_JUMP = 92 * Math.PI / 180;
+let fovNow = FOV_BASE;
+
+function updateFov(dt) {
+  const q = game.quantum;
+  const frac = q.phase === 'jump'
+    ? Math.min(1, q.speed / (ship.quantumSpeed || 60000)) : 0;
+  const want = FOV_BASE + (FOV_JUMP - FOV_BASE) * Math.min(1, 0.55 * frac + 0.5 * q.punch);
+  fovNow += (want - fovNow) * Math.min(1, dt * 6);
+  if (Math.abs(fovNow - camera.fov) > 1e-5) camera.setFov(fovNow);
 }
 
 // Камера сзади: ближе, чем кажется нужным.
@@ -940,6 +999,7 @@ function frame(now) {
   updateMessages(game.state, dt);
   if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
   updateCamOrbit(dt);
+  updateFov(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный
   // ускоритель множит перемещение, но не частоту кадров, и гул движков
   // от него меняться не должен.
@@ -976,7 +1036,7 @@ function devSpawn() {
   ship.dockedAt = null;
   game.lastStation = st;
   game.state.mode = ST.FLIGHT;
-  game.nav.index = game.nav.list.indexOf(st);
+  selectTarget(st);
 }
 
 function resizeAll() {
@@ -1015,7 +1075,7 @@ function boot() {
     // Целью по умолчанию ставим другую станцию: цель «там, откуда вылетел»
     // бесполезна, а так первый же J даёт осмысленный перелёт.
     const away = world.stations.find((s) => s !== home);
-    if (away) game.nav.index = game.nav.list.indexOf(away);
+    if (away) selectTarget(away);
   }
 
   sound.setMuted(!game.audio.on);
@@ -1043,6 +1103,5 @@ boot();
 // Полезно для отладки из консоли браузера.
 window.GAME = game;
 window.fmtDist = fmtDist;
-window.LEVELS = LEVELS;
 window.dot = dot;
 window.clamp = clamp;

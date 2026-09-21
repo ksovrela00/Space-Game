@@ -13,7 +13,6 @@
 import { clamp, approach } from '../core/vec3.js';
 import { makeRng } from '../core/rng.js';
 import { SHIP } from './ship.js';
-import { LEVELS } from './cruise.js';
 import { ST } from './state.js';
 
 export const AUDIO = {
@@ -59,7 +58,7 @@ export function makeAudio(seed = 0x51ee7) {
     vel: { x: 0, y: 0, z: 0 },
     accel: 0,          // км/с² за последний кадр — по нему скрипит корпус
     hasVel: false,
-    cruiseIndex: 0,
+    qPhase: 'idle',    // фаза привода в прошлом кадре — по ней слышен вход и выход
     gearMoving: false,
     creakGap: 0,       // сколько ещё нельзя скрипеть от нагрузки
     fatigue: 8,        // до следующего скрипа усталости
@@ -86,7 +85,7 @@ const push = (a, e) => { if (a.on && a.events.length < 32) a.events.push(e); };
  * меняется состояние: так звук не приходится угадывать по признакам.
  *
  * @param kind hit | land | belly | crash | dock | launch | gear |
- *             takeoff | cruise
+ *             takeoff | quantum
  */
 export function audioCue(a, kind, opts = {}) {
   const dmg = clamp((opts.damage || 0) / 30, 0, 1);
@@ -133,7 +132,7 @@ export function audioCue(a, kind, opts = {}) {
       push(a, { kind: 'servo', dur: SHIP.gearTime, up: !!opts.out });
       push(a, { kind: 'clunk', gain: 0.28, freq: 220, dur: 0.18, delay: SHIP.gearTime });
       break;
-    case 'cruise':
+    case 'quantum':
       push(a, { kind: 'spool', up: opts.dir > 0, level: clamp(opts.level || 0, 0, 1) });
       break;
     default: break;
@@ -158,7 +157,11 @@ export function updateAudio(a, game, dt) {
 
   // --- насколько резко изменилась скорость: это и нагрузка на корпус,
   // и признак того, что движки работают на пределе.
-  if (a.hasVel && dt > 1e-4) {
+  // В прыжке скорость меняется на десятки тысяч км/с за кадр, но это
+  // работа привода, а не нагрузка на корпус: считать её здесь значит
+  // сорвать корабль в непрерывный скрежет.
+  const inJump = !!(game.quantum && game.quantum.phase === 'jump');
+  if (a.hasVel && dt > 1e-4 && !inJump) {
     const dx = ship.vel.x - a.vel.x, dy = ship.vel.y - a.vel.y, dz = ship.vel.z - a.vel.z;
     a.accel = Math.hypot(dx, dy, dz) / dt;
   } else {
@@ -199,11 +202,13 @@ export function updateAudio(a, game, dt) {
   const station = mode === ST.DOCKED ? 1 : 0;
   // На грунте и после крушения — тишина: в ней и слышен остывающий металл.
 
-  // Круизный ускоритель. Mass lock его глушит, и это слышно раньше,
-  // чем читается надпись на панели.
-  const maxIdx = LEVELS.length - 1;
-  const idx = flying && !game.cruise.massLocked ? game.cruise.index : 0;
-  const drive = idx / maxIdx;
+  // Квантовый привод. На калибровке он воет вполсилы и ровно, в прыжке
+  // гудит во весь ход: по звуку слышно, что происходит, раньше, чем
+  // читается надпись на панели.
+  const q = game.quantum;
+  const drive = !flying || !q ? 0
+    : (q.phase === 'jump' ? clamp(q.speed / (ship.quantumSpeed || 60000), 0.25, 1)
+      : (q.phase === 'calib' ? 0.15 + 0.25 * q.calib : 0));
 
   // Подъёмные движки: ручка, а не результат — по ней и ход шипения.
   const lift = flying ? clamp(ship.control ? ship.control.lift : 0, -1, 1) : 0;
@@ -218,14 +223,13 @@ export function updateAudio(a, game, dt) {
   m.thrustPitch = approach(m.thrustPitch, lift > 0 ? 1 : (lift < 0 ? 0 : 0.5), k * 2, dt);
   m.station = approach(m.station, station, k * 0.4, dt);
 
-  // --- ступень ускорителя сменилась: разгон или сброс слышны свистом.
-  if (flying && game.cruise.index !== a.cruiseIndex) {
-    audioCue(a, 'cruise', {
-      dir: game.cruise.index > a.cruiseIndex ? 1 : -1,
-      level: game.cruise.index / maxIdx,
-    });
+  // --- вход в прыжок и выход из него: свист привода.
+  const phase = q ? q.phase : 'idle';
+  if (phase !== a.qPhase) {
+    if (phase === 'jump') audioCue(a, 'quantum', { dir: 1, level: 1 });
+    else if (a.qPhase === 'jump') audioCue(a, 'quantum', { dir: -1, level: 0.6 });
+    a.qPhase = phase;
   }
-  a.cruiseIndex = game.cruise.index;
 
   // --- скрежет от нагрузки.
   if (flying && a.quiet <= 0 && a.creakGap <= 0 && a.accel > AUDIO.jerkFloor) {

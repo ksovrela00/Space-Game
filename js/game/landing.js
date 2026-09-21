@@ -18,7 +18,6 @@
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { SHIP } from './ship.js';
 import { alignBasis, aimAt, levelRoll, horizontal } from './pilot.js';
-import { LEVELS } from './cruise.js';
 import {
   isLandable, isSolid, altitudeOf, surfaceNormal, worldPoint,
   dirToWorldBody, groundRadius, findSite, bodyFrame, latLon,
@@ -186,7 +185,7 @@ export function startLanding(ship, body, pos) {
   }
   const d = Math.hypot(pos.x - body.pos.x, pos.y - body.pos.y, pos.z - body.pos.z);
   if (d - body.radius > body.radius * LAND.range) {
-    return { ok: false, reason: 'ТЕЛО СЛИШКОМ ДАЛЕКО — СНАЧАЛА АВТОПИЛОТ (J)' };
+    return { ok: false, reason: 'ТЕЛО СЛИШКОМ ДАЛЕКО — СНАЧАЛА ПРЫЖОК (B)' };
   }
   // Площадка выбирается не сейчас, а на малой высоте: пока корабль
   // снижается, поверхность успевает уехать из-под него на десятки
@@ -199,7 +198,6 @@ export function startLanding(ship, body, pos) {
     searchSpan: 0,
     tries: 0,
     phase: 'подход',
-    wantCruise: null,
   };
   ship.autopilot = null;
   ship.docking = null;
@@ -216,24 +214,43 @@ export function stopLanding(ship) { ship.landing = null; }
  * a — то, что остаётся от их тяги после веса. Это и есть главное
  * ограничение спуска при настоящем тяготении.
  */
-function brakeLimit(body, pos, alt) {
+function brakeLimit(body, pos, alt, gearOut = true) {
   const g = gravityAt(body, pos);
-  const a = Math.max(1e-6, Math.max(SHIP.liftMin, g * SHIP.liftTWR) - g);
-  return Math.sqrt(2 * a * Math.max(0, alt)) * LAND.brakeMargin + 0.002;
+  // Тормозить можно двумя разными способами, и это две разные цифры.
+  //
+  // С ВЫПУЩЕННЫМ шасси корабль в посадочной конфигурации: маршевые
+  // движки работают только по горизонту, вертикаль держат подъёмные, а
+  // их тяга привязана к местной тяжести. На лёгкой луне она мала, и
+  // снижаться приходится медленно — это и есть посадка.
+  //
+  // С УБРАННЫМ шасси работает компенсатор высоты, а маршевые движки
+  // тянут в любую сторону: запас торможения SHIP.brake, вдвое с лишним
+  // больше, и от тела он не зависит.
+  //
+  // Поэтому спуск считается в два колена: до высоты выпуска шасси
+  // тормозим маршевыми, а к ней приходим уже на той скорости, которую
+  // потянут подъёмные. На стыке обе формулы дают одно и то же, и
+  // ступеньки нет. Раньше здесь всегда считались подъёмные, и спуск с
+  // 500 км на слабой луне занимал шестнадцать минут; если же считать
+  // всегда маршевыми, корабль приходит к шасси на километре в секунду и
+  // уходит под грунт.
+  const aLift = Math.max(1e-6, Math.max(SHIP.liftMin, g * SHIP.liftTWR) - g);
+  const vLift = (h) => Math.sqrt(2 * aLift * Math.max(0, h)) * LAND.brakeMargin + 0.002;
+  if (gearOut) return vLift(alt);
+  const hGear = LAND.landAlt * 1.5;          // высота выпуска шасси
+  return Math.sqrt(2 * SHIP.brake * Math.max(0, alt - hGear)) * LAND.brakeMargin + vLift(hGear);
 }
 
 /**
- * Ведёт корабль на площадку. Пишет в ship.control / ship.throttle и
- * выбирает уровень круиза (ship.landing.wantCruise).
+ * Ведёт корабль на площадку. Пишет в ship.control / ship.throttle.
  * @param zone обстановка у поверхности (landingContext) — из неё берётся
  *             фактическая вертикальная скорость относительно грунта
  * @returns строка статуса для HUD
  */
-export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
+export function updateLandingComputer(ship, dt, zone = null) {
   const L = ship.landing;
   if (!L) return null;
   const b = L.body;
-  L.wantCruise = null;
   const alt = altitudeOf(b, ship.pos, _alt);
 
   // Высоко — идём обычным полётом ВЕРТИКАЛЬНО ВНИЗ, к точке прямо под
@@ -251,34 +268,21 @@ export function updateLandingComputer(ship, dt, cruiseLevel = 1, zone = null) {
     // Шасси на подходе убрано: с ним скорость втрое ниже, а спуск с
     // орбиты и так самая долгая часть. Выпускается перед самым спуском.
     ship.gear.out = alt.alt < LAND.landAlt * 1.5;
-    const vMax = SHIP.maxSpeed * (ship.gear.t > 0.02 ? SHIP.gearSpeed : 1);
+    const gearOut = ship.gear.t > 0.02;
+    const vMax = SHIP.maxSpeed * (gearOut ? SHIP.gearSpeed : 1);
 
-    // Экспоненциальный подход, как у автопилота: чем ближе, тем медленнее.
-    let vEff = clamp(dist / 8, 0.01, 60000);
-    if (off > 0.35) vEff = Math.min(vEff, vMax);
-    let idx = LEVELS.length - 1;
-    for (let i = 0; i < LEVELS.length; i++) {
-      if (vMax * LEVELS[i] >= vEff) { idx = i; break; }
-    }
-    L.wantCruise = idx;
-    // Тягу считаем по уровню круиза, который РЕАЛЬНО действует: рядом с
-    // телом mass lock урезает его до x10, и тяга, рассчитанная на x1000,
-    // давала спуск в шесть раз медленнее возможного.
-    const level = Math.min(cruiseLevel, LEVELS[idx]);
-
-    // Главное ограничение спуска при настоящем тяготении: гасить
-    // скорость нечем, кроме подъёмных движков, и на высоте h она не
-    // должна превышать √(2·a·h). Ограничение на СОБСТВЕННУЮ скорость
-    // корабля, поэтому с круизом оно и сравнивается через его уровень:
-    // ускоритель множит пройденный путь, а тормозить придётся то, что
-    // корабль везёт на самом деле.
-    vEff = Math.min(vEff, brakeLimit(b, ship.pos, alt.alt) * level);
-    ship.throttle = clamp(vEff / (vMax * level), 0, 1);
+    // Экспоненциальный подход: чем ближе, тем медленнее.
+    //
+    // Главное ограничение спуска при настоящем тяготении: на высоте h
+    // скорость не должна превышать √(2·a·h) — иначе тормозить будет уже
+    // негде. Чем именно тормозим, зависит от шасси (см. brakeLimit).
+    let vEff = Math.min(dist / 8, vMax, brakeLimit(b, ship.pos, alt.alt, gearOut));
+    if (off > 0.35) vEff = Math.min(vEff, vMax * 0.3);
+    ship.throttle = clamp(vEff / vMax, 0, 1);
     return `ПОСАДКА: ПОДХОД, высота ${fmtKm(alt.alt)}, до площадки ${fmtKm(dist)}`;
   }
 
   // --- Спуск: брюхом вниз, тягой доводим снос, движками — высоту.
-  L.wantCruise = 0;
   dirToWorldBody(b, alt.dir, _up);                 // местная вертикаль
 
   // Площадка выбирается здесь, под собой, с оглядкой на уклон: садиться

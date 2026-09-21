@@ -26,8 +26,12 @@ export function drawDebug(r, game, dbg) {
       (rs.detail ? ', деталь на пиксель' : ''),
     rs.gpu ? `GPU ${rs.gpu}` : '',
     `pos ${s.pos.x.toFixed(1)} ${s.pos.y.toFixed(1)} ${s.pos.z.toFixed(1)}`,
-    `speed ${s.speed.toFixed(4)} км/с  тяга ${s.throttle.toFixed(2)}  круиз x${game.cruise.level}`,
-    `круиз лимит x${[1, 10, 100, 1000, 10000, 50000][game.cruise.limitedTo]}  masslock ${game.cruise.massLocked ? game.cruise.lockedBy.name : 'нет'}`,
+    `speed ${s.speed.toFixed(4)} км/с  тяга ${s.throttle.toFixed(2)}` +
+      `  форсаж ${(s.boost * 100).toFixed(0)}%${s.boosting ? ' (жмут)' : ''}`,
+    game.quantum && game.quantum.phase !== 'idle'
+      ? `привод ${game.quantum.phase} ${(game.quantum.calib * 100).toFixed(0)}%  ` +
+        `${game.quantum.speed.toFixed(0)} км/с  остаток ${game.quantum.dist.toFixed(0)} км`
+      : `привод выключен${game.quantum && game.quantum.reason ? ': ' + game.quantum.reason : ''}`,
     `rot ${s.rot.pitch.toFixed(3)} ${s.rot.yaw.toFixed(3)} ${s.rot.roll.toFixed(3)}`,
     `режим ${game.state.mode}  вид ${game.state.view}` +
       (s.lift ? `  подъём ${(s.lift * 1000).toFixed(1)} м/с²` : ''),

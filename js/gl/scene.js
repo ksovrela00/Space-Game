@@ -14,7 +14,7 @@ import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
-  PLUME_VS, PLUME_FS,
+  PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS,
 } from './shaders.js';
 import { detailUniforms, tileDetailUniforms } from './detail.js';
 import { terrainOf } from './terrain.js';
@@ -26,8 +26,9 @@ import { shipShadow } from '../game/shadow.js';
 import { localDir, altitudeOf } from '../game/surface.js';
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh, buildPlumeMesh,
-  buildDynamicMesh,
+  buildDynamicMesh, buildWarpMesh,
 } from './mesh.js';
+import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
 import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './planetmesh.js';
 import { SurfacePatch } from './patches.js';
@@ -42,6 +43,17 @@ const AMBIENT = 0.14;
 // теле в тень всё равно светит рассеянный свет от соседнего склона —
 // и тот же ambient, которым освещена ночная сторона.
 const SHADOW_DARK = 0.30;
+// Поток частиц в прыжке: сколько их и как далеко впереди рождаются.
+// Глубина рождения важнее числа: при uZ0 = 5 частица появляется в
+// 1–15° от точки схода, то есть у самого центра, и разгоняется к краю
+// сама собой. Меньше — и они будут возникать сразу посреди экрана.
+const WARP_COUNT = 1400;
+const WARP_Z0 = 5;
+// Насколько хвост отстаёт от головы по фазе. Длина полосы получается
+// не отсюда, а из перспективы: у центра частица еле ползёт, у края
+// летит, и один и тот же интервал времени даёт там короткий штрих, а
+// тут длинную черту.
+const WARP_TAIL = 0.11;
 // Единичный базис: тень уже посчитана в мировых осях, поворачивать её
 // нечем и незачем.
 const IDENTITY_BASIS = {
@@ -108,6 +120,8 @@ export class GlScene {
     this.pRing = buildProgram(gl, 'ring', RING_VS, RING_FS);
     this.pPlume = buildProgram(gl, 'plume', PLUME_VS, PLUME_FS);
     this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
+    this.pWarp = buildProgram(gl, 'warp', WARP_VS, WARP_FS);
+    this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
 
     this.meshLocs = {
       aPos: this.pMesh.attrib('aPos'),
@@ -135,6 +149,21 @@ export class GlScene {
     this.shadowMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 16 * 9);
     this.shadowBuf = {};
     this.stars = this.buildStars();
+    // Поток частиц прыжка. Строится один раз на запуск и от звёзд не
+    // зависит вовсе: звёзды бесконечно далеко и лететь мимо не могут.
+    this.warp = buildWarpMesh(gl, {
+      aParam: this.pWarp.attrib('aParam'),
+      aT: this.pWarp.attrib('aT'),
+    }, WARP_COUNT, makeRng(0x7a12));
+    this.tunnelQuad = buildQuad(gl, this.pTunnel.attrib('aQuad'));
+    this.jump = {
+      power: 0, axis: { x: 0, y: 0, z: 1 }, cx: 0, cy: 0,
+      // Мировые оси потока: сама ось движения и два перпендикуляра.
+      // Считаются в МИРОВЫХ осях, чтобы поток не закручивался, когда
+      // игрок вертит камерой.
+      aw: { x: 0, y: 0, z: 1 }, e1: { x: 1, y: 0, z: 0 }, e2: { x: 0, y: 1, z: 0 },
+      phase: 0,
+    };
     this.blankTex = createBlankTexture(gl);
     this.patch = new SurfacePatch(gl, this.meshLocs);
 
@@ -192,6 +221,8 @@ export class GlScene {
       colors[i * 4 + 2] = c[2];
       colors[i * 4 + 3] = src.mag[i];
     }
+    // Сырые массивы остаются: из них же строится меш полос для прыжка.
+    this.starData = { dirs, colors };
     return buildPointsMesh(this.gl, {
       aDir: this.pStars.attrib('aDir'),
       aColor: this.pStars.attrib('aColor'),
@@ -309,13 +340,98 @@ export class GlScene {
     gl.stencilMask(0xff);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
+    this.updateJump(game);
     this.drawStars();
     this.drawOpaque(game, world, sunPos);
     this.drawTransparent(game, world, sunPos);
+    this.drawTunnel();
 
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
+  }
+
+  /**
+   * Состояние квантового прыжка для картинки: сила эффекта, ось движения
+   * в координатах камеры и точка схода на экране.
+   *
+   * Точка схода — это не центр кадра: в виде от третьего лица камеру
+   * можно отвернуть, и тоннель обязан остаться там, куда корабль летит
+   * на самом деле. Именно на этом держится всё ощущение скорости.
+   */
+  updateJump(game) {
+    const j = this.jump;
+    const q = game.quantum;
+    const ship = game.ship;
+    j.power = 0;
+    if (!q || q.phase !== 'jump' || !ship) return;
+
+    const top = ship.quantumSpeed || 60000;
+    // Корень: тоннель обязан появиться сразу, а не к середине разгона,
+    // и так же честно растаять на торможении.
+    j.power = Math.min(1, Math.pow(Math.max(0, q.speed) / top, 0.35));
+
+    const v = ship.vel;
+    const L = Math.hypot(v.x, v.y, v.z);
+    if (L < 1e-9) { j.power = 0; return; }
+    const b = this.camera.basis;
+    const dx = v.x / L, dy = v.y / L, dz = v.z / L;
+
+    // Мировые оси потока. Перпендикуляры строятся от той же опорной
+    // оси, что и всегда, поэтому пока корабль летит прямо, они стоят
+    // на месте — поток не закручивается сам по себе.
+    j.aw.x = dx; j.aw.y = dy; j.aw.z = dz;
+    const refY = Math.abs(dy) < 0.9;
+    const rx = refY ? 0 : 1, ry = refY ? 1 : 0, rz = 0;
+    let ex = dy * rz - dz * ry, ey = dz * rx - dx * rz, ez = dx * ry - dy * rx;
+    const el = Math.hypot(ex, ey, ez) || 1;
+    ex /= el; ey /= el; ez /= el;
+    j.e1.x = ex; j.e1.y = ey; j.e1.z = ez;
+    j.e2.x = dy * ez - dz * ey;
+    j.e2.y = dz * ex - dx * ez;
+    j.e2.z = dx * ey - dy * ex;
+    // Фаза потока — из состояния привода: она копится в шаге физики,
+    // и картинка не зависит от того, с какой частотой идут кадры.
+    j.phase = q.warp || 0;
+    j.axis.x = dx * b.right.x + dy * b.right.y + dz * b.right.z;
+    j.axis.y = dx * b.up.x + dy * b.up.y + dz * b.up.z;
+    j.axis.z = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
+
+    const cam = this.camera;
+    if (j.axis.z > 0.08) {
+      const px = cam.cx + (j.axis.x / j.axis.z) * cam.focal;
+      const py = cam.cy - (j.axis.y / j.axis.z) * cam.focal;
+      j.cx = Math.max(-2, Math.min(2, (px / cam.w) * 2 - 1));
+      j.cy = Math.max(-2, Math.min(2, 1 - (py / cam.h) * 2));
+    } else {
+      // Ось ушла за спину: точку схода не спроецировать, и тоннеля
+      // быть не должно — сзади он выглядит как заливка экрана.
+      j.cx = 0; j.cy = 0;
+      j.power *= 0.25;
+    }
+  }
+
+  /** Полноэкранный тоннель поверх всего. */
+  drawTunnel() {
+    const j = this.jump;
+    if (!(j.power > 0.02)) return;
+    const gl = this.gl;
+    const prog = this.pTunnel;
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    prog.use();
+    gl.uniform2fv(prog.loc('uCenter'), new Float32Array([j.cx, j.cy]));
+    gl.uniform1f(prog.loc('uAspect'), this.canvas.width / Math.max(1, this.canvas.height));
+    gl.uniform1f(prog.loc('uTime'), (Date.now() % 1000000) / 1000);
+    gl.uniform1f(prog.loc('uPower'), j.power);
+    gl.uniform3fv(prog.loc('uColor'), new Float32Array([0.42, 0.70, 1.0]));
+    this.tunnelQuad.draw();
+    this.draws++;
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
   }
 
   // Ближайшее тело под камерой: только для него имеет смысл считать
@@ -403,6 +519,10 @@ export class GlScene {
 
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
+
+    // Звёзды рисуются всегда, в том числе в прыжке: они бесконечно
+    // далеко и стоять на месте — их законное поведение. Лететь мимо
+    // должен поток частиц, и это отдельный проход.
     this.pStars.use();
     gl.uniformMatrix4fv(this.pStars.loc('uProj'), false, this.proj);
     gl.uniformMatrix3fv(this.pStars.loc('uView'), false, m);
@@ -410,6 +530,27 @@ export class GlScene {
       Math.min(window.devicePixelRatio || 1, 2));
     this.stars.draw();
     this.draws++;
+
+    const j = this.jump;
+    if (j.power > 0.02) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      const prog = this.pWarp;
+      prog.use();
+      gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+      gl.uniformMatrix3fv(prog.loc('uView'), false, m);
+      gl.uniform3fv(prog.loc('uAxis'), new Float32Array([j.aw.x, j.aw.y, j.aw.z]));
+      gl.uniform3fv(prog.loc('uE1'), new Float32Array([j.e1.x, j.e1.y, j.e1.z]));
+      gl.uniform3fv(prog.loc('uE2'), new Float32Array([j.e2.x, j.e2.y, j.e2.z]));
+      gl.uniform1f(prog.loc('uPhase'), j.phase);
+      gl.uniform1f(prog.loc('uTail'), WARP_TAIL * (0.25 + 0.75 * j.power));
+      gl.uniform1f(prog.loc('uZ0'), WARP_Z0);
+      gl.uniform1f(prog.loc('uPower'), 0.25 + 0.75 * j.power);
+      gl.uniform3fv(prog.loc('uColor'), new Float32Array([0.82, 0.92, 1.0]));
+      this.warp.draw();
+      this.draws++;
+      gl.disable(gl.BLEND);
+    }
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
   }

@@ -1,10 +1,13 @@
-// Headless-проверка игровой логики: мир, полёт, автопилот, стыковка.
+// Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
 import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis } from '../js/core/basis.js';
-import { makeSystem, updateWorld, nearestBody } from '../js/game/world.js';
+import { makeSystem, updateWorld, nearestBody, bodyPosAt } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
-import { makeCruise, updateCruise } from '../js/game/cruise.js';
-import { makeNav, startAutopilot, updateAutopilot, currentTarget } from '../js/game/nav.js';
+import { makeNav, refreshNav, currentTarget, targetById } from '../js/game/nav.js';
+import {
+  makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump,
+  corridorBlock, exitPoint, jumpTime, suggestHop, QUANTUM,
+} from '../js/game/quantum.js';
 import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
@@ -581,7 +584,6 @@ function dockTest(distKm, startDir) {
   // Ставим корабль на расстоянии distKm от станции в заданном направлении
   const d = normalize(startDir(st));
   placeShip(sh, v3(st.pos.x + d.x * distKm, st.pos.y + d.y * distKm, st.pos.z + d.z * distKm), bb);
-  const cr = makeCruise();
   const res = startDockingComputer(sh, st);
   if (!res.ok) return { status: 'refused', reason: res.reason };
   let t = 0;
@@ -589,8 +591,7 @@ function dockTest(distKm, startDir) {
     updateWorld(w, STEP);
     clearControls(sh);
     updateDockingComputer(sh, STEP);
-    const lvl = updateCruise(cr, w, sh, STEP);
-    updateShip(sh, STEP, STEP * lvl);
+    updateShip(sh, STEP);
     t += STEP;
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0) return { status: 'crash-planet', t };
@@ -613,53 +614,194 @@ ok(t3.status === 'docked', `подход с обратной стороны (и�
 const t4 = dockTest(400, (st) => ({ ...st.basis.fwd }));
 ok(t4.status === 'refused', `с 400 км докинг-компьютер отказывает: ${t4.reason || t4.status}`);
 
-// --- 5. Автопилот: перелёт между планетами ---------------------------------
-console.log('\n== автопилот ==');
-function autopilotTest(targetName, maxSeconds = 600) {
+// --- 5. Квантовый привод: перелёт между телами -----------------------------
+//
+// Автопилота больше нет, перелёты делает привод. Проверяется то, за что
+// он отвечает целиком: доводит ли до цели, встаёт ли ровно на заданной
+// высоте, гасит ли скорость и не проходит ли сквозь тела по дороге.
+console.log('\n== квантовый привод ==');
+
+// Навести нос точно на точку выхода: калибровка иначе не пойдёт.
+function aimAtTarget(sh, target) {
+  const p = exitPoint(target, sh.pos);
+  lookAlong(sh.basis, normalize(v3(
+    p.x - sh.pos.x, p.y - sh.pos.y, p.z - sh.pos.z)), sh.basis.up);
+}
+
+// Один прыжок целиком: калибровка, ход, выход. Возвращает и то, что
+// нужно проверить по дороге, — минимальный зазор до тел.
+function runJump(w, sh, target, maxSeconds = 300) {
+  const q = makeQuantum();
+  const check = canJump(w, sh, target);
+  if (!check.ok) return { status: 'blocked', reason: check.reason };
+  aimAtTarget(sh, target);
+  startCalibration(q, target);
+
+  let t = 0, vMax = 0, minGap = Infinity;
+  for (let i = 0; i < 60 * maxSeconds; i++) {
+    updateWorld(w, STEP);
+    clearControls(sh);
+    if (q.phase === 'calib') aimAtTarget(sh, target);
+    const ev = updateQuantum(q, sh, w, STEP);
+    if (q.phase !== 'jump') updateShip(sh, STEP);
+    t += STEP;
+    vMax = Math.max(vMax, q.speed);
+    // Зазор до ЛЮБОГО тела по дороге: за этим и нужна проверка коридора.
+    minGap = Math.min(minGap, nearestBody(w, sh.pos).gap);
+    if (ev === 'abort') return { status: 'abort', reason: q.reason, t };
+    if (ev === 'arrive') {
+      const d = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
+      return { status: 'arrived', t, alt: d - target.radius, vMax, minGap, speed: sh.speed };
+    }
+  }
+  return { status: 'timeout', t, vMax, minGap };
+}
+
+/**
+ * Перелёт к цели ЦЕЛИКОМ, как его делает игрок: если прямой коридор
+ * перекрыт, привод подсказывает обходной маркер, и прыжков получается
+ * несколько. Именно это и есть настоящий сценарий — от станции прямой
+ * коридор перекрыт своей же планетой почти всегда.
+ */
+function jumpTest(targetName, maxHops = 4) {
   const w = makeSystem(0x1a7e);
   const nav = makeNav(w);
   const sh = makeShip();
   const st = w.home.station;
-  const bb = makeBasis();
   placeShip(sh, v3(
     st.pos.x + st.basis.fwd.x * 3,
     st.pos.y + st.basis.fwd.y * 3,
-    st.pos.z + st.basis.fwd.z * 3), bb);
+    st.pos.z + st.basis.fwd.z * 3), makeBasis());
   nav.index = nav.list.findIndex((x) => x.name === targetName);
   if (nav.index < 0) return { status: 'no-target' };
   const target = currentTarget(nav);
-  const cr = makeCruise();
-  startAutopilot(sh, target);
   const d0 = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
-  let t = 0, maxLevel = 1;
-  for (let i = 0; i < 60 * maxSeconds; i++) {
-    updateWorld(w, STEP);
-    clearControls(sh);
-    const idx = updateAutopilot(sh, w, STEP);
-    if (idx !== null) cr.index = idx;
-    const lvl = updateCruise(cr, w, sh, STEP);
-    maxLevel = Math.max(maxLevel, lvl);
-    updateShip(sh, STEP, STEP * lvl);
-    t += STEP;
-    const nb = nearestBody(w, sh.pos);
-    if (nb.gap <= 0) return { status: 'crash', t, into: nb.body.name };
-    if (sh.autopilot && sh.autopilot.arrived) {
-      const d = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
-      return { status: 'arrived', t, d0, d, maxLevel };
+
+  let t = 0, vMax = 0, minGap = Infinity, hops = 0;
+  for (let k = 0; k < maxHops; k++) {
+    let leg = target;
+    if (!canJump(w, sh, target).ok) {
+      leg = suggestHop(w, sh, target, SHIP.quantumSpeed);
+      if (!leg) return { status: 'no-route', t, hops };
+    }
+    const r = runJump(w, sh, leg);
+    hops++;
+    t += r.t || 0;
+    vMax = Math.max(vMax, r.vMax || 0);
+    minGap = Math.min(minGap, r.minGap === undefined ? Infinity : r.minGap);
+    if (r.status !== 'arrived') return { status: r.status, reason: r.reason, t, hops };
+    if (leg === target) {
+      return { status: 'arrived', t, d0, hops, alt: r.alt, vMax, minGap, speed: r.speed };
     }
   }
-  const d = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
-  return { status: 'timeout', t, d0, d, maxLevel };
+  return { status: 'too-many-hops', t, hops };
 }
 
 for (const name of ['Lave III', 'Lave V', 'Lave VI', 'Lave I']) {
-  const r = autopilotTest(name);
+  const r = jumpTest(name);
   ok(r.status === 'arrived',
-    `перелёт к ${name}: ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с`,
-    r.d0 ? `${(r.d0 / 1e6).toFixed(2)} млн км -> ${r.d ? r.d.toFixed(0) : '?'} км, круиз до x${r.maxLevel}` : '');
+    `перелёт к ${name}: ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с, прыжков ${r.hops}`,
+    r.d0 ? `${(r.d0 / 1e6).toFixed(2)} млн км, до ${r.vMax.toFixed(0)} км/с` : (r.reason || ''));
+  if (r.status === 'arrived') {
+    ok(Math.abs(r.alt - QUANTUM.exitAlt) < 1 || r.alt > QUANTUM.exitAlt,
+      `выход над ${name} на заданной высоте: ${r.alt.toFixed(0)} км`);
+    ok(r.speed < 1e-6, `скорость на выходе у ${name} нулевая: ${r.speed.toFixed(6)} км/с`);
+    ok(r.minGap > 0, `по дороге к ${name} ни во что не влетели (мин. зазор ${r.minGap.toFixed(0)} км)`);
+  }
 }
 
-// Полный цикл: автопилот к станции + стыковка
+// Прыжок обязан занимать ощутимое, но не бесконечное время — иначе
+// перелёт либо игрушечный, либо в нём нечего делать по полчаса.
+{
+  const short = jumpTime(6000, 60000);
+  const long = jumpTime(6e6, 60000);
+  ok(short < 3, `ближний прыжок (6 000 км) — «чих»: ${short.toFixed(1)} с`);
+  ok(long > 60 && long < 180, `через всю систему (6 млн км): ${long.toFixed(0)} с`);
+  // Профиль обязан быть монотонным по дистанции, иначе ближняя цель
+  // оказалась бы дальше по времени, чем дальняя.
+  let mono = true, prev = 0;
+  for (let d = 1000; d < 8e6; d *= 1.5) {
+    const t = jumpTime(d, 60000);
+    if (t <= prev) mono = false;
+    prev = t;
+  }
+  ok(mono, 'время прыжка растёт с дистанцией без провалов');
+}
+
+// Поток частиц в прыжке. Проверяется то, из-за чего первая версия
+// эффекта не работала: полосы строились из настоящих звёзд, а звёзды
+// бесконечно далеко и относительно корабля стоят — на экране получались
+// неподвижные белые линии. Теперь у потока есть своя фаза, и она обязана
+// идти вперёд и заворачиваться.
+{
+  const w = makeSystem(0x1a7e);
+  const sh = makeShip();
+  const to = w.bodies.find((b) => b.name === 'Lave V');
+  const from = w.home;
+  placeShip(sh, v3(from.pos.x + from.radius * 6, from.pos.y, from.pos.z), makeBasis());
+  const q = makeQuantum();
+  aimAtTarget(sh, to);
+  startCalibration(q, to);
+  for (let i = 0; i < 60 * 4 && q.phase !== 'jump'; i++) {
+    aimAtTarget(sh, to);
+    updateQuantum(q, sh, w, STEP);
+  }
+  const p0 = q.warp;
+  for (let i = 0; i < 30; i++) updateQuantum(q, sh, w, STEP);
+  const p1 = q.warp;
+  let wrapped = true;
+  for (let i = 0; i < 60 * 6; i++) {
+    updateQuantum(q, sh, w, STEP);
+    if (!(q.warp >= 0 && q.warp < 1)) wrapped = false;
+  }
+  ok(q.phase === 'jump' && p1 > p0 && wrapped,
+    `фаза потока идёт вперёд и заворачивается: ${p0.toFixed(3)} -> ${p1.toFixed(3)}`);
+}
+
+// Коридор: с обратной стороны планеты прыгать нельзя, и именно для
+// этого случая заведены орбитальные маркеры.
+{
+  const w = makeSystem(0x1a7e);
+  const from = w.bodies.find((b) => b.name === 'Lave II');
+  const to = w.bodies.find((b) => b.name === 'Lave III');
+  const d = normalize(v3(to.pos.x - from.pos.x, to.pos.y - from.pos.y, to.pos.z - from.pos.z));
+  const put = (sign) => {
+    const sh = makeShip();
+    placeShip(sh, v3(
+      from.pos.x + d.x * sign * (from.radius + 0.2),
+      from.pos.y + d.y * sign * (from.radius + 0.2),
+      from.pos.z + d.z * sign * (from.radius + 0.2)), makeBasis());
+    return sh;
+  };
+  const far = put(-1), near = put(1);
+  ok(!canJump(w, far, to).ok, 'с обратной стороны планеты коридор перекрыт');
+  ok(canJump(w, near, to).ok, 'с той же стороны прыжок разрешён');
+  // Хотя бы один маркер обязан быть виден: иначе с поверхности не уйти.
+  const free = from.markers.filter((m) => !corridorBlock(w, far.pos, m, SHIP.quantumSpeed));
+  ok(free.length >= 1, `с поверхности виден хотя бы один маркер (${free.length} из 6)`);
+  // Из-за планеты цель может быть закрыта и с первого маркера — тогда
+  // привод предлагает следующий. Маршрут обязан находиться, и коротким.
+  {
+    const sh = makeShip();
+    placeShip(sh, v3(far.pos.x, far.pos.y, far.pos.z), makeBasis());
+    let hops = 0, route = [];
+    while (!canJump(w, sh, to).ok && hops < 4) {
+      const hop = suggestHop(w, sh, to, SHIP.quantumSpeed);
+      if (!hop) break;
+      route.push(hop.name);
+      placeShip(sh, v3(hop.pos.x, hop.pos.y, hop.pos.z), makeBasis());
+      hops++;
+    }
+    ok(canJump(w, sh, to).ok,
+      `обход помехи находится за ${hops} прыжка`, route.join(' -> '));
+  }
+  // Прыгать со стоянки нельзя вовсе.
+  const landed = put(1);
+  landed.landedAt = from;
+  ok(!canJump(w, landed, to).ok, 'со стоянки привод не запускается');
+}
+
+// Полный цикл: прыжок к станции + стыковка
 console.log('\n== полный цикл: станция -> станция ==');
 {
   const w = makeSystem(0x1a7e);
@@ -672,25 +814,35 @@ console.log('\n== полный цикл: станция -> станция ==');
     from.pos.z + from.basis.fwd.z * 3), makeBasis());
   const to = w.stations.find((s) => s !== from);
   nav.index = nav.list.indexOf(to);
-  const cr = makeCruise();
-  startAutopilot(sh, to);
+  const q = makeQuantum();
+  // Первое плечо: прямо к станции, если коридор открыт, иначе в обход.
+  let leg = canJump(w, sh, to).ok ? to : suggestHop(w, sh, to, SHIP.quantumSpeed);
+  aimAtTarget(sh, leg);
+  startCalibration(q, leg);
   let t = 0, status = 'timeout', docking = false;
   for (let i = 0; i < 60 * 1500; i++) {
     updateWorld(w, STEP);
     clearControls(sh);
-    if (sh.docking) {
-      updateDockingComputer(sh, STEP);
-    } else if (sh.autopilot) {
-      const idx = updateAutopilot(sh, w, STEP);
-      if (idx !== null) cr.index = idx;
-      if (sh.autopilot.arrived) {
-        sh.autopilot = null;
-        startDockingComputer(sh, to);
-        docking = true;
+    if (q.phase !== 'idle') {
+      // Пока привод калибруется, нос надо держать на цели — в игре это
+      // делает игрок, здесь за него это делает одна строка.
+      if (q.phase === 'calib') aimAtTarget(sh, leg);
+      const ev = updateQuantum(q, sh, w, STEP);
+      if (ev === 'arrive') {
+        if (leg === to) { startDockingComputer(sh, to); docking = true; }
+        else {
+          // Дошли до обходной точки — считаем следующее плечо.
+          leg = canJump(w, sh, to).ok ? to : suggestHop(w, sh, to, SHIP.quantumSpeed);
+          if (!leg) { status = 'маршрут не найден'; break; }
+          aimAtTarget(sh, leg);
+          startCalibration(q, leg);
+        }
       }
+      if (ev === 'abort') { status = 'привод отказал: ' + q.reason; break; }
+    } else if (sh.docking) {
+      updateDockingComputer(sh, STEP);
     }
-    const lvl = updateCruise(cr, w, sh, STEP);
-    updateShip(sh, STEP, STEP * lvl);
+    if (q.phase !== 'jump') updateShip(sh, STEP);
     t += STEP;
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0) { status = 'crash into ' + nb.body.name; break; }
@@ -723,7 +875,7 @@ console.log('\n== выход на заданную ориентацию ==');
     for (let i = 0; i < 60 * 20; i++) {
       clearControls(sh);
       err = alignBasis(sh, fwd, up, 1.5);
-      updateShip(sh, STEP, STEP);
+      updateShip(sh, STEP);
     }
     const tilt = dot(sh.basis.up, up);
     const nose = dot(sh.basis.fwd, fwd);
@@ -788,18 +940,22 @@ console.log('\n== поверхность ==');
 
 // --- 5d. Посадочный компьютер -----------------------------------------------
 console.log('\n== посадка ==');
-function landTest(pick, startMul, opts = {}) {
+// Высота старта теперь задаётся в КИЛОМЕТРАХ, а не в радиусах тела:
+// после прыжка корабль всегда выходит на QUANTUM.exitAlt, и сценарий
+// «сесть с высоты в целый радиус» больше не встречается нигде, кроме
+// теста. На своих 1.2 км/с такой спуск занимал бы двадцать минут.
+function landTest(pick, altKm, opts = {}) {
   const w = makeSystem(0x1a7e);
   const body = pick(w);
   const sh = makeShip();
   const dir = normalize(v3(0.3, 0.7, 0.6));
+  const r0 = body.radius + altKm;
   placeShip(sh, v3(
-    body.pos.x + dir.x * body.radius * startMul,
-    body.pos.y + dir.y * body.radius * startMul,
-    body.pos.z + dir.z * body.radius * startMul), makeBasis());
+    body.pos.x + dir.x * r0,
+    body.pos.y + dir.y * r0,
+    body.pos.z + dir.z * r0), makeBasis());
   lookAlong(sh.basis, normalize(v3(
     body.pos.x - sh.pos.x, body.pos.y - sh.pos.y, body.pos.z - sh.pos.z)));
-  const cr = makeCruise();
   const res = startLanding(sh, body, sh.pos);
   if (!res.ok) return { status: 'refused', reason: res.reason };
   if (opts.noGear) { sh.gear.out = false; sh.gear.t = 0; }
@@ -815,12 +971,10 @@ function landTest(pick, startMul, opts = {}) {
     else updateGear(sh, STEP);
     let zone = landingContext(w, sh);
     if (sh.landing) {
-      updateLandingComputer(sh, STEP, cr.level, zone);
+      updateLandingComputer(sh, STEP, zone);
       phases.add(sh.landing.phase);
-      if (sh.landing.wantCruise !== null) cr.index = sh.landing.wantCruise;
     }
-    const lvl = updateCruise(cr, w, sh, STEP);
-    updateShip(sh, STEP, STEP * lvl, gravityField(cap, sh));
+    updateShip(sh, STEP, gravityField(cap, sh));
     t += STEP;
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0 && !isLandable(nb.body)) return { status: 'crash-body', t };
@@ -842,7 +996,7 @@ const moon2Pick = (w) => w.bodies.filter((b) => b.kind === 'moon')[1];
 const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
 
 {
-  const r1 = landTest(moonPick, 2.0);
+  const r1 = landTest(moonPick, QUANTUM.exitAlt);
   ok(r1.status === 'landed',
     `луна с высоты в радиус: ${r1.status} за ${r1.t ? r1.t.toFixed(0) : '?'} с`,
     r1.phases ? r1.phases.join(' -> ') : r1.reason || '');
@@ -880,7 +1034,7 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
       clearControls(sh);
       updateGear(sh, STEP);
       sh.control.lift = 1;                 // держим R: набор высоты
-      updateShip(sh, STEP, STEP, gravityField(cap, sh));
+      updateShip(sh, STEP, gravityField(cap, sh));
     }
     const z = landingContext(w, sh);
     ok(z && z.alt > 1.5, `за 40 с взлёта поднялись на ${z ? z.alt.toFixed(2) : '?'} км`);
@@ -888,11 +1042,11 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
 }
 
 {
-  const r2 = landTest(moon2Pick, 3.5);
+  const r2 = landTest(moon2Pick, QUANTUM.exitAlt * 2);
   ok(r2.status === 'landed', `вторая луна с 2.5 радиусов: ${r2.status} за ${r2.t ? r2.t.toFixed(0) : '?'} с`);
-  const r3 = landTest(rockPick, 1.6);
+  const r3 = landTest(rockPick, QUANTUM.exitAlt);
   ok(r3.status === 'landed', `каменистая планета: ${r3.status} за ${r3.t ? r3.t.toFixed(0) : '?'} с`);
-  const r4 = landTest((w) => w.home, 1.5);
+  const r4 = landTest((w) => w.home, QUANTUM.exitAlt);
   ok(r4.status === 'refused', `на мир с атмосферой компьютер не берётся: ${r4.reason || r4.status}`);
 }
 
@@ -915,7 +1069,7 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
     updateGear(sh, STEP);
-    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    updateShip(sh, STEP, gravityField(cap, sh));
     const z2 = landingContext(w, sh);
     if (z2) res = checkTouchdown(sh, z2);
   }
@@ -950,7 +1104,7 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     updateGear(sh, STEP);
     const zone = landingContext(w, sh);
     // Посадочный режим сознательно не включаем: это падение, не посадка.
-    updateShip(sh, STEP, STEP);
+    updateShip(sh, STEP);
     const z2 = landingContext(w, sh);
     if (z2) res = checkTouchdown(sh, z2);
   }
@@ -986,11 +1140,11 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   ok(Math.abs(t - SHIP.gearTime) < 0.05 && gearReady(sh),
     `шасси выпускается за ${t.toFixed(2)} с (задано ${SHIP.gearTime})`);
   sh.throttle = 1;
-  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP, STEP); }
+  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP); }
   const withGear = sh.speed;
   toggleGear(sh);
   while (sh.gear.t > 0) updateGear(sh, STEP);
-  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP, STEP); }
+  for (let i = 0; i < 60 * 20; i++) { clearControls(sh); updateShip(sh, STEP); }
   ok(Math.abs(withGear - SHIP.maxSpeed * SHIP.gearSpeed) < 0.01 &&
      Math.abs(sh.speed - SHIP.maxSpeed) < 0.01,
     `с шасси скорость ${withGear.toFixed(2)} км/с, без него ${sh.speed.toFixed(2)} км/с`);
@@ -1071,7 +1225,7 @@ console.log('\n== гравитация и захват ==');
     // Держим высоту: подъёмные движки дают тягу, и зависание — ровно
     // треть хода (полный ход втрое больше веса, SHIP.liftTWR).
     sh.control.lift = 1 / SHIP.liftTWR;
-    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    updateShip(sh, STEP, gravityField(cap, sh));
     if (i % 600 === 0) {
       const z = landingContext(w, sh);
       worstAlt = Math.max(worstAlt, Math.abs(z.alt - 1));
@@ -1101,7 +1255,7 @@ console.log('\n== гравитация и захват ==');
       const cap = captureBody(w, sh.pos);
       if (cap) carryShip(sh, cap, STEP);
       clearControls(sh);
-      updateShip(sh, STEP, STEP, gravityField(cap, sh));
+      updateShip(sh, STEP, gravityField(cap, sh));
     }
     return 3 - landingContext(w, sh).alt;
   };
@@ -1147,7 +1301,7 @@ console.log('\n== гравитация и захват ==');
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
     sh.control.thr = 0;                 // тягу держим как есть
-    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    updateShip(sh, STEP, gravityField(cap, sh));
     if ((i + 1) % 120 === 0) {
       const dd = localDir(moon, sh.pos, v3());
       const rr = Math.hypot(
@@ -1195,7 +1349,7 @@ console.log('\n== гравитация и захват ==');
     if (cap) carryShip(sh, cap, STEP);
     clearControls(sh);
     sh.control.lift = 1;                     // держим R
-    updateShip(sh, STEP, STEP, gravityField(cap, sh));
+    updateShip(sh, STEP, gravityField(cap, sh));
   }
   const z = landingContext(w, sh);
   const moved = v3(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
@@ -1276,7 +1430,7 @@ console.log('\n== задний ход ==');
     for (let i = 0; i < Math.round(seconds / STEP); i++) {
       clearControls(sh);
       sh.control.thr = thr;
-      updateShip(sh, STEP, STEP);
+      updateShip(sh, STEP);
     }
   };
 
@@ -1316,7 +1470,7 @@ console.log('\n== задний ход ==');
   for (let i = 0; i < Math.round(0.4 / STEP); i++) {
     clearControls(sh2);
     sh2.control.thr = -1;
-    updateShip(sh2, STEP, STEP);
+    updateShip(sh2, STEP);
   }
   ok(sh2.throttle === 0,
     `после короткого сброса тяга стоит на нуле, а не уходит в минус (${sh2.throttle})`);
@@ -1414,7 +1568,7 @@ console.log('\n== подъёмные движки ==');
     for (let i = 0; i < Math.round(secs / STEP); i++) {
       clearControls(sh);
       sh.control.lift = lift;
-      updateShip(sh, STEP, STEP, field);
+      updateShip(sh, STEP, field);
     }
     return sh;
   };
@@ -1433,7 +1587,7 @@ console.log('\n== подъёмные движки ==');
     const sh = hold(1, 2);
     for (let i = 0; i < Math.round(0.5 / STEP); i++) {
       clearControls(sh);
-      updateShip(sh, STEP, STEP);
+      updateShip(sh, STEP);
     }
     ok(Math.abs(vUp(sh)) < 1e-4,
       `отпущенный ход гасится стабилизатором (${(vUp(sh) * 1000).toFixed(2)} м/с)`);
@@ -1449,7 +1603,7 @@ console.log('\n== подъёмные движки ==');
     for (let i = 0; i < Math.round(2 / STEP); i++) {
       clearControls(sh);
       sh.control.lift = 1;
-      updateShip(sh, STEP, STEP, field);
+      updateShip(sh, STEP, field);
     }
     const wantG = field.g * SHIP.liftTWR * 2;
     ok(Math.abs(sh.vel.y - wantG) < wantG * 0.05,
@@ -1464,7 +1618,7 @@ console.log('\n== подъёмные движки ==');
     for (let i = 0; i < Math.round(2 / STEP); i++) {
       clearControls(sh);
       sh.control.lift = 1;
-      updateShip(sh, STEP, STEP);
+      updateShip(sh, STEP);
     }
     ok(Math.abs(dot(sh.vel, sh.basis.fwd) - fwd0) < 1e-6 && vUp(sh) > want * 0.9,
       `на крейсерском ходу R не съедает скорость вперёд: ` +
@@ -1521,7 +1675,7 @@ console.log('\n== вход в атмосферу ==');
   }
 
   // Обстановка целиком. Корабль падает на планету с воздухом.
-  const shipAt = (body, alt, vel, cruise = 1) => {
+  const shipAt = (body, alt, vel) => {
     const sh = makeShip();
     const dir = normalize(v3(0.3, 0.5, 0.81));
     placeShip(sh, v3(
@@ -1529,7 +1683,7 @@ console.log('\n== вход в атмосферу ==');
       body.pos.y + dir.y * (body.radius + alt),
       body.pos.z + dir.z * (body.radius + alt)), makeBasis());
     sh.vel.x = -dir.x * vel; sh.vel.y = -dir.y * vel; sh.vel.z = -dir.z * vel;
-    return entryState(world, sh, cruise);
+    return entryState(world, sh);
   };
 
   ok(shipAt(air, air.radius * ENTRY.top * 2, 1.2) === null,
@@ -1547,12 +1701,14 @@ console.log('\n== вход в атмосферу ==');
   ok(Math.abs(dot(fast.dir, down) + 1) < 1e-6,
     'ось волны совпадает с вектором скорости, а не с носом');
 
-  // Круиз множит перемещение, значит и обдув: нырять в атмосферу на
-  // ускорителе должно быть заметно горячее.
-  const cruised = shipAt(air, 5, 0.3, 10);
-  const plain = shipAt(air, 5, 0.3, 1);
-  ok(!plain && cruised && cruised.heat > 0.5,
-    `круиз x10 греет там, где на x1 нагрева нет вовсе (${cruised.heat.toFixed(2)})`);
+  // Пороги нагрева привязаны к обычному полёту: на полном ходу вход
+  // заметен, на форсаже корабль горит. Множителя круиза больше нет, и
+  // если пороги оставить старыми, механика просто перестанет включаться.
+  const full = shipAt(air, 5, SHIP.maxSpeed);
+  const boosted = shipAt(air, 5, SHIP.maxSpeed * SHIP.boostMax);
+  ok(full && full.heat > 0.2, `на полном ходу вход греет: ${full.heat.toFixed(2)}`);
+  ok(boosted && boosted.heat > full.heat * 1.5,
+    `на форсаже заметно горячее: ${boosted.heat.toFixed(2)}`);
 
   // Калибровочная таблица: по ней видно баланс целиком, а не по одному
   // числу. Это не столько проверка, сколько то, что должно быть на
@@ -1583,9 +1739,9 @@ console.log('\n== вход в атмосферу ==');
       air.pos.z + dir.z * (air.radius + 70)), makeBasis());
     // Своя скорость нулевая; грунт под кораблём уезжает.
     const drift = Math.hypot(...['x', 'y', 'z'].map((k) => groundDrift(air, sh.pos, v3())[k]));
-    const still = entryState(world, sh, 10);
+    const still = entryState(world, sh);
     ok(still === null,
-      `висящий на круизе x10 не горит: своя скорость 0, снос воздуха ` +
+      `висящий над планетой не горит: своя скорость 0, снос воздуха ` +
       `${(drift * 1000).toFixed(0)} м/с — ниже порога ${(ENTRY.vFloor * 1000).toFixed(0)} м/с`);
   }
 
@@ -1616,7 +1772,7 @@ console.log('\n== вход в атмосферу ==');
       air.pos.z + dir.z * (air.radius + 3));
     placeShip(sh, pos, makeBasis());
     groundDrift(air, pos, sh.vel);
-    ok(entryState(world, sh, 1) === null,
+    ok(entryState(world, sh) === null,
       'летящий вместе с воздухом не горит, хотя грунт под ним уезжает');
   }
 }
@@ -1629,7 +1785,7 @@ console.log('\n== звук ==');
   const mkGame = (over = {}) => ({
     ship: Object.assign(makeShip(), { control: { pitch: 0, roll: 0, yaw: 0, thr: 0, lift: 0 } }),
     state: { mode: AST.FLIGHT },
-    cruise: { index: 0, level: 1, massLocked: false, lockedBy: null },
+    quantum: makeQuantum(),
     ...over,
   });
   // Кадр целиком, как в main.js: посчитали -> разобрали очередь.
@@ -1666,15 +1822,33 @@ console.log('\n== звук ==');
       `задний ход ниже переднего: ${a.mix.pitch.toFixed(2)} против ${fwd.toFixed(2)}`);
   }
 
-  // Круизный ускоритель: ступень слышна, mass lock её глушит.
+  // Квантовый привод: калибровка воет вполсилы, прыжок — во весь ход,
+  // вход и выход отмечены свистом.
   {
     const a = makeAudio(3), g = mkGame();
-    g.cruise.index = 5; const up = run(a, g, 1.2);
+    g.quantum.phase = 'calib'; g.quantum.calib = 1; run(a, g, 1.2);
+    const calib = a.mix.drive;
+    g.quantum.phase = 'jump'; g.quantum.speed = SHIP.quantumSpeed;
+    const inEv = run(a, g, 1.2);
     const loud = a.mix.drive;
-    g.cruise.massLocked = true; run(a, g, 1.2);
-    ok(loud > 0.9 && a.mix.drive < 0.15 && up.some((e) => e.kind === 'spool' && e.up),
-      `ускоритель: x50000 даёт ${loud.toFixed(2)}, mass lock сбивает до ` +
-      `${a.mix.drive.toFixed(2)}, ступень отмечена свистом`);
+    g.quantum.phase = 'idle'; g.quantum.speed = 0;
+    const outEv = run(a, g, 1.2);
+    ok(calib > 0.2 && calib < 0.5 && loud > 0.9 && a.mix.drive < 0.15 &&
+      inEv.some((e) => e.kind === 'spool' && e.up) &&
+      outEv.some((e) => e.kind === 'spool' && !e.up),
+      `привод: калибровка ${calib.toFixed(2)}, прыжок ${loud.toFixed(2)}, ` +
+      `выход ${a.mix.drive.toFixed(2)}, вход и выход отмечены свистом`);
+  }
+
+  // В прыжке скорость меняется на десятки тысяч км/с за кадр. Корпус от
+  // этого скрипеть не должен: это работа привода, а не нагрузка.
+  {
+    const a = makeAudio(7), g = mkGame();
+    g.quantum.phase = 'jump'; g.quantum.speed = 20000;
+    g.ship.vel.x = 0; run(a, g, 0.2);
+    g.ship.vel.x = 20000;
+    const ev = run(a, g, 1.0);
+    ok(!ev.some((e) => e.kind === 'creak'), 'разгон привода не скрипит корпусом');
   }
 
   // Подъёмные движки: R и F шипят по-разному, и это тот самый канал,
@@ -1963,7 +2137,7 @@ console.log('\n== инерция и удар ==');
   for (let i = 0; i < 60 * 5; i++) {
     clearControls(sh);
     sh.control.thr = 1;
-    updateShip(sh, STEP, STEP);
+    updateShip(sh, STEP);
   }
   const v0 = Math.hypot(sh.vel.x, sh.vel.y, sh.vel.z);
   // Разворот носа на 90° «рывком»: дальше смотрим, что делает скорость.
@@ -1978,7 +2152,7 @@ console.log('\n== инерция и удар ==');
     for (let i = 0; i < Math.round(sec / STEP); i++) {
       clearControls(sh);
       sh.control.thr = 1;
-      updateShip(sh, STEP, STEP);
+      updateShip(sh, STEP);
     }
   };
   run(0.5);
@@ -2017,7 +2191,7 @@ console.log('\n== инерция и удар ==');
       if (cap) carryShip(sh, cap, STEP);
       clearControls(sh);
       updateGear(sh, STEP);
-      updateShip(sh, STEP, STEP, gravityField(cap, sh));
+      updateShip(sh, STEP, gravityField(cap, sh));
       const z = landingContext(w, sh);
       if (!z) continue;
       const t = checkTouchdown(sh, z);
@@ -2126,9 +2300,11 @@ console.log('\n== столкновения ==');
   const sh = makeShip();
   const p = w.home;
   const bb = makeBasis();
-  // 5000 км от планеты, носом в неё
+  // 500 км от планеты, носом в неё. Раньше тут было 5000: с круизным
+  // ускорителем такой путь пролетался за минуты, а на своих 1.2 км/с
+  // это больше часа модельного времени.
   const d = normalize(v3(1, 0.2, 0.3));
-  placeShip(sh, v3(p.pos.x + d.x * 5000, p.pos.y + d.y * 5000, p.pos.z + d.z * 5000), bb);
+  placeShip(sh, v3(p.pos.x + d.x * (p.radius + 500), p.pos.y + d.y * (p.radius + 500), p.pos.z + d.z * (p.radius + 500)), bb);
   // Разворачиваем нос на планету
   const to = normalize(v3(p.pos.x - sh.pos.x, p.pos.y - sh.pos.y, p.pos.z - sh.pos.z));
   sh.basis.fwd = to;
@@ -2138,18 +2314,18 @@ console.log('\n== столкновения ==');
     to.z * sh.basis.right.x - to.x * sh.basis.right.z,
     to.x * sh.basis.right.y - to.y * sh.basis.right.x));
   sh.throttle = 1;
-  const cr = makeCruise();
-  let crashed = false, t = 0, lockedSeen = false;
-  for (let i = 0; i < 60 * 4000; i++) {
+  let crashed = false, t = 0;
+  for (let i = 0; i < 60 * 1200; i++) {
     updateWorld(w, STEP);
-    const lvl = updateCruise(cr, w, sh, STEP);
-    if (cr.massLocked) lockedSeen = true;
-    updateShip(sh, STEP, STEP * lvl);
+    updateShip(sh, STEP);
     t += STEP;
     if (nearestBody(w, sh.pos).gap <= 0) { crashed = true; break; }
   }
   ok(crashed, `полёт в планету на полной тяге -> столкновение за ${t.toFixed(0)} с`);
-  ok(lockedSeen, 'mass lock срабатывал при подлёте к планете');
+  // Прыгнуть в ту же планету привод не даст: точка выхода снаружи, а
+  // коридор упирается в неё же.
+  ok(!canJump(w, sh, p).ok || sh.speed > 0,
+    'привод не подменяет собой столкновение: в прыжке проверок касания нет');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

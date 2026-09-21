@@ -158,6 +158,38 @@ export function buildPlumeMesh(gl, locs, rings = 14, segments = 28) {
   return buildIndexedMesh(gl, locs, { positions, t, indices });
 }
 
+/**
+ * Поток частиц для квантового прыжка: по две вершины на частицу
+ * (голова и конец хвоста). В атрибут кладутся не координаты, а ПАРАМЕТРЫ
+ * частицы — сторона вокруг оси, удаление от оси и фаза; саму траекторию
+ * считает вершинный шейдер (см. WARP_VS).
+ *
+ * Удаление берётся как sqrt(случайного): так частицы ложатся равномерно
+ * по площади кольца, а не сбиваются к оси.
+ */
+export function buildWarpMesh(gl, locs, count, rng, rMin = 0.06, rMax = 1.35) {
+  const par = new Float32Array(count * 6);
+  const t = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    const phi = rng.range(0, Math.PI * 2);
+    const rp = rMin + (rMax - rMin) * Math.sqrt(rng.range(0, 1));
+    const seed = rng.range(0, 1);
+    for (let k = 0; k < 2; k++) {
+      const o = i * 2 + k;
+      par[o * 3] = phi;
+      par[o * 3 + 1] = rp;
+      par[o * 3 + 2] = seed;
+      t[o] = k;
+    }
+  }
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  attrib(gl, locs.aParam, arrayBuffer(gl, par), 3);
+  attrib(gl, locs.aT, arrayBuffer(gl, t), 1);
+  gl.bindVertexArray(null);
+  return new GlMesh(gl, vao, count * 2, gl.LINES, null);
+}
+
 /** Звёзды: облако точек с направлением и цветом. */
 export function buildPointsMesh(gl, locs, dirs, colors) {
   const vao = gl.createVertexArray();

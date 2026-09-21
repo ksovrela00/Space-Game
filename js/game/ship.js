@@ -18,7 +18,7 @@ import { input } from '../core/input.js';
 import { GEAR_CLEAR, HULL_CLEAR } from '../models/ships.js';
 
 export const SHIP = {
-  maxSpeed: 1.2,      // км/с при круизе x1
+  maxSpeed: 1.2,      // км/с — обычный полёт, без форсажа
   // Задний ход — маневровый режим, а не полёт: те же движки работают
   // против своей геометрии, и тяги у них там заметно меньше.
   reverse: 0.15,      // доля максимальной скорости на заднем ходу
@@ -28,6 +28,17 @@ export const SHIP = {
   zeroDwell: 0.45,    // с
   accel: 0.45,        // км/с² — разгон вдоль носа
   brake: 0.75,        // торможение вдоль носа
+  // Форсаж — на удержании клавиши, с расходуемым зарядом. Он не про
+  // перелёты (для них есть квантовый привод), а про то, чтобы быстрее
+  // оторваться от поверхности и резче маневрировать у станции.
+  boostMax: 2,        // во сколько раз растёт предел скорости
+  boostAccel: 1.5,    // и разгон: без этого до удвоенной скорости идти вечность
+  boostBurn: 10,      // с — полный заряд на удержании
+  boostFill: 15,      // с — восстановление с нуля
+  // Скорость квантового прыжка. Живёт здесь, а не в quantum.js, потому
+  // что это характеристика КОРАБЛЯ: появятся другие корпуса — у каждого
+  // будет своя.
+  quantumSpeed: 60000,   // км/с
   // Власть движков ПОПЕРЁК носа: ею гасится занос после разворота.
   // Меньше — дольше несёт боком; больше — инерции не чувствуется вовсе.
   lateral: 0.5,       // км/с²
@@ -73,10 +84,12 @@ export function makeShip() {
   const s = {
     pos: v3(),
     basis: makeBasis(),
-    vel: v3(),          // мировая скорость (км/с, без множителя круиза)
+    vel: v3(),          // мировая скорость, км/с
     speed: 0,
     throttle: 0,
-    cruise: 1,          // множитель круизного ускорителя
+    quantumSpeed: SHIP.quantumSpeed,
+    boost: 1,           // заряд форсажа, 0..1
+    boosting: false,    // жмут ли клавишу прямо сейчас
     rot: { pitch: 0, yaw: 0, roll: 0 },
     zeroHold: 0,        // сколько ещё держать тягу на нуле (см. SHIP.zeroDwell)
     stun: 0,            // сколько ещё лететь без управления после удара
@@ -85,7 +98,7 @@ export function makeShip() {
     autopilot: null,
     docking: null,
     mesh: null,
-    control: { pitch: 0, yaw: 0, roll: 0, thr: 0, lift: 0 },
+    control: { pitch: 0, yaw: 0, roll: 0, thr: 0, lift: 0, boost: 0 },
     // Ход подъёмных движков за прошлый кадр — нужен приборам.
     lift: 0,
     // Посадка: шасси (t — доля выпуска), тело, на котором стоим, и
@@ -110,23 +123,31 @@ export function readControls(ship) {
   // и садиться брюхом вниз, не опуская нос, и просто держать высоту над
   // поверхностью, продолжая лететь вперёд.
   c.lift = input.axis(['KeyF'], ['KeyR']);
+  // Форсаж — именно на УДЕРЖАНИИ: отпустил, и он кончился.
+  c.boost = input.isDown('Space') ? 1 : 0;
   if (input.pressed('KeyX')) ship.throttle = 0;
   if (input.pressed('KeyZ')) ship.throttle = 1;
 }
 
 export function clearControls(ship) {
   const c = ship.control;
-  c.pitch = 0; c.roll = 0; c.yaw = 0; c.thr = 0; c.lift = 0;
+  c.pitch = 0; c.roll = 0; c.yaw = 0; c.thr = 0; c.lift = 0; c.boost = 0;
 }
 
 /**
- * @param dt     реальный шаг (управление, вращение, разгон)
- * @param moveDt шаг для перемещения (dt, умноженный на круиз)
- * @param field  тяготение под кораблём: {up, g} — местная вертикаль и
- *               ускорение свободного падения (null вне захвата тела)
+ * @param dt    шаг физики, с
+ * @param field тяготение под кораблём: {up, g} — местная вертикаль и
+ *              ускорение свободного падения (null вне захвата тела)
  */
-export function updateShip(ship, dt, moveDt, field = null) {
+export function updateShip(ship, dt, field = null) {
   const c = ship.control;
+
+  // Форсаж. Заряд тратится только пока клавиша зажата И есть что
+  // тратить; восстанавливается всегда, когда не тратится.
+  ship.boosting = c.boost > 0 && ship.boost > 0 && ship.stun <= 0;
+  if (ship.boosting) ship.boost = Math.max(0, ship.boost - dt / SHIP.boostBurn);
+  else ship.boost = Math.min(1, ship.boost + dt / SHIP.boostFill);
+  const boost = ship.boosting ? SHIP.boostMax : 1;
 
   // Тяга от -1 (полный назад) до +1. Ноль — с защёлкой: сбрасывая тягу,
   // корабль на нём останавливается и только при дальнейшем удержании
@@ -164,9 +185,9 @@ export function updateShip(ship, dt, moveDt, field = null) {
       ship.vel.z -= field.up.z * field.g * dt;
     }
     ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
-    ship.pos.x += ship.vel.x * moveDt;
-    ship.pos.y += ship.vel.y * moveDt;
-    ship.pos.z += ship.vel.z * moveDt;
+    ship.pos.x += ship.vel.x * dt;
+    ship.pos.y += ship.vel.y * dt;
+    ship.pos.z += ship.vel.z * dt;
     return;
   }
 
@@ -216,10 +237,11 @@ export function updateShip(ship, dt, moveDt, field = null) {
 
   // Главные движки: разгон до скорости, заданной тягой. С выпущенным
   // шасси предел ниже — на нём не летают.
-  const lim = SHIP.maxSpeed * (gearOut ? SHIP.gearSpeed : 1);
+  const lim = SHIP.maxSpeed * (gearOut ? SHIP.gearSpeed : 1) * boost;
   const target = ship.throttle * lim * (ship.throttle < 0 ? SHIP.reverse : 1);
   const cur = ship.vel.x * fx + ship.vel.y * fy + ship.vel.z * fz;
-  const aLim = (Math.abs(target) > Math.abs(cur) ? SHIP.accel : SHIP.brake) * dt;
+  const aBoost = ship.boosting ? SHIP.boostAccel : 1;
+  const aLim = (Math.abs(target) > Math.abs(cur) ? SHIP.accel * aBoost : SHIP.brake) * dt;
   const step = clamp(target - cur, -aLim, aLim);
   ship.vel.x += fx * step;
   ship.vel.y += fy * step;
@@ -262,9 +284,9 @@ export function updateShip(ship, dt, moveDt, field = null) {
     ship.speed = 0;
   }
 
-  ship.pos.x += ship.vel.x * moveDt;
-  ship.pos.y += ship.vel.y * moveDt;
-  ship.pos.z += ship.vel.z * moveDt;
+  ship.pos.x += ship.vel.x * dt;
+  ship.pos.y += ship.vel.y * dt;
+  ship.pos.z += ship.vel.z * dt;
 }
 
 // Мгновенно поставить корабль в точку с заданной ориентацией.

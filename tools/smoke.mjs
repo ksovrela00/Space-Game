@@ -141,6 +141,18 @@ console.log('\n== smoke: отрисовка и режимы ==');
 
 const mod = await import('../js/main.js');
 const game = globalThis.window.GAME;   // main.js пишет в window, а не в globalThis
+const { lookAlong } = await import('../js/core/basis.js');
+const { exitPoint } = await import('../js/game/quantum.js');
+
+// Навести нос на точку выхода привода. В игре это делает игрок ручкой;
+// здесь достаточно поставить базис — проверяется не пилотирование, а
+// сам привод.
+const aimAt = (target) => {
+  const p = exitPoint(target, game.ship.pos);
+  const dx = p.x - game.ship.pos.x, dy = p.y - game.ship.pos.y, dz = p.z - game.ship.pos.z;
+  const L = Math.hypot(dx, dy, dz) || 1;
+  lookAlong(game.ship.basis, { x: dx / L, y: dy / L, z: dz / L }, game.ship.basis.up);
+};
 
 await step('модуль загрузился, игра в порту', () => {
   if (!game) throw new Error('window.GAME не выставлен');
@@ -253,15 +265,24 @@ await step('вид от 3-го лица (V) рисует свой корабль
   frames(5);
 });
 
-await step('переключение цели (Tab) и круиза (T)', () => {
+await step('переключение цели (Tab) и форсаж (Space)', () => {
   const t0 = game.nav.index;
   key('Tab'); frames(2);
   if (game.nav.index === t0) throw new Error('цель не сменилась');
-  key('KeyT'); key('KeyT'); frames(2);
-  if (game.cruise.index < 0) throw new Error('индекс круиза ' + game.cruise.index);
+  // Форсаж на удержании: заряд тратится, потом восстанавливается.
+  // Тягу при этом НЕ даём: рядом станция, и разгон вдвое от неё — это
+  // проверка не форсажа, а прочности корпуса.
+  game.ship.throttle = 0;
+  holdDown('Space'); frames(120);
+  const spent = game.ship.boost;
+  if (!(spent < 0.9)) throw new Error('заряд форсажа не тратится: ' + spent.toFixed(2));
+  if (!game.ship.boosting) throw new Error('форсаж не включился');
+  release('Space'); frames(120);
+  if (!(game.ship.boost > spent)) throw new Error('заряд не восстанавливается');
+  if (game.ship.boosting) throw new Error('форсаж не выключился');
 });
 
-await step('автопилот (J) ведёт к цели', () => {
+await step('квантовый привод (B) доводит до цели', () => {
   // Цель выставляем напрямую: нажатия обрабатываются только внутри кадра,
   // и цикл «жать Tab до нужного имени» без прогона кадров зависал.
   game.nav.index = game.nav.list.findIndex((x) => x.name === 'Lave V');
@@ -270,21 +291,42 @@ await step('автопилот (J) ведёт к цели', () => {
     target.pos.x - game.ship.pos.x,
     target.pos.y - game.ship.pos.y,
     target.pos.z - game.ship.pos.z);
-  key('KeyJ');
-  frames(30);
-  if (!game.ship.autopilot) throw new Error('автопилот не включился');
-  frames(60 * 40, 16.7);
+
+  // Перелёт целиком, как его делает игрок: прямой коридор от станции
+  // перекрыт своей же планетой, привод подставляет обходную точку, и
+  // прыжков получается несколько.
+  let arrived = false;
+  for (let hop = 0; hop < 5 && !arrived; hop++) {
+    const back = game.nav.list.indexOf(target);
+    if (back >= 0) game.nav.index = back;
+    aimAt(target);
+    key('KeyB'); frames(4);
+    if (game.quantum.phase === 'idle') {
+      const detour = game.nav.list[game.nav.index];
+      if (detour === target) throw new Error('маршрут не найден: ' + (game.quantum.reason || '—'));
+      aimAt(detour);
+      key('KeyB'); frames(4);
+      if (game.quantum.phase === 'idle') throw new Error('обход тоже отказал');
+    }
+    const leg = game.quantum.target;
+    for (let i = 0; i < 400 && game.quantum.phase === 'calib'; i++) { aimAt(leg); frames(1); }
+    if (game.quantum.phase !== 'jump') throw new Error('прыжок не начался');
+    for (let i = 0; i < 60 * 150 && game.quantum.phase === 'jump'; i++) frames(1);
+    if (game.quantum.phase !== 'idle') throw new Error('прыжок не закончился');
+    if (leg === target) arrived = true;
+  }
+  if (!arrived) throw new Error('не дошли за пять прыжков');
   const d1 = Math.hypot(
     target.pos.x - game.ship.pos.x,
     target.pos.y - game.ship.pos.y,
     target.pos.z - game.ship.pos.z);
-  if (!(d1 < d0 * 0.5)) {
-    throw new Error(`дистанция почти не изменилась: ${(d0 / 1e3).toFixed(0)} -> ${(d1 / 1e3).toFixed(0)} тыс. км`);
+  if (!(d1 < d0 * 0.1)) {
+    throw new Error(`не долетели: ${(d0 / 1e3).toFixed(0)} -> ${(d1 / 1e3).toFixed(0)} тыс. км`);
   }
+  if (!(game.ship.speed < 0.001)) throw new Error('скорость на выходе ' + game.ship.speed);
 });
 
 await step('карта системы (M)', () => {
-  if (game.ship.autopilot) key('KeyJ');
   key('KeyM'); frames(5);
   if (game.state.mode !== 'map') throw new Error('режим ' + game.state.mode);
   key('KeyM'); frames(5);
@@ -529,10 +571,16 @@ await step('посадочный компьютер (L) доводит до гр
   game.nav.index = game.nav.list.indexOf(moon);
   const d = { x: 0.3, y: 0.7, z: 0.6 };
   const l = Math.hypot(d.x, d.y, d.z);
-  const R = moon.radius * 1.4;
+  // Высота — та, на которой выбрасывает квантовый привод: это и есть
+  // единственный способ оказаться у луны, а с половины радиуса спуск
+  // на своих 1.2 км/с занимал бы десять минут модельного времени.
+  const R = moon.radius + 250;
   game.ship.pos.x = moon.pos.x + d.x / l * R;
   game.ship.pos.y = moon.pos.y + d.y / l * R;
   game.ship.pos.z = moon.pos.z + d.z / l * R;
+  // Скорость гасим ВЕКТОРОМ: прошлые шаги оставили её на корабле, и с
+  // ней компьютер начинал спуск уже разогнанным.
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
   game.ship.speed = 0;
   game.ship.throttle = 0;
   const b = game.ship.basis;
@@ -548,7 +596,7 @@ await step('посадочный компьютер (L) доводит до гр
   key('KeyL');
   frames(30);
   if (!game.ship.landing) throw new Error('посадочный компьютер не включился');
-  for (let i = 0; i < 400 && game.state.mode === 'flight'; i++) frames(60);
+  for (let i = 0; i < 500 && game.state.mode === 'flight'; i++) frames(60);
   if (game.state.mode !== 'landed') {
     throw new Error('режим ' + game.state.mode + ', фаза ' +
       (game.ship.landing && game.ship.landing.phase) + ', причина: ' + game.crashReason);

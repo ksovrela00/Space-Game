@@ -181,6 +181,67 @@ const makeStation = (rng, planet, name) => {
   };
 };
 
+// Орбитальные маркеры: точки в пустоте, к которым можно прыгнуть.
+//
+// Нужны они ровно за тем, чтобы обходить помеху: прямой коридор к цели
+// может упираться в планету, над которой висишь, и тогда прыгают
+// сначала к маркеру с открытой стороны. Шесть штук по осям — при таком
+// раскладе из любой точки поверхности хотя бы один виден над
+// горизонтом; четырёх в одной плоскости для этого не хватает.
+//
+// Точки ДЕТЕРМИНИРОВАННЫЕ, а не случайные: по ним запоминают маршрут, и
+// прыгать между сессиями они должны в одни и те же места.
+const MARKER_R = 3;      // в радиусах тела
+
+function makeMarkers(b) {
+  const A = b.orbit ? b.orbit.A : v3(1, 0, 0);
+  const B = b.orbit ? b.orbit.B : v3(0, 0, 1);
+  const up = b.orbit ? normalize(cross(A, B)) : v3(0, 1, 0);
+  const out = [];
+  let n = 1;
+  for (const a of [A, B, up]) {
+    for (const s of [1, -1]) {
+      out.push({
+        id: 'm' + b.id + '-' + n,
+        kind: 'marker',
+        name: b.name + ' · ОМ-' + n,
+        isMarker: true,
+        body: b,
+        radius: 0,
+        off: v3(a.x * s, a.y * s, a.z * s),
+        dist: b.radius * MARKER_R,
+        pos: v3(),
+        // Маркер жёстко привязан к телу, поэтому и скорость у него та же.
+        // Ссылка общая намеренно: пересчитывать её отдельно нечего.
+        vel: b.vel,
+      });
+      n++;
+    }
+  }
+  return out;
+}
+
+/**
+ * Положение тела на ЛЮБОЙ момент времени, а не только на текущий.
+ *
+ * Нужно проверке коридора: прыжок длится до полутора минут, и тела за
+ * это время уезжают. Орбиты аналитические, поэтому будущее положение
+ * считается точно и даром — интегрировать вперёд ничего не надо.
+ */
+export function bodyPosAt(b, t, out = v3()) {
+  out.x = 0; out.y = 0; out.z = 0;
+  for (let node = b; node; node = node.parent) {
+    const o = node.orbit;
+    if (!o) continue;                // корень (светило) стоит в начале координат
+    const a = o.phase + (t / o.period) * TAU;
+    const ca = Math.cos(a) * o.radius, sa = Math.sin(a) * o.radius;
+    out.x += o.A.x * ca + o.B.x * sa;
+    out.y += o.A.y * ca + o.B.y * sa;
+    out.z += o.A.z * ca + o.B.z * sa;
+  }
+  return out;
+}
+
 // --- Система -----------------------------------------------------------------
 
 export function makeSystem(seed = 0x1a7e) {
@@ -275,6 +336,7 @@ export function makeSystem(seed = 0x1a7e) {
     entities: [],          // сюда позже лягут NPC-корабли и снаряды
     bodies: [],            // плоский список тел для рендера и навигации
     stations: [],
+    markers: [],           // орбитальные маркеры (цели квантового прыжка)
   };
 
   world.bodies.push(star);
@@ -282,6 +344,13 @@ export function makeSystem(seed = 0x1a7e) {
     world.bodies.push(p);
     for (const m of p.moons) world.bodies.push(m);
     if (p.station) world.stations.push(p.station);
+  }
+  // Маркеры есть у всего, вокруг чего можно застрять, — то есть у всех
+  // тел, включая светило: его диаметр 124 000 км, и он перекрывает
+  // коридор чаще любой планеты.
+  for (const b of world.bodies) {
+    b.markers = makeMarkers(b);
+    for (const m of b.markers) world.markers.push(m);
   }
 
   // Гравитация: масса из плотности и радиуса, радиус захвата — из массы
@@ -346,6 +415,14 @@ export function updateWorld(world, dt) {
         P.z * cs + Q.z * sn), s.basis.right);
       cross(f, s.basis.right, s.basis.up);
     }
+  }
+
+  // Маркеры едут вместе со своим телом, но НЕ вращаются с ним: иначе
+  // точка, к которой только что прыгнул, уезжала бы за сутки.
+  for (const m of world.markers) {
+    m.pos.x = m.body.pos.x + m.off.x * m.dist;
+    m.pos.y = m.body.pos.y + m.off.y * m.dist;
+    m.pos.z = m.body.pos.z + m.off.z * m.dist;
   }
 }
 

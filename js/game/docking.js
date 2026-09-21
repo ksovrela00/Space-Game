@@ -79,7 +79,7 @@ export function startDockingComputer(ship, station) {
     station.pos.x - ship.pos.x,
     station.pos.y - ship.pos.y,
     station.pos.z - ship.pos.z);
-  if (d > DOCK_RANGE) return { ok: false, reason: 'СТАНЦИЯ СЛИШКОМ ДАЛЕКО — АВТОПИЛОТ (J)' };
+  if (d > DOCK_RANGE) return { ok: false, reason: 'СТАНЦИЯ СЛИШКОМ ДАЛЕКО — ПРЫЖОК (B)' };
   ship.docking = { station, phase: 'gate' };
   ship.autopilot = null;
   return { ok: true };
@@ -95,7 +95,7 @@ const distTo = (ship, p) =>
   Math.hypot(p.x - ship.pos.x, p.y - ship.pos.y, p.z - ship.pos.z);
 
 // Наведение носа, полёт заданным вектором скорости и гашение крена —
-// в js/game/pilot.js: тем же приёмом пользуются автопилот и посадка.
+// в js/game/pilot.js: тем же приёмом пользуется посадочный компьютер.
 
 // Согласование крена с вращающейся станцией (по модулю 180°).
 const matchRoll = (ship, station, k = 2.0) => {

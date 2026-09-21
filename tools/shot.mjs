@@ -319,7 +319,7 @@ show('планета-океан: терминатор, континенты, а�
     y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
     z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
   };
-  game.entry = entryState(game.world, game.ship, 1);
+  game.entry = entryState(game.world, game.ship);
   game.state.view = 'chase';
   show('вход в атмосферу: плазма впереди корабля, нагрев ' +
     (game.entry ? game.entry.heat.toFixed(2) : '—'));
