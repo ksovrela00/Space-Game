@@ -37,7 +37,7 @@ import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import {
-  showDocked, showCrash, showHelp, showLanded, hideOverlay,
+  showDocked, showCrash, showHelp, hideOverlay,
 } from './ui/screens.js';
 import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
@@ -115,6 +115,7 @@ const game = {
   stats: { docks: 0, crashes: 0, flownKm: 0, landings: 0 },
   crashReason: '',
   lastStation: null,
+  landHold: 0,           // сколько уже держат клавишу взлёта на грунте
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
   restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
 };
@@ -179,13 +180,31 @@ function landAt(zone, belly = false) {
   game.stats.landings++;
   stopQuantum(game.quantum);
   game.state.mode = ST.LANDED;
+  // Касание — ещё не стоянка: корабль стоит на стойках с работающими
+  // движками, и что делать дальше, решает пилот. Экрана поверх игры тут
+  // больше нет: всё нужное говорит сам кадр (см. drawLandedPrompt).
+  ship.secured = false;
+  game.landHold = 0;
   input.releaseAll();
-  showLanded(game);
   save();
 }
 
+/** Зафиксировать корабль на грунте: замки стоек, движки в ноль. */
+game.secure = () => {
+  if (!ship.landedAt || ship.secured) return;
+  ship.secured = true;
+  ship.throttle = 0;
+  ship.lift = 0;
+  ship.control.lift = 0;
+  audioCue(game.audio, 'gear', { out: false });
+  audioReset(game.audio, ship);
+  say(game.state, 'КОРАБЛЬ ЗАФИКСИРОВАН. ДВИГАТЕЛИ ОТКЛЮЧЕНЫ.', '#78e08f');
+  save();
+};
+
 game.takeoff = () => {
   hideOverlay();
+  game.landHold = 0;
   if (!takeoff(ship)) { game.state.mode = ST.FLIGHT; return; }
   game.state.mode = ST.FLIGHT;
   audioReset(game.audio, ship);
@@ -263,7 +282,6 @@ game.closeOverlay = () => {
   hideOverlay();
   game.state.mode = restMode();
   if (ship.dockedAt) showDocked(game);
-  else if (ship.landedAt) showLanded(game);
 };
 
 function crash(reason) {
@@ -407,7 +425,9 @@ function save() {
       last: game.lastStation ? game.lastStation.id : null,
       // Стоянка на поверхности хранится в локальных осях тела: мировые
       // координаты через сутки указывали бы в пустоту.
-      landed: ship.landedAt ? { id: ship.landedAt.id, pose: ship.landedPose } : null,
+      landed: ship.landedAt
+        ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
+        : null,
       gear: ship.gear.out,
       audio: { on: game.audio.on, vol: game.audio.vol },
       stats: game.stats,
@@ -439,6 +459,7 @@ function load() {
     if (body) {
       ship.landedAt = body;
       ship.landedPose = s.landed.pose;
+      ship.secured = !!s.landed.secured;
       ship.gear.out = true;
       ship.gear.t = 1;
       updateLandedPose(ship);
@@ -464,7 +485,7 @@ function load() {
 
 // --- глобальные клавиши ------------------------------------------------------
 
-function handleKeys() {
+function handleKeys(dt) {
   if (!booted) return;
   const st = game.state;
 
@@ -515,7 +536,6 @@ function handleKeys() {
       game.map.sel = currentTarget(game.nav);
     }
     if (st.mode === ST.DOCKED) showDocked(game);
-    else if (st.mode === ST.LANDED) showLanded(game);
     else hideOverlay();
     return;
   }
@@ -529,7 +549,21 @@ function handleKeys() {
     return;
   }
   if (st.mode === ST.LANDED) {
-    if (input.pressed('Space', 'Enter')) game.takeoff();
+    // Одна клавиша на два действия, и разводятся они временем:
+    // коротко нажал — зафиксировал корабль, подержал три секунды —
+    // оторвался. Взлёт случайным нажатием не делается.
+    const held = input.isDown('Space', 'Enter');
+    // Нажатие считаем и по факту удержания, и по событию: очень короткое
+    // нажатие успевает начаться и кончиться внутри одного кадра, и по
+    // одному isDown его не видно вовсе.
+    const tapped = input.pressed('Space', 'Enter');
+    if (held) {
+      game.landHold += dt;
+      if (game.landHold >= LAND.holdOff) game.takeoff();
+    } else {
+      if ((game.landHold > 0 || tapped) && game.landHold < LAND.holdOff) game.secure();
+      game.landHold = 0;
+    }
     return;
   }
   if (st.mode === ST.CRASHED) {
@@ -1123,7 +1157,7 @@ function render() {
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
-  else if (game.state.mode === ST.FLIGHT) drawHud(hud, game);
+  else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
   drawDebug(hud, game, dbg);
 }
 
@@ -1139,7 +1173,7 @@ function frame(now) {
   if (dt > 0.25) dt = 0.25;      // после переключения таба не «телепортируемся»
   tickDebug(dbg, dt);
 
-  handleKeys();
+  handleKeys(dt);
 
   acc += dt;
   let steps = 0;
@@ -1163,7 +1197,7 @@ function frame(now) {
   // от него меняться не должен.
   updateAudio(game.audio, game, dt);
   playAudio(game.audio, sound);
-  if (game.state.mode === ST.FLIGHT) prepareHud();
+  if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) prepareHud();
 
   render();
   input.endFrame();

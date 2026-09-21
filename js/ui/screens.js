@@ -1,11 +1,15 @@
 // Экраны вне полёта: станция, крушение, помощь — как DOM-оверлей.
+//
+// Экрана ПОСАДКИ здесь нет намеренно: он выбрасывал игрока из кадра
+// ровно в тот момент, ради которого вся посадка и затевалась. Всё, что
+// он показывал, теперь стоит в приборах (js/ui/hud.js): кнопка
+// фиксации, координаты стоянки и высота площадки.
 // Карта системы живёт отдельно (js/ui/map.js): она не текст в рамке, а
 // интерактивный план с масштабом, выбором и справкой.
 
 import { fmtDist } from './hud.js';
 import { KIND_INFO } from '../game/bodyinfo.js';
 import { ST } from '../game/state.js';
-import { landedInfo } from '../game/landing.js';
 
 const overlay = () => document.getElementById('overlay');
 const panelEl = () => document.getElementById('panel');
@@ -51,30 +55,6 @@ export function showDocked(game) {
   ]);
 }
 
-export function showLanded(game) {
-  const info = landedInfo(game.ship);
-  const b = info ? info.body : null;
-  const hemis = info && info.lat >= 0 ? 'с.ш.' : 'ю.ш.';
-  show(`
-    <h1>ПОСАДКА ВЫПОЛНЕНА</h1>
-    <h2>${b ? b.name : ''}</h2>
-    <table class="rows">
-      <tr><td>Тип</td><td class="v">${b ? KIND_RU[b.kind] || b.kind : '—'}</td></tr>
-      <tr><td>Радиус тела</td><td class="v">${b ? fmtDist(b.radius) : '—'}</td></tr>
-      <tr><td>Тяжесть</td><td class="v">${b ? b.g0.toFixed(2) + ' м/с²' : '—'}</td></tr>
-      <tr><td>Координаты</td><td class="v">${info ? Math.abs(info.lat).toFixed(2) + '° ' + hemis + ', ' + info.lon.toFixed(2) + '°' : '—'}</td></tr>
-      <tr><td>Высота площадки</td><td class="v">${info ? fmtDist(info.height) : '—'}</td></tr>
-      <tr><td>Состояние корпуса</td><td class="v">${Math.round(game.ship.hull)}%</td></tr>
-      <tr><td>Посадок выполнено</td><td class="v">${game.stats.landings || 0}</td></tr>
-    </table>
-    <p class="sub">Ремонта здесь нет: корпус восстанавливают только на станциях.
-      Шасси выпущено, взлёт — на посадочных движках.</p>
-  `, [
-    { label: 'ВЗЛЁТ', onClick: () => game.takeoff() },
-    { label: 'КАРТА СИСТЕМЫ', ghost: true, onClick: () => { hideOverlay(); game.state.mode = ST.MAP; } },
-  ]);
-}
-
 export function showCrash(game) {
   show(`
     <h1>КОРПУС РАЗРУШЕН</h1>
@@ -115,7 +95,8 @@ export function showHelp(game) {
       <tr><td>~</td><td class="v">отладочный оверлей</td></tr>
       <tr><td>K / Shift+K</td><td class="v">телепорт к цели / смена высоты телепорта</td></tr>
       <tr><td>Space (зажать)</td><td class="v">форсаж: втрое быстрее, пока есть заряд</td></tr>
-      <tr><td>Space</td><td class="v">вылет со станции, взлёт, рестарт после крушения</td></tr>
+      <tr><td>Space</td><td class="v">вылет со станции, рестарт после крушения</td></tr>
+      <tr><td>на грунте: Space</td><td class="v">коротко — зафиксировать; удержать 3 с — взлёт</td></tr>
       <tr><td>Shift+N</td><td class="v">начать заново (дважды: сохранение стирается)</td></tr>
     </table>
     <p class="sub">Цели видны на экране сразу. Навести нос на нужную и нажать
@@ -146,6 +127,10 @@ export function showHelp(game) {
       допусков даёт отскок, кувырок и потерю управления на несколько десятых
       секунды; корпус при этом теряет тем больше, чем сильнее удар — по
       квадрату скорости. Корабль гибнет, когда корпуса не осталось.</p>
+    <p class="sub">Сел — игра не останавливается: корабль стоит на стойках, а в
+      приборах появляется кнопка <b>ГОТОВ К ПОСАДКЕ</b>. Короткое нажатие
+      <b>Пробел</b> фиксирует его и глушит движки; взлёт — удержание того же
+      Пробела три секунды, полоса показывает, сколько осталось.</p>
     <p class="sub">Посадка: сесть можно на луны и голые планеты — там, где нет
       атмосферы. Отдельного режима нет: тяга по-прежнему ведёт корабль вдоль
       носа, а <b>R/F</b> поднимают и опускают его подъёмными движками, так что

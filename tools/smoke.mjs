@@ -724,27 +724,83 @@ await step('посадочный компьютер (L) доводит до гр
   if (!(game.stats.landings > 0)) throw new Error('посадка не засчитана');
 });
 
-await step('стоянка на поверхности и взлёт по Space', () => {
-  frames(60 * 10);
+await step('стоянка на грунте: кнопка вместо экрана, взлёт удержанием', () => {
+  frames(60 * 2);
   if (game.state.mode !== 'landed') throw new Error('режим ' + game.state.mode);
+  // ТО, ЧТО БЫЛО СЛОМАНО: посадка выбрасывала игрока в экран поверх
+  // игры — ровно в тот момент, ради которого всё и затевалось.
+  if (!nodes.overlay.classList.contains('hidden')) {
+    throw new Error('на посадке показан экран поверх игры');
+  }
+  if (game.ship.secured) throw new Error('корабль зафиксирован сам, без пилота');
+
+  // Кадр на грунте рисует приборы и кнопку.
+  texts = [];
+  frames(1);
+  const seen = texts;
+  texts = null;
+  if (!seen.some((t) => /ГОТОВ К ПОСАДКЕ/.test(t.s))) {
+    throw new Error('кнопки «готов к посадке» нет в кадре');
+  }
+  // И то, что раньше показывал экран посадки: где сел и какая площадка.
+  if (!seen.some((t) => /ПЛОЩАДКА/.test(t.s) && /ПОСАДОК/.test(t.s))) {
+    throw new Error('координат стоянки нет в кадре');
+  }
+
+  // Короткое нажатие — фиксация: движки в ноль, взлёта нет.
+  game.ship.throttle = 0.4;
+  key('Space'); frames(3);
+  if (!game.ship.secured) throw new Error('короткое нажатие не зафиксировало корабль');
+  if (game.state.mode !== 'landed') throw new Error('короткое нажатие подняло корабль');
+  if (game.ship.throttle !== 0) throw new Error('движки не заглушены: ' + game.ship.throttle);
+
   // Стоянка обязана попасть в сейв: в локальных осях тела, иначе через
   // сутки эти координаты указывали бы в пустоту.
   const saved = JSON.parse(store['solar_trader_save_v1']);
   if (!saved.landed || !saved.landed.pose || !saved.landed.id) {
     throw new Error('стоянка не сохранена: ' + JSON.stringify(saved.landed));
   }
+  if (!saved.landed.secured) throw new Error('фиксация не сохранена');
   if (!saved.gear) throw new Error('состояние шасси не сохранено');
-  key('Space'); frames(30);
-  if (game.state.mode !== 'flight') throw new Error('после взлёта режим ' + game.state.mode);
-  // Отрыв — это импульс по местной вертикали, а не «ход движков».
+
+  // Полсекунды удержания — ещё не взлёт, но полоса пошла.
+  holdDown('Space');
+  frames(30);
+  if (game.state.mode !== 'landed') throw new Error('взлетел за полсекунды удержания');
+  if (!(game.landHold > 0.3)) throw new Error('удержание не копится: ' + game.landHold);
+  texts = [];
+  frames(1);
+  const hold = texts;
+  texts = null;
+  if (!hold.some((t) => /ДЕРЖАТЬ ЕЩЁ/.test(t.s))) {
+    throw new Error('в кадре не видно, сколько ещё держать');
+  }
+  // Отпустили — отсчёт сбросился.
+  release('Space'); frames(3);
+  if (game.landHold !== 0) throw new Error('отсчёт не сбросился: ' + game.landHold);
+  if (game.state.mode !== 'landed') throw new Error('режим ' + game.state.mode);
+
+  // Полное удержание — отрыв. Держим ровно до смены режима: после него
+  // Space уже означает форсаж, и лишние секунды удержания тут ни к чему.
+  holdDown('Space');
+  for (let i = 0; i < 60 * 5 && game.state.mode === 'landed'; i++) frames(1);
+  release('Space');
+  // Даём движкам отработать отрыв: они идут около секунды (LAND.liftoff).
+  frames(40);
+  if (game.state.mode !== 'flight') throw new Error('после удержания режим ' + game.state.mode);
+  if (game.ship.secured) throw new Error('фиксация не снята на взлёте');
+  // Отрыв — это работа движков: они какое-то время идут сами.
   {
-    const b = game.ship.landedAt || game.zone && game.zone.body;
+    const b = game.ship.landedAt || (game.zone && game.zone.body);
     const p = game.ship.pos, c = b ? b.pos : { x: 0, y: 0, z: 0 };
     const ux = p.x - c.x, uy = p.y - c.y, uz = p.z - c.z;
     const l = Math.hypot(ux, uy, uz) || 1;
     const v = game.ship.vel;
-    if (!((v.x * ux + v.y * uy + v.z * uz) / l > 0.001)) {
-      throw new Error('после отрыва корабль не идёт вверх');
+    const vUp = (v.x * ux + v.y * uy + v.z * uz) / l;
+    if (!(vUp > 0.001)) {
+      throw new Error('после отрыва корабль не идёт вверх: ' + (vUp * 1000).toFixed(2) +
+        ' м/с, отработка движков ' + game.ship.liftHold.toFixed(2) + ' с, ' +
+        'подъёмные ' + (game.ship.lift * 1000).toFixed(2) + ' м/с²');
     }
   }
   frames(60 * 5);

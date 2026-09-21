@@ -163,6 +163,9 @@ export function makeShip() {
     liftHold: 0,
     hull: SHIP.maxHull,
     dockedAt: null,
+    // Корабль зафиксирован на грунте: стойки на замках, движки
+    // заглушены. Касание этого ещё не значит — фиксирует пилот.
+    secured: false,
     autopilot: null,
     docking: null,
     mesh: null,

@@ -5,7 +5,7 @@ import { v3, dot, clamp, normalize } from '../core/vec3.js';
 import { SHIP } from '../game/ship.js';
 import { QUANTUM } from '../game/quantum.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
-import { gearLabel } from '../game/landing.js';
+import { gearLabel, landedInfo, LAND } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
 import { targetLabel } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
@@ -197,6 +197,9 @@ export function drawHud(r, game) {
   }
 
   drawScanner(ctx, w / 2, h - 60, game);
+
+  // На грунте — кнопка вместо экрана поверх игры.
+  if (state.mode === 'landed') drawLandedPrompt(ctx, cam, game);
 
   // --- приборы подхода, помощник стыковки ---
   if (approach) {
@@ -543,6 +546,77 @@ function drawCockpitFrame(ctx, w, h) {
 // появляется только в виде из-за спины: камера догоняет корабль с
 // запаздыванием, и на развороте нос уходит из центра — по тому, как
 // далеко он ушёл, и читается разворот.
+/**
+ * Кнопка на грунте: зафиксировать корабль или взлететь.
+ *
+ * Экрана поверх игры на посадке больше нет — он выбрасывал игрока из
+ * кадра ровно в тот момент, ради которого всё и затевалось. Вместо него
+ * одна кнопка, и два действия разведены ВРЕМЕНЕМ: коротко нажал —
+ * зафиксировал стойки и заглушил движки, подержал три секунды —
+ * оторвался. Полоса заполнения показывает, сколько ещё держать: без неё
+ * удержание — это игра в угадайку.
+ */
+function drawLandedPrompt(ctx, cam, game) {
+  const ship = game.ship;
+  const t = clamp((game.landHold || 0) / LAND.holdOff, 0, 1);
+  const w = 300, h = 52;
+  const x = cam.cx - w / 2, y = cam.h - 172;
+
+  // Корпус кнопки и полоса удержания под ним.
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,12,20,0.78)';
+  ctx.fillRect(x, y, w, h);
+  if (t > 0) {
+    ctx.fillStyle = 'rgba(255,204,102,0.22)';
+    ctx.fillRect(x, y, w * t, h);
+  }
+  ctx.strokeStyle = t > 0 ? AMBER : (ship.secured ? GREEN : CY);
+  ctx.lineWidth = t > 0 ? 2 : 1;
+  ctx.strokeRect(x, y, w, h);
+
+  ctx.textAlign = 'center';
+  const mid = x + w / 2;
+
+  // Строка над кнопкой — то, что раньше было в экране посадки: где
+  // именно сел и какой высоты площадка.
+  const info = landedInfo(ship);
+  if (info) {
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = 'rgba(159,217,230,0.7)';
+    const hemi = info.lat >= 0 ? 'с.ш.' : 'ю.ш.';
+    ctx.fillText(
+      `${info.body.name.toUpperCase()} · ${Math.abs(info.lat).toFixed(2)}° ${hemi}, ` +
+      `${info.lon.toFixed(2)}° · ПЛОЩАДКА ${fmtDist(info.height)} · ` +
+      `ПОСАДОК ${game.stats ? game.stats.landings || 0 : 0}`,
+      mid, y - 8);
+  }
+
+  if (t > 0) {
+    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.fillStyle = AMBER;
+    ctx.fillText(t >= 1 ? 'ОТРЫВ' : 'ВЗЛЁТ', mid, y + 22);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = '#d8f2ff';
+    ctx.fillText(t >= 1 ? 'ДЕРЖИТЕСЬ' :
+      'ДЕРЖАТЬ ЕЩЁ ' + ((1 - t) * LAND.holdOff).toFixed(1) + ' с', mid, y + 40);
+  } else if (ship.secured) {
+    ctx.font = 'bold 14px Consolas, monospace';
+    ctx.fillStyle = GREEN;
+    ctx.fillText('НА ГРУНТЕ · ДВИГАТЕЛИ ОТКЛЮЧЕНЫ', mid, y + 22);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = 'rgba(159,217,230,0.8)';
+    ctx.fillText('УДЕРЖАТЬ ПРОБЕЛ ' + LAND.holdOff + ' с — ВЗЛЁТ', mid, y + 40);
+  } else {
+    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.fillStyle = CY;
+    ctx.fillText('ГОТОВ К ПОСАДКЕ', mid, y + 22);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = 'rgba(159,217,230,0.8)';
+    ctx.fillText('ПРОБЕЛ — ЗАФИКСИРОВАТЬ · УДЕРЖАТЬ — ВЗЛЁТ', mid, y + 40);
+  }
+  ctx.restore();
+}
+
 function drawReticle(ctx, cam, ship) {
   const p = projectDir(cam, ship.basis.fwd.x, ship.basis.fwd.y, ship.basis.fwd.z, _pt);
   // Нос за спиной у камеры (осмотр мышью) — прицела нет.
