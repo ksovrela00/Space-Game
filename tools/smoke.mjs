@@ -19,7 +19,7 @@ const ctx = new Proxy({}, {
     }
     if (prop === 'measureText') return () => ({ width: 42 });
     if (prop === 'setTransform') return () => count('setTransform');
-    if (typeof prop === 'string' && /^(save|restore|beginPath|closePath|fill|stroke|clip|translate|rotate|scale|moveTo|lineTo|arc|ellipse|rect|fillRect|strokeRect|clearRect|fillText|strokeText|drawImage|setLineDash|quadraticCurveTo|bezierCurveTo)$/.test(prop)) {
+    if (typeof prop === 'string' && /^(save|restore|beginPath|closePath|fill|stroke|clip|translate|rotate|scale|transform|setTransform|resetTransform|moveTo|lineTo|arc|ellipse|rect|fillRect|strokeRect|clearRect|fillText|strokeText|drawImage|setLineDash|quadraticCurveTo|bezierCurveTo)$/.test(prop)) {
       return (...a) => {
         for (const v of a) {
           if (typeof v === 'number' && !Number.isFinite(v)) {
@@ -255,6 +255,47 @@ await step('осмотр камерой правой кнопкой из-за с
     throw new Error('камера не вернулась: ' + game.camOrbit.yaw.toFixed(3));
   }
   if (game.state.view !== view0) { key('KeyV'); frames(2); }
+});
+
+await step('кабина: приборы на доске, осмотр головой, штурвал за ручками', async () => {
+  // Кабина есть только в объёмном рендере, а smoke идёт на Canvas-2D
+  // (WebGL здесь не подменить). Поэтому модель подставляем руками: нам
+  // важна не её отрисовка — её проверяет tools/gl.mjs, — а то, что HUD
+  // умеет класть приборы на экраны и не падает на этом.
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const saved = game.cockpit;
+  game.cockpit = buildCockpit();
+  if (game.state.view !== 'cockpit') { key('KeyV'); frames(2); }
+  if (game.state.view !== 'cockpit') throw new Error('вид не переключился в кокпит');
+  frames(3);
+
+  // Осмотр головой: в кабине предел меньше, чем от третьего лица, —
+  // шея не поворачивается на 180°.
+  mouse('mousedown');
+  for (let i = 0; i < 4; i++) { mouse('mousemove', { movementX: 360 }); frames(1); }
+  const yaw = game.camOrbit.yaw;
+  if (!(yaw > 1.5 && yaw <= 1.93)) {
+    throw new Error('поворот головы в кабине вне допуска: ' + yaw.toFixed(2));
+  }
+  mouse('mouseup');
+  frames(45);
+  if (Math.abs(game.camOrbit.yaw) > 0.05) {
+    throw new Error('голова не вернулась прямо: ' + game.camOrbit.yaw.toFixed(2));
+  }
+
+  // Штурвал ходит за ручками: держим крен и смотрим, что он отклонился.
+  holdDown('KeyE'); frames(20);
+  const rolled = game.yoke.roll;
+  release('KeyE'); frames(30);
+  if (!(Math.abs(rolled) > 0.3)) {
+    throw new Error('штурвал не пошёл за ручкой: ' + rolled.toFixed(2));
+  }
+  if (Math.abs(game.yoke.roll) > 0.05) {
+    throw new Error('штурвал не вернулся в нейтраль: ' + game.yoke.roll.toFixed(2));
+  }
+
+  game.cockpit = saved;
+  frames(2);
 });
 
 await step('вид от 3-го лица (V) рисует свой корабль', () => {

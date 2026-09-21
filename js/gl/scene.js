@@ -35,9 +35,10 @@ import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './pla
 import { SurfacePatch } from './patches.js';
 import { RockField } from './rocks.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
-import { makeBasis, lookAlong, toLocal } from '../core/basis.js';
+import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
 import { FLOW } from '../game/flow.js';
+import { buildCockpit } from '../models/cockpit.js';
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
 const GLOW_FALLOFF = 2.5;
@@ -75,6 +76,15 @@ const IDENTITY_BASIS = {
   up: { x: 0, y: 1, z: 0 },
   fwd: { x: 0, y: 0, z: 1 },
 };
+// Кабина стоит в метре от глаза, а ближняя плоскость сцены — на
+// четырёх метрах: в общий проход она не влезает ни одной гранью.
+// Поэтому у неё своя, в пять сантиметров, и свой проход (drawCockpit).
+const NEAR_CABIN = 5e-5;     // км
+// Внутри кабины светло даже в тени: доска подсвечена изнутри, по бортам
+// идёт дежурный свет, экраны светятся сами. Это не произвол — это
+// разница между кабиной и чёрной плитой: при звёздном ambient (0.14)
+// корпус кабины уходит в ноль, и в кадре остаются одни экраны.
+const CABIN_AMBIENT = 0.55;
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
 const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
 const PATCH_MS = 3.0;        // и на заплатки поверхности
@@ -195,6 +205,12 @@ export class GlScene {
     this.moteRel = new Float32Array(3);
     this.moteOfs = new Float32Array(3);
     this.moteStreak = new Float32Array(3);
+    // Кабина собирается по первому требованию: в виде от третьего лица
+    // она не нужна вовсе, а модель не бесплатная.
+    this.cockpit = null;
+    this.projCabin = new Float32Array(16);
+    this.cabinBasis = makeBasis();
+    this.cabinPos = { x: 0, y: 0, z: 0 };
     this.blankTex = createBlankTexture(gl);
     this.patch = new SurfacePatch(gl, this.meshLocs);
     // Камни у самой поверхности: предметы известного размера, по которым
@@ -349,6 +365,7 @@ export class GlScene {
     this.rockDraws = 0;
     this.streamDraws = 0;
     this.moteDraws = 0;
+    this.cabinDraws = 0;
 
     const aspect = this.canvas.width / this.canvas.height;
     perspective(cam.fov, aspect, NEAR, FAR, this.proj);
@@ -382,6 +399,7 @@ export class GlScene {
     this.drawOpaque(game, world, sunPos);
     this.drawTransparent(game, world, sunPos);
     this.drawMotes(game);
+    this.drawCockpit(game, sunPos);
     this.drawTunnel();
 
     gl.depthMask(true);
@@ -533,6 +551,61 @@ export class GlScene {
     this.moteDraws++;
     gl.disable(gl.BLEND);
     gl.depthMask(true);
+  }
+
+  /**
+   * Кабина: то, что видно с места пилота.
+   *
+   * Отдельный проход, и на то две причины, обе про расстояние. Кабина
+   * в МЕТРЕ от глаза, а ближняя плоскость сцены стоит на четырёх
+   * метрах (NEAR): в общем проходе от неё не осталось бы ни грани.
+   * И она ближе всего, что есть в кадре, — значит должна закрывать
+   * собой всё. Поэтому буфер глубины очищается, проекция берётся своя,
+   * и нарисованное раньше честно остаётся позади.
+   *
+   * Начало координат модели — глаз пилота (js/models/cockpit.js),
+   * а камера в кокпите стоит ровно там же. Поэтому перенос нулевой:
+   * кабина только поворачивается вместе с корпусом.
+   */
+  drawCockpit(game, sunPos) {
+    const st = game.state;
+    if (!st || st.view !== 'cockpit' || st.mode === 'docked') return;
+    const ship = game.ship;
+    if (!ship) return;
+    const cp = game.cockpit || (this.cockpit || (this.cockpit = buildCockpit()));
+    const gl = this.gl;
+    const cam = this.camera;
+    const prog = this.pMesh;
+
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    perspective(cam.fov, cam.w / Math.max(1, cam.h), NEAR_CABIN, FAR, this.projCabin);
+
+    prog.use();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projCabin);
+    gl.uniform1f(prog.loc('uAmbient'), CABIN_AMBIENT);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    this.setDetail(prog, null, 0);
+
+    this.drawObject(prog, this.glMeshFor(cp.shell), cam.pos, ship.basis, 1, sunPos);
+    this.cabinDraws = 1;
+
+    // Штурвал — свой меш со своей осью: вершины у него отсчитаны ОТ
+    // оси, поэтому поворот это поворот базиса, а место — сама ось,
+    // перенесённая в мир.
+    if (cp.yoke && game.yoke) {
+      copyBasis(this.cabinBasis, ship.basis);
+      rotateBasis(this.cabinBasis, game.yoke.pitch, game.yoke.yaw, game.yoke.roll);
+      toWorld(ship.basis, cam.pos, cp.pivot, this.cabinPos);
+      this.drawObject(prog, this.glMeshFor(cp.yoke), this.cabinPos, this.cabinBasis, 1, sunPos);
+      this.cabinDraws = 2;
+    }
   }
 
   /** Полноэкранный тоннель поверх всего. */

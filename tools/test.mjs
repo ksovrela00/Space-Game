@@ -44,7 +44,8 @@ import { STATION_D } from '../js/models/station.js';
 import { buildCobra, buildGear, HULL_HALF } from '../js/models/ships.js';
 import { buildStation, SLOT } from '../js/models/station.js';
 import { Camera } from '../js/render/camera.js';
-import { velocityMarker } from '../js/ui/hud.js';
+import { velocityMarker, projectDir } from '../js/ui/hud.js';
+import { buildCockpit, makeYoke, updateYoke, YOKE } from '../js/models/cockpit.js';
 import { Renderer } from '../js/render/renderer.js';
 import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
@@ -3515,6 +3516,193 @@ console.log('\n== пылинки за бортом ==');
     updateFlow(f, { ship: sh, quantum: { phase: 'jump' } }, STEP);
     ok(f.power === 0 && streakLen(f) === 0,
       'в прыжке своего потока нет: там работает поток привода');
+  }
+}
+
+console.log('\n== кабина ==');
+{
+  const cp = buildCockpit();
+  const M = 1000;                      // км -> м
+  const DEG = 57.2957795;
+  // Поле зрения игры: вниз от центра видно ровно половину его.
+  const FOV = 68 / DEG;
+  const halfDown = FOV / 2;
+
+  // Габарит кабины — человеческий. Это не придирка к модели, а проверка
+  // масштаба: данные лежат в миллиметрах, и ошибка в тысячу раз здесь
+  // выглядела бы как «кабина собралась».
+  {
+    const w = (cp.bound.hi.x - cp.bound.lo.x) * M;
+    const h = (cp.bound.hi.y - cp.bound.lo.y) * M;
+    ok(w > 1.5 && w < 2.5 && h > 1.5 && h < 2.6,
+      `кабина человеческого размера: ${w.toFixed(2)} x ${h.toFixed(2)} м`);
+  }
+
+  // ГЛАВНОЕ ТРЕБОВАНИЕ к кабине: она не смеет лезть в прицел. Проём
+  // фонаря здесь не вырезан, а задан — рамы в нём просто нет, — и это
+  // должно быть видно числом, а не на глаз.
+  {
+    let inCone = 0;
+    for (const f of cp.shell.faces) {
+      let x = 0, y = 0, z = 0;
+      for (const i of f.v) {
+        const p = cp.shell.verts[i];
+        x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+      }
+      if (z <= 0) continue;
+      if (Math.atan2(Math.hypot(x, y), z) < 14 / DEG) inCone++;
+    }
+    ok(inCone === 0, `прицел чист: в конусе 14° вокруг оси ${inCone} граней кабины`);
+  }
+
+  // Рама фонаря обязана быть ВИДНА по краям кадра — иначе кабина
+  // читается как приборная плита, подставленная снизу (так и вышло с
+  // покупной моделью: её пришлось так резать, что от кабины осталась
+  // одна доска). Считаем грани, попадающие в боковые полосы кадра:
+  // по горизонтали видно ±50°, значит стойки на ±36° в кадре есть.
+  {
+    let side = 0, top = 0;
+    for (const f of cp.shell.faces) {
+      let x = 0, y = 0, z = 0;
+      for (const i of f.v) {
+        const p = cp.shell.verts[i];
+        x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+      }
+      if (z <= 0) continue;
+      const az = Math.abs(Math.atan2(x, z)) * DEG;
+      const el = Math.atan2(y, Math.hypot(x, z)) * DEG;
+      if (az > 25 && az < 50 && el > -20 && el < 34) side++;
+      if (el > 20 && el < 34 && az < 50) top++;
+    }
+    ok(side > 8 && top > 4,
+      `рама в кадре: ${side} граней по бортам, ${top} сверху — обзор обрамлён, а не завешен`);
+  }
+
+  // Кабина должна быть ЗАКРЫТОЙ: пилот вертит головой (ПКМ), и назад,
+  // вниз и вбок он обязан видеть кабину, а не открытый космос.
+  {
+    const dirs = [
+      ['назад', 0, 0, -1], ['вниз', 0, -1, 0],
+      ['влево', -1, 0, 0], ['вправо', 1, 0, 0],
+    ];
+    const seen = [];
+    for (const [name, dx, dy, dz] of dirs) {
+      let hit = 0;
+      for (const f of cp.shell.faces) {
+        let x = 0, y = 0, z = 0;
+        for (const i of f.v) {
+          const p = cp.shell.verts[i];
+          x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+        }
+        const L = Math.hypot(x, y, z) || 1;
+        if ((x * dx + y * dy + z * dz) / L > 0.7) hit++;
+      }
+      if (hit > 0) seen.push(name);
+    }
+    ok(seen.length === dirs.length,
+      `кабина закрыта со всех сторон, кроме фонаря: ${seen.join(', ')}`);
+  }
+
+  // Штурвал должен быть ВИДЕН: кабина, в которой не видно собственных
+  // органов управления, теряет смысл. Верх штурвала обязан попадать в
+  // нижнюю половину кадра, а не лежать под ней.
+  {
+    let top = -Infinity;
+    for (const v of cp.yoke.verts) top = Math.max(top, v.y + cp.pivot.y);
+    const z = cp.pivot.z;
+    const down = Math.atan2(-top, z);
+    ok(cp.yoke && down > 0 && down < halfDown,
+      `штурвал в кадре: верх на ${(down * DEG).toFixed(0)}° ниже оси, видно ` +
+      `${(halfDown * DEG).toFixed(0)}° (ось колонки в ${(z * M).toFixed(2)} м впереди)`);
+  }
+
+  // Приборная доска: три места, все ниже горизонта и в кадре.
+  {
+    const cam = new Camera();
+    cam.resize(1600, 900);
+    cam.basis.right = { x: 1, y: 0, z: 0 };
+    cam.basis.up = { x: 0, y: 1, z: 0 };
+    cam.basis.fwd = { x: 0, y: 0, z: 1 };
+    const at = (p) => {
+      const L = Math.hypot(p.x, p.y, p.z);
+      return projectDir(cam, p.x / L, p.y / L, p.z / L, {});
+    };
+    const s = cp.slots;
+    ok(!!s, 'приборная доска найдена по геометрии модели');
+    const L = at(s.left.pos), C = at(s.mid.pos), R = at(s.right.pos);
+    const onScreen = (p) => p.x > 0 && p.x < 1600 && p.y > 450 && p.y < 900;
+    ok(Object.keys(s).length === 5 && [...Object.values(s)].every((sl) => sl.w > 0 && sl.h > 0),
+      `экранов в кабине ${Object.keys(s).length}, у каждого свой размер`);
+    ok(onScreen(L) && onScreen(C) && onScreen(R) && L.x < C.x && C.x < R.x,
+      `приборы стоят на доске и в кадре: слева ${L.x | 0},${L.y | 0}; ` +
+      `по центру ${C.x | 0},${C.y | 0}; справа ${R.x | 0},${R.y | 0}`);
+
+    // ТО, ЧТО БЫЛО СЛОМАНО: у верхних табло ось «вправо» бралась от
+    // НОРМАЛИ (направления на пилота), а не от направления взгляда, и
+    // оказывалась зеркальной — текст на них читался задом наперёд.
+    // Проверяем все экраны разом: «вправо» по экрану обязано идти
+    // вправо по кадру, «вверх» — вверх.
+    {
+      const bad = [];
+      for (const k of Object.keys(s)) {
+        const sl = s[k];
+        const c = at(sl.pos);
+        const r = at({
+          x: sl.pos.x + sl.right.x * sl.w * 0.4,
+          y: sl.pos.y + sl.right.y * sl.w * 0.4,
+          z: sl.pos.z + sl.right.z * sl.w * 0.4,
+        });
+        const u = at({
+          x: sl.pos.x + sl.up.x * sl.h * 0.4,
+          y: sl.pos.y + sl.up.y * sl.h * 0.4,
+          z: sl.pos.z + sl.up.z * sl.h * 0.4,
+        });
+        if (!(r.x > c.x + 1) || !(u.y < c.y - 1)) bad.push(k);
+      }
+      ok(bad.length === 0,
+        `ни один экран не зеркальный и не перевёрнутый (проверено ${Object.keys(s).length})` +
+        (bad.length ? ': ' + bad.join(', ') : ''));
+    }
+
+    // Оси доски — настоящие оси плоскости: перпендикулярны и не
+    // вырождены. Иначе преобразование холста схлопнет блок в полоску.
+    const dotv = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+    let worst = 0;
+    for (const k of ['left', 'mid', 'right']) {
+      worst = Math.max(worst, Math.abs(dotv(s[k].right, s[k].up)));
+      // Нормаль смотрит НА пилота — иначе приборы окажутся с изнанки.
+      if (dotv(s[k].normal, s[k].pos) > 0) worst = 1;
+    }
+    ok(worst < 1e-6,
+      `оси доски перпендикулярны и повёрнуты к пилоту (худшее ${worst.toExponential(1)})`);
+  }
+
+  // Штурвал ходит за РУЧКАМИ, а не за угловой скоростью корабля: он в
+  // руках у пилота и стоять должен там, куда его отклонили.
+  {
+    const y = makeYoke();
+    const c = { pitch: 1, yaw: 0, roll: -1 };
+    for (let i = 0; i < 120; i++) updateYoke(y, c, STEP);
+    ok(Math.abs(y.pitch - YOKE.pitch) < 1e-3 && Math.abs(y.roll + YOKE.roll) < 1e-3,
+      `штурвал доходит до упора: тангаж ${(y.pitch * DEG).toFixed(0)}°, ` +
+      `крен ${(y.roll * DEG).toFixed(0)}°`);
+
+    // Возврат: ручки отпущены — штурвал сам идёт в нейтраль.
+    for (let i = 0; i < 120; i++) updateYoke(y, { pitch: 0, yaw: 0, roll: 0 }, STEP);
+    ok(Math.abs(y.pitch) < 1e-3 && Math.abs(y.roll) < 1e-3,
+      'отпущенные ручки возвращают штурвал в нейтраль');
+
+    // Скорость не зависит от частоты кадров: на 12 и 240 Гц за ту же
+    // секунду штурвал уходит одинаково.
+    const run = (dt) => {
+      const z = makeYoke();
+      for (let i = 0; i < Math.round(1 / dt); i++) updateYoke(z, { pitch: 1 }, dt);
+      return z.pitch;
+    };
+    const slow = run(1 / 12), fast = run(1 / 240);
+    ok(Math.abs(slow - fast) < YOKE.pitch * 0.05,
+      `ход штурвала почти не зависит от частоты кадров: ${(slow * DEG).toFixed(1)}° ` +
+      `при 12 Гц против ${(fast * DEG).toFixed(1)}° при 240 Гц`);
   }
 }
 

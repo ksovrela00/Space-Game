@@ -1,0 +1,11 @@
+// Палитра приборов. Живёт отдельно, потому что её делят два модуля:
+// угловые панели вида от третьего лица (js/ui/hud.js) и софт на экранах
+// кабины (js/ui/panels.js). Две копии одних и тех же цветов неизбежно
+// разъезжаются, а разъехавшиеся приборы выглядят как поломка.
+
+export const CY = '#4fb3e0';
+export const CY_DIM = 'rgba(79,179,224,0.35)';
+export const AMBER = '#ffcc66';
+export const GREEN = '#78e08f';
+export const RED = '#ff7a66';
+export const INK = '#d8f2ff';

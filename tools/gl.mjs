@@ -1210,6 +1210,27 @@ console.log('\n== мок GL: путь отрисовки ==');
   game.state.view = 'cockpit';
   ship.throttle = 0;
 
+  // Кабина (js/models/cockpit.js): рисуется только от первого лица и
+  // отдельным проходом — со своей ближней плоскостью и очисткой
+  // глубины. Проверяем не картинку, а то, что проход вообще идёт и что
+  // от третьего лица его нет: кабина в метре от глаза, и забытая
+  // очистка глубины означала бы, что её съедает ближняя плоскость сцены.
+  {
+    const { buildCockpit, makeYoke } = await import('../js/models/cockpit.js');
+    game.cockpit = buildCockpit();
+    game.yoke = makeYoke();
+    game.state.view = 'cockpit';
+    scene.render(game);
+    const inCockpit = scene.cabinDraws;
+    game.state.view = 'chase';
+    scene.render(game);
+    const inChase = scene.cabinDraws;
+    game.state.view = 'cockpit';
+    ok(inCockpit === 2 && inChase === 0,
+      `кабина: ${inCockpit} вызова от первого лица (корпус и штурвал), ` +
+      `${inChase} от третьего`);
+  }
+
   // Пылинки за бортом (js/game/flow.js): то, чем в пустоте видно
   // скорость. Проверяем не картинку, а цену и повод — один вызов
   // отрисовки на кадр на форсаже и ни одного, когда корабль стоит.

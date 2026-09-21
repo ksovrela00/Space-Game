@@ -168,6 +168,10 @@ const ctx = {
   // подписи в приборах обводятся тёмным контуром (js/ui/hud.js).
   strokeText() {},
   translate() {}, rotate() {}, scale() {},
+  // Приборы кабины кладутся на приборную доску преобразованием холста
+  // (js/ui/hud.js, onPanel). Растеризатор его не воспроизводит — ему
+  // важно, что вызовы идут и ничего не падает.
+  transform() {}, setTransform() {}, resetTransform() {},
   measureText: () => ({ width: 40 }),
   createRadialGradient: (x0, y0, r0, x1, y1, r1) => makeGrad(x0, y0, r0, x1, y1, r1),
   createLinearGradient: (x0, y0, x1, y1) => makeGrad(x0, y0, 0, x1, y1, Math.hypot(x1 - x0, y1 - y0)),

@@ -10,12 +10,15 @@ import { SLOT, STATION_D } from '../models/station.js';
 import { targetLabel } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
+import { dirToWorld } from '../core/basis.js';
+import { CY, CY_DIM, AMBER, GREEN, RED } from './theme.js';
+import {
+  engineScreen, targetScreen, scopeScreen, commsScreen, systemsScreen,
+} from './panels.js';
 
-const CY = '#4fb3e0';
-const CY_DIM = 'rgba(79,179,224,0.35)';
-const AMBER = '#ffcc66';
-const GREEN = '#78e08f';
-const RED = '#ff7a66';
+// Палитра и софт экранов кабины живут отдельно: их делят два вида —
+// угловые панели от третьего лица (здесь) и мониторы приборной доски
+// (js/ui/panels.js).
 const TAU = Math.PI * 2;
 
 const _sil = {};
@@ -30,6 +33,15 @@ const _mkAlt = { dir: { x: 0, y: 0, z: 0 } };
 const VMARK_MIN = 0.002;      // км/с
 const _vm = { x: 0, y: 0 };
 const _pt = { x: 0, y: 0 };
+// Точки под приборы на доске кабины: та же экономия, что и везде —
+// вектор на кадр это мусор в куче шестьдесят раз в секунду.
+const _pw = { x: 0, y: 0, z: 0 };
+const _p0 = { x: 0, y: 0 };
+const _p1 = { x: 0, y: 0 };
+const _p2 = { x: 0, y: 0 };
+// Размер блока в пикселях. На экране кабины он растягивается на всю
+// бухту (её размер приходит из js/models/cockpit.js), поэтому важны
+// только ПРОПОРЦИИ: бухты под них и сделаны.
 
 export const fmtDist = (km) => {
   if (!isFinite(km)) return '—';
@@ -97,7 +109,9 @@ export function drawHud(r, game) {
     return;
   }
 
-  if (state.view === 'cockpit') drawCockpitFrame(ctx, w, h);
+  // Стойки фонаря штрихами нужны только там, где кабины нет в кадре, —
+  // на запасном пути Canvas-2D. С настоящей кабиной они бы двоились.
+  if (state.view === 'cockpit' && !game.cockpit) drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam, ship);
   drawVelocityMarker(ctx, cam, ship);
   // После удара корабль какое-то время летит сам по себе — об этом надо
@@ -122,81 +136,32 @@ export function drawHud(r, game) {
   // чем не показывать вовсе: глаз всё равно мечется между ними.
   const approach = !!(game.capture && state.mode === 'flight');
 
-  // --- левая колонка: тяга, форсаж, корпус ---
+  // Приборы: от третьего лица — по углам экрана, в кабине — НА ДОСКЕ.
+  // Рисует их один и тот же код: разница только в преобразовании
+  // холста, которое ставит onPanel.
+  const slots = state.view === 'cockpit' && game.cockpit ? game.cockpit.slots : null;
   const lh = approach ? 68 : 112;
-  const px = 18, py = h - lh - 20;
-  panel(ctx, px, py, 132, lh);
-  ctx.font = '10px Consolas, monospace';
-  ctx.textAlign = 'left';
-  const back = ship.throttle < -0.001;
-  ctx.fillStyle = back ? AMBER : CY;
-  ctx.fillText(back ? 'ТЯГА НАЗАД' : 'ТЯГА', px + 10, py + 18);
-  bar(ctx, px + 10, py + 24, 112, 8, Math.abs(ship.throttle), back ? AMBER : CY);
-  if (!approach) {
-    ctx.fillStyle = CY;
-    ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
-    ctx.font = '15px Consolas, monospace';
-    ctx.fillStyle = '#d8f2ff';
-    ctx.fillText(fmtSpeed(ship.speed), px + 10, py + 70);
-    ctx.font = '10px Consolas, monospace';
-  }
-  // Форсаж: шкала разряда и зарядки. Цвет говорит о состоянии — жгут,
-  // накопилось, пусто, — потому что смотреть на длину полоски в бою
-  // некогда.
-  const boostY = approach ? py + 48 : py + 88;
-  // Цвет говорит о состоянии: жгут, заперт до перезарядки, накопилось,
-  // копится. Смотреть на длину полоски в манёвре некогда.
-  ctx.fillStyle = ship.boosting ? AMBER
-    : (ship.boostLock ? RED : (ship.boost > 0.999 ? CY : CY_DIM));
-  ctx.fillText('ФОРСАЖ', px + 10, boostY);
-  bar(ctx, px + 58, boostY - 7, 64, 7, ship.boost,
-    ship.boosting ? AMBER : (ship.boostLock ? RED : CY));
-  ctx.fillStyle = CY_DIM;
-  ctx.fillText('КОРПУС', px + 10, boostY + 14);
-  bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
-    ship.hull > 40 ? GREEN : RED);
-
-  // Шасси: строкой над панелью. У поверхности его состояние стоит в
-  // приборах подхода отдельной клеткой, и здесь оно уже лишнее.
-  if ((ship.gear.t > 0.005 || ship.gear.out) && !(approach && game.landInfo)) {
-    ctx.font = '10px Consolas, monospace';
-    ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER;
-    ctx.fillText(gearLabel(ship), px, py - 8);
-  }
-
-  // --- правая колонка: цель ---
   const th = approach ? 68 : 112;
-  const tx = w - 250, ty = h - th - 20;
-  panel(ctx, tx, ty, 232, th);
-  ctx.font = '10px Consolas, monospace';
-  ctx.fillStyle = CY_DIM;
-  ctx.fillText('ЦЕЛЬ', tx + 10, ty + 18);
-  ctx.font = '13px Consolas, monospace';
-  ctx.fillStyle = AMBER;
-  ctx.fillText(targetLabel(target).slice(0, 24), tx + 10, ty + 36);
-
-  if (game.info) {
-    ctx.font = '11px Consolas, monospace';
-    if (!approach) {
-      ctx.fillStyle = '#9fd9ff';
-      ctx.fillText('ДИСТ  ' + fmtDist(game.info.gap), tx + 10, ty + 56);
-      ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
-    }
-    const stateY = approach ? ty + 58 : ty + 90;
-    if (q && q.phase === 'calib') {
-      // Калибровка: полоса и прямая подсказка, чего привод ждёт. Без
-      // подсказки «почему не стартует» — самый частый вопрос к нему.
-      ctx.fillStyle = q.aligned ? GREEN : AMBER;
-      ctx.fillText(q.aligned ? 'КАЛИБРОВКА' : 'НАВЕДИСЬ НА ЦЕЛЬ', tx + 10, stateY);
-      bar(ctx, tx + 10, stateY + 4, 120, 6, q.calib, q.aligned ? GREEN : AMBER);
-    } else if (ship.docking) {
-      ctx.fillStyle = GREEN;
-      ctx.fillText('ДОКИНГ', tx + 10, stateY);
-    }
-    drawCompass(ctx, tx + 178, ty + th / 2, approach ? 24 : 34, ship, game.info.dir);
+  if (slots) {
+    // В кабине приборы — это СОФТ В МОНИТОРАХ (js/ui/panels.js), а не
+    // те же угловые панели, положенные на доску: у монитора есть корпус,
+    // заголовок, сетка подложки и своя вёрстка. Размер блока в пикселях
+    // выбран по пропорции бухты — растянется он на неё целиком.
+    onPanel(ctx, cam, ship, slots.left, 260, 222,
+      () => engineScreen(ctx, 260, 222, game));
+    onPanel(ctx, cam, ship, slots.right, 340, 170,
+      () => targetScreen(ctx, 340, 170, game, target));
+    onPanel(ctx, cam, ship, slots.mid, 260, 260,
+      () => scopeScreen(ctx, 260, 260, game));
+    onPanel(ctx, cam, ship, slots.upLeft, 280, 175,
+      () => commsScreen(ctx, 280, 175, game));
+    onPanel(ctx, cam, ship, slots.upRight, 280, 175,
+      () => systemsScreen(ctx, 280, 175, game));
+  } else {
+    drawThrustBlock(ctx, 18, h - lh - 20, game, approach);
+    drawTargetBlock(ctx, w - 250, h - th - 20, game, approach, target, q);
+    drawScanner(ctx, w / 2, h - 60, game);
   }
-
-  drawScanner(ctx, w / 2, h - 60, game);
 
   // На грунте — кнопка вместо экрана поверх игры.
   if (state.mode === 'landed') drawLandedPrompt(ctx, cam, game);
@@ -209,22 +174,26 @@ export function drawHud(r, game) {
   if (game.dockAssist) drawDockAssist(ctx, w / 2, 96, game.dockAssist);
 
   // --- сообщения ---
-  ctx.font = '12px Consolas, monospace';
-  ctx.textAlign = 'left';
-  let my = 26;
-  for (const m of state.messages) {
-    ctx.globalAlpha = clamp(m.t, 0, 1);
-    ctx.fillStyle = m.color || AMBER;
-    ctx.fillText(m.text, 20, my);
-    my += 16;
-    ctx.globalAlpha = 1;
-  }
-
-  if (game.statusLine) {
-    ctx.textAlign = 'center';
+  // В кабине они уже стоят на верхнем левом табло (drawCommsBlock):
+  // одно и то же в двух местах хуже, чем в одном.
+  if (!slots) {
     ctx.font = '12px Consolas, monospace';
-    ctx.fillStyle = GREEN;
-    ctx.fillText(game.statusLine, w / 2, h - 148);
+    ctx.textAlign = 'left';
+    let my = 26;
+    for (const m of state.messages) {
+      ctx.globalAlpha = clamp(m.t, 0, 1);
+      ctx.fillStyle = m.color || AMBER;
+      ctx.fillText(m.text, 20, my);
+      my += 16;
+      ctx.globalAlpha = 1;
+    }
+
+    if (game.statusLine) {
+      ctx.textAlign = 'center';
+      ctx.font = '12px Consolas, monospace';
+      ctx.fillStyle = GREEN;
+      ctx.fillText(game.statusLine, w / 2, h - 148);
+    }
   }
 
   // Вспышка выхода рисуется и здесь: к этому моменту привод уже
@@ -521,6 +490,137 @@ function drawGroundMark(ctx, cam, game) {
     }
   }
   ctx.restore();
+}
+
+/**
+ * Приборы НА ДОСКЕ: блок, нарисованный в своих пикселях, кладётся на
+ * плоскость приборной доски кабины.
+ *
+ * Зачем не просто нарисовать те же панели по углам экрана. В кокпите
+ * доска — настоящая геометрия (js/models/cockpit.js), и показания,
+ * висящие поверх неё ровным прямоугольником, сразу читаются как
+ * наклейка: голова поворачивается, доска уезжает, а цифры стоят.
+ * Здесь вместо этого берутся три точки самой доски — её центр и две
+ * оси, — проецируются на экран, и по ним строится преобразование
+ * холста. Дальше блок рисуется теми же вызовами, что и от третьего
+ * лица, но ложится на доску вместе с её наклоном и перспективой.
+ *
+ * Приближение здесь одно: внутри блока перспектива считается линейной.
+ * На куске доски в четверть метра разница меньше пикселя.
+ *
+ * @returns false, если доска ушла за спину — рисовать нечего.
+ */
+function onPanel(ctx, cam, ship, slot, bw, bh, draw) {
+  if (!slot) return false;
+  const b = ship.basis;
+  // Блок растягивается на бухту целиком: по ширине — по её ширине, по
+  // высоте — по её высоте. Пропорции блоков под бухты и подобраны.
+  const sx = slot.w / bw, sy = slot.h / bh;                      // километров доски на пиксель блока
+  const put = (kx, ky, out) => {
+    // Точка доски в осях корабля -> направление в мире -> экран.
+    const p = slot.pos, r = slot.right, u = slot.up;
+    const lx = p.x + r.x * kx + u.x * ky;
+    const ly = p.y + r.y * kx + u.y * ky;
+    const lz = p.z + r.z * kx + u.z * ky;
+    dirToWorld(b, { x: lx, y: ly, z: lz }, _pw);
+    // projectDir ждёт ЕДИНИЧНОЕ направление: у него внутри есть подпорка
+    // z снизу (0.02), рассчитанная на длину 1. Точка доски — это метры,
+    // то есть тысячные километра, и без нормировки подпорка съела бы всю
+    // перспективу, схлопнув приборы в точку у центра кадра.
+    const L = Math.hypot(_pw.x, _pw.y, _pw.z) || 1;
+    return projectDir(cam, _pw.x / L, _pw.y / L, _pw.z / L, out);
+  };
+  const c = put(0, 0, _p0);
+  if (c.back) return false;
+  const ex = put(sx * bw * 0.5, 0, _p1);
+  const ey = put(0, -sy * bh * 0.5, _p2);
+  if (ex.back || ey.back) return false;
+  const ax = (ex.x - c.x) / (bw * 0.5), ay = (ex.y - c.y) / (bw * 0.5);
+  const cx = (ey.x - c.x) / (bh * 0.5), cy = (ey.y - c.y) / (bh * 0.5);
+  // Доска почти в профиль: блок вырождается в полоску, читать нечего.
+  if (Math.abs(ax * cy - ay * cx) < 0.02) return false;
+
+  ctx.save();
+  ctx.transform(ax, ay, cx, cy, c.x - (bw * 0.5) * ax - (bh * 0.5) * cx,
+    c.y - (bw * 0.5) * ay - (bh * 0.5) * cy);
+  draw();
+  ctx.restore();
+  return true;
+}
+
+/** Левый блок: тяга, скорость, форсаж, корпус, шасси. */
+function drawThrustBlock(ctx, px, py, game, approach) {
+  const ship = game.ship;
+  const lh = approach ? 68 : 112;
+  panel(ctx, px, py, 132, lh);
+  ctx.font = '10px Consolas, monospace';
+  ctx.textAlign = 'left';
+  const back = ship.throttle < -0.001;
+  ctx.fillStyle = back ? AMBER : CY;
+  ctx.fillText(back ? 'ТЯГА НАЗАД' : 'ТЯГА', px + 10, py + 18);
+  bar(ctx, px + 10, py + 24, 112, 8, Math.abs(ship.throttle), back ? AMBER : CY);
+  if (!approach) {
+    ctx.fillStyle = CY;
+    ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
+    ctx.font = '15px Consolas, monospace';
+    ctx.fillStyle = '#d8f2ff';
+    ctx.fillText(fmtSpeed(ship.speed), px + 10, py + 70);
+    ctx.font = '10px Consolas, monospace';
+  }
+  // Форсаж: цвет говорит о состоянии — жгут, заперт до перезарядки,
+  // накопилось, копится. Смотреть на длину полоски в манёвре некогда.
+  const boostY = approach ? py + 48 : py + 88;
+  ctx.fillStyle = ship.boosting ? AMBER
+    : (ship.boostLock ? RED : (ship.boost > 0.999 ? CY : CY_DIM));
+  ctx.fillText('ФОРСАЖ', px + 10, boostY);
+  bar(ctx, px + 58, boostY - 7, 64, 7, ship.boost,
+    ship.boosting ? AMBER : (ship.boostLock ? RED : CY));
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('КОРПУС', px + 10, boostY + 14);
+  bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
+    ship.hull > 40 ? GREEN : RED);
+
+  // Шасси: строкой над панелью. У поверхности его состояние стоит в
+  // приборах подхода отдельной клеткой, и здесь оно уже лишнее.
+  if ((ship.gear.t > 0.005 || ship.gear.out) && !(approach && game.landInfo)) {
+    ctx.font = '10px Consolas, monospace';
+    ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER;
+    ctx.fillText(gearLabel(ship), px, py - 8);
+  }
+}
+
+/** Правый блок: цель, дистанция, состояние привода, компас. */
+function drawTargetBlock(ctx, tx, ty, game, approach, target, q) {
+  const ship = game.ship;
+  const th = approach ? 68 : 112;
+  panel(ctx, tx, ty, 232, th);
+  ctx.font = '10px Consolas, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText('ЦЕЛЬ', tx + 10, ty + 18);
+  ctx.font = '13px Consolas, monospace';
+  ctx.fillStyle = AMBER;
+  ctx.fillText(targetLabel(target).slice(0, 24), tx + 10, ty + 36);
+
+  if (!game.info) return;
+  ctx.font = '11px Consolas, monospace';
+  if (!approach) {
+    ctx.fillStyle = '#9fd9ff';
+    ctx.fillText('ДИСТ  ' + fmtDist(game.info.gap), tx + 10, ty + 56);
+    ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
+  }
+  const stateY = approach ? ty + 58 : ty + 90;
+  if (q && q.phase === 'calib') {
+    // Калибровка: полоса и прямая подсказка, чего привод ждёт. Без
+    // подсказки «почему не стартует» — самый частый вопрос к нему.
+    ctx.fillStyle = q.aligned ? GREEN : AMBER;
+    ctx.fillText(q.aligned ? 'КАЛИБРОВКА' : 'НАВЕДИСЬ НА ЦЕЛЬ', tx + 10, stateY);
+    bar(ctx, tx + 10, stateY + 4, 120, 6, q.calib, q.aligned ? GREEN : AMBER);
+  } else if (ship.docking) {
+    ctx.fillStyle = GREEN;
+    ctx.fillText('ДОКИНГ', tx + 10, stateY);
+  }
+  drawCompass(ctx, tx + 178, ty + th / 2, approach ? 24 : 34, ship, game.info.dir);
 }
 
 function drawCockpitFrame(ctx, w, h) {

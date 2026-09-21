@@ -30,6 +30,7 @@ import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
 import { makeFlow, updateFlow } from './game/flow.js';
+import { makeYoke, updateYoke, buildCockpit } from './models/cockpit.js';
 import {
   toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
@@ -81,9 +82,15 @@ const ship = makeShip();
 const shipMesh = buildCobra();
 const stationMesh = buildStation();
 const gearMesh = buildGear();
+// Кабина есть только в объёмном рендере: на запасном пути Canvas-2D
+// рисовать её нечем, и приборы там остаются по углам экрана, а стойки
+// фонаря — штрихами поверх кадра (js/ui/hud.js). Поэтому game.cockpit
+// значит ровно «в кадре есть настоящая кабина».
+const cockpitModel = scene ? buildCockpit() : null;
 
 const game = {
   world, ship, shipMesh, stationMesh, gearMesh,
+  cockpit: cockpitModel,   // модель кабины: геометрия, штурвал, места приборов
   renderer: hud,
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
@@ -101,6 +108,7 @@ const game = {
   entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
   dust: makeDust(),      // пыль из-под движков у самой земли
   flow: makeFlow(),      // пылинки за бортом: ими видно скорость и форсаж
+  yoke: makeYoke(),      // положение штурвала в кабине (вид от 1-го лица)
   capture: null,         // тело, в чьём гравитационном захвате корабль
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   // Камера из-за спины со своей инерцией: она догоняет корабль, а не
@@ -907,11 +915,17 @@ function updateCamOrbit(dt) {
   input.takeDrag(_drag);
   // Осматриваться можно и стоя на грунте: посадка больше не экран
   // поверх игры, а такое же состояние в кадре, как полёт.
-  const look = input.mouse.right && game.state.view === 'chase' &&
-    (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED);
+  const canLook = game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED;
+  const look = input.mouse.right && canLook;
+  // В кабине голова поворачивается на шее, а не облетает корабль:
+  // назад — только через плечо (110°), вниз — до приборной доски.
+  // Отсюда и разные пределы, а не одно «крутить как угодно».
+  const cockpit = game.state.view === 'cockpit';
+  const yawMax = cockpit ? 1.92 : Math.PI;
+  const pitchMax = cockpit ? 0.95 : 1.2;
   if (look) {
-    o.yaw = clamp(o.yaw + _drag.x * LOOK, -Math.PI, Math.PI);
-    o.pitch = clamp(o.pitch + _drag.y * LOOK, -1.2, 1.2);
+    o.yaw = clamp(o.yaw + _drag.x * LOOK, -yawMax, yawMax);
+    o.pitch = clamp(o.pitch + _drag.y * LOOK, -pitchMax, pitchMax);
   } else {
     const k = Math.min(1, dt * 6);
     o.yaw += (0 - o.yaw) * k;
@@ -1092,11 +1106,22 @@ function setupCamera() {
     cam.pos.y = ship.pos.y - _camDir.y * back + b.up.y * up + c.sway.y;
     cam.pos.z = ship.pos.z - _camDir.z * back + b.up.z * up + c.sway.z;
   } else {
-    // Кокпит: чуть впереди центра масс, на уровне фонаря.
+    // Кокпит: чуть впереди центра масс, на уровне фонаря. Это и есть
+    // глаз пилота — в той же точке стоит начало координат кабины
+    // (js/models/cockpit.js), поэтому её рисование сводится к повороту.
     const b = ship.basis;
     cam.pos.x = ship.pos.x + b.fwd.x * 0.012 + b.up.x * 0.006;
     cam.pos.y = ship.pos.y + b.fwd.y * 0.012 + b.up.y * 0.006;
     cam.pos.z = ship.pos.z + b.fwd.z * 0.012 + b.up.z * 0.006;
+    // Голова на шее: взгляд отворачивается от носа, а САМ ГЛАЗ остаётся
+    // на месте. Поэтому кабина вокруг не съезжает, а поворачивается —
+    // ровно то, ради чего она и нарисована геометрией.
+    const o = game.camOrbit;
+    if (o.yaw || o.pitch) {
+      rotAround(b.fwd, b.up, o.yaw, _camDir);
+      rotAround(_camDir, rotAround(b.right, b.up, o.yaw, _camRight), o.pitch, _camDir);
+      lookAlong(cam.basis, _camDir, b.up);
+    }
   }
 }
 
@@ -1229,6 +1254,9 @@ function frame(now) {
   // Поток за бортом — тоже картинка, и по той же причине идёт по
   // времени игрока: фаза копится в js/game/flow.js, рендер её читает.
   updateFlow(game.flow, game, dt);
+  // Штурвал ходит за ручками по времени игрока: это рука пилота, а не
+  // состояние корабля, и от шага физики зависеть не должна.
+  updateYoke(game.yoke, ship.control, dt);
   updateChase(dt);
   updateFov(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный
