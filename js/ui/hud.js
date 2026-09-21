@@ -98,7 +98,7 @@ export function drawHud(r, game) {
   }
 
   if (state.view === 'cockpit') drawCockpitFrame(ctx, w, h);
-  drawReticle(ctx, cam);
+  drawReticle(ctx, cam, ship);
   drawVelocityMarker(ctx, cam, ship);
   // После удара корабль какое-то время летит сам по себе — об этом надо
   // сказать, иначе непонятно, почему он не слушается.
@@ -539,8 +539,15 @@ function drawCockpitFrame(ctx, w, h) {
   ctx.fillRect(0, h * 0.72, w, h * 0.28);
 }
 
-function drawReticle(ctx, cam) {
-  const x = cam.cx, y = cam.cy;
+// Прицел стоит там, КУДА СМОТРИТ НОС, а не в середине кадра. Разница
+// появляется только в виде из-за спины: камера догоняет корабль с
+// запаздыванием, и на развороте нос уходит из центра — по тому, как
+// далеко он ушёл, и читается разворот.
+function drawReticle(ctx, cam, ship) {
+  const p = projectDir(cam, ship.basis.fwd.x, ship.basis.fwd.y, ship.basis.fwd.z, _pt);
+  // Нос за спиной у камеры (осмотр мышью) — прицела нет.
+  if (p.back) return;
+  const x = clamp(p.x, 24, cam.w - 24), y = clamp(p.y, 24, cam.h - 24);
   ctx.strokeStyle = 'rgba(120,220,255,0.55)';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -570,21 +577,32 @@ function drawReticle(ctx, cam) {
 export function velocityMarker(cam, vel, out = { x: 0, y: 0 }) {
   const sp = Math.hypot(vel.x, vel.y, vel.z);
   if (sp < VMARK_MIN) return null;
+  projectDir(cam, vel.x / sp, vel.y / sp, vel.z / sp, out);
+  out.speed = sp;
+  return out;
+}
+
+/**
+ * Единичное направление — в экранные координаты.
+ *
+ * Тем же считается и прицел: с камерой из-за спины, которая догоняет
+ * корабль с запаздыванием, «куда смотрит нос» перестало совпадать с
+ * серединой кадра, и рисовать прицел по центру стало враньём.
+ */
+export function projectDir(cam, dx, dy, dz, out = { x: 0, y: 0 }) {
   const b = cam.basis;
-  const dx = vel.x / sp, dy = vel.y / sp, dz = vel.z / sp;
   const rx = dx * b.right.x + dy * b.right.y + dz * b.right.z;
   const uy = dx * b.up.x + dy * b.up.y + dz * b.up.z;
   const fz = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
 
-  // Скорость назад: проецируем противоположное направление, иначе точка
-  // улетает в бесконечность и знак путается.
+  // Направление назад: проецируем противоположное, иначе точка улетает
+  // в бесконечность и знак путается.
   const back = fz <= 0;
   const s = back ? -1 : 1;
   const z = Math.max(0.02, s * fz);          // у самого горизонта не делим на ноль
   out.x = cam.cx + (s * rx / z) * cam.focal;
   out.y = cam.cy - (s * uy / z) * cam.focal;
   out.back = back;
-  out.speed = sp;
   return out;
 }
 

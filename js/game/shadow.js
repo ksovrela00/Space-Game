@@ -3,17 +3,31 @@
 // Полноценных карт теней здесь нет и не нужно: тень отбрасывает ровно
 // один предмет — сам корабль, и ровно на одну поверхность — на грунт под
 // ним. Для такого случая силуэт считается прямо: вершины корпуса
-// проецируются вдоль луча от солнца на плоскость грунта, по ним строится
-// выпуклая оболочка, а она уже НАТЯГИВАЕТСЯ НА РЕЛЬЕФ — каждая вершина
-// сетки опускается на настоящую высоту грунта под собой.
+// проецируются вдоль луча от солнца на плоскость грунта.
 //
-// Натягивать обязательно: плоским многоугольником тень на кратере
-// наполовину уходит под грунт, наполовину висит над ним, и читается как
-// отдельный предмет, проваливающийся сквозь землю.
+// Силуэт — НАСТОЯЩИЙ, по граням корпуса.
 //
-// Это дёшево (полсотни проекций и полсотни высот на кадр, без второго
-// прохода рендера и без текстуры глубины) и на безатмосферном теле
-// физически уместно: там тени резкие и чёрные, размывать их нечем.
+// Раньше здесь строилась выпуклая оболочка проекции, и от корабля
+// оставался ромб: у этого корпуса настоящий силуэт занимает лишь 56%
+// площади своей оболочки — узкий нос, ступенчатый корпус и широкие
+// крылья в корме превращались в один кусок. Теперь на грунт кладутся те
+// грани, которые отвёрнуты от солнца (их-то свет и не достаёт), и тень
+// повторяет корабль со всеми вырезами.
+//
+// Накладываться друг на друга проекции граней могут (корпус не выпуклый),
+// а смешивание у тени умножающее — двойное перекрытие давало бы чёрные
+// пятна. Поэтому грани рисуются в ТРАФАРЕТ, а умножается по нему
+// накрывающая сетка (out.cover): каждый пиксель ровно один раз.
+//
+// Высота берётся не под каждой вершиной: рельеф — самая дорогая функция
+// в игре, а вершин у силуэта тысячи. Вместо этого под тенью строится
+// сетка GRID×GRID настоящих высот, и вершины садятся на неё
+// билинейно. Она же служит и накрывающей сеткой — один расчёт на две
+// работы.
+//
+// Натягивать на рельеф обязательно: плоским многоугольником тень на
+// кратере наполовину уходит под грунт, наполовину висит над ним, и
+// читается как отдельный предмет, проваливающийся сквозь землю.
 //
 // Заодно тень — второй после кольца признак высоты: по расстоянию между
 // кораблём и его тенью сразу видно, насколько он над грунтом.
@@ -25,11 +39,11 @@ import { altitudeOf, worldPoint } from './surface.js';
 // растягивается в бесконечность, а точность луча падает.
 export const SUN_MIN = 0.12;
 export const SHADOW_MAX_ALT = 3;      // км — выше тень уже не разглядеть
-// Силуэт кладётся на рельеф сеткой: SECTORS секторов по кругу и два
-// кольца от центра. Плоским многоугольником тень нельзя — на кратере
-// она наполовину уходит под грунт, наполовину висит над ним, и читается
-// как отдельный предмет, проваливающийся сквозь землю.
-const SECTORS = 16;
+
+// Узлов сетки высот по стороне габарита тени. Семь на сторону — это 49
+// выборок рельефа на кадр, примерно столько же, сколько стоила старая
+// тень из двух колец, и вдвое точнее по шагу.
+const GRID = 7;
 
 const _up = v3();
 const _hit = v3();
@@ -37,8 +51,8 @@ const _p = v3();
 const _e1 = v3();
 const _e2 = v3();
 const _probe = v3();
+const _n = v3();
 const _alt = { dir: v3() };
-let _rad = new Float32Array(0);
 let _nodes = new Float32Array(0);
 
 /**
@@ -98,15 +112,18 @@ export function convexHull(pts, n) {
  *
  * @param zone обстановка у поверхности (js/game/landing.js → landingContext)
  * @param ship корабль
- * @param mesh модель корпуса ({verts})
+ * @param mesh модель корпуса ({verts, faces})
  * @param sunPos положение светила
- * @param out   {verts: Float32Array} — куда положить вершины (координаты
- *              ОТНОСИТЕЛЬНО корабля: так они остаются мелкими числами и
- *              не теряют точность на межпланетных расстояниях)
- * @returns число вершин многоугольника или 0, если тени нет
+ * @param out   куда положить результат. Координаты ОТНОСИТЕЛЬНО корабля:
+ *              так они остаются мелкими числами и не теряют точность на
+ *              межпланетных расстояниях.
+ *                verts/count — треугольники силуэта (в трафарет),
+ *                cover/coverCount — накрывающая сетка (её и умножают).
+ * @returns число вершин силуэта или 0, если тени нет
  */
 export function shipShadow(zone, ship, mesh, sunPos, out) {
-  if (!zone || !mesh || !mesh.verts || !mesh.verts.length) return 0;
+  out.coverCount = 0;
+  if (!zone || !mesh || !mesh.verts || !mesh.verts.length || !mesh.faces) return 0;
   if (!(zone.alt > 0) || zone.alt > SHADOW_MAX_ALT) return 0;
   const body = zone.body;
 
@@ -153,86 +170,116 @@ export function shipShadow(zone, ship, mesh, sunPos, out) {
     flat[i * 2 + 1] = qx * _e2.x + qy * _e2.y + qz * _e2.z;
   }
 
-  const hull = convexHull(flat, n);
-  if (hull.length < 3) return 0;
-
-  // Центр силуэта и его радиус по каждому направлению: дальше тень
-  // строится не как многоугольник, а как сетка, натянутая на рельеф.
-  let cx = 0, cy = 0;
-  for (const i of hull) { cx += flat[i * 2]; cy += flat[i * 2 + 1]; }
-  cx /= hull.length; cy /= hull.length;
-
-  const rad = _rad.length === SECTORS ? _rad : (_rad = new Float32Array(SECTORS));
-  for (let k = 0; k < SECTORS; k++) {
-    const a = (k / SECTORS) * Math.PI * 2;
-    const dx = Math.cos(a), dy = Math.sin(a);
-    let best = 0;
-    for (let i = 0; i < hull.length; i++) {
-      const p0 = hull[i], p1 = hull[(i + 1) % hull.length];
-      const ax = flat[p0 * 2] - cx, ay = flat[p0 * 2 + 1] - cy;
-      const bx = flat[p1 * 2] - cx, by = flat[p1 * 2 + 1] - cy;
-      // Пересечение луча (dx,dy) с отрезком a->b.
-      const den = (bx - ax) * dy - (by - ay) * dx;
-      if (Math.abs(den) < 1e-12) continue;
-      const u = (ax * dy - ay * dx) / -den;
-      if (u < 0 || u > 1) continue;
-      const px = ax + (bx - ax) * u, py = ay + (by - ay) * u;
-      const t = px * dx + py * dy;
-      if (t > best) best = t;
+  // Грани, отвёрнутые от солнца: свет их не достаёт, и на грунте лежит
+  // именно их проекция. Освещённые брать нельзя — получилась бы вторая
+  // копия того же силуэта, только вывернутая.
+  const faces = mesh.faces;
+  let tris = 0;
+  for (const f of faces) {
+    if (!f.v || f.v.length < 3) continue;
+    const nn = f.n;
+    if (nn && !f.twoSided) {
+      _n.x = b.right.x * nn.x + b.up.x * nn.y + b.fwd.x * nn.z;
+      _n.y = b.right.y * nn.x + b.up.y * nn.y + b.fwd.y * nn.z;
+      _n.z = b.right.z * nn.x + b.up.z * nn.y + b.fwd.z * nn.z;
+      if (_n.x * sun.x + _n.y * sun.y + _n.z * sun.z >= 0) continue;   // освещена
     }
-    rad[k] = best;
+    tris += f.v.length - 2;
+    f._shade = true;
   }
+  if (tris < 1) return 0;
+
+  // Габарит тени в осях плоскости — по ним же строится сетка высот.
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (const f of faces) {
+    if (!f._shade) continue;
+    for (const i of f.v) {
+      const uu = flat[i * 2], vv = flat[i * 2 + 1];
+      if (uu < u0) u0 = uu;
+      if (uu > u1) u1 = uu;
+      if (vv < v0) v0 = vv;
+      if (vv > v1) v1 = vv;
+    }
+  }
+  // Запас в полшага: накрывающая сетка обязана перекрывать силуэт
+  // целиком, иначе по краю тени остаётся светлая кайма.
+  const padU = Math.max(1e-6, (u1 - u0) * 0.08);
+  const padV = Math.max(1e-6, (v1 - v0) * 0.08);
+  u0 -= padU; u1 += padU; v0 -= padV; v1 += padV;
 
   // Подъём над грунтом. Сам рельеф рисуется плитками, и их сетка грубее
   // расчётной поверхности на десятки сантиметров — тень должна лежать
   // выше этой разницы, иначе она частями тонет в собственном грунте.
   const lift = Math.min(0.02, Math.max(0.0012, zone.alt * 0.01));
 
-  // Высота грунта считается ОДИН раз на точку сетки: центр, среднее
-  // кольцо и внешнее — всего 2·SECTORS+1 отсчёт. Треугольники потом
-  // собираются копированием. Если считать её на каждую вершину каждого
-  // треугольника, выходит вчетверо больше выборок рельефа — а это самая
-  // дорогая часть всей тени.
-  const RING = 0.55;
-  const nodes = _nodes.length === (2 * SECTORS + 1) * 3
-    ? _nodes : (_nodes = new Float32Array((2 * SECTORS + 1) * 3));
-  const node = (x, y, i) => {
-    _p.x = _hit.x + _e1.x * x + _e2.x * y;
-    _p.y = _hit.y + _e1.y * x + _e2.y * y;
-    _p.z = _hit.z + _e1.z * x + _e2.z * y;
-    const a = altitudeOf(body, _p, _alt);
-    worldPoint(body, a.dir, a.groundR + lift, _probe);
-    nodes[i * 3] = _probe.x - ship.pos.x;
-    nodes[i * 3 + 1] = _probe.y - ship.pos.y;
-    nodes[i * 3 + 2] = _probe.z - ship.pos.z;
-  };
-  node(cx, cy, 0);
-  for (let k = 0; k < SECTORS; k++) {
-    const a = (k / SECTORS) * Math.PI * 2;
-    const dx = Math.cos(a), dy = Math.sin(a);
-    node(cx + dx * rad[k] * RING, cy + dy * rad[k] * RING, 1 + k);
-    node(cx + dx * rad[k], cy + dy * rad[k], 1 + SECTORS + k);
+  // Сетка настоящих высот под тенью. Это единственное место, где
+  // считается рельеф, — GRID² выборок на кадр.
+  const nodeCount = GRID * GRID;
+  const nodes = _nodes.length === nodeCount * 3 ? _nodes : (_nodes = new Float32Array(nodeCount * 3));
+  const du = (u1 - u0) / (GRID - 1), dv = (v1 - v0) / (GRID - 1);
+  for (let j = 0; j < GRID; j++) {
+    for (let i = 0; i < GRID; i++) {
+      const uu = u0 + du * i, vv = v0 + dv * j;
+      _p.x = _hit.x + _e1.x * uu + _e2.x * vv;
+      _p.y = _hit.y + _e1.y * uu + _e2.y * vv;
+      _p.z = _hit.z + _e1.z * uu + _e2.z * vv;
+      const a = altitudeOf(body, _p, _alt);
+      worldPoint(body, a.dir, a.groundR + lift, _probe);
+      const k = (j * GRID + i) * 3;
+      nodes[k] = _probe.x - ship.pos.x;
+      nodes[k + 1] = _probe.y - ship.pos.y;
+      nodes[k + 2] = _probe.z - ship.pos.z;
+    }
   }
 
-  // Треугольники: веер от центра к среднему кольцу и полоса между кольцами.
-  // На сектор приходится девять вершин, на вершину — три числа.
-  const need = SECTORS * 9 * 3;
-  const dst = out.verts && out.verts.length >= need
-    ? out.verts : (out.verts = new Float32Array(need));
-  let o = 0;
-  const put = (i) => {
-    dst[o++] = nodes[i * 3];
-    dst[o++] = nodes[i * 3 + 1];
-    dst[o++] = nodes[i * 3 + 2];
+  // Точка плоскости -> точка на рельефе: билинейно по сетке узлов.
+  const put = (dst, o, uu, vv) => {
+    const fi = Math.min(GRID - 1.0001, Math.max(0, (uu - u0) / du));
+    const fj = Math.min(GRID - 1.0001, Math.max(0, (vv - v0) / dv));
+    const i0 = Math.floor(fi), j0 = Math.floor(fj);
+    const tu = fi - i0, tv = fj - j0;
+    const k00 = (j0 * GRID + i0) * 3, k10 = k00 + 3;
+    const k01 = k00 + GRID * 3, k11 = k01 + 3;
+    for (let c = 0; c < 3; c++) {
+      const a = nodes[k00 + c] + (nodes[k10 + c] - nodes[k00 + c]) * tu;
+      const bb = nodes[k01 + c] + (nodes[k11 + c] - nodes[k01 + c]) * tu;
+      dst[o + c] = a + (bb - a) * tv;
+    }
+    return o + 3;
   };
-  for (let k = 0; k < SECTORS; k++) {
-    const k2 = (k + 1) % SECTORS;
-    const m0 = 1 + k, m1 = 1 + k2;
-    const e0 = 1 + SECTORS + k, e1 = 1 + SECTORS + k2;
-    put(0); put(m0); put(m1);
-    put(m0); put(e0); put(e1);
-    put(m0); put(e1); put(m1);
+
+  // Силуэт: треугольники отвёрнутых граней.
+  const need = tris * 9;
+  const dstV = out.verts && out.verts.length >= need ? out.verts : (out.verts = new Float32Array(need));
+  let o = 0;
+  for (const f of faces) {
+    if (!f._shade) continue;
+    f._shade = false;
+    const idx = f.v;
+    for (let t = 2; t < idx.length; t++) {
+      for (const i of [idx[0], idx[t - 1], idx[t]]) {
+        o = put(dstV, o, flat[i * 2], flat[i * 2 + 1]);
+      }
+    }
   }
   out.count = o / 3;
+
+  // Накрывающая сетка: те же узлы, собранные в полосы. Перекрытий в ней
+  // нет по построению, поэтому умножать по трафарету можно ею.
+  const coverNeed = (GRID - 1) * (GRID - 1) * 6 * 3;
+  const dstC = out.cover && out.cover.length >= coverNeed
+    ? out.cover : (out.cover = new Float32Array(coverNeed));
+  let c = 0;
+  const node = (i, j) => {
+    const k = (j * GRID + i) * 3;
+    dstC[c++] = nodes[k]; dstC[c++] = nodes[k + 1]; dstC[c++] = nodes[k + 2];
+  };
+  for (let j = 0; j < GRID - 1; j++) {
+    for (let i = 0; i < GRID - 1; i++) {
+      node(i, j); node(i + 1, j); node(i + 1, j + 1);
+      node(i, j); node(i + 1, j + 1); node(i, j + 1);
+    }
+  }
+  out.coverCount = c / 3;
   return out.count;
 }

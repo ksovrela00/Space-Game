@@ -25,6 +25,10 @@ export const AUDIO = {
   // смысл звука: обычный полёт, включая торможение в пол, молчит, а
   // разворот на полном ходу с оттормаживанием — уже слышно. Ниже 0.75
   // скрежет сопровождал бы каждую остановку и не значил бы ничего.
+  // Громкость маневровых относительно подъёмных движков. Сопла у них
+  // мельче, тяга меньше — и слышны они как шёпот рядом с гудением, а не
+  // вровень с ним.
+  rcsLevel: 0.45,
   jerkFloor: 0.88,   // км/с²
   jerkFull: 6.0,     // здесь скрежет в полную силу
   jerkGap: 0.45,     // с — не чаще, иначе трение превращается в треск
@@ -213,14 +217,25 @@ export function updateAudio(a, game, dt) {
   // Подъёмные движки: ручка, а не результат — по ней и ход шипения.
   const lift = flying ? clamp(ship.control ? ship.control.lift : 0, -1, 1) : 0;
 
+  // Маневровые идут тем же каналом: это те же сопла, только мельче и
+  // короткими импульсами — отсюда и звонче. Берётся не то, что нажато, а
+  // то, работает ли момент (ship.rcs): на постоянном развороте в пустоте
+  // сопла молчат, и звук обязан молчать вместе с ними.
+  const r = flying && ship.rcs ? ship.rcs : null;
+  const rcs = r ? Math.min(1, (Math.abs(r.pitch) + Math.abs(r.yaw) + Math.abs(r.roll)) * 0.5) : 0;
+
   const k = AUDIO.smooth;
   m.engine = approach(m.engine, engine, k, dt);
   m.pitch = approach(m.pitch, clamp(pitch, 0, 1), k, dt);
   m.roar = approach(m.roar, clamp(roar, 0, 1), k, dt);
   m.drive = approach(m.drive, drive, k * 0.7, dt);
   m.drivePitch = approach(m.drivePitch, drive, k * 0.7, dt);
-  m.thrust = approach(m.thrust, Math.abs(lift), k * 2, dt);
-  m.thrustPitch = approach(m.thrustPitch, lift > 0 ? 1 : (lift < 0 ? 0 : 0.5), k * 2, dt);
+  // Маневровые тише подъёмных: сопла у них заметно мельче.
+  const hiss = Math.max(Math.abs(lift), rcs * AUDIO.rcsLevel);
+  const sharp = rcs * AUDIO.rcsLevel > Math.abs(lift);
+  m.thrust = approach(m.thrust, hiss, k * (sharp ? 5 : 2), dt);
+  m.thrustPitch = approach(m.thrustPitch,
+    sharp ? 1 : (lift > 0 ? 1 : (lift < 0 ? 0 : 0.5)), k * (sharp ? 5 : 2), dt);
   m.station = approach(m.station, station, k * 0.4, dt);
 
   // --- вход в прыжок и выход из него: свист привода.

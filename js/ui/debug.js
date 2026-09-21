@@ -53,6 +53,10 @@ export function drawDebug(r, game, dbg) {
         `уклон ${(game.zone.slope * 57.3).toFixed(0)}°, шасси ${s.gear.t.toFixed(2)}`
       : '',
     game.nearest ? `ближайшее ${game.nearest.body.name} зазор ${game.nearest.gap.toFixed(1)} км` : '',
+    rs.rocks
+      ? `камни: ${rs.rocks.count} в поле, нарисовано ${rs.rocks.drawn}, ` +
+        `сборок ${rs.rocks.builds}   пыль: ${rs.dust} частиц`
+      : '',
     game.entry
       ? `вход в атмосферу: нагрев ${(game.entry.heat * 100).toFixed(0)}%, ` +
         `обдув ${(game.entry.speed * 1000).toFixed(0)} м/с, плотность ` +

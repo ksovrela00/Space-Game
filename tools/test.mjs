@@ -1,7 +1,7 @@
 // Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
 import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
-import { makeBasis, rotateBasis } from '../js/core/basis.js';
-import { makeSystem, updateWorld, nearestBody, bodyPosAt } from '../js/game/world.js';
+import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
+import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
 import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
@@ -23,7 +23,9 @@ import {
 } from '../js/game/landing.js';
 import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '../js/game/gravity.js';
 import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
-import { shipShadow } from '../js/game/shadow.js';
+import { shipShadow, convexHull } from '../js/game/shadow.js';
+import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
+import { makeDust, updateDust, DUST } from '../js/game/dust.js';
 import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
   KIND_INFO, T_EQ_HOME,
@@ -1517,6 +1519,100 @@ console.log('\n== тень ==');
   ok(n > 40 && worstAlt < 0.004 && hiR - loR > 0.003,
     `тень натянута на рельеф: ${n} вершин, все в ${(worstAlt * 1000).toFixed(1)} м от грунта, ` +
     `а сам грунт под ней гуляет на ${((hiR - loR) * 1000).toFixed(1)} м`);
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: тень строилась как ВЫПУКЛАЯ ОБОЛОЧКА проекции,
+  // и от корабля оставался ромб — у этого корпуса настоящий силуэт
+  // занимает чуть больше половины площади своей оболочки. Считаем
+  // площадь тени и сравниваем с оболочкой тех же точек.
+  {
+    const P = [];
+    for (let i = 0; i < n; i++) {
+      P.push([out.verts[i * 3], out.verts[i * 3 + 1], out.verts[i * 3 + 2]]);
+    }
+    // Плоскость тени: две оси из разброса точек.
+    const c = [0, 0, 0];
+    for (const q of P) { c[0] += q[0]; c[1] += q[1]; c[2] += q[2]; }
+    for (let k = 0; k < 3; k++) c[k] /= P.length;
+    const nrm = [up.x, up.y, up.z];
+    let e1 = [1, 0, 0];
+    const d0 = e1[0] * nrm[0] + e1[1] * nrm[1] + e1[2] * nrm[2];
+    if (Math.abs(d0) > 0.9) e1 = [0, 1, 0];
+    const dd = e1[0] * nrm[0] + e1[1] * nrm[1] + e1[2] * nrm[2];
+    e1 = [e1[0] - nrm[0] * dd, e1[1] - nrm[1] * dd, e1[2] - nrm[2] * dd];
+    const l1 = Math.hypot(e1[0], e1[1], e1[2]);
+    e1 = e1.map((x) => x / l1);
+    const e2 = [
+      nrm[1] * e1[2] - nrm[2] * e1[1],
+      nrm[2] * e1[0] - nrm[0] * e1[2],
+      nrm[0] * e1[1] - nrm[1] * e1[0]];
+    const flat2 = new Float32Array(P.length * 2);
+    P.forEach((q, i) => {
+      const x = q[0] - c[0], y = q[1] - c[1], z = q[2] - c[2];
+      flat2[i * 2] = x * e1[0] + y * e1[1] + z * e1[2];
+      flat2[i * 2 + 1] = x * e2[0] + y * e2[1] + z * e2[2];
+    });
+    // Площадь самой тени — ОБЪЕДИНЕНИЕ треугольников: проекции граней
+    // местами накладываются (корпус не выпуклый), и складывать их
+    // площади нельзя. Растеризуем в сетку, как это делает экран.
+    let ru0 = Infinity, ru1 = -Infinity, rv0 = Infinity, rv1 = -Infinity;
+    for (let i = 0; i < P.length; i++) {
+      ru0 = Math.min(ru0, flat2[i * 2]); ru1 = Math.max(ru1, flat2[i * 2]);
+      rv0 = Math.min(rv0, flat2[i * 2 + 1]); rv1 = Math.max(rv1, flat2[i * 2 + 1]);
+    }
+    const RES = 128;
+    const cell = Math.max((ru1 - ru0), (rv1 - rv0)) / (RES - 1);
+    const grid = new Uint8Array(RES * RES);
+    for (let i = 0; i + 2 < P.length; i += 3) {
+      const ax = (flat2[i * 2] - ru0) / cell, ay = (flat2[i * 2 + 1] - rv0) / cell;
+      const bx = (flat2[(i + 1) * 2] - ru0) / cell, by = (flat2[(i + 1) * 2 + 1] - rv0) / cell;
+      const cx2 = (flat2[(i + 2) * 2] - ru0) / cell, cy2 = (flat2[(i + 2) * 2 + 1] - rv0) / cell;
+      const den = (bx - ax) * (cy2 - ay) - (by - ay) * (cx2 - ax);
+      if (Math.abs(den) < 1e-9) continue;
+      const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx2)));
+      const x1 = Math.min(RES - 1, Math.ceil(Math.max(ax, bx, cx2)));
+      const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy2)));
+      const y1 = Math.min(RES - 1, Math.ceil(Math.max(ay, by, cy2)));
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const w0 = ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) / den;
+          const w1 = ((x - ax) * (cy2 - ay) - (y - ay) * (cx2 - ax)) / den;
+          if (w0 >= 0 && w1 >= 0 && w0 + w1 <= 1) grid[y * RES + x] = 1;
+        }
+      }
+    }
+    let area = 0;
+    for (const g of grid) area += g;
+    area *= cell * cell;
+    const hull = convexHull(flat2, P.length);
+    let hullArea = 0;
+    for (let i = 0; i < hull.length; i++) {
+      const a = hull[i], b2 = hull[(i + 1) % hull.length];
+      hullArea += flat2[a * 2] * flat2[b2 * 2 + 1] - flat2[b2 * 2] * flat2[a * 2 + 1];
+    }
+    hullArea = Math.abs(hullArea) / 2;
+    const fill = area / hullArea;
+    ok(fill > 0.35 && fill < 0.8,
+      `тень повторяет силуэт, а не оболочку: занимает ${(fill * 100).toFixed(0)}% ` +
+      'её площади (ромб дал бы под сотню, двойное покрытие — больше)');
+
+    // Накрывающая сетка обязана перекрывать силуэт целиком: по ней идёт
+    // умножение, и не накрытый ею край остался бы светлой каймой.
+    let cu0 = Infinity, cu1 = -Infinity, cv0 = Infinity, cv1 = -Infinity;
+    for (let i = 0; i < out.coverCount; i++) {
+      const x = out.cover[i * 3] - c[0], y = out.cover[i * 3 + 1] - c[1], z = out.cover[i * 3 + 2] - c[2];
+      const uu = x * e1[0] + y * e1[1] + z * e1[2];
+      const vv = x * e2[0] + y * e2[1] + z * e2[2];
+      cu0 = Math.min(cu0, uu); cu1 = Math.max(cu1, uu);
+      cv0 = Math.min(cv0, vv); cv1 = Math.max(cv1, vv);
+    }
+    let outside = 0;
+    for (let i = 0; i < P.length; i++) {
+      const uu = flat2[i * 2], vv = flat2[i * 2 + 1];
+      if (uu < cu0 || uu > cu1 || vv < cv0 || vv > cv1) outside++;
+    }
+    ok(out.coverCount > 0 && outside === 0,
+      `накрывающая сетка (${out.coverCount} вершин) перекрывает силуэт целиком`);
+  }
 }
 
 // --- 5g. Задний ход ----------------------------------------------------------
@@ -2727,6 +2823,398 @@ console.log('\n== карта системы ==');
       'маркер не перехватывает выбор у тела, на котором лежит');
     m2.items = [{ obj: over, sx: 100, sy: 100 }];
     ok(pickAt(m2, 100, 100) === over, 'сам по себе маркер выбирается как раньше');
+  }
+}
+
+// --- 14. Масса в развороте ----------------------------------------------------
+//
+// Корабль ощущался игрушечным не потому, что вертелся быстро, а потому,
+// что трогался с места рывком: угловая скорость набиралась по экспоненте,
+// а та в первый же миг выдаёт максимальное ускорение. Теперь маневровые
+// дают постоянный МОМЕНТ, и проверяется здесь именно это.
+console.log('\n== масса в развороте ==');
+{
+  const S = 1 / 60;
+  const spin = (axis, rate, accel) => {
+    const sh = makeShip();
+    sh.control[axis] = 1;
+    const first = [];
+    let t = 0, t95 = 0, half = 0, ang = 0, t180 = 0;
+    for (let i = 0; i < 900; i++) {
+      updateShip(sh, S);
+      t += S;
+      ang += Math.abs(sh.rot[axis]) * S;
+      if (i < 3) first.push(Math.abs(sh.rot[axis]));
+      if (!half && t >= SHIP.rotRamp * 0.5) half = Math.abs(sh.rot[axis]);
+      if (!t95 && Math.abs(sh.rot[axis]) >= rate * 0.95) t95 = t;
+      if (!t180 && ang >= Math.PI) t180 = t;
+    }
+    sh.control[axis] = 0;
+    let stop = 0;
+    for (let i = 0; i < 900; i++) {
+      updateShip(sh, S);
+      stop += S;
+      if (Math.abs(sh.rot[axis]) < 1e-9) break;
+    }
+    return { t95, stop, t180, first, half, ramp: rate / accel };
+  };
+
+  const p = spin('pitch', SHIP.pitchRate, SHIP.pitchAccel);
+  const y = spin('yaw', SHIP.yawRate, SHIP.yawAccel);
+  const r = spin('roll', SHIP.rollRate, SHIP.rollAccel);
+
+  // Момент один на все оси: он же и есть «маневровые такой-то силы».
+  // Отсюда и разные времена разгона — не из подбора, а из геометрии.
+  const I = (a, b) => a * a + b * b;
+  const mp = SHIP.pitchAccel * I(HULL_HALF.y, HULL_HALF.z);
+  const my = SHIP.yawAccel * I(HULL_HALF.x, HULL_HALF.z);
+  const mr = SHIP.rollAccel * I(HULL_HALF.x, HULL_HALF.y);
+  ok(Math.abs(mp - mr) / mr < 1e-12 && Math.abs(my - mr) / mr < 1e-12,
+    `момент маневровых один на все оси: ${mp.toExponential(3)} / ${my.toExponential(3)} / ` +
+    `${mr.toExponential(3)} (км²·рад/с²)`);
+
+  // Рыскание тяжелее всех: корпус широкий и длинный, но плоский.
+  ok(y.t95 > p.t95 && SHIP.yawAccel < SHIP.pitchAccel,
+    `разгон осей из момента инерции: тангаж ${p.t95.toFixed(2)} с, рыскание ${y.t95.toFixed(2)} с, ` +
+    `крен ${r.t95.toFixed(2)} с`);
+
+  // Постоянное ускорение — это ПРЯМАЯ: на половине времени разгона
+  // угловая скорость ровно половина предельной. Экспонента дала бы 0.63
+  // и больше, и именно это чувствовалось как рывок.
+  ok(Math.abs(r.half / SHIP.rollRate - 0.5) < 0.02,
+    `угловая скорость растёт прямой: на половине разгона ${(r.half / SHIP.rollRate * 100).toFixed(0)}% ` +
+    'предела (у экспоненты было бы 63%)');
+
+  // Первый кадр не должен давать больше, чем даёт момент за кадр.
+  const step = SHIP.rollAccel * S;
+  ok(r.first[0] <= step * 1.001 && Math.abs(r.first[1] - 2 * step) < step * 0.01,
+    `в первом кадре не рывок, а ${(r.first[0] * 57.3).toFixed(2)}°/с — ровно ускорение за кадр ` +
+    `(раньше было ${(SHIP.rollRate * 7 * S * 57.3).toFixed(1)}°/с)`);
+
+  // Останов стоит столько же, сколько разгон: тот же момент в другую
+  // сторону. Несимметричность означала бы, что где-то есть «тормоз».
+  ok(Math.abs(r.stop - r.t95) < 0.1 && Math.abs(p.stop - p.t95) < 0.1,
+    `останов симметричен разгону: крен ${r.t95.toFixed(2)} / ${r.stop.toFixed(2)} с, ` +
+    `тангаж ${p.t95.toFixed(2)} / ${p.stop.toFixed(2)} с`);
+
+  // Калибровочная таблица: по ней видно поведение целиком.
+  ok(r.t180 > 1.5 && r.t180 < 4 && y.t180 > 3,
+    `разворот на 180°: тангаж ${p.t180.toFixed(2)} с, рыскание ${y.t180.toFixed(2)} с, ` +
+    `крен ${r.t180.toFixed(2)} с`);
+
+  // Маневровые видно и слышно ровно тогда, когда приложен момент.
+  // В пустоте постоянный разворот не стоит ничего, и сопла обязаны
+  // молчать — иначе это не двигатели, а подсветка.
+  {
+    const sh = makeShip();
+    sh.control.roll = 1;
+    let onSpin = 0, onHold = 0;
+    for (let i = 0; i < 120; i++) {
+      updateShip(sh, S);
+      // Разгон крена занимает rotRamp; между ним и «держим ровно»
+      // оставляем зазор в пару кадров, иначе считаем границу.
+      if (i < 40) onSpin += sh.rcs.roll !== 0 ? 1 : 0;
+      else if (i >= 48) onHold += sh.rcs.roll !== 0 ? 1 : 0;
+    }
+    sh.control.roll = 0;
+    let onStop = 0, sign = 0;
+    for (let i = 0; i < 60; i++) {
+      updateShip(sh, S);
+      if (sh.rcs.roll !== 0) { onStop++; sign = sh.rcs.roll; }
+    }
+    ok(onSpin === 40 && onHold === 0 && onStop > 20 && sign === -1,
+      `сопла работают на раскрутке (${onSpin} кадров из 40) и на остановке (${onStop}, ` +
+      `момент обратный), а на ровном вращении молчат (${onHold})`);
+
+    // Оглушённый корабль кувыркается сам — управления нет, и сопел тоже.
+    sh.stun = 1;
+    sh.control.roll = 1;
+    updateShip(sh, S);
+    ok(sh.rcs.roll === 0 && sh.rcs.pitch === 0,
+      'после удара сопла молчат: управления нет');
+  }
+}
+
+// --- 15. Камни на грунте ------------------------------------------------------
+//
+// Высота у поверхности не читалась не из-за разрешения рельефа, а из-за
+// того, что на метровом масштабе у него ничего нет: шероховатость на
+// десяти метрах — двенадцать сантиметров. Камни известного размера эту
+// дыру и закрывают.
+console.log('\n== камни на грунте ==');
+{
+  const w = makeSystem(0x1a7e);
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+  const dir = normalize(v3(0.3, 0.5, 0.81));
+  const radius = ROCKS.radiusOf(0.02);
+  const rocks = scatterRocks(moon, dir, radius);
+
+  const sizes = rocks.map((r) => r.size * 1000);
+  ok(rocks.length > 40 && rocks.length <= ROCKS.max &&
+     Math.min(...sizes) >= ROCKS.sizeMin * 1000 - 1e-9 &&
+     Math.max(...sizes) <= ROCKS.sizeMax * 1000 + 1e-9,
+    `поле ${(radius * 1000).toFixed(0)} м: ${rocks.length} камней ` +
+    `от ${Math.min(...sizes).toFixed(1)} до ${Math.max(...sizes).toFixed(1)} м`);
+
+  // Мелких заметно больше крупных — так и выглядит настоящая россыпь.
+  const small = sizes.filter((x) => x < 1.5).length;
+  const big = sizes.filter((x) => x > 2.5).length;
+  ok(small > rocks.length * 0.5 && big < rocks.length * 0.2,
+    `россыпь по большей части мелкая: ${small} камней из ${rocks.length} мельче полутора ` +
+    `метров, крупнее двух с половиной — ${big}`);
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: поле было РЕДКИМ. Шаг решётки растягивался
+  // вместе с радиусом поля (чтобы не упереться в предел числа камней), и
+  // на высоте в полсотни метров выходил один камень на сорок — в кадре
+  // их оставалось два-три, то есть камней не было видно вовсе. Плотность
+  // россыпи — свойство грунта, и от высоты зависеть не может.
+  {
+    const rows = [];
+    let worst = 0;
+    for (const alt of [0.005, 0.02, 0.05, 0.3]) {
+      const rr = ROCKS.radiusOf(alt);
+      const n = scatterRocks(moon, dir, rr).length;
+      const step = Math.sqrt(Math.PI * (rr * 1000) ** 2 / Math.max(1, n));
+      worst = Math.max(worst, step);
+      rows.push(`${(alt * 1000).toFixed(0)} м: поле ${(rr * 1000).toFixed(0)} м, ` +
+        `камень каждые ${step.toFixed(0)} м`);
+    }
+    ok(worst < 20, `плотность россыпи не зависит от высоты — ${rows.join('; ')}`);
+  }
+
+  // Всё поле в пределах своего радиуса.
+  let far = 0;
+  for (const r of rocks) {
+    const ang = Math.acos(Math.max(-1, Math.min(1, dot(r.dir, dir))));
+    if (ang * moon.radius > radius * 1.001) far++;
+  }
+  ok(far === 0, 'ни один камень не вылез за край поля');
+
+  // ГЛАВНОЕ СВОЙСТВО: расстановка привязана к телу, а не к камере.
+  // Переехали — камни в общей части остались теми же, до последнего
+  // знака. Иначе при каждом движении поле пересобиралось бы заново, и
+  // камни ползли бы по грунту.
+  {
+    const same = scatterRocks(moon, dir, radius);
+    const key = (r) => r.dir.x.toFixed(12) + ' ' + r.size.toFixed(9);
+    const repeat = rocks.map(key).join('|') === same.map(key).join('|');
+
+    // Сдвигаем центр на треть поля — ровно так, как это делает игра.
+    const side = normalize(v3(
+      dir.x + 0.00004, dir.y - 0.00002, dir.z + 0.00001));
+    const moved = scatterRocks(moon, side, radius);
+    const set = new Set(moved.map(key));
+    let common = 0, drift = 0;
+    for (const r of rocks) {
+      const ang = Math.acos(Math.max(-1, Math.min(1, dot(r.dir, side))));
+      if (ang * moon.radius > radius * 0.9) continue;     // вышел из нового поля
+      common++;
+      if (!set.has(key(r))) drift++;
+    }
+    ok(repeat && common > 10 && drift === 0,
+      `камни привязаны к телу: после переезда ${common} общих камней стоят на тех же местах`);
+  }
+
+  // Камень лежит НА грунте: низом в земле, верхом наружу. Иначе он либо
+  // парит, либо тонет — и оба случая видно сразу.
+  {
+    const geo = buildRockGeometry(moon, rocks.slice(0, 40));
+    let worstUnder = 0, best = 0;
+    for (let i = 0; i < geo.faces * 3; i++) {
+      const x = geo.positions[i * 3], y = geo.positions[i * 3 + 1], z = geo.positions[i * 3 + 2];
+      const rr = Math.hypot(x, y, z);
+      const d = normalize(v3(x / rr, y / rr, z / rr));
+      const g = groundRadius(moon, d) / moon.radius;
+      const over = (rr - g) * moon.radius * 1000;         // м над грунтом
+      worstUnder = Math.min(worstUnder, over);
+      best = Math.max(best, over);
+    }
+    // Верх камня обязан подниматься над грунтом настолько, чтобы его
+    // было видно с высоты в пару десятков метров: ради этого он тут и
+    // стоит. Низ уходит в землю тем глубже, чем шире камень и круче
+    // склон под ним, — это нормально и незаметно.
+    ok(best > 1.5 && best < ROCKS.sizeMax * 1000 * 1.5 &&
+       worstUnder > -ROCKS.sizeMax * 1000 * 2.5,
+      `камни лежат на грунте: выступают на ${best.toFixed(2)} м, ` +
+      `сидят в земле на ${(-worstUnder).toFixed(2)} м`);
+  }
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: камень без тени. С высоты его видно сверху, а
+  // сверху камень — это многоугольник: на ровном грунте он читался как
+  // пятно краски. Тень — единственное, что делает его предметом.
+  {
+    const up = normalize(v3(dir.x, dir.y, dir.z));
+    // Солнце под заданным углом к горизонту в точке поля.
+    const sunAt = (deg) => {
+      const e = Math.sin(deg * Math.PI / 180);
+      const side = normalize(v3(-up.y, up.x, 0));
+      return normalize(v3(
+        up.x * e + side.x * Math.sqrt(1 - e * e),
+        up.y * e + side.y * Math.sqrt(1 - e * e),
+        up.z * e + side.z * Math.sqrt(1 - e * e)));
+    };
+    const one = rocks.slice(0, 1);
+    const reach = (deg) => {
+      const sun = sunAt(deg);
+      const geo = buildRockGeometry(moon, one, sun);
+      // Тень — последние 24 вершины камня; меряем, насколько она уходит
+      // от него и в какую сторону.
+      let far = 0, along = 0, offGround = 0;
+      const base = 12 * 3;
+      for (let i = base; i < geo.faces * 3; i++) {
+        const x = geo.positions[i * 3], y = geo.positions[i * 3 + 1], z = geo.positions[i * 3 + 2];
+        const rr = Math.hypot(x, y, z);
+        const d2 = normalize(v3(x / rr, y / rr, z / rr));
+        offGround = Math.max(offGround,
+          Math.abs(rr - groundRadius(moon, d2) / moon.radius) * moon.radius * 1000);
+        // Смещение от центра камня по горизонтали.
+        const ang = Math.acos(Math.max(-1, Math.min(1, dot(d2, one[0].dir))));
+        far = Math.max(far, ang * moon.radius * 1000);
+        // В сторону от солнца или к нему?
+        const toSun = dot(d2, sun) - dot(one[0].dir, sun);
+        along = Math.min(along, toSun);
+      }
+      return { far, along, offGround, verts: geo.faces * 3 - base };
+    };
+
+    const low = reach(20), high = reach(70);
+    ok(low.verts === 24 && high.verts === 24 && low.far > high.far * 1.5,
+      `тень камня вытягивается с высотой солнца: ${low.far.toFixed(1)} м при 20° ` +
+      `против ${high.far.toFixed(1)} м при 70°`);
+    ok(low.along < 0 && low.offGround < 1.2,
+      `тень ложится ПРОЧЬ от солнца и на грунт (отрыв ${low.offGround.toFixed(2)} м)`);
+
+    // У самого горизонта тени нет: она растянулась бы в бесконечность.
+    const flat = buildRockGeometry(moon, one, sunAt(3));
+    ok(flat.faces * 3 === 12 * 3,
+      'у самого горизонта тень не строится: она ушла бы за край поля');
+  }
+
+  // На газовом гиганте и звезде поверхности нет — камней тоже.
+  const gas = w.planets.find((b) => b.kind === 'gas');
+  ok(scatterRocks(gas, dir, radius).length >= 0, 'у тел без рельефа поле не строится в сцене');
+}
+
+// --- 16. Пыль из-под движков --------------------------------------------------
+//
+// Второй признак близости грунта после камней: неподвижная земля о
+// расстоянии не говорит ничего, а летящая из-под сопел пыль — говорит
+// сразу. Проверяется, что она следует из мира: из тяги, из высоты и из
+// тяжести тела.
+console.log('\n== пыль из-под движков ==');
+{
+  const w = makeSystem(0x1a7e);
+  const near = (body, alt) => {
+    const dir = normalize(v3(0.3, 0.5, 0.81));
+    const sh = makeShip();
+    placeShip(sh, worldPoint(body, dir, groundRadius(body, dir) + alt, v3()), makeBasis());
+    return sh;
+  };
+  const run = (body, alt, lift, secs) => {
+    const sh = near(body, alt);
+    sh.control.lift = lift;
+    const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+    const d = makeDust();
+    let peak = 0;
+    for (let i = 0; i < Math.round(secs / STEP); i++) {
+      updateDust(d, g, STEP);
+      peak = Math.max(peak, d.list.length);
+    }
+    return { dust: d, ship: sh, zone: g.zone, peak, game: g };
+  };
+
+  const moon = w.bodies.find((b) => b.kind === 'moon');
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: пыль бралась с РУЧКИ, а не с двигателей.
+  // Корабль висит над грунтом без единого нажатия — и держат его
+  // подъёмные движки: с убранным шасси компенсатор высоты в точности
+  // гасит вес. Значит, вниз они дуют, и пыль под ними стоит.
+  const hover = run(moon, 0.01, 0, 2);
+  ok(hover.peak > 5,
+    `висящий корабль поднимает пыль сам: ${hover.peak} частиц без единого нажатия ` +
+    `(движки держат вес, на это уходит треть их хода)`);
+
+  // А вот на шасси компенсатора нет: стоит корабль на грунте — и пыли
+  // взяться неоткуда.
+  {
+    const sh = near(moon, 0.01);
+    sh.gear.out = true;
+    sh.control.lift = 0;
+    const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+    const d = makeDust();
+    let peak = 0;
+    for (let i = 0; i < Math.round(2 / STEP); i++) {
+      updateDust(d, g, STEP);
+      peak = Math.max(peak, d.list.length);
+    }
+    ok(peak === 0, 'на выпущенном шасси с выключенными движками пыли нет');
+  }
+
+  // Работают у самой земли — поднимается, но не больше предела.
+  const blow = run(moon, 0.01, 1, 2);
+  ok(blow.peak > 10 && blow.peak <= DUST.max,
+    `на полном ходу подъёмных поднялось ${blow.peak} частиц (предел ${DUST.max})`);
+
+  // Маршевые тоже метут грунт — но позади корабля, куда достаёт их струя.
+  {
+    const sh = near(moon, 0.01);
+    sh.gear.out = true;                 // компенсатор выключен: только маршевые
+    sh.throttle = 1;
+    const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+    const d = makeDust();
+    for (let i = 0; i < Math.round(1 / STEP); i++) updateDust(d, g, STEP);
+    // Точка под кораблём в тех же осях, что и пыль.
+    const fr = bodyBasis(moon, makeBasis());
+    const lp = toLocal(fr, moon.pos, sh.pos, v3());
+    const len = Math.hypot(lp.x, lp.y, lp.z);
+    const gp = v3(lp.x / len, lp.y / len, lp.z / len);
+    let far = 0;
+    for (const p of d.list) {
+      const ang = Math.acos(Math.max(-1, Math.min(1,
+        (p.x * gp.x + p.y * gp.y + p.z * gp.z) / Math.hypot(p.x, p.y, p.z))));
+      far = Math.max(far, ang * moon.radius * 1000);
+    }
+    ok(d.list.length > 5 && far > DUST.mainBack * 1000 * 0.5,
+      `маршевые метут грунт за кормой: ${d.list.length} частиц, дальняя в ` +
+      `${far.toFixed(0)} м от точки под кораблём`);
+  }
+
+  // Высоко — струя грунта не достаёт.
+  const high = run(moon, DUST.maxAlt * 1.5, 1, 2);
+  ok(high.peak === 0, `с ${(DUST.maxAlt * 1500).toFixed(0)} м пыли нет: струя не достаёт грунта`);
+
+  // Заглушили движки (сели на шасси) — осела вся.
+  {
+    const r = run(moon, 0.01, 1, 1);
+    r.ship.control.lift = 0;
+    r.ship.gear.out = true;
+    for (let i = 0; i < Math.round(DUST.fade / STEP) + 60; i++) updateDust(r.dust, r.game, STEP);
+    ok(r.dust.list.length === 0, 'после остановки движков пыль оседает вся');
+  }
+
+  // ГЛАВНОЕ: частица летит баллистически в местной тяжести. Подъём
+  // гасится тяжестью, поэтому при одной и той же тяге на луне пыль
+  // встаёт заметно выше, чем на тяжёлой планете, — и это видно глазом.
+  {
+    const apex = (body) => {
+      const sh = near(body, 0.008);
+      sh.control.lift = 1;
+      const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+      const d = makeDust();
+      let up = 0;
+      for (let i = 0; i < Math.round(DUST.fade / STEP); i++) {
+        updateDust(d, g, STEP);
+        for (const p of d.list) up = Math.max(up, Math.hypot(p.x, p.y, p.z) - p.r0);
+      }
+      return up * 1000;      // м
+    };
+    const heavy = w.planets.find((b) => b.kind === 'rock');
+    const onMoon = apex(moon);
+    const onRock = apex(heavy);
+    ok(onMoon > onRock * 1.15,
+      `подъём пыли задаёт тяжесть тела: ${onMoon.toFixed(1)} м на луне ` +
+      `(${moon.g0.toFixed(2)} м/с²) против ${onRock.toFixed(1)} м на ${heavy.name} ` +
+      `(${heavy.g0.toFixed(2)} м/с²)`);
   }
 }
 

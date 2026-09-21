@@ -266,6 +266,31 @@ await step('вид от 3-го лица (V) рисует свой корабль
   frames(5);
 });
 
+await step('камера из-за спины догоняет корабль, а не сидит на нём', () => {
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+  game.ship.throttle = 0;
+  frames(30);
+  const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1,
+    a.x * b.x + a.y * b.y + a.z * b.z)));
+  // В покое камера стоит ровно за кораблём.
+  if (ang(game.camera.basis.up, game.ship.basis.up) > 0.02) {
+    throw new Error('камера не села на место в покое');
+  }
+  // На крене «верх» камеры обязан отставать от корпуса: именно по этому
+  // отставанию корабль и читается как тяжёлый.
+  holdDown('KeyQ');
+  frames(30);
+  const lag = ang(game.camera.basis.up, game.ship.basis.up);
+  release('KeyQ');
+  if (!(lag > 0.08)) throw new Error('камера не отстаёт на крене: ' + lag.toFixed(3));
+  if (!(lag < 1.2)) throw new Error('камера отстала слишком сильно: ' + lag.toFixed(3));
+  // Перестали крутить — догнала.
+  frames(120);
+  const settled = ang(game.camera.basis.up, game.ship.basis.up);
+  if (!(settled < 0.02)) throw new Error('камера не догнала: ' + settled.toFixed(3));
+  key('KeyV'); frames(2);
+});
+
 await step('выбор цели наведением (Tab) и форсаж (Space)', () => {
   // Цель выбирается тем, что на неё наведён нос. Наводимся на планету
   // явно: «нажать Tab и посмотреть, что изменилось» теперь ничего не

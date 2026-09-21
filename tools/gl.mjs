@@ -1441,6 +1441,76 @@ console.log('\n== мок GL: путь отрисовки ==');
         `${again} плиток против ${first} на первом проходе`);
     }
 
+    // Камни у поверхности: то, по чему глаз меряет высоту. Поле должно
+    // появляться у земли, исчезать с высоты и не пересобираться на
+    // каждом кадре — иначе оно стоило бы дороже всего остального.
+    {
+      put(0.02);
+      for (let i = 0; i < 40; i++) scene.render(game);
+      const near = scene.rocks.count;
+      const nearMesh = !!scene.rocks.mesh;
+      const drawn = scene.rockDraws;
+      const builds0 = scene.rocks.builds;
+      for (let i = 0; i < 60; i++) scene.render(game);
+      const idle = scene.rocks.builds - builds0;
+      put(3);
+      for (let i = 0; i < 5; i++) scene.render(game);
+      ok(nearMesh && near > 40 && idle === 0 && !scene.rocks.mesh && drawn === 1,
+        `камни у грунта: ${near} штук в поле, нарисованы (${drawn} вызов), стоя на месте ` +
+        `не пересобираются (${idle} сборок за 60 кадров), с трёх километров поля нет`);
+    }
+
+    // ТО, ЧТО БЫЛО СЛОМАНО: игра, ЗАПУЩЕННАЯ у самой земли.
+    //
+    // При спуске с орбиты поверхность доходит до полной детализации, а
+    // при перезагрузке страницы в двухстах метрах над грунтом — нет:
+    // плитки замирали на грубом уровне, треугольники переставали
+    // расти. Разница между двумя случаями только одна — с холодного
+    // кэша у земли набор строится весь разом, и регулятор допуска
+    // успевает уйти в потолок раньше, чем набор достроится.
+    //
+    // Проверяем не «допуск такой-то», а исход: с какого уровня
+    // детализации кадр в одной и той же точке.
+    {
+      const deepestOf = (sc) => {
+        let d = 0;
+        for (const t of sc.tiles.draw) d = Math.max(d, t.level);
+        return d;
+      };
+      put(0.2);
+      let warm = 0;
+      while (warm++ < 900) {
+        scene.render(game);
+        if (scene.tiles.stats.pending === 0 && warm > 3) break;
+      }
+      const warmLevel = deepestOf(scene);
+      const warmTris = scene.tris;
+
+      const camC = new Camera();
+      camC.resize(1600, 900);
+      const cold = new GlScene(canvas, camC, new Starfield(950, 0x51ee7));
+      const e = worldPoint(moon, dirL, gr + 0.2, v3());
+      camC.pos.x = e.x; camC.pos.y = e.y; camC.pos.z = e.z;
+      camC.basis.right = { ...cam.basis.right };
+      camC.basis.up = { ...cam.basis.up };
+      camC.basis.fwd = { ...cam.basis.fwd };
+      const savedCam = game.camera;
+      game.camera = camC;
+      let cf = 0;
+      while (cf++ < 1500) {
+        cold.render(game);
+        if (cold.tiles.stats.pending === 0 && cf > 30) break;
+      }
+      const coldLevel = deepestOf(cold);
+      const coldTris = cold.tris;
+      game.camera = savedCam;
+
+      ok(coldLevel >= warmLevel - 1 && coldTris > warmTris * 0.5,
+        `запуск у самой земли доходит до той же детализации, что и спуск с орбиты: ` +
+        `уровень ${coldLevel} против ${warmLevel}, треугольников ${coldTris} против ${warmTris} ` +
+        `(допуск ×${cold.tiles.tolScale.toFixed(1)} против ×${scene.tiles.tolScale.toFixed(1)})`);
+    }
+
     // Сборка в рабочих потоках. Настоящий Worker в node недоступен, но
     // его код — обычная функция (js/gl/tileworker.js: runJob), и её
     // можно подсунуть заглушке. Тогда через пул проходит ровно тот же

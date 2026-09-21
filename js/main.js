@@ -1,7 +1,7 @@
 // Точка входа: сборка мира, игровой цикл с фиксированным шагом физики,
 // обработка глобальных клавиш и отрисовка кадра.
 
-import { v3, normalize, dot, clamp } from './core/vec3.js';
+import { v3, copy, normalize, dot, clamp } from './core/vec3.js';
 import { makeBasis, dirToWorld, lookAlong } from './core/basis.js';
 import { input } from './core/input.js';
 import { sound } from './core/sound.js';
@@ -27,6 +27,7 @@ import {
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
+import { makeDust, updateDust } from './game/dust.js';
 import {
   toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
@@ -96,8 +97,16 @@ const game = {
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
   entry: null,           // вход в атмосферу: нагрев, цвет и ось факела
   entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
+  dust: makeDust(),      // пыль из-под движков у самой земли
   capture: null,         // тело, в чьём гравитационном захвате корабль
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
+  // Камера из-за спины со своей инерцией: она догоняет корабль, а не
+  // сидит на нём намертво (см. updateChase).
+  chase: {
+    fwd: v3(0, 0, 1), up: v3(0, 1, 0),
+    acc: v3(), prevVel: v3(), sway: v3(),
+    near: 1, ready: false,
+  },
   camera,                // та же камера, что у рендера: нужна приборам и проверкам
   landInfo: null,        // показания посадочного дисплея
   statusLine: null,
@@ -911,21 +920,107 @@ function updateFov(dt) {
 // видно.
 const CHASE_BACK = 0.105, CHASE_UP = 0.026;
 
+// Камера НЕ приклеена к корпусу.
+//
+// Пока она повторяла ориентацию корабля кадр в кадр, на развороте
+// вращался мир, а корабль стоял в кадре неподвижно — ровно так выглядит
+// модель на подставке, и отсюда шло «игрушечное» ощущение. Теперь
+// камера догоняет нос с запаздыванием: корабль успевает повернуться
+// ВНУТРИ кадра, и видно, что его ворочают, а не переставляют.
+//
+// Крен догоняется вдвое медленнее поворота: у него и угловая скорость
+// самая большая, и именно на нём запаздывание читается как вес.
+const CHASE_TURN = 7.0;        // 1/с — как быстро камера догоняет нос
+const CHASE_ROLL = 3.2;        // 1/с — то же для «верха» (крен)
+// Снос от ускорения: разгоняясь, корабль уходит от камеры вперёд.
+// Коэффициент подобран по форсажу — на полной тяге отставание выходит
+// около полутора корпусов, дальше упирается в предел.
+const CHASE_SWAY = 0.012;      // км на км/с²
+const CHASE_SWAY_MAX = 0.05;   // км
+// У самой земли камеру подтягивает к корпусу: чем ближе точка съёмки к
+// кораблю, тем вернее глаз читает высоту по его размеру.
+const CHASE_LOW = 0.4;         // км — ниже этого начинается подтягивание
+const CHASE_LOW_K = 0.62;      // во сколько раз ближе она встаёт у грунта
+
+const _chaseBasis = makeBasis();
+const _acc = v3();
+
+/**
+ * Инерция камеры из-за спины. Считается по времени игрока, а не по шагам
+ * физики: это свойство съёмки, а не корабля.
+ */
+function updateChase(dt) {
+  const c = game.chase;
+  const b = ship.basis;
+  const settled = game.state.mode !== ST.FLIGHT;
+
+  // Ускорение корабля — по изменению его скорости. Отдельного «сколько
+  // дали тяги» тут не нужно: камере важно то, что произошло, а не то,
+  // что просили, и удар о грунт она обязана показать так же, как разгон.
+  if (dt > 1e-5) {
+    _acc.x = (ship.vel.x - c.prevVel.x) / dt;
+    _acc.y = (ship.vel.y - c.prevVel.y) / dt;
+    _acc.z = (ship.vel.z - c.prevVel.z) / dt;
+  }
+  copy(c.prevVel, ship.vel);
+  const ka = Math.min(1, dt * 6);
+  c.acc.x += (_acc.x - c.acc.x) * ka;
+  c.acc.y += (_acc.y - c.acc.y) * ka;
+  c.acc.z += (_acc.z - c.acc.z) * ka;
+
+  // Высота: у грунта камера ближе.
+  const alt = game.zone ? game.zone.alt : Infinity;
+  const want = alt >= CHASE_LOW ? 1
+    : CHASE_LOW_K + (1 - CHASE_LOW_K) * clamp(alt / CHASE_LOW, 0, 1);
+  c.near += (want - c.near) * Math.min(1, dt * 3);
+
+  if (!c.ready || settled || dt <= 0) {
+    // На стоянке и при перезапуске камера садится на место мгновенно:
+    // запаздывание — это про полёт, а не про то, как открылся экран.
+    copy(c.fwd, b.fwd);
+    copy(c.up, b.up);
+    c.acc.x = c.acc.y = c.acc.z = 0;
+    c.ready = true;
+  } else {
+    const kf = 1 - Math.exp(-CHASE_TURN * dt);
+    const ku = 1 - Math.exp(-CHASE_ROLL * dt);
+    c.fwd.x += (b.fwd.x - c.fwd.x) * kf;
+    c.fwd.y += (b.fwd.y - c.fwd.y) * kf;
+    c.fwd.z += (b.fwd.z - c.fwd.z) * kf;
+    c.up.x += (b.up.x - c.up.x) * ku;
+    c.up.y += (b.up.y - c.up.y) * ku;
+    c.up.z += (b.up.z - c.up.z) * ku;
+    normalize(c.fwd, c.fwd);
+    normalize(c.up, c.up);
+  }
+
+  // Снос камеры: она отстаёт от того, что разгоняется.
+  const am = Math.hypot(c.acc.x, c.acc.y, c.acc.z);
+  const k = am > 1e-9 ? -Math.min(CHASE_SWAY * am, CHASE_SWAY_MAX) / am : 0;
+  c.sway.x = c.acc.x * k;
+  c.sway.y = c.acc.y * k;
+  c.sway.z = c.acc.z * k;
+}
+
 function setupCamera() {
   const cam = camera;
   cam.basis.right = { ...ship.basis.right };
   cam.basis.up = { ...ship.basis.up };
   cam.basis.fwd = { ...ship.basis.fwd };
   if (game.state.view === 'chase') {
-    const b = ship.basis;
+    const c = game.chase;
+    // Своя ориентация камеры: она догоняет корабль, а не повторяет его.
+    lookAlong(_chaseBasis, c.fwd, c.up);
+    const b = _chaseBasis;
     const o = game.camOrbit;
     // Направление взгляда = нос корабля, повёрнутый на осмотр.
     rotAround(b.fwd, b.up, o.yaw, _camDir);
     rotAround(_camDir, rotAround(b.right, b.up, o.yaw, _camRight), o.pitch, _camDir);
     lookAlong(cam.basis, _camDir, b.up);
-    cam.pos.x = ship.pos.x - _camDir.x * CHASE_BACK + b.up.x * CHASE_UP;
-    cam.pos.y = ship.pos.y - _camDir.y * CHASE_BACK + b.up.y * CHASE_UP;
-    cam.pos.z = ship.pos.z - _camDir.z * CHASE_BACK + b.up.z * CHASE_UP;
+    const back = CHASE_BACK * c.near, up = CHASE_UP * c.near;
+    cam.pos.x = ship.pos.x - _camDir.x * back + b.up.x * up + c.sway.x;
+    cam.pos.y = ship.pos.y - _camDir.y * back + b.up.y * up + c.sway.y;
+    cam.pos.z = ship.pos.z - _camDir.z * back + b.up.z * up + c.sway.z;
   } else {
     // Кокпит: чуть впереди центра масс, на уровне фонаря.
     const b = ship.basis;
@@ -1018,6 +1113,11 @@ function render() {
   // Состояние кэша плиток: по нему в отладке видно и загрузку рельефа,
   // и то, в потоках ли она считается.
   st.tiles = scene && scene.tiles && scene.tiles.body ? scene.tiles.stats : null;
+  // Камни и пыль — по ним видно, работает ли то, чем меряется высота.
+  st.rocks = scene && scene.rocks
+    ? { count: scene.rocks.count, builds: scene.rocks.builds, drawn: scene.rockDraws || 0 }
+    : null;
+  st.dust = game.dust ? game.dust.list.length : 0;
 
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();
@@ -1052,6 +1152,10 @@ function frame(now) {
   updateMessages(game.state, dt);
   if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
   updateCamOrbit(dt);
+  // Пыль идёт по времени игрока, как и звук: это картинка, а не физика
+  // корабля, и от шага интегрирования зависеть не должна.
+  updateDust(game.dust, game, dt);
+  updateChase(dt);
   updateFov(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный
   // ускоритель множит перемещение, но не частоту кадров, и гул движков

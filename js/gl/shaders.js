@@ -439,6 +439,10 @@ in float vFragDepth;
 uniform vec3 uColor;
 uniform float uLogFC;
 uniform float uIntensity;
+// Насколько резко пятно спадает к краю. Ореолу звезды нужен мягкий
+// хвост (2.5 и больше), а комку пыли — очерченный край: это предмет, а
+// не свечение, и размытым он читается как грязь на стекле.
+uniform float uFalloff;
 
 out vec4 outColor;
 
@@ -446,8 +450,7 @@ void main() {
 ${LOG_DEPTH_FRAG}
   float r = length(vUv);
   if (r > 1.0) discard;
-  // Мягкое спадание к краю: ядро ярче, ореол уходит в ноль.
-  float a = pow(1.0 - r, 2.5) * uIntensity;
+  float a = pow(1.0 - r, uFalloff) * uIntensity;
   outColor = vec4(uColor * a, a);
 }`;
 
