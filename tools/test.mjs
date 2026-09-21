@@ -7,7 +7,7 @@ import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
 } from '../js/game/nav.js';
 import {
-  makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump,
+  makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
   corridorBlock, exitPoint, jumpTime, suggestHop, QUANTUM,
 } from '../js/game/quantum.js';
 import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality } from '../js/game/docking.js';
@@ -3342,6 +3342,87 @@ console.log('\n== шасси на грунте ==');
       `нижняя пята ближе к грунту, чем центр масс: просвет ` +
       `${(feetClearance(high, z) * 1000).toFixed(1)} м против ` +
       `${((z.alt - SHIP.gearClear) * 1000).toFixed(1)} м по центру`);
+  }
+}
+
+// --- 18. Срыв прыжка ----------------------------------------------------------
+//
+// ТО, ЧТО БЫЛО СЛОМАНО: привод на срыве просто выключался, а скорость
+// оставалась на корабле — шестьдесят тысяч километров в секунду. Погасить
+// их маршевыми (0.75 км/с²) нельзя и за сутки: корабль уносило из системы
+// навсегда. Резко обнулять тоже нельзя — это тот же телепорт наизнанку.
+console.log('\n== срыв прыжка ==');
+{
+  const w = makeSystem(0x1a7e);
+  const run = (speed, at) => {
+    const sh = makeShip();
+    const q = makeQuantum();
+    placeShip(sh, at, makeBasis());
+    const d = normalize(v3(0, 0, 1));
+    lookAlong(sh.basis, d);
+    sh.vel.x = d.x * speed; sh.vel.y = d.y * speed; sh.vel.z = d.z * speed;
+    sh.speed = speed;
+    q.phase = 'jump';
+    abortQuantum(q, sh);
+    let t = 0, path = 0, ev = null;
+    for (let i = 0; i < 60 * 60 && ev !== 'stopped'; i++) {
+      updateWorld(w, STEP);
+      const p0 = { x: sh.pos.x, y: sh.pos.y, z: sh.pos.z };
+      ev = updateQuantum(q, sh, w, STEP);
+      path += Math.hypot(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
+      t += STEP;
+    }
+    return { q, sh, t, path, ev };
+  };
+
+  const full = run(60000, v3(2.0e6, 4e5, 0));
+  ok(full.ev === 'stopped' && full.sh.speed === 0 &&
+     Math.abs(full.t - QUANTUM.rampOut) < 0.2,
+    `срыв на полном ходу гасит скорость за ${full.t.toFixed(1)} с ` +
+    `(штатный выход — ${QUANTUM.rampOut} с), пройдено ` +
+    `${(full.path / 1000).toFixed(0)} тыс. км, скорость ${full.sh.speed}`);
+
+  // Гашение идёт ПЛАВНО: за первую десятую долю секунды скорость падает
+  // на проценты, а не в ноль. Мгновенный сброс — тот же телепорт.
+  {
+    const sh = makeShip();
+    const q = makeQuantum();
+    placeShip(sh, v3(2.0e6, 4e5, 0), makeBasis());
+    const d = normalize(v3(0, 0, 1));
+    lookAlong(sh.basis, d);
+    sh.vel.z = 60000; sh.speed = 60000;
+    q.phase = 'jump';
+    abortQuantum(q, sh);
+    updateQuantum(q, sh, w, STEP);
+    const after = sh.speed;
+    ok(q.phase === 'brake' && after > 60000 * 0.95 && after < 60000,
+      `сразу после срыва корабль всё ещё идёт: ${after.toFixed(0)} км/с ` +
+      'на первом кадре, привод в фазе гашения');
+  }
+
+  // И самое главное: гашение не проносит корабль сквозь тело. Ставим
+  // корабль в лоб планете и срываем прыжок.
+  {
+    const planet = w.planets.find((p) => p.kind === 'gas');
+    const from = v3(
+      planet.pos.x, planet.pos.y, planet.pos.z - 120000);
+    const sh = makeShip();
+    const q = makeQuantum();
+    placeShip(sh, from, makeBasis());
+    const d = normalize(v3(0, 0, 1));
+    lookAlong(sh.basis, d);
+    sh.vel.z = 60000; sh.speed = 60000;
+    q.phase = 'jump';
+    abortQuantum(q, sh);
+    let ev = null, worst = Infinity;
+    for (let i = 0; i < 60 * 60 && ev !== 'stopped'; i++) {
+      updateWorld(w, STEP);
+      ev = updateQuantum(q, sh, w, STEP);
+      worst = Math.min(worst, nearestBody(w, sh.pos).gap);
+    }
+    ok(ev === 'stopped' && worst > 0,
+      `гашение не проносит корабль сквозь планету: ближе ` +
+      `${worst.toFixed(0)} км к поверхности не подошли`);
   }
 }
 

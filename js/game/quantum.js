@@ -19,7 +19,7 @@
 
 import { v3, normalize } from '../core/vec3.js';
 import { lookAlong, aimAngles } from '../core/basis.js';
-import { bodyPosAt } from './world.js';
+import { bodyPosAt, nearestBody } from './world.js';
 
 export const QUANTUM = {
   // Скорость — характеристика КОРАБЛЯ (ship.quantumSpeed), здесь только
@@ -53,7 +53,7 @@ export const QUANTUM = {
 };
 
 export const makeQuantum = () => ({
-  phase: 'idle',      // idle | calib | jump
+  phase: 'idle',      // idle | calib | jump | brake
   target: null,
   calib: 0,           // 0..1 — готовность привода
   speed: 0,           // текущая скорость прыжка, км/с
@@ -67,6 +67,9 @@ export const makeQuantum = () => ({
   // сцене: иначе картинка зависела бы от частоты кадров, а при смене
   // скорости потока фаза прыгала бы назад.
   warp: 0,
+  // Куда корабль летел в момент срыва: по ней он и гасит ход (см.
+  // abortQuantum). Хранится тут, потому что после срыва цели уже нет.
+  dir: v3(),
 });
 
 export const quantumSpeed = (ship) => (ship && ship.quantumSpeed) || QUANTUM.speed;
@@ -241,6 +244,34 @@ const _exit = v3();
 const _dir = v3();
 
 /**
+ * Срыв прыжка на ходу.
+ *
+ * ТО, ЧТО БЫЛО СЛОМАНО: привод просто выключался, а скорость оставалась
+ * на корабле — шестьдесят тысяч километров в секунду. Погасить их
+ * маршевыми (0.75 км/с²) нельзя и за сутки, и корабль уносило из
+ * системы навсегда.
+ *
+ * Резко обнулять её тоже неправильно: это тот же телепорт, только
+ * наоборот. Поэтому срыв — отдельная фаза: привод больше не ведёт
+ * корабль к цели, но гасит ход тем же темпом, что и на штатном выходе
+ * (QUANTUM.rampOut), и по дороге следит, чтобы не воткнуться в тело.
+ */
+export function abortQuantum(q, ship, reason = '') {
+  if (q.phase !== 'jump') return stopQuantum(q, reason);
+  const sp = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
+  if (sp < 1e-9) return stopQuantum(q, reason);
+  q.dir.x = ship.vel.x / sp; q.dir.y = ship.vel.y / sp; q.dir.z = ship.vel.z / sp;
+  q.speed = sp;
+  q.phase = 'brake';
+  q.target = null;
+  q.calib = 0;
+  q.dist = 0;
+  q.reason = reason;
+  q.flash = 1;
+  return 'brake';
+}
+
+/**
  * Шаг привода. Возвращает событие для главного цикла:
  * null | 'engage' | 'arrive' | 'abort'.
  *
@@ -251,6 +282,35 @@ export function updateQuantum(q, ship, world, dt) {
   if (q.flash > 0) q.flash = Math.max(0, q.flash - dt * 1.6);
   if (q.punch > 0) q.punch = Math.max(0, q.punch - dt * 2.2);
   if (q.phase === 'idle') return null;
+
+  // Гашение хода после срыва: цели уже нет, есть направление и скорость.
+  if (q.phase === 'brake') {
+    const aOut = quantumSpeed(ship) / QUANTUM.rampOut;
+    q.speed = Math.max(0, q.speed - aOut * dt);
+    // Впереди может оказаться тело: коридор проверялся под маршрут, а
+    // тормозим мы уже мимо него. Тот же кинематический предел, что и на
+    // штатном выходе, гарантирует остановку, а не таран.
+    const gap = Math.max(0, nearestBody(world, ship.pos).gap - QUANTUM.exitAlt);
+    q.speed = Math.min(q.speed, Math.sqrt(2 * aOut * gap));
+    const step = q.speed * dt;
+    ship.pos.x += q.dir.x * step;
+    ship.pos.y += q.dir.y * step;
+    ship.pos.z += q.dir.z * step;
+    ship.vel.x = q.dir.x * q.speed;
+    ship.vel.y = q.dir.y * q.speed;
+    ship.vel.z = q.dir.z * q.speed;
+    ship.speed = q.speed;
+    q.dist = 0;
+    q.warp = (q.warp + dt * (0.22 + 0.75 * (q.speed / quantumSpeed(ship)))) % 1;
+    if (q.speed <= QUANTUM.minSpeed) {
+      ship.vel.x = 0; ship.vel.y = 0; ship.vel.z = 0;
+      ship.speed = 0;
+      ship.throttle = 0;
+      stopQuantum(q, q.reason);
+      return 'stopped';
+    }
+    return null;
+  }
 
   const t = q.target;
   if (!t) { stopQuantum(q); return 'abort'; }

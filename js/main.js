@@ -18,7 +18,8 @@ import {
   makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById,
 } from './game/nav.js';
 import {
-  makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump, suggestHop, QUANTUM,
+  makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum,
+  canJump, suggestHop, QUANTUM,
 } from './game/quantum.js';
 import {
   checkStation, startDockingComputer, stopDockingComputer,
@@ -105,7 +106,7 @@ const game = {
   chase: {
     fwd: v3(0, 0, 1), up: v3(0, 1, 0),
     acc: v3(), prevVel: v3(), sway: v3(),
-    near: 1, ready: false,
+    near: 1, ready: false, wasRailed: false,
   },
   camera,                // та же камера, что у рендера: нужна приборам и проверкам
   landInfo: null,        // показания посадочного дисплея
@@ -587,14 +588,19 @@ function handleKeys(dt) {
     // от прыжка: привод просто начинает считать заново.
     const q = game.quantum;
     if (q.phase === 'calib') startCalibration(q, t);
-    else if (q.phase === 'jump') { stopQuantum(q); say(st, 'ПРЫЖОК СОРВАН', '#ff7a66'); }
+    else if (q.phase === 'jump') {
+      abortQuantum(q, ship);
+      say(st, 'ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА', '#ff7a66');
+    }
   }
 
   // B — квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
   if (input.pressed('KeyB')) {
     const q = game.quantum;
-    if (q.phase === 'jump') { stopQuantum(q); say(st, 'ПРЫЖОК СОРВАН', '#ff7a66'); }
-    else if (q.phase === 'calib') { stopQuantum(q); say(st, 'ПРИВОД ОТКЛЮЧЁН'); }
+    if (q.phase === 'jump') {
+      abortQuantum(q, ship);
+      say(st, 'ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА', '#ff7a66');
+    } else if (q.phase === 'calib') { stopQuantum(q); say(st, 'ПРИВОД ОТКЛЮЧЁН'); }
     else {
       const t = currentTarget(game.nav);
       // Коридор проверяется и здесь, до калибровки: держать прицел три
@@ -725,13 +731,16 @@ function step(dt) {
   // коридор проверен заранее, а лететь на 60 000 км/с мимо проверок
   // касания всё равно нельзя: за кадр корабль проходит тысячу километров.
   const q = game.quantum;
-  if (q.phase === 'jump') {
+  if (q.phase === 'jump' || q.phase === 'brake') {
     const ev = updateQuantum(q, ship, world, dt);
     game.stats.flownKm += ship.speed * dt;
     game.entry = null;
     game.zone = null;
     if (ev === 'arrive') {
       say(st, 'ВЫХОД ИЗ ПРЫЖКА', '#78e08f');
+      audioReset(game.audio, ship);
+    } else if (ev === 'stopped') {
+      say(st, 'ХОД ПОГАШЕН', '#78e08f');
       audioReset(game.audio, ship);
     }
     return;
@@ -894,8 +903,10 @@ const _drag = { x: 0, y: 0 };
 function updateCamOrbit(dt) {
   const o = game.camOrbit;
   input.takeDrag(_drag);
+  // Осматриваться можно и стоя на грунте: посадка больше не экран
+  // поверх игры, а такое же состояние в кадре, как полёт.
   const look = input.mouse.right && game.state.view === 'chase' &&
-    game.state.mode === ST.FLIGHT;
+    (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED);
   if (look) {
     o.yaw = clamp(o.yaw + _drag.x * LOOK, -Math.PI, Math.PI);
     o.pitch = clamp(o.pitch + _drag.y * LOOK, -1.2, 1.2);
@@ -988,19 +999,41 @@ function updateChase(dt) {
   const b = ship.basis;
   const settled = game.state.mode !== ST.FLIGHT;
 
+  // На рельсах квантового привода сноса нет вовсе.
+  //
+  // Снос — это модель камеры-преследователя с инерцией, и она про ТЯГУ
+  // корабля. В прыжке скорость задаётся профилем, и на торможении
+  // ускорение доходит до двенадцати тысяч км/с²: снос упирался в свой
+  // предел и держал камеру вплотную к кораблю все пять секунд выхода —
+  // со стороны это и выглядело как «камера уехала вперёд».
+  // «На рельсах» считается и один кадр ПОСЛЕ выхода: на самом выходе
+  // скорость падает с тысяч км/с до нуля за кадр, и разность скоростей
+  // даёт ускорение, которого не бывает. Именно этот единственный кадр и
+  // швырял камеру вперёд на пол-корпуса.
+  const onRails = !!(game.quantum && game.quantum.phase !== 'idle');
+  const railed = onRails || c.wasRailed;
+  c.wasRailed = onRails;
+  if (railed) {
+    copy(c.prevVel, ship.vel);
+    c.acc.x = c.acc.y = c.acc.z = 0;
+    c.sway.x = c.sway.y = c.sway.z = 0;
+  }
+
   // Ускорение корабля — по изменению его скорости. Отдельного «сколько
   // дали тяги» тут не нужно: камере важно то, что произошло, а не то,
   // что просили, и удар о грунт она обязана показать так же, как разгон.
-  if (dt > 1e-5) {
+  if (!railed && dt > 1e-5) {
     _acc.x = (ship.vel.x - c.prevVel.x) / dt;
     _acc.y = (ship.vel.y - c.prevVel.y) / dt;
     _acc.z = (ship.vel.z - c.prevVel.z) / dt;
   }
-  copy(c.prevVel, ship.vel);
-  const ka = Math.min(1, dt * 6);
-  c.acc.x += (_acc.x - c.acc.x) * ka;
-  c.acc.y += (_acc.y - c.acc.y) * ka;
-  c.acc.z += (_acc.z - c.acc.z) * ka;
+  if (!railed) {
+    copy(c.prevVel, ship.vel);
+    const ka = Math.min(1, dt * 6);
+    c.acc.x += (_acc.x - c.acc.x) * ka;
+    c.acc.y += (_acc.y - c.acc.y) * ka;
+    c.acc.z += (_acc.z - c.acc.z) * ka;
+  }
 
   // Высота: у грунта камера ближе.
   const alt = game.zone ? game.zone.alt : Infinity;
@@ -1029,6 +1062,7 @@ function updateChase(dt) {
   }
 
   // Снос камеры: она отстаёт от того, что разгоняется.
+  if (railed) return;
   const am = Math.hypot(c.acc.x, c.acc.y, c.acc.z);
   const k = am > 1e-9 ? -Math.min(CHASE_SWAY * am, CHASE_SWAY_MAX) / am : 0;
   c.sway.x = c.acc.x * k;

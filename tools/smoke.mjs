@@ -362,7 +362,28 @@ await step('квантовый привод (B) доводит до цели', (
     const leg = game.quantum.target;
     for (let i = 0; i < 400 && game.quantum.phase === 'calib'; i++) { aimAt(leg); frames(1); }
     if (game.quantum.phase !== 'jump') throw new Error('прыжок не начался');
-    for (let i = 0; i < 60 * 150 && game.quantum.phase === 'jump'; i++) frames(1);
+    // Смотрим из-за спины: снос камеры есть только там.
+    if (game.state.view !== 'chase') { key('KeyV'); frames(1); }
+    // ТО, ЧТО БЫЛО СЛОМАНО: на торможении привода камера уезжала вперёд.
+    // Снос камеры — модель преследователя с инерцией, и он про ТЯГУ; в
+    // прыжке ускорение доходит до двенадцати тысяч км/с², снос упирался
+    // в предел и держал камеру вплотную к кораблю весь выход.
+    // Меряем на ТОРМОЖЕНИИ — там ускорение и доходило до предела.
+    // Остаток пути меньше тормозного (150 тыс. км) означает, что привод
+    // уже гасит ход.
+    let camFar = 0, camNear = 1e9;
+    for (let i = 0; i < 60 * 150 && game.quantum.phase === 'jump'; i++) {
+      frames(1);
+      if (game.quantum.dist > 150000) continue;
+      const p = game.camera.pos, sp = game.ship.pos;
+      const d = Math.hypot(p.x - sp.x, p.y - sp.y, p.z - sp.z);
+      camFar = Math.max(camFar, d); camNear = Math.min(camNear, d);
+    }
+    if (camNear < 0.09 || camFar > 0.13) {
+      throw new Error('камера гуляет в прыжке: от ' + (camNear * 1000).toFixed(0) +
+        ' до ' + (camFar * 1000).toFixed(0) + ' м вместо ~108');
+    }
+    key('KeyV'); frames(1);                 // обратно в кокпит
     if (game.quantum.phase !== 'idle') throw new Error('прыжок не закончился');
     if (leg === target) arrived = true;
   }
@@ -779,6 +800,22 @@ await step('стоянка на грунте: кнопка вместо экра
   release('Space'); frames(3);
   if (game.landHold !== 0) throw new Error('отсчёт не сбросился: ' + game.landHold);
   if (game.state.mode !== 'landed') throw new Error('режим ' + game.state.mode);
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: на грунте правая кнопка мыши не вертела
+  // камеру — осмотр был разрешён только в полёте. Стоянка теперь такое
+  // же состояние в кадре, и смотреть по сторонам на ней можно.
+  {
+    if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+    const yaw0 = game.camOrbit.yaw;
+    mouse('mousedown');
+    mouse('mousemove', { movementX: 150, movementY: 20 });
+    frames(2);
+    const turned = game.camOrbit.yaw - yaw0;
+    mouse('mouseup');
+    if (!(turned > 0.2)) throw new Error('на стоянке камера не вертится: ' + turned.toFixed(3));
+    frames(90);
+    if (Math.abs(game.camOrbit.yaw) > 0.02) throw new Error('камера не вернулась на место');
+  }
 
   // Полное удержание — отрыв. Держим ровно до смены режима: после него
   // Space уже означает форсаж, и лишние секунды удержания тут ни к чему.
