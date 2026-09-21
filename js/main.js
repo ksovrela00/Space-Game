@@ -29,6 +29,7 @@ import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.j
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
+import { makeFlow, updateFlow } from './game/flow.js';
 import {
   toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
@@ -99,6 +100,7 @@ const game = {
   entry: null,           // вход в атмосферу: нагрев, цвет и ось факела
   entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
   dust: makeDust(),      // пыль из-под движков у самой земли
+  flow: makeFlow(),      // пылинки за бортом: ими видно скорость и форсаж
   capture: null,         // тело, в чьём гравитационном захвате корабль
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   // Камера из-за спины со своей инерцией: она догоняет корабль, а не
@@ -1224,6 +1226,9 @@ function frame(now) {
   // Пыль идёт по времени игрока, как и звук: это картинка, а не физика
   // корабля, и от шага интегрирования зависеть не должна.
   updateDust(game.dust, game, dt);
+  // Поток за бортом — тоже картинка, и по той же причине идёт по
+  // времени игрока: фаза копится в js/game/flow.js, рендер её читает.
+  updateFlow(game.flow, game, dt);
   updateChase(dt);
   updateFov(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный

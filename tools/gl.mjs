@@ -1169,9 +1169,9 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 10,
-    `собрано программ: ${state.programs} (меш, звёзды, полосы, тоннель, ореол, атмосфера, кольца, ` +
-    'плазма входа, тень, запекание)');
+  ok(state.programs === 11,
+    `собрано программ: ${state.programs} (меш, звёзды, полосы, тоннель, пылинки, ореол, атмосфера, ` +
+    'кольца, плазма входа, тень, запекание)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -1209,6 +1209,30 @@ console.log('\n== мок GL: путь отрисовки ==');
   ok(d2 >= d1, `вид от 3-го лица: ${d2} вызовов (свой корабль и выхлоп)`);
   game.state.view = 'cockpit';
   ship.throttle = 0;
+
+  // Пылинки за бортом (js/game/flow.js): то, чем в пустоте видно
+  // скорость. Проверяем не картинку, а цену и повод — один вызов
+  // отрисовки на кадр на форсаже и ни одного, когда корабль стоит.
+  // Вся траектория считается в шейдере, буфер статический, поэтому
+  // дороже этого одного вызова поток не стоит ничего.
+  {
+    const { makeFlow, updateFlow, FLOW } = await import('../js/game/flow.js');
+    const { SHIP } = await import('../js/game/ship.js');
+    game.flow = makeFlow();
+    ship.vel.x = 0; ship.vel.y = 0; ship.vel.z = 0;
+    updateFlow(game.flow, game, 1 / 60);
+    scene.render(game);
+    const still = scene.moteDraws;
+    ship.vel.x = SHIP.maxSpeed * SHIP.boostMax;
+    for (let i = 0; i < 4; i++) updateFlow(game.flow, game, 1 / 60);
+    scene.render(game);
+    const fast = scene.moteDraws;
+    ok(still === 0 && fast === 1 && state.uni.uBox === FLOW.box,
+      `пылинки за бортом: ${fast} вызов отрисовки на форсаже и ${still} на месте, ` +
+      `решётка ${FLOW.box} км дошла до шейдера`);
+    ship.vel.x = 0;
+    game.flow = null;
+  }
 
   // Подлёт к планете: уровень LOD должен расти.
   const planet = world.home;

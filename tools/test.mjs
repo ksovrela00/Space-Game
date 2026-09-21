@@ -28,6 +28,7 @@ import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
+import { makeFlow, updateFlow, FLOW } from '../js/game/flow.js';
 import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
   KIND_INFO, T_EQ_HOME,
@@ -3423,6 +3424,97 @@ console.log('\n== срыв прыжка ==');
     ok(ev === 'stopped' && worst > 0,
       `гашение не проносит корабль сквозь планету: ближе ` +
       `${worst.toFixed(0)} км к поверхности не подошли`);
+  }
+}
+
+console.log('\n== пылинки за бортом ==');
+{
+  // Поток за бортом — единственное, чем в пустоте видно скорость. Он
+  // обязан следовать из движения корабля, а не из нажатой клавиши:
+  // проверяем именно это, а не «эффект включился».
+  const fly = (speed, secs = 1, dt = STEP) => {
+    const sh = makeShip();
+    sh.vel.x = speed;                       // курс по оси X, чтобы было видно
+    const f = makeFlow();
+    const g = { ship: sh, quantum: null };
+    for (let i = 0; i < Math.round(secs / dt); i++) updateFlow(f, g, dt);
+    return { f, sh, g };
+  };
+  const streakLen = (f) => Math.hypot(f.streak.x, f.streak.y, f.streak.z);
+
+  // Стоит корабль — смазу взяться неоткуда, и потока нет вовсе.
+  {
+    const r = fly(0);
+    ok(r.f.power === 0 && streakLen(r.f) === 0,
+      'на месте потока нет: пылинки неподвижны, смазывать нечего');
+  }
+
+  // ЧЕГО ПРОСИЛИ: без форсажа пылинки еле заметны, с ним — стена полос.
+  // Разница берётся не из флага, а из того, что перевалить за обычный
+  // предел скорости можно только форсажем.
+  {
+    const calm = fly(SHIP.maxSpeed).f;
+    const burn = fly(SHIP.maxSpeed * SHIP.boostMax).f;
+    ok(calm.power <= FLOW.calm + 1e-9 && burn.power > calm.power * 8,
+      `без форсажа поток еле виден: яркость ${calm.power.toFixed(2)} против ` +
+      `${burn.power.toFixed(2)} на полном форсаже (в ${(burn.power / calm.power).toFixed(0)} раз)`);
+  }
+
+  // Длина черты — это смаз за экспозицию, а не настройка: во сколько
+  // раз выше скорость, во столько же длиннее полоса.
+  {
+    const calm = streakLen(fly(SHIP.maxSpeed).f);
+    const burn = streakLen(fly(SHIP.maxSpeed * SHIP.boostMax).f);
+    ok(Math.abs(calm - SHIP.maxSpeed * FLOW.smear) < 1e-9 &&
+       Math.abs(burn / calm - SHIP.boostMax) < 1e-6,
+      `черта — смаз за ${(FLOW.smear * 1000).toFixed(0)} мс: ${(calm * 1000).toFixed(0)} м ` +
+      `обычным ходом и ${(burn * 1000).toFixed(0)} м на форсаже (ровно в ${SHIP.boostMax} раза)`);
+  }
+
+  // Решётку двигает пройденный путь, а не число кадров: на любой
+  // частоте за ту же секунду поток уходит на то же место.
+  {
+    const a = fly(SHIP.maxSpeed, 1, 1 / 12).f;
+    const b = fly(SHIP.maxSpeed, 1, 1 / 240).f;
+    const d = Math.abs(a.ofs.x - b.ofs.x);
+    ok(d < 1e-9,
+      `сдвиг решётки не зависит от частоты кадров: 12 и 240 Гц дают одно и то же ` +
+      `(расхождение ${d.toExponential(1)} ячейки)`);
+  }
+
+  // ТО, ЧТО СЛОМАЛОСЬ БЫ ПРИ СЧЁТЕ ПО МИРУ: в гравитационном захвате
+  // корабль переносится вместе с планетой и за секунду проходит по
+  // орбите десятки километров. Считай мы путь по мировым координатам —
+  // над неподвижной точкой грунта мимо неслась бы метель.
+  {
+    const r = fly(0, 1);
+    r.sh.pos.x += 50;              // перенесли вместе с телом, своей скорости нет
+    updateFlow(r.f, r.g, STEP);
+    ok(r.f.ofs.x === 0 && r.f.power === 0,
+      'перенос вместе с планетой поток не двигает: считается собственная скорость');
+  }
+
+  // На рельсах привода скорость измеряется десятками тысяч км/с. Если
+  // пустить картинку по ней, за кадр решётка проскочит сотни ячеек и
+  // вместо потока будет рябь. Упираем в предел корабля.
+  {
+    const r = fly(60000, 0.5);
+    const naive = 60000 * STEP / FLOW.box;           // было бы, считай по скорости
+    const real = SHIP.maxSpeed * SHIP.boostMax * STEP / FLOW.box;
+    ok(streakLen(r.f) <= FLOW.streakMax + 1e-9 && real < 0.05 && naive > 100,
+      `на 60000 км/с поток не рассыпается: черта ${(streakLen(r.f) * 1000).toFixed(0)} м, ` +
+      `решётка идёт на ${real.toFixed(3)} ячейки за кадр вместо ${naive.toFixed(0)}`);
+  }
+
+  // В самом прыжке поток свой, от привода (js/gl/scene.js): два потока
+  // в одном кадре — каша.
+  {
+    const sh = makeShip();
+    sh.vel.x = SHIP.maxSpeed;
+    const f = makeFlow();
+    updateFlow(f, { ship: sh, quantum: { phase: 'jump' } }, STEP);
+    ok(f.power === 0 && streakLen(f) === 0,
+      'в прыжке своего потока нет: там работает поток привода');
   }
 }
 

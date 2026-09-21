@@ -190,6 +190,36 @@ export function buildWarpMesh(gl, locs, count, rng, rMin = 0.06, rMax = 1.35) {
   return new GlMesh(gl, vao, count * 2, gl.LINES, null);
 }
 
+/**
+ * Пылинки за бортом: по две вершины на пылинку (она сама и место, где
+ * она была экспозицию назад). В атрибут кладётся только её место
+ * ВНУТРИ ячейки решётки — всё остальное считает вершинный шейдер
+ * (см. MOTE_VS).
+ *
+ * Буфер строится один раз на запуск и больше не трогается: на кадр
+ * приходится один вызов отрисовки и три числа сдвига решётки. Процессор
+ * тут не участвует вовсе — иначе на каждую пылинку пришлось бы вести
+ * запись, а их сотни.
+ */
+export function buildMoteMesh(gl, locs, count, rng) {
+  const cell = new Float32Array(count * 6);
+  const t = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    const x = rng.range(0, 1), y = rng.range(0, 1), z = rng.range(0, 1);
+    for (let k = 0; k < 2; k++) {
+      const o = i * 2 + k;
+      cell[o * 3] = x; cell[o * 3 + 1] = y; cell[o * 3 + 2] = z;
+      t[o] = k;
+    }
+  }
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  attrib(gl, locs.aCell, arrayBuffer(gl, cell), 3);
+  attrib(gl, locs.aT, arrayBuffer(gl, t), 1);
+  gl.bindVertexArray(null);
+  return new GlMesh(gl, vao, count * 2, gl.LINES, null);
+}
+
 /** Звёзды: облако точек с направлением и цветом. */
 export function buildPointsMesh(gl, locs, dirs, colors) {
   const vao = gl.createVertexArray();

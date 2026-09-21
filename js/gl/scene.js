@@ -14,7 +14,7 @@ import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
-  PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS,
+  PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
 } from './shaders.js';
 import { detailUniforms, tileDetailUniforms } from './detail.js';
 import { terrainOf } from './terrain.js';
@@ -27,7 +27,7 @@ import { shipShadow } from '../game/shadow.js';
 import { localDir, altitudeOf } from '../game/surface.js';
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh, buildPlumeMesh,
-  buildDynamicMesh, buildWarpMesh,
+  buildDynamicMesh, buildWarpMesh, buildMoteMesh,
 } from './mesh.js';
 import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
@@ -37,6 +37,7 @@ import { RockField } from './rocks.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
+import { FLOW } from '../game/flow.js';
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
 const GLOW_FALLOFF = 2.5;
@@ -58,6 +59,15 @@ const WARP_Z0 = 5;
 // летит, и один и тот же интервал времени даёт там короткий штрих, а
 // тут длинную черту.
 const WARP_TAIL = 0.11;
+// Прыжковый поток отдаёт в синеву, пылинки за бортом — почти белые:
+// они просто освещены солнцем системы.
+const WARP_COLOR = new Float32Array([0.82, 0.92, 1.0]);
+const MOTE_COLOR = new Float32Array([0.88, 0.91, 0.98]);
+// Сколько пылинок стоит в ячейке решётки (js/game/flow.js, FLOW.box).
+// Четыре сотни на два километра — это крошка на каждые триста метров:
+// в кадре десятки черт. Считать их нечем и незачем: буфер статический,
+// на кадр приходится один вызов отрисовки.
+const MOTE_COUNT = 400;
 // Единичный базис: тень уже посчитана в мировых осях, поворачивать её
 // нечем и незачем.
 const IDENTITY_BASIS = {
@@ -126,6 +136,7 @@ export class GlScene {
     this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
     this.pWarp = buildProgram(gl, 'warp', WARP_VS, WARP_FS);
     this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
+    this.pMote = buildProgram(gl, 'mote', MOTE_VS, MOTE_FS);
 
     this.meshLocs = {
       aPos: this.pMesh.attrib('aPos'),
@@ -169,8 +180,21 @@ export class GlScene {
       // Считаются в МИРОВЫХ осях, чтобы поток не закручивался, когда
       // игрок вертит камерой.
       aw: { x: 0, y: 0, z: 1 }, e1: { x: 1, y: 0, z: 0 }, e2: { x: 0, y: 1, z: 0 },
-      phase: 0,
+      phase: 0, tail: 0,
     };
+    // Пылинки за бортом (js/game/flow.js). В отличие от прыжкового
+    // потока это НАСТОЯЩИЕ точки в пространстве, с расстоянием и
+    // глубиной: их закрывает собой планета и корпус корабля, и видны
+    // они со всех сторон, а не только по курсу.
+    this.motes = buildMoteMesh(gl, {
+      aCell: this.pMote.attrib('aCell'),
+      aT: this.pMote.attrib('aT'),
+    }, MOTE_COUNT, makeRng(0x3e11));
+    // Постоянные буферы под их униформы: вектор на кадр — это мусор в
+    // куче каждые шестнадцать миллисекунд.
+    this.moteRel = new Float32Array(3);
+    this.moteOfs = new Float32Array(3);
+    this.moteStreak = new Float32Array(3);
     this.blankTex = createBlankTexture(gl);
     this.patch = new SurfacePatch(gl, this.meshLocs);
     // Камни у самой поверхности: предметы известного размера, по которым
@@ -323,6 +347,8 @@ export class GlScene {
     this.tris = 0;
     this.draws = 0;
     this.rockDraws = 0;
+    this.streamDraws = 0;
+    this.moteDraws = 0;
 
     const aspect = this.canvas.width / this.canvas.height;
     perspective(cam.fov, aspect, NEAR, FAR, this.proj);
@@ -355,6 +381,7 @@ export class GlScene {
     this.drawStars();
     this.drawOpaque(game, world, sunPos);
     this.drawTransparent(game, world, sunPos);
+    this.drawMotes(game);
     this.drawTunnel();
 
     gl.depthMask(true);
@@ -382,25 +409,9 @@ export class GlScene {
     // и так же честно растаять на торможении.
     j.power = Math.min(1, Math.pow(Math.max(0, q.speed) / top, 0.35));
 
-    const v = ship.vel;
-    const L = Math.hypot(v.x, v.y, v.z);
-    if (L < 1e-9) { j.power = 0; return; }
+    if (this.streamAxes(ship.vel, j) <= 0) { j.power = 0; return; }
     const b = this.camera.basis;
-    const dx = v.x / L, dy = v.y / L, dz = v.z / L;
-
-    // Мировые оси потока. Перпендикуляры строятся от той же опорной
-    // оси, что и всегда, поэтому пока корабль летит прямо, они стоят
-    // на месте — поток не закручивается сам по себе.
-    j.aw.x = dx; j.aw.y = dy; j.aw.z = dz;
-    const refY = Math.abs(dy) < 0.9;
-    const rx = refY ? 0 : 1, ry = refY ? 1 : 0, rz = 0;
-    let ex = dy * rz - dz * ry, ey = dz * rx - dx * rz, ez = dx * ry - dy * rx;
-    const el = Math.hypot(ex, ey, ez) || 1;
-    ex /= el; ey /= el; ez /= el;
-    j.e1.x = ex; j.e1.y = ey; j.e1.z = ez;
-    j.e2.x = dy * ez - dz * ey;
-    j.e2.y = dz * ex - dx * ez;
-    j.e2.z = dx * ey - dy * ex;
+    const dx = j.aw.x, dy = j.aw.y, dz = j.aw.z;
     // Фаза потока — из состояния привода: она копится в шаге физики,
     // и картинка не зависит от того, с какой частотой идут кадры.
     j.phase = q.warp || 0;
@@ -420,6 +431,108 @@ export class GlScene {
       j.cx = 0; j.cy = 0;
       j.power *= 0.25;
     }
+  }
+
+  /**
+   * Мировые оси потока от вектора движения: сама ось и два
+   * перпендикуляра к ней. Считаются в МИРОВЫХ осях, чтобы поток не
+   * закручивался, когда игрок вертит камерой, а перпендикуляры
+   * строятся от одной и той же опорной оси — пока корабль летит
+   * прямо, они стоят на месте, и поток не вращается сам по себе.
+   *
+   * Возвращает длину вектора: нулевая скорость — потока нет.
+   */
+  streamAxes(v, out) {
+    const L = Math.hypot(v.x, v.y, v.z);
+    if (!(L > 1e-9)) return 0;
+    const dx = v.x / L, dy = v.y / L, dz = v.z / L;
+    out.aw.x = dx; out.aw.y = dy; out.aw.z = dz;
+    const refY = Math.abs(dy) < 0.9;
+    const rx = refY ? 0 : 1, ry = refY ? 1 : 0, rz = 0;
+    let ex = dy * rz - dz * ry, ey = dz * rx - dx * rz, ez = dx * ry - dy * rx;
+    const el = Math.hypot(ex, ey, ez) || 1;
+    ex /= el; ey /= el; ez /= el;
+    out.e1.x = ex; out.e1.y = ey; out.e1.z = ez;
+    out.e2.x = dy * ez - dz * ey;
+    out.e2.y = dz * ex - dx * ez;
+    out.e2.z = dx * ey - dy * ex;
+    return L;
+  }
+
+  /**
+   * Один проход потока частиц: и прыжковый, и обычный рисуются одной
+   * программой и одним мешем — разница только в темпе, длине черты и
+   * яркости (см. WARP_VS).
+   */
+  drawStream(st, color) {
+    const gl = this.gl;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    const prog = this.pWarp;
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniformMatrix3fv(prog.loc('uView'), false, this.viewMat3);
+    gl.uniform3fv(prog.loc('uAxis'), new Float32Array([st.aw.x, st.aw.y, st.aw.z]));
+    gl.uniform3fv(prog.loc('uE1'), new Float32Array([st.e1.x, st.e1.y, st.e1.z]));
+    gl.uniform3fv(prog.loc('uE2'), new Float32Array([st.e2.x, st.e2.y, st.e2.z]));
+    gl.uniform1f(prog.loc('uPhase'), st.phase);
+    gl.uniform1f(prog.loc('uTail'), st.tail);
+    gl.uniform1f(prog.loc('uZ0'), WARP_Z0);
+    gl.uniform1f(prog.loc('uPower'), st.power);
+    gl.uniform3fv(prog.loc('uColor'), color);
+    this.warp.draw();
+    this.draws++;
+    this.streamDraws++;
+    gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Пылинки за бортом: один вызов отрисовки на кадр.
+   *
+   * Рисуются ПОСЛЕ непрозрачного прохода и с честной глубиной, но без
+   * записи в буфер: пылинка перед планетой её закрывает, пылинка за
+   * планетой — не видна. Прежний, проекционный поток этого не умел
+   * вовсе: у его частиц не было расстояния, и рядом с планетой они
+   * оказывались за ней.
+   *
+   * Вся траектория считается в вершинном шейдере (MOTE_VS). На
+   * процессоре за кадр — три числа сдвига решётки и вектор смаза.
+   */
+  drawMotes(game) {
+    const f = game.flow;
+    if (!f || !(f.power > 0.004) || !game.ship) return;
+    const gl = this.gl;
+    const prog = this.pMote;
+    const cam = this.camera;
+    prog.use();
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.depthMask(false);
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniformMatrix3fv(prog.loc('uView'), false, this.viewMat3);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform1f(prog.loc('uBox'), FLOW.box);
+    // Решётка стоит вокруг КОРАБЛЯ, а камера отнесена от него на
+    // длину троса: в виде от третьего лица разница метров сто, и без
+    // неё пылинки сидели бы не там, где летит корабль.
+    const sp = game.ship.pos;
+    this.moteRel[0] = sp.x - cam.pos.x;
+    this.moteRel[1] = sp.y - cam.pos.y;
+    this.moteRel[2] = sp.z - cam.pos.z;
+    this.moteOfs[0] = f.ofs.x; this.moteOfs[1] = f.ofs.y; this.moteOfs[2] = f.ofs.z;
+    this.moteStreak[0] = f.streak.x;
+    this.moteStreak[1] = f.streak.y;
+    this.moteStreak[2] = f.streak.z;
+    gl.uniform3fv(prog.loc('uShipRel'), this.moteRel);
+    gl.uniform3fv(prog.loc('uOfs'), this.moteOfs);
+    gl.uniform3fv(prog.loc('uStreak'), this.moteStreak);
+    gl.uniform3fv(prog.loc('uColor'), MOTE_COLOR);
+    gl.uniform1f(prog.loc('uPower'), f.power);
+    this.motes.draw();
+    this.draws++;
+    this.moteDraws++;
+    gl.disable(gl.BLEND);
+    gl.depthMask(true);
   }
 
   /** Полноэкранный тоннель поверх всего. */
@@ -565,23 +678,11 @@ export class GlScene {
 
     const j = this.jump;
     if (j.power > 0.02) {
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-      const prog = this.pWarp;
-      prog.use();
-      gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
-      gl.uniformMatrix3fv(prog.loc('uView'), false, m);
-      gl.uniform3fv(prog.loc('uAxis'), new Float32Array([j.aw.x, j.aw.y, j.aw.z]));
-      gl.uniform3fv(prog.loc('uE1'), new Float32Array([j.e1.x, j.e1.y, j.e1.z]));
-      gl.uniform3fv(prog.loc('uE2'), new Float32Array([j.e2.x, j.e2.y, j.e2.z]));
-      gl.uniform1f(prog.loc('uPhase'), j.phase);
-      gl.uniform1f(prog.loc('uTail'), WARP_TAIL * (0.25 + 0.75 * j.power));
-      gl.uniform1f(prog.loc('uZ0'), WARP_Z0);
-      gl.uniform1f(prog.loc('uPower'), 0.25 + 0.75 * j.power);
-      gl.uniform3fv(prog.loc('uColor'), new Float32Array([0.82, 0.92, 1.0]));
-      this.warp.draw();
-      this.draws++;
-      gl.disable(gl.BLEND);
+      j.tail = WARP_TAIL * (0.25 + 0.75 * j.power);
+      const saved = j.power;
+      j.power = 0.25 + 0.75 * saved;
+      this.drawStream(j, WARP_COLOR);
+      j.power = saved;
     }
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);

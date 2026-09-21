@@ -144,6 +144,7 @@ const mod = await import('../js/main.js');
 const game = globalThis.window.GAME;   // main.js пишет в window, а не в globalThis
 const { lookAlong } = await import('../js/core/basis.js');
 const { exitPoint } = await import('../js/game/quantum.js');
+const { SHIP } = await import('../js/game/ship.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -330,6 +331,50 @@ await step('выбор цели наведением (Tab) и форсаж (Spac
   // постоянное состояние.
   if (Math.abs(game.camera.fov - fov0) > 0.005) {
     throw new Error('поле зрения не вернулось: ' + (game.camera.fov * 57.3).toFixed(1) + '°');
+  }
+});
+
+await step('поток за бортом: еле виден обычным ходом, полосы на форсаже', () => {
+  // Пылинки за бортом (js/game/flow.js) — то, чем в пустоте видно
+  // скорость. Здесь проверяется проводка: скорость корабля доходит до
+  // потока каждый кадр, и яркость с длиной черты следуют за ней.
+  //
+  // Скорость ставим вектором, а не разгоном: разгон на своих 0.45 км/с²
+  // занял бы шесть секунд модельного времени, и весь остальной smoke
+  // поехал бы вслед за ним (мир-то идёт).
+  const ship = game.ship;
+  const len = (f) => Math.hypot(f.streak.x, f.streak.y, f.streak.z);
+  const put = (v) => {
+    ship.vel.x = ship.basis.fwd.x * v;
+    ship.vel.y = ship.basis.fwd.y * v;
+    ship.vel.z = ship.basis.fwd.z * v;
+    frames(2);
+  };
+  const SH = SHIP.maxSpeed;                  // предел обычного хода, км/с
+
+  put(SH);
+  const calmPow = game.flow.power, calmLen = len(game.flow);
+  if (!(calmPow > 0 && calmPow <= 0.12)) {
+    throw new Error('обычным ходом поток должен быть еле заметен, а он ' + calmPow.toFixed(2));
+  }
+  if (!(calmLen > 0.05)) throw new Error('черты нет вовсе: ' + (calmLen * 1000).toFixed(0) + ' м');
+
+  put(SH * SHIP.boostMax);
+  const burnPow = game.flow.power, burnLen = len(game.flow);
+  if (!(burnPow > calmPow * 6)) {
+    throw new Error('на форсажном ходу поток не разгорелся: ' +
+      calmPow.toFixed(2) + ' -> ' + burnPow.toFixed(2));
+  }
+  if (!(burnLen > calmLen * 2.5)) {
+    throw new Error('черта не вытянулась: ' + (calmLen * 1000).toFixed(0) + ' м -> ' +
+      (burnLen * 1000).toFixed(0) + ' м');
+  }
+
+  // Встали — поток обязан погаснуть вместе с ходом: он следует за
+  // скоростью, а не за нажатой клавишей.
+  put(0);
+  if (game.flow.power !== 0) {
+    throw new Error('на месте поток не погас: ' + game.flow.power.toFixed(3));
   }
 });
 
