@@ -1,7 +1,9 @@
 // Экраны вне полёта: станция, крушение, помощь — как DOM-оверлей.
-// Карта системы рисуется на canvas поверх сцены.
+// Карта системы живёт отдельно (js/ui/map.js): она не текст в рамке, а
+// интерактивный план с масштабом, выбором и справкой.
 
 import { fmtDist } from './hud.js';
+import { KIND_INFO } from '../game/bodyinfo.js';
 import { ST } from '../game/state.js';
 import { landedInfo } from '../game/landing.js';
 
@@ -103,6 +105,10 @@ export function showHelp(game) {
       <tr><td>V</td><td class="v">кокпит / вид от 3-го лица</td></tr>
       <tr><td>ПКМ (зажать)</td><td class="v">осмотр камерой от 3-го лица</td></tr>
       <tr><td>M</td><td class="v">карта системы</td></tr>
+      <tr><td>на карте: колесо, W/S</td><td class="v">масштаб</td></tr>
+      <tr><td>на карте: ЛКМ, &larr;/&rarr;</td><td class="v">выбрать объект</td></tr>
+      <tr><td>на карте: Tab</td><td class="v">назначить выбранное целью</td></tr>
+      <tr><td>на карте: Пробел / X</td><td class="v">подъехать к выбранному / сброс вида</td></tr>
       <tr><td>H</td><td class="v">эта справка</td></tr>
       <tr><td>N</td><td class="v">звук: включить / выключить</td></tr>
       <tr><td>- / =</td><td class="v">громкость тише / громче</td></tr>
@@ -119,6 +125,14 @@ export function showHelp(game) {
       в 250 км над целью. Прямой коридор часто перекрыт планетой, над
       которой висишь: тогда привод сам предложит обходную точку (ОМ) и
       поставит её целью — достаточно нажать B ещё раз.</p>
+    <p class="sub">Карта системы (<b>M</b>) — не картинка, а рабочий план.
+      Масштаб колесом или <b>W</b>/<b>S</b>: от всей системы в кадре до
+      окрестностей одной станции. Выбор — щелчком или <b>&larr;</b>/<b>&rarr;</b>
+      (вид сам подъезжает к выбранному), <b>Tab</b> назначает выбранное целью.
+      Справа — карточка объекта: тип, тяжесть, температура, состав атмосферы,
+      возможность посадки и состояние коридора прыжка. Станцию на обзорном
+      масштабе не видно — она сидит внутри значка своей планеты, к ней надо
+      подъехать.</p>
     <p class="sub">Стыковка: войти в щель порта носом вперёд, скорость ниже
       0.28 км/с, крен согласован с вращением станции (зелёные огни сверху).</p>
     <p class="sub">В центре экрана два знака: прицел — куда смотрит нос,
@@ -160,87 +174,7 @@ export function showHelp(game) {
   ]);
 }
 
-export const KIND_RU = {
-  star: 'звезда',
-  lava: 'вулканическая',
-  rock: 'каменистая',
-  desert: 'пустынная',
-  ocean: 'океаническая',
-  ice: 'ледяная',
-  gas: 'газовый гигант',
-  moon: 'луна',
-};
-
-// --- Карта системы -----------------------------------------------------------
-
-export function drawMap(r, game) {
-  const ctx = r.ctx;
-  const w = r.camera.w, h = r.camera.h;
-  const cx = w / 2, cy = h / 2 + 10;
-  const maxR = Math.min(w, h) * 0.40;
-
-  ctx.save();
-  ctx.fillStyle = 'rgba(0,4,10,0.88)';
-  ctx.fillRect(0, 0, w, h);
-
-  // Логарифмический радиус: иначе внутренние орбиты сливаются в точку.
-  const outer = game.world.planets[game.world.planets.length - 1].orbit.radius;
-  const scale = (dist) => {
-    const t = Math.log10(1 + dist / 1000) / Math.log10(1 + outer / 1000);
-    return t * maxR;
-  };
-
-  ctx.font = '11px Consolas, monospace';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#4fb3e0';
-  ctx.fillText('КАРТА СИСТЕМЫ ' + game.world.name.toUpperCase() + '   (M — закрыть)', cx, 34);
-
-  // Светило
-  ctx.fillStyle = '#ffe2a8';
-  ctx.beginPath();
-  ctx.arc(cx, cy, 7, 0, Math.PI * 2);
-  ctx.fill();
-
-  const target = game.nav.list[game.nav.index];
-
-  for (const p of game.world.planets) {
-    const rr = scale(p.orbit.radius);
-    ctx.strokeStyle = 'rgba(79,179,224,0.22)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, rr, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Позиция на орбите: проекция мировых координат на плоскость XZ.
-    const a = Math.atan2(p.pos.z, p.pos.x);
-    const px = cx + Math.cos(a) * rr;
-    const py = cy + Math.sin(a) * rr;
-
-    const isTarget = target === p || (p.station && target === p.station);
-    ctx.fillStyle = isTarget ? '#ffcc66' : '#9fd9ff';
-    ctx.beginPath();
-    ctx.arc(px, py, p.kind === 'gas' ? 5 : 3.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.textAlign = 'left';
-    ctx.fillStyle = isTarget ? '#ffcc66' : 'rgba(159,217,230,0.7)';
-    ctx.fillText(p.name + (p.station ? ' *' : ''), px + 8, py + 4);
-  }
-
-  // Корабль
-  const sa = Math.atan2(game.ship.pos.z, game.ship.pos.x);
-  const sr = scale(Math.hypot(game.ship.pos.x, game.ship.pos.z));
-  const sx = cx + Math.cos(sa) * sr;
-  const sy = cy + Math.sin(sa) * sr;
-  ctx.strokeStyle = '#78e08f';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(sx - 5, sy); ctx.lineTo(sx + 5, sy);
-  ctx.moveTo(sx, sy - 5); ctx.lineTo(sx, sy + 5);
-  ctx.stroke();
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(159,217,230,0.6)';
-  ctx.fillText('* — есть станция   |   зелёный крест — ваш корабль', cx, h - 30);
-  ctx.restore();
-}
+// Названия типов тел берём там же, где о них знает всё остальное:
+// две таблицы неизбежно разъезжаются, а эта ещё и видна игроку.
+export const KIND_RU = Object.fromEntries(
+  Object.entries(KIND_INFO).map(([k, v]) => [k, v.ru]));

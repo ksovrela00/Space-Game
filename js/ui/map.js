@@ -1,0 +1,694 @@
+// Карта системы: план на плоскости XZ с масштабом, выбором объектов и
+// справкой о выбранном.
+//
+// Карта была статичной картинкой: шесть орбит, подписи и крестик
+// корабля. Смотреть на неё было можно, пользоваться — нет: ни
+// приблизиться к планете с лунами, ни ткнуть в станцию, ни узнать, куда
+// вообще летишь. Теперь это рабочий инструмент — масштаб от всей
+// системы до окрестностей одной станции, выбор объекта мышью или
+// стрелками, назначение цели (Tab) и карточка с физикой выбранного.
+//
+// Проекция ЛИНЕЙНАЯ, а не логарифмическая, как раньше. Логарифм был
+// нужен, чтобы внутренние орбиты не слипались в точку, но с ним
+// невозможен сам смысл масштаба: вблизи планеты её луны и станция
+// остаются в одном пикселе при любом приближении. Здесь орбиты
+// отличаются всего в десять раз (0.34–3.6 млн км), и линейная карта
+// читается и без ухищрений.
+//
+// Всё, что панель пишет о теле, взято из модели мира (js/game/bodyinfo.js):
+// масса из плотности и радиуса, тяжесть из массы, сутки из периода
+// вращения, воздух — из того же давления, по которому считается нагрев
+// при входе. Подписи, не подтверждённой числом из мира, в карточке нет.
+
+import { fmtDist, fmtTime } from './hud.js';
+import {
+  KIND_INFO, kindLabel, massOf, escapeSpeed, dayLength, atmosphereOf,
+  temperatureOf, toCelsius, EARTH_MASS, starDistance,
+} from '../game/bodyinfo.js';
+import { DENSITY } from '../game/gravity.js';
+import { isLandable, isSolid } from '../game/surface.js';
+import { LIMITS } from '../game/docking.js';
+import { canJump } from '../game/quantum.js';
+import { currentTarget } from '../game/nav.js';
+import { say } from '../game/state.js';
+
+const CY = '#4fb3e0';
+const CY_DIM = 'rgba(79,179,224,0.35)';
+const PALE = '#9fd9ff';
+const AMBER = '#ffcc66';
+const GREEN = '#78e08f';
+
+// Пределы масштаба. Единица — вся система в кадре, потолок подобран по
+// самой тесной паре, которую вообще нужно различать: станция и её
+// планета расходятся на пару тысяч километров.
+const ZOOM_MIN = 0.6;
+const ZOOM_MAX = 900;
+
+// Поля карты: сверху заголовок, снизу подсказки, справа карточка.
+const PAD_TOP = 46;
+const PAD_BOT = 40;
+
+export function makeMap() {
+  return {
+    zoom: 1,
+    cx: 0, cz: 0,          // центр вида в мировых километрах (плоскость XZ)
+    sel: null,             // выбранный объект (о нём карточка)
+    follow: null,          // за кем едет вид; ручное перетаскивание его сбрасывает
+    items: [],             // что нарисовано в прошлом кадре — по нему ищут попадание
+    scale: 0,              // пикселей на километр в этом кадре
+    vx: 0, vy: 0, vw: 1, vh: 1,
+    mx: -1, my: -1,        // курсор
+    hover: null,
+    dragged: false,
+  };
+}
+
+// --- геометрия ---------------------------------------------------------------
+
+const outerOrbit = (world) => world.planets[world.planets.length - 1].orbit.radius;
+
+/** Масштаб «вся система в кадре», пикселей на километр. */
+export const fitScale = (map, world) => Math.min(map.vw, map.vh) * 0.44 / outerOrbit(world);
+
+const projX = (map, wx) => map.vx + map.vw / 2 + (wx - map.cx) * map.scale;
+const projY = (map, wz) => map.vy + map.vh / 2 + (wz - map.cz) * map.scale;
+
+const clampZoom = (z) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+
+/**
+ * Насколько крупный «свой мир» у объекта — по нему считается приближение
+ * при переходе к нему стрелками. Планету показываем вместе с её лунами и
+ * станцией, станцию — вместе с её орбитой: иначе выбранное оказывается
+ * либо точкой, либо во весь экран.
+ */
+function spanOf(obj, world) {
+  if (!obj) return outerOrbit(world);
+  if (obj.isMarker) return obj.dist * 1.6;
+  if (obj.isStation) return obj.orbit.radius * 1.5;
+  if (obj.kind === 'star') return outerOrbit(world) * 2.2;
+  let span = obj.radius * 8;
+  for (const m of obj.moons || []) span = Math.max(span, m.orbit.radius * 1.4);
+  if (obj.station) span = Math.max(span, obj.station.orbit.radius * 2.5);
+  return span;
+}
+
+/** Показать объект целиком и поехать за ним. */
+export function focusOn(map, world, obj) {
+  if (!obj) return;
+  map.follow = obj;
+  map.cx = obj.pos.x; map.cz = obj.pos.z;
+  const span = spanOf(obj, world);
+  const want = Math.min(map.vw, map.vh) * 0.35 / span;   // пикселей на километр
+  map.zoom = clampZoom(want / fitScale(map, world));
+}
+
+export function resetMap(map, world) {
+  map.zoom = 1;
+  map.follow = null;
+  map.cx = 0; map.cz = 0;
+  if (world && world.star) { map.cx = world.star.pos.x; map.cz = world.star.pos.z; }
+}
+
+/**
+ * Изменить масштаб, оставив на месте точку под курсором.
+ * Когда вид едет за объектом, курсор не учитывается: иначе масштаб и
+ * слежение спорили бы за центр и картинка дёргалась.
+ */
+function zoomBy(map, k, ax, ay) {
+  const z0 = map.zoom;
+  map.zoom = clampZoom(map.zoom * k);
+  if (map.zoom === z0 || map.follow) return;
+  const s0 = map.scale;
+  const s1 = s0 * (map.zoom / z0);
+  if (!(s0 > 0) || !(s1 > 0)) return;
+  // Мировая точка под курсором должна остаться под курсором.
+  const ox = ax - (map.vx + map.vw / 2);
+  const oy = ay - (map.vy + map.vh / 2);
+  map.cx += ox / s0 - ox / s1;
+  map.cz += oy / s0 - oy / s1;
+}
+
+// --- список объектов ---------------------------------------------------------
+
+const markerHost = (sel) => {
+  if (!sel) return null;
+  if (sel.isMarker) return sel.body;
+  if (sel.isStation) return sel.parent;
+  return sel.isBody ? sel : null;
+};
+
+/**
+ * Всё, что может быть выбрано, в порядке обхода системы.
+ * Маркеры попадают сюда только у выбранного тела: их шесть на каждое
+ * тело, и в общем списке они хоронят всё остальное.
+ */
+export function mapObjects(world, sel, out = []) {
+  out.length = 0;
+  out.push(world.star);
+  for (const p of world.planets) {
+    out.push(p);
+    if (p.station) out.push(p.station);
+    for (const m of p.moons) out.push(m);
+  }
+  const host = markerHost(sel);
+  if (host && host.markers) for (const m of host.markers) out.push(m);
+  return out;
+}
+
+/** Насколько объект отстоит от своего хозяина, км (Infinity — сам хозяин). */
+function offsetOf(obj) {
+  if (!obj) return Infinity;
+  if (obj.isMarker) return obj.dist;
+  if (obj.isStation) return obj.orbit.radius;
+  if (obj.parent && obj.parent.parent) return obj.orbit.radius;   // луна
+  return Infinity;
+}
+
+// Спутник показывается только тогда, когда он отошёл от своей планеты
+// хотя бы на несколько пикселей: иначе это не объект, а утолщение точки.
+const visibleAt = (obj, scale) => offsetOf(obj) * scale > 5;
+
+/** Радиус значка на экране, пикселей. */
+export function glyphRadius(obj, map) {
+  if (!obj || obj.isMarker || obj.isStation) return 4;
+  const min = obj.kind === 'star' ? 5 : (obj.kind === 'moon' ? 2 : 3.2);
+  return Math.max(min, Math.min(obj.radius * map.scale, Math.min(map.vw, map.vh) * 0.45));
+}
+
+/**
+ * Лёг ли маркер на диск своего тела.
+ *
+ * Карта — проекция на плоскость орбит, и два маркера из шести стоят над
+ * полюсами: в этой проекции они приходятся ровно на центр тела. Толку от
+ * них там нет — ни различить, ни ткнуть, — зато они закрывают планету
+ * собой и своей подписью.
+ */
+export function markerOnBody(mk, map) {
+  const b = mk.body;
+  if (!b) return false;
+  const dx = (mk.pos.x - b.pos.x) * map.scale;
+  const dz = (mk.pos.z - b.pos.z) * map.scale;
+  return Math.hypot(dx, dz) < glyphRadius(b, map) + 5;
+}
+
+/**
+ * Что под курсором. Ищем среди нарисованного — по экрану, а не по миру.
+ *
+ * Маркер уступает телу, даже если лежит к курсору ближе: это точка в
+ * пустоте ВОКРУГ того же тела, и когда они рядом, целятся в тело.
+ * Обратное неверно — попасть в маркер мимо тела ничто не мешает.
+ */
+export function pickAt(map, x, y, reach = 13) {
+  let best = null, bestD = reach * reach;
+  let mark = null, markD = reach * reach;
+  for (const it of map.items) {
+    const dx = it.sx - x, dy = it.sy - y;
+    const d = dx * dx + dy * dy;
+    if (it.obj.isMarker) { if (d <= markD) { markD = d; mark = it.obj; } }
+    else if (d <= bestD) { bestD = d; best = it.obj; }
+  }
+  return best || mark;
+}
+
+// --- управление --------------------------------------------------------------
+
+const _pan = { x: 0, y: 0 };
+
+/**
+ * Разбор ввода в режиме карты. Вызывается каждый кадр из main.js —
+ * колесо, перетаскивание и выбор живут здесь, потому что в полёте
+ * ничего из этого не работает.
+ */
+export function mapInput(game, input) {
+  const map = game.map;
+  const world = game.world;
+  if (!map.sel) map.sel = currentTarget(game.nav);
+
+  map.mx = input.mouse.x;
+  map.my = input.mouse.y;
+
+  // Колесо — масштаб вокруг курсора.
+  const wheel = input.takeWheel();
+  if (wheel) zoomBy(map, Math.exp(-wheel * 0.0015), map.mx, map.my);
+
+  // Клавишами — вокруг центра: курсор в этот момент может быть где угодно.
+  // Плюс и минус сюда не годятся: ими везде, в том числе на карте,
+  // меняется громкость, и одна клавиша делала бы два дела сразу.
+  const ax = map.vx + map.vw / 2, ay = map.vy + map.vh / 2;
+  if (input.pressed('KeyW', 'ArrowUp')) zoomBy(map, 1.35, ax, ay);
+  if (input.pressed('KeyS', 'ArrowDown')) zoomBy(map, 1 / 1.35, ax, ay);
+
+  // Перетаскивание: вид отвязывается от объекта, за которым ехал.
+  input.takePan(_pan);
+  if (input.mouse.left && (_pan.x || _pan.y) && map.scale > 0) {
+    map.follow = null;
+    map.cx -= _pan.x / map.scale;
+    map.cz -= _pan.y / map.scale;
+    map.dragged = true;
+  }
+  // Щелчок выбирает то, что под курсором, и НЕ трогает вид: карта не
+  // должна прыгать под рукой.
+  if (input.mouse.clicked) {
+    map.dragged = false;
+    const hit = pickAt(map, map.mx, map.my);
+    if (hit) map.sel = hit;
+  }
+
+  // Стрелками — по списку системы; сюда же попадают станции и луны,
+  // невидимые при обзорном масштабе, поэтому вид к ним подъезжает сам.
+  const dir = (input.pressed('ArrowRight', 'KeyD') ? 1 : 0) -
+              (input.pressed('ArrowLeft', 'KeyA') ? 1 : 0);
+  if (dir) {
+    const all = mapObjects(world, map.sel);
+    let i = all.indexOf(map.sel);
+    i = i < 0 ? 0 : (i + dir + all.length) % all.length;
+    map.sel = all[i];
+    focusOn(map, world, map.sel);
+  }
+
+  if (input.pressed('Space')) focusOn(map, world, map.sel);
+  if (input.pressed('KeyX', 'Digit0', 'Numpad0')) resetMap(map, world);
+
+  if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
+    const t = map.sel;
+    if (!t) say(game.state, 'ОБЪЕКТ НЕ ВЫБРАН', AMBER);
+    else {
+      game.selectTarget(t);
+      say(game.state, 'ЦЕЛЬ: ' + t.name);
+    }
+  }
+}
+
+// --- форматирование ----------------------------------------------------------
+
+const SUP = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+const sup = (n) => String(n).split('').map((c) => SUP[+c] || c).join('');
+
+// Масса Луны, кг — мелкие тела в земных массах читаются как ноль.
+const MOON_MASS = 7.35e22;
+
+export function fmtMass(kg) {
+  const e = Math.floor(Math.log10(kg));
+  const m = kg / 10 ** e;
+  const earth = kg / EARTH_MASS;
+  const rel = earth >= 0.01
+    ? earth.toFixed(earth < 1 ? 2 : 1) + ' Земли'
+    : (kg / MOON_MASS).toFixed(2) + ' Луны';
+  return `${m.toFixed(2)}·10${sup(e)} кг · ${rel}`;
+}
+
+const plural = (n, one, few, many) => {
+  const n10 = n % 10, n100 = n % 100;
+  if (n10 === 1 && n100 !== 11) return one;
+  if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return few;
+  return many;
+};
+
+export function fmtYears(sec) {
+  const years = sec / (365.25 * 24 * 3600);
+  if (years < 1) return fmtTime(sec);
+  return years.toFixed(years < 10 ? 1 : 0) + ' ' + plural(Math.round(years), 'год', 'года', 'лет');
+}
+
+const fmtTemp = (k) => {
+  const c = toCelsius(k);
+  if (k > 1000) return Math.round(k) + ' К (' + Math.round(c) + ' °C)';
+  return (c > 0 ? '+' : '') + c.toFixed(0) + ' °C';
+};
+
+// --- карточка объекта --------------------------------------------------------
+
+function landingNote(b) {
+  if (b.kind === 'star') return 'исключена';
+  if (!isSolid(b)) return 'поверхности нет';
+  if (!isLandable(b)) return 'нужен аэродинамический спуск';
+  return 'возможна: шасси и R/F';
+}
+
+/**
+ * Строки справки о выбранном объекте.
+ * Ни одно число здесь не написано от руки: всё считается из мира.
+ *
+ * @returns {{title, kind, desc, rows, jumpOk}}
+ */
+export function objectCard(game, obj) {
+  const world = game.world, ship = game.ship;
+  const rows = [];
+  const info = KIND_INFO[obj.kind] || null;
+  const card = { title: obj.name, kind: kindLabel(obj), desc: '', rows };
+
+  const range = () => {
+    const d = Math.hypot(obj.pos.x - ship.pos.x, obj.pos.y - ship.pos.y, obj.pos.z - ship.pos.z);
+    rows.push(['ДО КОРАБЛЯ', fmtDist(Math.max(0, d - (obj.radius || 0)))]);
+  };
+
+  if (obj.isMarker) {
+    card.desc = 'Точка в пустоте, к которой можно прыгнуть. Нужна, когда ' +
+      'прямой коридор до цели перекрыт телом, над которым висишь: сначала ' +
+      'прыжок сюда, потом к цели.';
+    rows.push(['ТЕЛО', obj.body.name]);
+    rows.push(['УДАЛЕНИЕ', fmtDist(obj.dist) +
+      ' (' + (obj.dist / obj.body.radius).toFixed(0) + ' радиуса)']);
+    range();
+  } else if (obj.isStation) {
+    const p = obj.parent;
+    card.desc = 'Орбитальный порт: единственное место, где восстанавливают ' +
+      'корпус. Створ смотрит от планеты, барабан вращается — крен на входе ' +
+      'согласуют с ним.';
+    rows.push(['ПЛАНЕТА', p ? p.name : '—']);
+    rows.push(['ВЫСОТА ОРБИТЫ', p ? fmtDist(obj.orbit.radius - p.radius) : '—']);
+    rows.push(['ОБОРОТ ВОКРУГ', fmtTime(obj.orbit.period)]);
+    rows.push(['ВРАЩЕНИЕ', 'оборот за ' + fmtTime(2 * Math.PI / obj.spinRate)]);
+    rows.push(['СТЫКОВКА', 'скорость до ' + LIMITS.speed.toFixed(2) + ' км/с']);
+    range();
+  } else {
+    // Тело: звезда, планета или луна.
+    card.desc = info ? info.desc : '';
+    rows.push(['РАДИУС', fmtDist(obj.radius)]);
+    rows.push(['МАССА', fmtMass(massOf(obj))]);
+    rows.push(['ПЛОТНОСТЬ', ((DENSITY[obj.kind] || DENSITY.rock) / 1000).toFixed(2) + ' г/см³']);
+    rows.push(['ТЯЖЕСТЬ', obj.g0.toFixed(2) + ' м/с² (' + (obj.g0 / 9.81).toFixed(2) + ' g)']);
+    rows.push(['ВТОРАЯ КОСМ.', escapeSpeed(obj).toFixed(2) + ' км/с']);
+    rows.push(['ТЕМПЕРАТУРА', fmtTemp(temperatureOf(world, obj))]);
+    if (obj.spin) rows.push(['СУТКИ', fmtTime(dayLength(obj))]);
+    if (obj.orbit) {
+      rows.push(['ОРБИТА', fmtDist(obj.orbit.radius) +
+        ' вокруг ' + (obj.parent ? obj.parent.name : 'светила')]);
+      rows.push(['ГОД', fmtYears(obj.orbit.period)]);
+    }
+    if (obj.kind !== 'star') {
+      rows.push(['ОТ СВЕТИЛА', fmtDist(starDistance(obj))]);
+      rows.push(['ЗАХВАТ', fmtDist(obj.soi) +
+        ' (' + (obj.soi / obj.radius).toFixed(0) + ' радиусов)']);
+    }
+
+    const air = atmosphereOf(obj);
+    if (air) {
+      rows.push(['АТМОСФЕРА', air.press.toFixed(2) + ' бар, до ' + fmtDist(air.top)]);
+      if (air.mix) rows.push(['СОСТАВ', air.mix.map(([g, s]) => g + ' ' + s + '%').join(' · ')]);
+    } else {
+      rows.push(['АТМОСФЕРА', 'нет']);
+    }
+
+    rows.push(['ПОСАДКА', landingNote(obj)]);
+    if (obj.rings) rows.push(['КОЛЬЦА', 'есть']);
+    if (obj.station) rows.push(['СТАНЦИЯ', obj.station.name]);
+    if (obj.moons && obj.moons.length) {
+      rows.push(['ЛУНЫ', obj.moons.length + ': ' + obj.moons.map((m) => m.name).join(', ')]);
+    }
+    if (obj.kind !== 'star') range();
+  }
+
+  // Коридор прыжка: ради этого цель на карте и выбирают. Считается тем
+  // же кодом, что и сам прыжок, поэтому «свободен» здесь означает, что
+  // B сработает, а не «наверное, получится».
+  const jump = canJump(world, ship, obj);
+  rows.push(['КОРИДОР', jump.ok ? 'свободен — B' : jump.reason.toLowerCase()]);
+  card.jumpOk = jump.ok;
+  return card;
+}
+
+// --- отрисовка ---------------------------------------------------------------
+
+const disc = (ctx, x, y, r, fill) => {
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+};
+
+const rgb = (c) => 'rgb(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ')';
+
+export function drawMap(r, game) {
+  const ctx = r.ctx;
+  const w = r.camera.w, h = r.camera.h;
+  const map = game.map;
+  const world = game.world;
+
+  const panelW = Math.max(240, Math.min(360, Math.round(w * 0.26)));
+  map.vx = 0; map.vy = PAD_TOP;
+  map.vw = Math.max(80, w - panelW - 16);
+  map.vh = Math.max(80, h - PAD_TOP - PAD_BOT);
+
+  if (!map.sel) map.sel = currentTarget(game.nav);
+  if (map.follow) { map.cx = map.follow.pos.x; map.cz = map.follow.pos.z; }
+  else if (map.cx === 0 && map.cz === 0) { map.cx = world.star.pos.x; map.cz = world.star.pos.z; }
+  map.scale = fitScale(map, world) * map.zoom;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,4,10,0.92)';
+  ctx.fillRect(0, 0, w, h);
+  ctx.font = '11px Consolas, monospace';
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = CY;
+  ctx.fillText('КАРТА СИСТЕМЫ ' + world.name.toUpperCase(), 18, 28);
+  ctx.fillStyle = 'rgba(159,217,230,0.65)';
+  ctx.fillText('МАСШТАБ ×' + (map.zoom < 10 ? map.zoom.toFixed(1) : Math.round(map.zoom)) +
+    (map.follow ? '   ЗА ' + map.follow.name.toUpperCase() : ''), 250, 28);
+
+  drawPlan(ctx, map, game, world);
+  drawScaleBar(ctx, map);
+  drawPanel(ctx, game, w - panelW - 6, PAD_TOP - 8, panelW, h - PAD_TOP - PAD_BOT + 18);
+
+  // Подсказки в две строки: одной они не помещаются в узкое окно, а
+  // обрезанная подсказка хуже, чем её отсутствие.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(159,217,230,0.6)';
+  ctx.fillText('КОЛЕСО / W,S — МАСШТАБ · ЛКМ — ВЫБОР · ТЯНУТЬ — СДВИГ', 18, h - 26);
+  ctx.fillText('←,→ — ПО ОБЪЕКТАМ · ПРОБЕЛ — К ВЫБРАННОМУ · TAB — НАЗНАЧИТЬ ЦЕЛЬЮ · ' +
+    'X — СБРОС · M — ЗАКРЫТЬ', 18, h - 12);
+  ctx.restore();
+}
+
+function drawPlan(ctx, map, game, world) {
+  const ship = game.ship;
+  const target = currentTarget(game.nav);
+  const items = map.items;
+  items.length = 0;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(map.vx, map.vy, map.vw, map.vh);
+  ctx.clip();
+
+  // Орбиты — окружности вокруг хозяина. Рисуем только те, что видно:
+  // иначе при сильном приближении в кадре стоит дуга радиусом в экран.
+  const ring = (host, radius, color) => {
+    const rr = radius * map.scale;
+    if (rr < 4 || rr > 12000) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(projX(map, host.pos.x), projY(map, host.pos.z), rr, 0, Math.PI * 2);
+    ctx.stroke();
+  };
+
+  for (const p of world.planets) {
+    ring(world.star, p.orbit.radius, 'rgba(79,179,224,0.20)');
+    for (const m of p.moons) ring(p, m.orbit.radius, 'rgba(79,179,224,0.16)');
+    if (p.station) ring(p, p.station.orbit.radius, 'rgba(120,224,143,0.18)');
+  }
+
+  for (const obj of mapObjects(world, map.sel)) {
+    if (!visibleAt(obj, map.scale) && obj !== map.sel) continue;
+    // Маркер, легший на диск своего тела, не показываем: выбрать его там
+    // всё равно нельзя, а планету он закрывает. Выбранный — исключение:
+    // раз его выбрали, он должен быть виден, где бы ни оказался.
+    if (obj.isMarker && obj !== map.sel && markerOnBody(obj, map)) continue;
+    const sx = projX(map, obj.pos.x), sy = projY(map, obj.pos.z);
+    if (sx < map.vx - 40 || sx > map.vx + map.vw + 40) continue;
+    if (sy < map.vy - 40 || sy > map.vy + map.vh + 40) continue;
+    items.push({ obj, sx, sy });
+    drawGlyph(ctx, obj, sx, sy, map, obj === target);
+  }
+
+  // Корабль — зелёный крест, и от него пунктир к выбранному: по нему
+  // сразу видно, куда собрался лететь и насколько это далеко.
+  const shx = projX(map, ship.pos.x), shy = projY(map, ship.pos.z);
+  if (map.sel) {
+    const sx = projX(map, map.sel.pos.x), sy = projY(map, map.sel.pos.z);
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = 'rgba(255,204,102,0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(shx, shy); ctx.lineTo(sx, sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = AMBER;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 11, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = GREEN;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(shx - 6, shy); ctx.lineTo(shx + 6, shy);
+  ctx.moveTo(shx, shy - 6); ctx.lineTo(shx, shy + 6);
+  ctx.stroke();
+  ctx.fillStyle = GREEN;
+  ctx.textAlign = 'left';
+  ctx.fillText('КОРАБЛЬ', shx + 9, shy + 13);
+
+  // Подсветка того, что под курсором: без неё непонятно, во что попадёшь.
+  map.hover = pickAt(map, map.mx, map.my);
+  if (map.hover && map.hover !== map.sel) {
+    const it = items.find((x) => x.obj === map.hover);
+    if (it) {
+      ctx.strokeStyle = 'rgba(159,217,230,0.8)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(it.sx, it.sy, 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawGlyph(ctx, obj, sx, sy, map, isTarget) {
+  const sel = obj === map.sel;
+  let size = 4;
+  ctx.lineWidth = 1;
+
+  if (obj.isMarker) {
+    ctx.strokeStyle = sel ? AMBER : CY_DIM;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 4); ctx.lineTo(sx + 4, sy);
+    ctx.lineTo(sx, sy + 4); ctx.lineTo(sx - 4, sy);
+    ctx.closePath();
+    ctx.stroke();
+  } else if (obj.isStation) {
+    ctx.strokeStyle = sel ? AMBER : GREEN;
+    ctx.strokeRect(sx - 3.5, sy - 3.5, 7, 7);
+  } else {
+    // Тело рисуется своим же цветом — тем, каким его видно из кабины, —
+    // и своим же радиусом, пока он крупнее метки.
+    const rr = glyphRadius(obj, map);
+    disc(ctx, sx, sy, rr, rgb(obj.color));
+    if (obj.rings) {
+      ctx.strokeStyle = 'rgba(206,186,150,0.6)';
+      ctx.beginPath();
+      ctx.arc(sx, sy, rr * 1.9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    size = rr;
+  }
+
+  if (isTarget) {
+    ctx.strokeStyle = AMBER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(sx, sy, size + 5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Подпись: у крупного — всегда, у спутников — когда они отошли от
+  // планеты настолько, что подпись есть куда деть.
+  const off = offsetOf(obj) * map.scale;
+  if (off > 22 || sel) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = sel ? AMBER
+      : (obj.isStation ? 'rgba(120,224,143,0.85)' : 'rgba(159,217,230,0.78)');
+    ctx.fillText(obj.name, sx + size + 5, sy + 4);
+  }
+}
+
+function drawScaleBar(ctx, map) {
+  // Отрезок «круглой» длины: берём примерно 160 пикселей и округляем
+  // километры вниз до 1/2/5·10^n — читается только такое.
+  const km = 160 / map.scale;
+  const e = Math.floor(Math.log10(km));
+  const base = 10 ** e;
+  const m = km / base;
+  const nice = (m >= 5 ? 5 : m >= 2 ? 2 : 1) * base;
+  const px = nice * map.scale;
+  const y = map.vy + map.vh - 12;
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(18, y); ctx.lineTo(18 + px, y);
+  ctx.moveTo(18, y - 4); ctx.lineTo(18, y + 4);
+  ctx.moveTo(18 + px, y - 4); ctx.lineTo(18 + px, y + 4);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(159,217,230,0.7)';
+  ctx.textAlign = 'left';
+  ctx.fillText(fmtDist(nice), 18, y - 8);
+}
+
+function wrap(ctx, text, width) {
+  const words = String(text).split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const probe = line ? line + ' ' + word : word;
+    if (line && ctx.measureText(probe).width > width) { lines.push(line); line = word; }
+    else line = probe;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawPanel(ctx, game, x, y, w, h) {
+  const map = game.map;
+  const obj = map.sel;
+  ctx.fillStyle = 'rgba(2,10,18,0.72)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+
+  const pad = 12;
+  let ty = y + 22;
+  ctx.textAlign = 'left';
+
+  if (!obj) {
+    ctx.fillStyle = 'rgba(159,217,230,0.7)';
+    const help = 'Объект не выбран. Ткни в планету, станцию или луну — ' +
+      'здесь будет всё, что о ней известно.';
+    for (const line of wrap(ctx, help, w - pad * 2)) { ctx.fillText(line, x + pad, ty); ty += 14; }
+    return;
+  }
+
+  const card = objectCard(game, obj);
+
+  ctx.fillStyle = AMBER;
+  ctx.font = 'bold 13px Consolas, monospace';
+  ctx.fillText(card.title, x + pad, ty);
+  ty += 16;
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = CY;
+  ctx.fillText(card.kind.toUpperCase(), x + pad, ty);
+  ty += 16;
+
+  if (card.desc) {
+    ctx.fillStyle = 'rgba(159,217,230,0.72)';
+    for (const line of wrap(ctx, card.desc, w - pad * 2)) {
+      ctx.fillText(line, x + pad, ty);
+      ty += 13;
+    }
+    ty += 6;
+  }
+
+  const keyW = 104;
+  for (const [k, v] of card.rows) {
+    if (ty > y + h - 34) break;
+    ctx.fillStyle = 'rgba(79,179,224,0.75)';
+    ctx.fillText(k, x + pad, ty);
+    ctx.fillStyle = PALE;
+    const lines = wrap(ctx, v, w - pad * 2 - keyW);
+    for (const line of lines) {
+      ctx.fillText(line, x + pad + keyW, ty);
+      ty += 13;
+    }
+    if (!lines.length) ty += 13;
+  }
+
+  // Что нажать — внизу карточки, а не в общем списке подсказок: это
+  // действие относится к выбранному объекту.
+  const cur = currentTarget(game.nav);
+  const isCur = obj === cur || (obj.isMarker && cur === obj.body);
+  ctx.fillStyle = isCur ? GREEN : AMBER;
+  ctx.fillText(isCur ? '● ТЕКУЩАЯ ЦЕЛЬ' : 'TAB — НАЗНАЧИТЬ ЦЕЛЬЮ', x + pad, y + h - 14);
+}

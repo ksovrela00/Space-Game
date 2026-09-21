@@ -48,6 +48,7 @@ const el = (id) => ({
     add(c) { this._s.add(c); },
     remove(c) { this._s.delete(c); },
     contains(c) { return this._s.has(c); },
+    toggle(c, on) { if (on === undefined ? this._s.has(c) : !on) this._s.delete(c); else this._s.add(c); },
   },
   listeners: {},
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
@@ -351,11 +352,80 @@ await step('квантовый привод (B) доводит до цели', (
   if (!(game.ship.speed < 0.001)) throw new Error('скорость на выходе ' + game.ship.speed);
 });
 
-await step('карта системы (M)', () => {
+await step('карта системы (M): масштаб, выбор, назначение цели', () => {
   key('KeyM'); frames(5);
   if (game.state.mode !== 'map') throw new Error('режим ' + game.state.mode);
+  const map = game.map;
+  // Курсор: в полёте он спрятан (мешал бы прицелу), на карте им выбирают
+  // объекты — и без него карта неуправляема.
+  if (!nodes.screen.classList.contains('map')) throw new Error('курсор не показан на карте');
+  // Карта открывается на том, куда летишь, и во весь обзор.
+  if (map.sel !== game.nav.list[game.nav.index]) throw new Error('выбрана не текущая цель');
+  if (Math.abs(map.zoom - 1) > 1e-6) throw new Error('масштаб при открытии ' + map.zoom);
+
+  // Колесо приближает, W и S — тоже. Это и было главной претензией к
+  // старой карте: она не приближалась вовсе.
+  mouse('mousemove', { clientX: 400, clientY: 400 });
+  mouse('wheel', { deltaY: -600 });
+  frames(2);
+  const zWheel = map.zoom;
+  if (!(zWheel > 1.5)) throw new Error('колесо не приближает: ×' + zWheel.toFixed(2));
+  key('KeyW'); frames(2);
+  if (!(map.zoom > zWheel)) throw new Error('W не приближает');
+  // Нажатия разбираются раз в кадр: два в одном кадре — это одно.
+  key('KeyS'); frames(2); key('KeyS'); frames(2);
+  if (!(map.zoom < zWheel)) throw new Error('S не отдаляет');
+
+  // Щелчок по нарисованному объекту выбирает его. Координаты берём из
+  // того же списка, по которому карта ищет попадание, — так проверяется
+  // связка «нарисовано там же, где ловится».
+  key('KeyX'); frames(3);                       // сброс вида: снова вся система
+  const spot = map.items.find((it) => it.obj === game.world.home);
+  if (!spot) throw new Error('родной планеты нет на карте');
+  mouse('mousemove', { clientX: spot.sx, clientY: spot.sy });
+  mouse('mousedown', { button: 0, clientX: spot.sx, clientY: spot.sy });
+  frames(2);
+  mouse('mouseup', { button: 0 });
+  if (map.sel !== game.world.home) {
+    throw new Error('щелчок не выбрал планету: ' + (map.sel && map.sel.name));
+  }
+
+  // Карточка выбранного: название и физика, а не одна подпись.
+  texts = [];
+  frames(1);
+  const seen = texts;
+  texts = null;
+  const has = (re) => seen.some((t) => re.test(t.s));
+  for (const re of [/^Lave II$/, /МАССА/, /ТЯЖЕСТЬ/, /ТЕМПЕРАТУРА/, /АТМОСФЕРА/, /СОСТАВ/, /КОРИДОР/]) {
+    if (!has(re)) throw new Error('в карточке нет ' + re);
+  }
+  if (!has(/N₂/)) throw new Error('состав атмосферы не расписан');
+
+  // Tab назначает выбранное целью — ради этого карту и открывают.
+  key('Tab'); frames(2);
+  if (game.nav.list[game.nav.index] !== game.world.home) {
+    throw new Error('Tab не назначил цель на карте');
+  }
+
+  // Стрелки идут по объектам системы и подвозят вид к выбранному:
+  // станция на обзорном масштабе сидит внутри планеты, и иначе до неё
+  // не добраться.
+  const before = map.sel;
+  key('ArrowRight'); frames(3);
+  if (map.sel === before) throw new Error('стрелка не переключила объект');
+  if (map.follow !== map.sel) throw new Error('вид не поехал за выбранным');
+  if (!(map.zoom > 5)) throw new Error('переход не приблизил: ×' + map.zoom.toFixed(1));
+  if (map.sel.isStation) {
+    const gap = map.sel.orbit.radius * map.scale;
+    if (!(gap > 30)) throw new Error('станция не отделилась от планеты: ' + gap.toFixed(1) + ' px');
+  }
+
+  key('KeyX'); frames(2);
+  if (Math.abs(map.zoom - 1) > 1e-6 || map.follow) throw new Error('X не сбросил вид');
+
   key('KeyM'); frames(5);
   if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+  if (nodes.screen.classList.contains('map')) throw new Error('курсор остался после карты');
 });
 
 await step('справка (H)', () => {

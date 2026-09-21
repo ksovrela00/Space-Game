@@ -54,15 +54,20 @@ export const ENTRY = {
 };
 
 /**
- * Плотность воздуха на высоте, 0..1 (единица — у поверхности).
+ * Плотность воздуха на высоте, 0..1 (единица — у земли при давлении в
+ * одну атмосферу). Тонкий воздух даёт меньше единицы и у самой земли:
+ * давление берётся из тела (body.press), и пустынный мир с его 0.7 бар
+ * жжёт обшивку слабее океанического.
+ *
  * @param alt высота над сферой тела, км
  */
 export function airDensity(body, alt) {
   if (!body || !body.atmo) return 0;
+  const press = body.press === undefined ? 1 : body.press;
   const top = body.radius * ENTRY.top;
   if (alt >= top) return 0;
-  if (alt <= 0) return 1;
-  return Math.exp(-ENTRY.scales * (alt / top));
+  if (alt <= 0) return press;
+  return press * Math.exp(-ENTRY.scales * (alt / top));
 }
 
 /**

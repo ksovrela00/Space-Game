@@ -20,6 +20,12 @@ html, body {
 #screen { z-index: 1; background: #000; }
 #hud { z-index: 2; pointer-events: none; }
 
+/* На карте курсором выбирают объекты, поэтому его видно. В полёте он
+   спрятан намеренно: стрелка поверх прицела — лишний знак ровно там, где
+   смотрят. Класс вешается на #screen, потому что #hud сквозной по
+   событиям и вид курсора берётся с нижнего слоя. */
+#screen.map { cursor: crosshair; }
+
 .overlay {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;

@@ -212,7 +212,7 @@ function makeGrad(x0, y0, r0, x1, y1, r1) {
 // --- DOM-заглушки ---
 const el = (id) => ({
   id, innerHTML: '', textContent: '', className: '', style: {},
-  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); } },
+  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); }, toggle(c, on) { if (on === undefined ? this._s.has(c) : !on) this._s.delete(c); else this._s.add(c); } },
   listeners: {},
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
   appendChild() {}, getContext: () => ctx, width: 0, height: 0,

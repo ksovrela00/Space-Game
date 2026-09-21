@@ -36,8 +36,9 @@ import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import {
-  showDocked, showCrash, showHelp, showLanded, hideOverlay, drawMap,
+  showDocked, showCrash, showHelp, showLanded, hideOverlay,
 } from './ui/screens.js';
+import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 
 const STEP = 1 / 60;
@@ -83,6 +84,7 @@ const game = {
   renderer: hud,
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
+  map: makeMap(),        // состояние карты системы: масштаб, центр, выбор
   quantum: makeQuantum(),
   state: makeState(),
   audio: makeAudio(),
@@ -369,6 +371,8 @@ function teleportToTarget() {
  * ходу. Маркер тела, рядом с которым корабль не находится, в список не
  * попадает — тогда встаём на само тело.
  */
+game.selectTarget = (t) => selectTarget(t);
+
 function selectTarget(t) {
   if (!t) return;
   refreshNav(game.nav, world, ship);
@@ -493,12 +497,23 @@ function handleKeys() {
 
   if (input.pressed('KeyM')) {
     if (st.mode === ST.MAP) st.mode = restMode();
-    else if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) st.mode = ST.MAP;
+    else if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) {
+      st.mode = ST.MAP;
+      // Карта открывается на том, куда летишь: выбранной оказывается
+      // текущая цель, а вид охватывает всю систему. Искать себя на
+      // плане каждый раз заново — работа, которой быть не должно.
+      resetMap(game.map, world);
+      game.map.sel = currentTarget(game.nav);
+    }
     if (st.mode === ST.DOCKED) showDocked(game);
     else if (st.mode === ST.LANDED) showLanded(game);
     else hideOverlay();
     return;
   }
+
+  // Карта — единственный режим, где работают мышь и колесо, поэтому её
+  // ввод разбирается целиком в js/ui/map.js, а не здесь.
+  if (st.mode === ST.MAP) { mapInput(game, input); return; }
 
   if (st.mode === ST.DOCKED) {
     if (input.pressed('Space', 'Enter')) game.launch();
@@ -976,8 +991,18 @@ function render2d() {
   renderer.end();
 }
 
+// Курсор виден только на карте (см. css/style.css). Переключаем по
+// изменению, а не каждый кадр: трогать DOM в кадре незачем.
+let cursorShown = false;
+
 function render() {
   setupCamera();
+
+  const wantCursor = game.state.mode === ST.MAP;
+  if (wantCursor !== cursorShown) {
+    cursorShown = wantCursor;
+    screenCanvas.classList.toggle('map', wantCursor);
+  }
 
   if (scene) scene.render(game);
   else render2d();

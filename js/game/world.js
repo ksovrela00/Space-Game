@@ -15,6 +15,7 @@
 import { v3, normalize, cross } from '../core/vec3.js';
 import { makeRng, makeName, ROMAN } from '../core/rng.js';
 import { setGravity } from './gravity.js';
+import { pressureOf } from './bodyinfo.js';
 import { STATION_R } from '../models/station.js';
 
 const TAU = Math.PI * 2;
@@ -137,6 +138,11 @@ const makeBody = (rng, opts) => {
     radius: opts.radius,
     color: surf.color,
     atmo: surf.atmo,
+    // Давление у поверхности, бар. Стоит рядом с atmo не для красоты:
+    // по нему считается плотность воздуха, а значит и нагрев при входе
+    // (js/game/entry.js). Тонкая пустынная атмосфера обязана и жечь
+    // слабее плотной океанической.
+    press: pressureOf(opts.kind),
     features: surf.features,
     pole: frame.pole,
     eqRef: frame.eqRef,

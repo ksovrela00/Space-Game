@@ -24,6 +24,14 @@ import {
 import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '../js/game/gravity.js';
 import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
 import { shipShadow } from '../js/game/shadow.js';
+import {
+  massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
+  KIND_INFO, T_EQ_HOME,
+} from '../js/game/bodyinfo.js';
+import {
+  makeMap, mapObjects, objectCard, focusOn, fitScale, pickAt, fmtMass,
+  markerOnBody, glyphRadius,
+} from '../js/ui/map.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '../js/game/audio.js';
 import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
@@ -2556,6 +2564,170 @@ console.log('\n== столкновения ==');
   // коридор упирается в неё же.
   ok(!canJump(w, sh, p).ok || sh.speed > 0,
     'привод не подменяет собой столкновение: в прыжке проверок касания нет');
+}
+
+// --- 13. Карта системы --------------------------------------------------------
+//
+// Карта пишет о теле десяток чисел, и главный риск здесь не в отрисовке,
+// а в том, что написанное разойдётся с тем, по чему корабль летает.
+// Поэтому проверяется не «нарисовалось», а «то же самое число».
+console.log('\n== карта системы ==');
+{
+  // Гравитационная постоянная в километрах — та же, что в gravity.js.
+  const G = 6.674e-20;
+  let worst = 0, worstName = '';
+  for (const b of world.bodies) {
+    const g = G * massOf(b) / (b.radius * b.radius) * 1000;   // м/с² из массы
+    const err = Math.abs(g - b.g0) / b.g0;
+    if (err > worst) { worst = err; worstName = b.name; }
+  }
+  ok(worst < 1e-9,
+    `масса в карточке и тяжесть в полёте — одно число: расхождение ${worst.toExponential(1)} ` +
+    `(худшее у ${worstName})`);
+
+  // Вторая космическая: столько же, сколько нужно, чтобы уйти от тела.
+  const home = world.home;
+  ok(Math.abs(escapeSpeed(home) - Math.sqrt(2 * home.mu / home.radius)) < 1e-12 &&
+     escapeSpeed(home) > 1,
+    `вторая космическая у ${home.name}: ${escapeSpeed(home).toFixed(2)} км/с`);
+
+  // Температура. Шкала привязана к родной планете (иначе в сжатой
+  // системе получались бы полторы тысячи градусов), но дальше работает
+  // настоящий закон: поток падает как квадрат расстояния.
+  const tHome = temperatureOf(world, home);
+  ok(Math.abs(tHome - (T_EQ_HOME + KIND_INFO.ocean.heat)) < 1e-9,
+    `родная планета откалибрована: ${(tHome - 273.15).toFixed(1)} °C`);
+
+  const temps = world.planets.map((p) => temperatureOf(world, p));
+  ok(temps.every((t, i) => i === 0 || t < temps[i - 1]),
+    'от светила наружу становится холоднее: ' +
+    temps.map((t) => (t - 273.15).toFixed(0) + '°').join(' > '));
+
+  // Два тела одного типа на разных орбитах — на них закон виден начисто,
+  // без поправок на альбедо и собственное тепло.
+  const m1 = world.planets.find((p) => p.kind === 'gas').moons[0];
+  const m2 = world.planets.find((p) => p.kind === 'ice').moons[0];
+  const ratio = temperatureOf(world, m1) / temperatureOf(world, m2);
+  const want = Math.sqrt(starDistance(m2) / starDistance(m1));
+  ok(Math.abs(ratio - want) < 1e-12,
+    `температура падает как корень из расстояния: ${ratio.toFixed(4)} при ожидании ${want.toFixed(4)}`);
+
+  // Атмосфера в карточке есть ровно там, где она есть у мира.
+  const mismatch = world.bodies.filter((b) => !!atmosphereOf(b) !== !!b.atmo);
+  ok(mismatch.length === 0,
+    `воздух в карточке совпадает с воздухом в мире (${world.bodies.filter((b) => b.atmo).length} тел с атмосферой)`);
+
+  const badMix = Object.entries(KIND_INFO)
+    .filter(([, v]) => v.mix)
+    .filter(([, v]) => Math.abs(v.mix.reduce((a, [, x]) => a + x, 0) - 100) > 0.01);
+  ok(badMix.length === 0, 'состав воздуха везде сходится к 100%: ' +
+    Object.entries(KIND_INFO).filter(([, v]) => v.mix).map(([k]) => k).join(', '));
+
+  // ТО, ЧТО ЛЕГКО СЛОМАТЬ: давление в карточке должно работать, а не
+  // просто печататься. Тонкий воздух обязан и жечь обшивку слабее.
+  const ocean = world.planets.find((p) => p.kind === 'ocean');
+  const desert = world.planets.find((p) => p.kind === 'desert');
+  const hOcean = entryHeat(airDensity(ocean, 0), 1.2);
+  const hDesert = entryHeat(airDensity(desert, 0), 1.2);
+  ok(Math.abs(airDensity(desert, 0) - KIND_INFO.desert.press) < 1e-12 && hDesert < hOcean,
+    `давление не подпись: ${KIND_INFO.desert.press} бар у пустынной против ${KIND_INFO.ocean.press} ` +
+    `у океанической, нагрев ${hDesert.toFixed(3)} против ${hOcean.toFixed(3)}`);
+
+  // Сутки: из периода вращения, по которому крутится сама планета.
+  ok(Math.abs(dayLength(home) - 2 * Math.PI / home.spin) < 1e-9 && dayLength(home) > 3600,
+    `сутки ${home.name}: ${(dayLength(home) / 3600).toFixed(1)} ч`);
+
+  // --- карточка целиком ------------------------------------------------------
+  const mship = makeShip();
+  placeShip(mship, v3(home.pos.x + 40000, home.pos.y, home.pos.z), makeBasis());
+  const mgame = {
+    world, ship: mship, nav: makeNav(world), map: makeMap(),
+    state: { messages: [] },
+  };
+
+  const card = objectCard(mgame, home);
+  const keys = card.rows.map(([k]) => k);
+  const needed = ['РАДИУС', 'МАССА', 'ТЯЖЕСТЬ', 'ТЕМПЕРАТУРА', 'СУТКИ', 'ГОД',
+    'АТМОСФЕРА', 'СОСТАВ', 'ПОСАДКА', 'СТАНЦИЯ', 'КОРИДОР'];
+  const missing = needed.filter((k) => !keys.includes(k));
+  ok(missing.length === 0 && card.desc.length > 40,
+    `в карточке ${home.name} есть всё, что просили: ${keys.length} строк` +
+    (missing.length ? ', нет ' + missing.join(', ') : ''));
+
+  // Ни одного «NaN», «undefined» и «Infinity» — ни у планеты, ни у
+  // станции, ни у маркера: карточку читают, а не смотрят.
+  const objs = mapObjects(world, home).concat(world.stations, world.markers.slice(0, 6));
+  let dirty = null;
+  for (const o of objs) {
+    for (const [k, v] of objectCard(mgame, o).rows) {
+      if (/NaN|undefined|Infinity/.test(String(v))) { dirty = o.name + ' / ' + k + ': ' + v; break; }
+    }
+    if (dirty) break;
+  }
+  ok(!dirty, `карточки ${objs.length} объектов читаются без дыр` + (dirty ? ': ' + dirty : ''));
+
+  // Посадка в карточке — это ровно то, что скажет посадочный компьютер.
+  const wrong = world.bodies.filter((b) => {
+    const note = objectCard(mgame, b).rows.find(([k]) => k === 'ПОСАДКА');
+    return note && /^возможна/.test(note[1]) !== isLandable(b);
+  });
+  ok(wrong.length === 0, 'карточка обещает посадку там же, где её разрешает игра');
+
+  // --- масштаб ---------------------------------------------------------------
+  //
+  // ТО, РАДИ ЧЕГО КАРТА ПЕРЕДЕЛЫВАЛАСЬ: на обзорном масштабе станция
+  // сидит внутри своей планеты (полпикселя), и выбрать её нельзя. После
+  // перехода к ней она обязана отойти от планеты настолько, чтобы в неё
+  // можно было ткнуть.
+  const map = makeMap();
+  map.vx = 0; map.vy = 46; map.vw = 1200; map.vh = 800;
+  const st = world.home.station;
+  const gapFit = st.orbit.radius * fitScale(map, world) * map.zoom;
+  focusOn(map, world, st);
+  const gapNear = st.orbit.radius * fitScale(map, world) * map.zoom;
+  ok(gapFit < 2 && gapNear > 40,
+    `станция отделяется от планеты приближением: ${gapFit.toFixed(2)} px на обзоре, ` +
+    `${gapNear.toFixed(0)} px после перехода (масштаб ×${map.zoom.toFixed(0)})`);
+
+  // Список выбора: вся система разом, а маркеры — только у выбранного
+  // тела, иначе в списке шесть точек на каждое тело и ничего больше.
+  const plain = mapObjects(world, null);
+  const withMarks = mapObjects(world, home);
+  ok(plain.length === 1 + world.planets.length + world.stations.length + 3 &&
+     withMarks.length === plain.length + 6,
+    `в списке карты ${plain.length} объектов, с маркерами выбранного тела — ${withMarks.length}`);
+
+  // Попадание курсором: по экранным координатам, а не по мировым.
+  map.items = [{ obj: home, sx: 100, sy: 100 }, { obj: st, sx: 124, sy: 100 }];
+  ok(pickAt(map, 104, 103) === home && pickAt(map, 122, 104) === st &&
+     pickAt(map, 400, 400) === null,
+    'курсор попадает в ближайший к нему объект и мимо пустоты не цепляет ничего');
+
+  ok(/10²⁴ кг/.test(fmtMass(1.71e24)) && /Земли/.test(fmtMass(1.71e24)),
+    `масса читается человеком: ${fmtMass(massOf(home))}`);
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: карта — проекция на плоскость орбит, и два
+  // маркера из шести стоят над полюсами, то есть приходятся ровно на
+  // центр своего тела. Они закрывали планету и перехватывали щелчок.
+  {
+    const fake = { kind: 'moon', radius: 1000, pos: v3(), isBody: true };
+    const over = { isMarker: true, body: fake, pos: v3(0, 3000, 0) };   // над полюсом
+    const side = { isMarker: true, body: fake, pos: v3(3000, 0, 0) };   // в стороне
+    const m2 = makeMap();
+    m2.vx = 0; m2.vy = 0; m2.vw = 1200; m2.vh = 800; m2.scale = 0.01;
+    ok(markerOnBody(over, m2) && !markerOnBody(side, m2) &&
+       Math.abs(glyphRadius(fake, m2) - 10) < 1e-9,
+      `маркер над полюсом ложится на диск тела (значок ${glyphRadius(fake, m2).toFixed(0)} px) ` +
+      'и не рисуется, боковой — рисуется');
+
+    // И даже если маркер оказался ближе к курсору, выбирается тело: он
+    // точка в пустоте ВОКРУГ него, и целятся в него.
+    m2.items = [{ obj: over, sx: 100, sy: 100 }, { obj: fake, sx: 104, sy: 100 }];
+    ok(pickAt(m2, 100, 100) === fake,
+      'маркер не перехватывает выбор у тела, на котором лежит');
+    m2.items = [{ obj: over, sx: 100, sy: 100 }];
+    ok(pickAt(m2, 100, 100) === over, 'сам по себе маркер выбирается как раньше');
+  }
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

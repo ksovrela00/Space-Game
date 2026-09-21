@@ -10,9 +10,14 @@ class Input {
     this.down = new Set();
     this.pressedThisFrame = new Set();
     this.enabled = true;
-    // Мышь нужна только для осмотра из-за спины: правая кнопка зажата —
-    // копим сдвиг курсора, камера его разбирает раз в кадр.
-    this.mouse = { right: false, dx: 0, dy: 0 };
+    // Мышь: правая кнопка — осмотр из-за спины (копим сдвиг курсора,
+    // камера разбирает его раз в кадр), левая и колесо — карта системы
+    // (выбор объекта, перетаскивание, масштаб). В полёте левая кнопка и
+    // колесо не делают ничего, поэтому и перехватывать их незачем.
+    this.mouse = {
+      right: false, dx: 0, dy: 0,
+      left: false, x: 0, y: 0, pdx: 0, pdy: 0, wheel: 0, clicked: false,
+    };
   }
 
   attach(target = window) {
@@ -40,15 +45,51 @@ class Input {
     win.addEventListener('contextmenu', (e) => { if (e.preventDefault) e.preventDefault(); });
     win.addEventListener('mousedown', (e) => {
       if (e.button === 2) { this.mouse.right = true; if (e.preventDefault) e.preventDefault(); }
+      if (e.button === 0) { this.mouse.left = true; this.mouse.clicked = true; }
+      this.setPos(e);
     });
-    win.addEventListener('mouseup', (e) => { if (e.button === 2) this.mouse.right = false; });
+    win.addEventListener('mouseup', (e) => {
+      if (e.button === 2) this.mouse.right = false;
+      if (e.button === 0) this.mouse.left = false;
+    });
     win.addEventListener('mousemove', (e) => {
+      this.setPos(e);
+      // Тянуть карту можно только левой, вертеть камеру — только правой.
+      if (this.mouse.left) {
+        this.mouse.pdx += e.movementX || 0;
+        this.mouse.pdy += e.movementY || 0;
+      }
       if (!this.mouse.right) return;
       this.mouse.dx += e.movementX || 0;
       this.mouse.dy += e.movementY || 0;
     });
+    // Колесо копится до конца кадра: за кадр приходит несколько щелчков,
+    // и разбирать их по одному значит дёргать масштаб рывками.
+    win.addEventListener('wheel', (e) => {
+      this.mouse.wheel += e.deltaY || 0;
+      // Страница здесь одна и целиком занята игрой, прокручивать нечего.
+      if (e.preventDefault && e.cancelable) e.preventDefault();
+    }, { passive: false });
     // Потеря фокуса не должна оставлять кнопку «зажатой».
-    win.addEventListener('blur', () => { this.mouse.right = false; });
+    win.addEventListener('blur', () => { this.mouse.right = false; this.mouse.left = false; });
+  }
+
+  setPos(e) {
+    if (typeof e.clientX === 'number') { this.mouse.x = e.clientX; this.mouse.y = e.clientY; }
+  }
+
+  /** Забрать накопленный поворот колеса и обнулить его. */
+  takeWheel() {
+    const v = this.mouse.wheel;
+    this.mouse.wheel = 0;
+    return v;
+  }
+
+  /** Забрать сдвиг при перетаскивании левой кнопкой и обнулить его. */
+  takePan(out = { x: 0, y: 0 }) {
+    out.x = this.mouse.pdx; out.y = this.mouse.pdy;
+    this.mouse.pdx = 0; this.mouse.pdy = 0;
+    return out;
   }
 
   /** Забрать накопленный сдвиг мыши и обнулить его. */
@@ -73,7 +114,7 @@ class Input {
     return (this.isDown(...posCodes) ? 1 : 0) - (this.isDown(...negCodes) ? 1 : 0);
   }
 
-  endFrame() { this.pressedThisFrame.clear(); }
+  endFrame() { this.pressedThisFrame.clear(); this.mouse.clicked = false; }
   releaseAll() { this.down.clear(); this.pressedThisFrame.clear(); }
 }
 
