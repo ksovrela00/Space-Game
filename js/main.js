@@ -100,6 +100,7 @@ const game = {
   crashReason: '',
   lastStation: null,
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
+  restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
 };
 
 const dbg = makeDebug();
@@ -184,6 +185,59 @@ game.respawn = () => {
   const st = game.lastStation || (world.home && world.home.station);
   if (st) dockAt(st);
   else { game.state.mode = ST.FLIGHT; }
+};
+
+// Сколько секунд ждём второго нажатия. Рестарт необратим и стирает
+// сохранение, поэтому одной клавишей он не делается: первое нажатие
+// только предупреждает.
+const RESTART_CONFIRM = 3;
+
+/**
+ * Начать заново: то же состояние, что у первого запуска — корабль в
+ * порту родной станции, корпус цел, счётчики обнулены, часы мира на
+ * нуле. Сохранение переписывается сразу, иначе старое вернулось бы при
+ * следующей загрузке страницы.
+ *
+ * Корабль именно ПЕРЕСОБИРАЕТСЯ по полям, а не создаётся заново: на него
+ * держат ссылки и сцена, и приборы, и звук.
+ */
+game.restart = () => {
+  stopAutopilot(ship);
+  stopDockingComputer(ship);
+  stopLanding(ship);
+  ship.landedAt = null;
+  ship.landedPose = null;
+  ship.dockedAt = null;
+  ship.landing = null;
+  ship.hull = SHIP.maxHull;
+  ship.gear.out = false;
+  ship.gear.t = 0;
+  ship.lift = 0;
+  ship.stun = 0;
+  ship.zeroHold = 0;
+  placeShip(ship, v3(), makeBasis());
+
+  world.time = 0;
+  updateWorld(world, 0);
+  resetCruise(game.cruise);
+  game.stats = { docks: 0, crashes: 0, flownKm: 0, landings: 0 };
+  game.zone = null;
+  game.capture = null;
+  game.landInfo = null;
+  game.dockAssist = null;
+  game.statusLine = null;
+  game.crashReason = '';
+  game.camOrbit.yaw = 0;
+  game.camOrbit.pitch = 0;
+  game.restartArmed = 0;
+  game.state.messages.length = 0;
+
+  const home = world.home.station;
+  const away = world.stations.find((x) => x !== home);
+  if (away) game.nav.index = game.nav.list.indexOf(away);
+  try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* приватный режим */ }
+  dockAt(home);                 // ставит режим, экран порта и пишет сейв
+  say(game.state, 'НОВАЯ ИГРА', '#78e08f', 3);
 };
 
 // Куда возвращаться, закрывая карту или справку.
@@ -387,10 +441,19 @@ function handleKeys() {
   // Звук. Клавиши намеренно вне разбора режимов ниже: выключать гул
   // надо и на карте, и в порту, а не только в полёте.
   if (input.pressed('KeyN')) {
-    game.audio.on = !game.audio.on;
-    sound.setMuted(!game.audio.on);
-    say(st, game.audio.on ? 'ЗВУК ВКЛЮЧЁН' : 'ЗВУК ВЫКЛЮЧЕН');
-    save();
+    if (input.isDown('ShiftLeft', 'ShiftRight')) {
+      // Начать заново — только с подтверждения: сохранение стирается.
+      if (game.restartArmed > 0) game.restart();
+      else {
+        game.restartArmed = RESTART_CONFIRM;
+        say(st, 'SHIFT+N ЕЩЁ РАЗ — НАЧАТЬ ЗАНОВО', '#ff7a66', RESTART_CONFIRM);
+      }
+    } else {
+      game.audio.on = !game.audio.on;
+      sound.setMuted(!game.audio.on);
+      say(st, game.audio.on ? 'ЗВУК ВКЛЮЧЁН' : 'ЗВУК ВЫКЛЮЧЕН');
+      save();
+    }
   }
   if (input.pressed('Minus', 'Equal', 'NumpadSubtract', 'NumpadAdd')) {
     const up = input.pressed('Equal', 'NumpadAdd');
@@ -875,6 +938,7 @@ function frame(now) {
   if (acc > STEP) acc = 0;
 
   updateMessages(game.state, dt);
+  if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
   updateCamOrbit(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный
   // ускоритель множит перемещение, но не частоту кадров, и гул движков

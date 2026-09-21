@@ -582,6 +582,61 @@ await step('стоянка на поверхности и взлёт по Space'
   frames(60 * 5);
 });
 
+await step('рестарт с начала по Shift+N (с подтверждением)', () => {
+  // Наигрываем состояние, которое рестарт обязан снести.
+  game.stats.docks = 7;
+  game.stats.landings = 3;
+  game.ship.hull = 42;
+  game.world.time = 12345;
+  frames(2);
+
+  // Одного нажатия мало: сначала предупреждение.
+  holdDown('ShiftLeft');
+  key('KeyN');
+  frames(2);
+  release('ShiftLeft');
+  if (game.state.mode === 'docked' && game.ship.hull === 100) {
+    throw new Error('рестарт случился с одного нажатия');
+  }
+  if (!game.state.messages.some((m) => /ЕЩЁ РАЗ/.test(m.text))) {
+    throw new Error('нет предупреждения о рестарте');
+  }
+
+  // Второе нажатие в окне подтверждения — рестарт.
+  holdDown('ShiftLeft');
+  key('KeyN');
+  frames(2);
+  release('ShiftLeft');
+  frames(3);
+
+  if (game.state.mode !== 'docked') throw new Error('после рестарта режим ' + game.state.mode);
+  if (game.ship.dockedAt !== game.world.home.station) {
+    throw new Error('рестарт не в порту родной станции');
+  }
+  if (game.ship.hull !== 100) throw new Error('корпус не восстановлен: ' + game.ship.hull);
+  if (game.stats.docks !== 0 || game.stats.landings !== 0) {
+    throw new Error('счётчики не обнулены: ' + JSON.stringify(game.stats));
+  }
+  if (game.world.time > 1) throw new Error('часы мира не обнулены: ' + game.world.time);
+  const saved = JSON.parse(store['solar_trader_save_v1'] || 'null');
+  if (!saved || saved.hull !== 100 || (saved.stats && saved.stats.docks !== 0)) {
+    throw new Error('сохранение не переписано: ' + JSON.stringify(saved && saved.stats));
+  }
+
+  // Окно подтверждения закрывается само.
+  holdDown('ShiftLeft');
+  key('KeyN');
+  frames(2);
+  release('ShiftLeft');
+  frames(60 * 5);                       // ждём дольше окна
+  const before = game.world.time;
+  holdDown('ShiftLeft');
+  key('KeyN');
+  frames(2);
+  release('ShiftLeft');
+  if (game.world.time < before) throw new Error('рестарт сработал после истечения окна');
+});
+
 await step('изменение размера окна', () => {
   window.innerWidth = 640; window.innerHeight = 1000;
   for (const fn of winListeners.resize || []) fn();
