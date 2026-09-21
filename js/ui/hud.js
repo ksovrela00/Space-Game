@@ -108,6 +108,11 @@ export function drawHud(r, game) {
     ctx.fillStyle = RED;
     ctx.fillText('БЕЗ УПРАВЛЕНИЯ', w / 2, h / 2 + 56);
   }
+  // Все цели видны сразу — выбирать их наведением можно, только если
+  // видно, куда наводиться. Выбранная рисуется поверх остальных своей
+  // рамкой.
+  drawTargetList(ctx, cam, game, target);
+  drawAimedLabel(ctx, cam, game, target);
   if (target) drawTargetMarker(ctx, cam, target);
 
   // Приборы подхода включаются в гравитационном захвате и берут на себя
@@ -139,10 +144,13 @@ export function drawHud(r, game) {
   // накопилось, пусто, — потому что смотреть на длину полоски в бою
   // некогда.
   const boostY = approach ? py + 48 : py + 88;
-  ctx.fillStyle = ship.boosting ? AMBER : (ship.boost > 0.999 ? CY : CY_DIM);
+  // Цвет говорит о состоянии: жгут, заперт до перезарядки, накопилось,
+  // копится. Смотреть на длину полоски в манёвре некогда.
+  ctx.fillStyle = ship.boosting ? AMBER
+    : (ship.boostLock ? RED : (ship.boost > 0.999 ? CY : CY_DIM));
   ctx.fillText('ФОРСАЖ', px + 10, boostY);
   bar(ctx, px + 58, boostY - 7, 64, 7, ship.boost,
-    ship.boosting ? AMBER : (ship.boost < 0.2 ? RED : CY));
+    ship.boosting ? AMBER : (ship.boostLock ? RED : CY));
   ctx.fillStyle = CY_DIM;
   ctx.fillText('КОРПУС', px + 10, boostY + 14);
   bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
@@ -608,6 +616,103 @@ function drawVelocityMarker(ctx, cam, ship) {
   }
   ctx.restore();
 }
+
+/**
+ * Метки всех целей, попавших в кадр.
+ *
+ * Без них выбор наведением не работает: нос наводить не на что, если
+ * цель — точка в пустоте или луна в пиксель размером. Поэтому у каждой
+ * рисуется значок, а имя — только у того, на что нос наведён сейчас, и
+ * у ближайших к прицелу: подписать всё разом значит закрыть подписями
+ * полкадра.
+ *
+ * Значки разные по смыслу, а не для красоты: у тел кружок (у них есть
+ * размер), у станций квадрат, у орбитальных маркеров косой крест —
+ * точка в пустоте, за которую не зацепишься.
+ *
+ * Каждый значок рисуется ДВАЖДЫ: сначала тёмной широкой линией, потом
+ * своей. Без подложки метка теряется — она тонкая и того же порядка
+ * яркости, что звёзды и подсвеченный край планеты, а искать её глазами
+ * приходится именно на этом фоне.
+ */
+function drawTargetList(ctx, cam, game, target) {
+  const nav = game.nav;
+  if (!nav || !nav.list) return;
+  const aimed = game.aimed || null;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  for (const t of nav.list) {
+    if (t === target) continue;              // у выбранной своя рамка
+    const c = cam.toCamera(t.pos);
+    if (c.z <= cam.near) continue;           // за спиной
+    const p = cam.project(c, _pt);
+    if (p.x < 8 || p.x > cam.w - 8 || p.y < 8 || p.y > cam.h - 8) continue;
+    const hot = t === aimed;
+    const r = hot ? 7 : 5.5;
+
+    const shape = () => {
+      ctx.beginPath();
+      if (t.isStation) ctx.rect(p.x - r, p.y - r, r * 2, r * 2);
+      else if (t.isMarker) {
+        ctx.moveTo(p.x - r, p.y - r); ctx.lineTo(p.x + r, p.y + r);
+        ctx.moveTo(p.x + r, p.y - r); ctx.lineTo(p.x - r, p.y + r);
+      } else ctx.arc(p.x, p.y, r, 0, TAU);
+      ctx.stroke();
+    };
+
+    // Подложка.
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.lineWidth = hot ? 4.5 : 3.5;
+    shape();
+    // Сама метка.
+    ctx.strokeStyle = hot ? '#ffffff' : CY;
+    ctx.lineWidth = hot ? 2 : 1.4;
+    shape();
+
+    if (hot) {
+      // Наведённая цель обведена ещё раз: сам значок мелкий, а решение
+      // «эту и выберу» принимается по нему.
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 3.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r + 5, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = AMBER;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r + 5, 0, TAU); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * Имя того, на что наведён нос, — в ПОСТОЯННОМ месте под приборами.
+ *
+ * Подпись у самого значка была бы удобнее, да только значок наведённой
+ * цели по определению стоит у прицела, а середина кадра обязана
+ * оставаться пустой: приборы не закрывают то, во что целятся. Заодно
+ * строка не прыгает по экрану вслед за целью.
+ */
+function drawAimedLabel(ctx, cam, game, target) {
+  const t = game.aimed;
+  if (!t || t === target) return;
+  const bh = Math.min(Math.max(cam.h * 0.13, 92), 160);
+  ctx.save();
+  ctx.font = '12px Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Та же подложка, что у значков: строка стоит поверх звёздного неба.
+  const line = (text, y, color) => {
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeText(text, cam.cx, y);
+    ctx.fillStyle = color;
+    ctx.fillText(text, cam.cx, y);
+  };
+  line(targetLabel(t) + '   ' + fmtDist(dist3(cam.pos, t.pos)), cam.cy + bh + 84, '#ffffff');
+  line('TAB — ВЫБРАТЬ ЦЕЛЬ', cam.cy + bh + 100, AMBER);
+  ctx.restore();
+}
+
+const dist3 = (a, b) => Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
 
 // Рамка вокруг цели или стрелка к ней у края экрана.
 function drawTargetMarker(ctx, cam, target) {

@@ -14,7 +14,9 @@ import { buildCobra, buildGear } from './models/ships.js';
 import { buildStation, STATION_D } from './models/station.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
-import { makeNav, refreshNav, cycleTarget, currentTarget, navInfo, targetById } from './game/nav.js';
+import {
+  makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById,
+} from './game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump, suggestHop, QUANTUM,
 } from './game/quantum.js';
@@ -88,6 +90,7 @@ const game = {
   info: null,
   nearest: null,
   dockAssist: null,
+  aimed: null,           // цель под прицелом: её выберет Tab
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
   entry: null,           // вход в атмосферу: нагрев, цвет и ось факела
   entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
@@ -515,10 +518,13 @@ function handleKeys() {
     st.view = st.view === 'cockpit' ? 'chase' : 'cockpit';
   }
 
+  // Tab выбирает то, на что НАВЕДЁН НОС. Перебора списка больше нет: в
+  // системе два десятка целей, и щёлкать через полсистемы до нужной —
+  // худший способ выбрать то, что и так видно на экране.
   if (input.pressed('Tab')) {
-    const dir = input.isDown('ShiftLeft', 'ShiftRight') ? -1 : 1;
-    const t = cycleTarget(game.nav, dir);
-    say(st, 'ЦЕЛЬ: ' + (t ? t.name : '—'));
+    const t = pickTarget(game.nav, ship);
+    if (!t) { say(st, 'НАВЕДИ НОС НА ЦЕЛЬ', '#ffcc66'); return; }
+    say(st, 'ЦЕЛЬ: ' + t.name);
     // Смена цели на калибровке — это выбор другого маршрута, а не отказ
     // от прыжка: привод просто начинает считать заново.
     const q = game.quantum;
@@ -775,6 +781,9 @@ function prepareHud() {
   refreshNav(game.nav, world, ship);
   const target = currentTarget(game.nav);
   game.info = navInfo(ship, target);
+  // На что наведён нос прямо сейчас: приборы подсвечивают это, и то же
+  // самое выберет Tab.
+  game.aimed = aimedTarget(game.nav, ship);
 
   // Блипы сканера: станции, планеты, луны.
   game.scanBlips.length = 0;
@@ -839,22 +848,41 @@ function updateCamOrbit(dt) {
   }
 }
 
-// Поле зрения: удар в момент разгона привода и широкий угол на ходу.
+// Поле зрения: удар в момент разгона и широкий угол на ходу — и у
+// квантового привода, и у форсажа.
 //
 // Это то, что физически продаёт скорость. Полосы звёзд без него
 // выглядят обоями: глаз читает разгон именно по тому, как раздвигается
 // картинка по краям. Удар короткий (punch гаснет за полсекунды), а
-// широкий угол держится, пока привод разогнан.
+// широкий угол держится, пока разогнаны.
+//
+// У форсажа тот же приём в меньшем масштабе: он даёт вдвое к скорости, а
+// не в пятьдесят тысяч раз, и +12° против +24° у привода.
 const FOV_BASE = 68 * Math.PI / 180;
 const FOV_JUMP = 92 * Math.PI / 180;
+const FOV_BOOST = 80 * Math.PI / 180;
 let fovNow = FOV_BASE;
 
 function updateFov(dt) {
   const q = game.quantum;
   const frac = q.phase === 'jump'
     ? Math.min(1, q.speed / (ship.quantumSpeed || 60000)) : 0;
-  const want = FOV_BASE + (FOV_JUMP - FOV_BASE) * Math.min(1, 0.55 * frac + 0.5 * q.punch);
-  fovNow += (want - fovNow) * Math.min(1, dt * 6);
+  const jump = FOV_BASE + (FOV_JUMP - FOV_BASE) * Math.min(1, 0.55 * frac + 0.5 * q.punch);
+
+  // Широкий угол держится по НАБРАННОЙ скорости сверх обычного предела,
+  // а не по факту нажатия: иначе картинка раздвигалась бы раньше, чем
+  // корабль поехал, и рывок читался бы как дефект, а не как разгон.
+  const over = clamp(
+    (ship.speed - SHIP.maxSpeed) / (SHIP.maxSpeed * (SHIP.boostMax - 1)), 0, 1);
+  const boost = FOV_BASE + (FOV_BOOST - FOV_BASE) *
+    Math.min(1, 0.8 * over + 0.6 * ship.boostPunch);
+
+  // Не сумма, а что сильнее: в прыжке форсаж всё равно недоступен, и
+  // складывать их значит получить угол, которого не задумывал никто.
+  const want = Math.max(jump, boost);
+  // Вверх поле зрения идёт резче, чем возвращается: рывок — событие, а
+  // возврат — послевкусие.
+  fovNow += (want - fovNow) * Math.min(1, dt * (want > fovNow ? 10 : 5));
   if (Math.abs(fovNow - camera.fov) > 1e-5) camera.setFov(fovNow);
 }
 

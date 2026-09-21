@@ -265,21 +265,46 @@ await step('вид от 3-го лица (V) рисует свой корабль
   frames(5);
 });
 
-await step('переключение цели (Tab) и форсаж (Space)', () => {
-  const t0 = game.nav.index;
+await step('выбор цели наведением (Tab) и форсаж (Space)', () => {
+  // Цель выбирается тем, что на неё наведён нос. Наводимся на планету
+  // явно: «нажать Tab и посмотреть, что изменилось» теперь ничего не
+  // проверяет — могло и не быть под прицелом никого.
+  const planet = game.world.home;
+  const p = planet.pos, sp = game.ship.pos;
+  const d = Math.hypot(p.x - sp.x, p.y - sp.y, p.z - sp.z) || 1;
+  const fwd = { x: (p.x - sp.x) / d, y: (p.y - sp.y) / d, z: (p.z - sp.z) / d };
+  lookAlong(game.ship.basis, fwd);
+  frames(2);
   key('Tab'); frames(2);
-  if (game.nav.index === t0) throw new Error('цель не сменилась');
+  const picked = game.nav.list[game.nav.index];
+  if (picked !== planet) {
+    throw new Error('наведение не выбрало планету: ' + (picked && picked.name));
+  }
+
   // Форсаж на удержании: заряд тратится, потом восстанавливается.
   // Тягу при этом НЕ даём: рядом станция, и разгон вдвое от неё — это
   // проверка не форсажа, а прочности корпуса.
   game.ship.throttle = 0;
-  holdDown('Space'); frames(120);
+  const fov0 = game.camera.fov;
+  holdDown('Space'); frames(6);
+  // Рывок по полю зрения: он короткий, поэтому смотрим сразу.
+  const fovPunch = game.camera.fov;
+  if (!(fovPunch > fov0 + 0.01)) {
+    throw new Error('поле зрения не раздвинулось на форсаже: ' +
+      (fov0 * 57.3).toFixed(1) + '° -> ' + (fovPunch * 57.3).toFixed(1) + '°');
+  }
+  frames(120);
   const spent = game.ship.boost;
   if (!(spent < 0.9)) throw new Error('заряд форсажа не тратится: ' + spent.toFixed(2));
   if (!game.ship.boosting) throw new Error('форсаж не включился');
   release('Space'); frames(120);
   if (!(game.ship.boost > spent)) throw new Error('заряд не восстанавливается');
   if (game.ship.boosting) throw new Error('форсаж не выключился');
+  // Стоя на месте, поле зрения обязано вернуться: удар — событие, а не
+  // постоянное состояние.
+  if (Math.abs(game.camera.fov - fov0) > 0.005) {
+    throw new Error('поле зрения не вернулось: ' + (game.camera.fov * 57.3).toFixed(1) + '°');
+  }
 });
 
 await step('квантовый привод (B) доводит до цели', () => {

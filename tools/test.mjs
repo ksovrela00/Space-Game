@@ -3,7 +3,9 @@ import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis } from '../js/core/basis.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
-import { makeNav, refreshNav, currentTarget, targetById } from '../js/game/nav.js';
+import {
+  makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
+} from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, canJump,
   corridorBlock, exitPoint, jumpTime, suggestHop, QUANTUM,
@@ -575,6 +577,96 @@ const err = Math.max(
 ok(err < 1e-9, `после 100000 поворотов ошибка ортонормальности ${err.toExponential(2)}`);
 
 // --- 4. Стыковка докинг-компьютером ----------------------------------------
+// --- выбор цели наведением ------------------------------------------------------
+console.log('\n== выбор цели наведением ==');
+{
+  // Перебора списка больше нет: цель выбирается тем, что на неё наведён
+  // нос. Проверяется здесь именно правило выбора — что считается
+  // «наведён» и что происходит, когда под прицелом несколько объектов.
+  const nav = makeNav(world);
+  const sh = makeShip();
+
+  // Поставить корабль в точку и навести нос на цель с заданным
+  // промахом (рад) вокруг оси «вверх».
+  const aimAt = (from, at, missRad = 0) => {
+    placeShip(sh, from, makeBasis());
+    const d = normalize(v3(at.x - from.x, at.y - from.y, at.z - from.z));
+    lookAlong(sh.basis, d);
+    if (missRad) {
+      const b = sh.basis;
+      const c = Math.cos(missRad), s2 = Math.sin(missRad);
+      const f = v3(b.fwd.x * c + b.right.x * s2, b.fwd.y * c + b.right.y * s2,
+        b.fwd.z * c + b.right.z * s2);
+      lookAlong(sh.basis, normalize(f));
+    }
+    refreshNav(nav, world, sh);
+  };
+
+  const planet = world.planets.find((p) => p.station) || world.planets[0];
+  const far = v3(planet.pos.x + planet.radius * 40, planet.pos.y, planet.pos.z);
+
+  aimAt(far, planet.pos);
+  ok(pickTarget(nav, sh) === planet && currentTarget(nav) === planet,
+    `нос на планету — выбрана она (${planet.name})`);
+
+  // Мимо всего: смотрим в пустоту за пределами системы. Прежняя цель
+  // при этом обязана остаться — промах не должен сбрасывать выбор.
+  // (Просто «отвернуться на сорок градусов» здесь не годится: в небе
+  // тесно, и под прицел попадает соседняя планета со станцией.)
+  {
+    const out = world.planets[world.planets.length - 1].orbit.radius * 6;
+    const from = v3(world.star.pos.x, world.star.pos.y + out, world.star.pos.z);
+    placeShip(sh, from, makeBasis());
+    lookAlong(sh.basis, normalize(v3(0, 1, 0)));
+    refreshNav(nav, world, sh);
+    const keep = currentTarget(nav);
+    ok(aimTargets(nav, sh).length === 0 && pickTarget(nav, sh) === null &&
+       currentTarget(nav) === keep,
+      'нос в пустоту — под прицелом никого, выбор не меняется');
+  }
+
+  // Мера — зазор до КРАЯ, а не угол до центра: у самой планеты её центр
+  // далеко от прицела, но диск занимает полнеба, и она выбирается.
+  {
+    // С двух радиусов планета видна под 30°: целимся в 20° от её центра —
+    // это мимо по углу, но точно по диску.
+    const close = v3(planet.pos.x + planet.radius * 2, planet.pos.y, planet.pos.z);
+    aimAt(close, planet.pos, 20 * Math.PI / 180);
+    const toCentre = Math.acos(clamp(dot(normalize(v3(
+      planet.pos.x - close.x, planet.pos.y - close.y, planet.pos.z - close.z)), sh.basis.fwd), -1, 1));
+    const angR = Math.asin(planet.radius / (planet.radius * 2)) * 57.3;
+    // Смотрим на первого под прицелом, а не на pickTarget: планета уже
+    // выбрана с прошлой проверки, и повторное нажатие намеренно
+    // перешагнуло бы на следующий объект под тем же прицелом.
+    ok(aimedTarget(nav, sh) === planet && toCentre > AIM_CONE,
+      `диск считается целиком: до центра ${(toCentre * 57.3).toFixed(0)}° — ` +
+      `больше допуска ${(AIM_CONE * 57.3).toFixed(0)}°, но внутри диска ` +
+      `(${angR.toFixed(0)}°), и планета под прицелом`);
+  }
+
+  // Под прицелом несколько — повторное нажатие перебирает ТОЛЬКО их.
+  {
+    const st = planet.station;
+    const from = v3(st.pos.x + (st.pos.x - planet.pos.x) * 6,
+      st.pos.y + (st.pos.y - planet.pos.y) * 6, st.pos.z + (st.pos.z - planet.pos.z) * 6);
+    aimAt(from, st.pos);
+    const under = aimTargets(nav, sh).map((a) => a.t);
+    const first = pickTarget(nav, sh);
+    const second = pickTarget(nav, sh);
+    ok(under.length >= 2 && under.includes(st) && under.includes(planet) &&
+       first !== second && under.includes(first) && under.includes(second),
+      `станция и её планета под одним прицелом (${under.length} объекта): ` +
+      `первое нажатие — ${first.name}, второе — ${second.name}`);
+  }
+
+  // Приборы подсвечивают ровно то, что выберет первое нажатие.
+  {
+    aimAt(far, planet.pos);
+    ok(aimedTarget(nav, sh) === aimTargets(nav, sh)[0].t,
+      'подсветка в приборах и выбор по Tab — это один и тот же объект');
+  }
+}
+
 console.log('\n== докинг-компьютер ==');
 function dockTest(distKm, startDir) {
   const w = makeSystem(0x1a7e);
@@ -1420,6 +1512,143 @@ console.log('\n== тень ==');
 }
 
 // --- 5g. Задний ход ----------------------------------------------------------
+// --- форсаж ---------------------------------------------------------------------
+console.log('\n== форсаж ==');
+{
+  // Форсаж — удержание с расходуемым зарядом. Кроме физики у него есть
+  // РЫВОК: короткий всплеск, по которому камера бьёт полем зрения. Он
+  // живёт в модели (ship.boostPunch), а не в рендере, поэтому его можно
+  // проверить здесь.
+  const mk = () => {
+    const sh = makeShip();
+    placeShip(sh, v3(0, 0, 0), makeBasis());
+    return sh;
+  };
+  const hold = (sh, secs, on = true) => {
+    for (let i = 0; i < Math.round(secs / STEP); i++) {
+      clearControls(sh);
+      sh.control.boost = on ? 1 : 0;
+      sh.control.thr = 1;
+      updateShip(sh, STEP, null);
+    }
+  };
+
+  // Включение: рывок разом на единицу.
+  {
+    const sh = mk();
+    clearControls(sh); sh.control.boost = 1;
+    updateShip(sh, STEP, null);
+    ok(sh.boosting && sh.boostPunch > 0.99,
+      `в момент включения рывок ${sh.boostPunch.toFixed(2)}`);
+  }
+
+  // Удержание: рывок гаснет и НЕ повторяется, пока клавишу держат.
+  {
+    const sh = mk();
+    hold(sh, 0.6);
+    const after = sh.boostPunch;
+    hold(sh, 1);
+    ok(after < 0.05 && sh.boostPunch === 0 && sh.boosting,
+      `за 0.6 с рывок гаснет до ${after.toFixed(3)} и на удержании не повторяется`);
+  }
+
+  // Отпустил и нажал снова — рывок новый.
+  {
+    const sh = mk();
+    hold(sh, 0.6);
+    hold(sh, 0.2, false);
+    clearControls(sh); sh.control.boost = 1;
+    updateShip(sh, STEP, null);
+    ok(sh.boostPunch > 0.99, 'повторное нажатие даёт новый рывок');
+  }
+
+  // Пустой заряд — ни форсажа, ни рывка: иначе камера дёргалась бы на
+  // клавишу, которая ничего не делает.
+  {
+    const sh = mk();
+    sh.boost = 0;
+    clearControls(sh); sh.control.boost = 1;
+    updateShip(sh, STEP, null);
+    ok(!sh.boosting && sh.boostPunch === 0, 'на пустом заряде нет ни форсажа, ни рывка');
+  }
+
+  // И собственно физика: предел скорости вдвое выше обычного. Мерить
+  // надо ПОКА заряд есть: на десятой секунде он кончается, и корабль
+  // возвращается к обычному пределу — это и проверено ниже.
+  {
+    const plain = mk(); const fast = mk();
+    for (let i = 0; i < Math.round(8 / STEP); i++) {
+      clearControls(plain); plain.control.thr = 1; updateShip(plain, STEP, null);
+      clearControls(fast); fast.control.thr = 1; fast.control.boost = 1;
+      updateShip(fast, STEP, null);
+    }
+    const peak = fast.speed;
+    // Заряд кончился — предел снова обычный.
+    for (let i = 0; i < Math.round(25 / STEP); i++) {
+      clearControls(fast); fast.control.thr = 1; fast.control.boost = 1;
+      updateShip(fast, STEP, null);
+    }
+    ok(Math.abs(plain.speed - SHIP.maxSpeed) < 0.01 && peak > SHIP.maxSpeed * 1.5 &&
+       fast.boostLock && Math.abs(fast.speed - SHIP.maxSpeed) < 0.02,
+      `предел: обычный ${plain.speed.toFixed(2)} км/с, на форсаже ${peak.toFixed(2)}; ` +
+      `заряд кончился, форсаж заперт — скорость вернулась к ${fast.speed.toFixed(2)}`);
+  }
+
+  // Разгон: форсаж поднимает не только предел, но и тягу, и время
+  // выхода на предел — это то, что задано (SHIP.boostRamp), а множитель
+  // тяги из него выведен.
+  {
+    const sh = mk();
+    const lim = SHIP.maxSpeed * SHIP.boostMax;
+    // Сперва обычный предел, потом форсаж — как в жизни.
+    for (let i = 0; i < Math.round(20 / STEP); i++) {
+      clearControls(sh); sh.control.thr = 1; updateShip(sh, STEP, null);
+    }
+    let t = 0;
+    while (sh.speed < lim - 0.01 && t < 10) {
+      clearControls(sh); sh.control.thr = 1; sh.control.boost = 1;
+      updateShip(sh, STEP, null);
+      t += STEP;
+    }
+    ok(Math.abs(t - SHIP.boostRamp) < 0.1 && SHIP.boostAccel > 3,
+      `с обычного предела до форсажного за ${t.toFixed(2)} с (задано ` +
+      `${SHIP.boostRamp}); тяга выше обычной в ${SHIP.boostAccel.toFixed(2)} раза`);
+  }
+
+  // Перегруз слышен: тяга форсажа выше порога, на котором корпус
+  // начинает скрипеть, а обычная — ниже. Это не случайность, а
+  // следствие: движки работают за пределом, на который рассчитан
+  // корпус, и это ровно тот случай, ради которого скрежет и заведён.
+  {
+    const creakAt = SHIP.accel * SHIP.boostAccel;
+    ok(SHIP.accel < AUDIO.jerkFloor && creakAt > AUDIO.jerkFloor,
+      `обычный разгон ${SHIP.accel} км/с² ниже порога скрежета ` +
+      `${AUDIO.jerkFloor}, форсажный ${creakAt.toFixed(2)} — выше: корпус жалуется`);
+  }
+
+  // Замок снимается только после того, как клавишу ОТПУСТИЛИ и заряд
+  // накопился. Держать её бесполезно: иначе получился бы тот же вечный
+  // форсаж по капле, только циклами.
+  {
+    const sh = mk();
+    sh.boost = 0;
+    const press = (secs, on) => {
+      for (let i = 0; i < Math.round(secs / STEP); i++) {
+        clearControls(sh); sh.control.thr = 1; sh.control.boost = on ? 1 : 0;
+        updateShip(sh, STEP, null);
+      }
+    };
+    press(SHIP.boostFill, true);                  // держим — заряд копится, но замок стоит
+    const heldLocked = sh.boostLock && !sh.boosting && sh.boost > SHIP.boostArm;
+    press(0.2, false);                            // отпустили — замок снят
+    const freed = !sh.boostLock;
+    press(0.2, true);
+    ok(heldLocked && freed && sh.boosting,
+      `замок не снимается на зажатой клавише (заряд дошёл до ` +
+      `${(sh.boost * 100).toFixed(0)}%), а после отпускания форсаж снова доступен`);
+  }
+}
+
 console.log('\n== задний ход ==');
 {
   const sh = makeShip();
@@ -1888,7 +2117,8 @@ console.log('\n== звук ==');
     ok(heard === 0 && SHIP.brake < AUDIO.jerkFloor && both > AUDIO.jerkFloor,
       `порог ${AUDIO.jerkFloor} км/с² выше любого одного канала тяги ` +
       `(разгон ${SHIP.accel}, тормоз ${SHIP.brake}, занос ${SHIP.lateral}) и ниже ` +
-      `их суммы ${both.toFixed(2)}: штатный разгон молчит (${heard})`);
+      `их суммы ${both.toFixed(2)}: штатный разгон молчит (${heard}). ` +
+      `Форсаж (${(SHIP.accel * SHIP.boostAccel).toFixed(2)}) порог переходит намеренно`);
   }
 
   // Телепорт и вылет не должны читаться как удар.

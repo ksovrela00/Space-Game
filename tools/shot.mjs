@@ -164,6 +164,9 @@ const ctx = {
   // прозрачностью игнорируем, иначе приборы стёрли бы сцену.
   clearRect() {},
   fillText() {},
+  // Текст в ASCII не растеризуется, но вызов обязан существовать:
+  // подписи в приборах обводятся тёмным контуром (js/ui/hud.js).
+  strokeText() {},
   translate() {}, rotate() {}, scale() {},
   measureText: () => ({ width: 40 }),
   createRadialGradient: (x0, y0, r0, x1, y1, r1) => makeGrad(x0, y0, r0, x1, y1, r1),
