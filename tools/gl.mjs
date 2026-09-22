@@ -17,7 +17,12 @@ import {
   DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
   makeDetailLoad, updateDetailLoad, FW_MAX, FW_TARGET_GPU, FW_TARGET_CPU,
 } from '../js/gl/detail.js';
-import { MESH_FS, MESH_FS_DETAIL } from '../js/gl/shaders.js';
+import { MESH_FS, MESH_FS_DETAIL, ATMO_FS, PLUME_VS } from '../js/gl/shaders.js';
+import { shockGeometry } from '../js/gl/mesh.js';
+import { altitudeOf } from '../js/game/surface.js';
+import { buildCobra } from '../js/models/ships.js';
+import { ENTRY, airDensity } from '../js/game/entry.js';
+import { ATMO_THICK, ATMO_GLOW } from '../js/gl/scene.js';
 import { skyFor, skyUniforms, SKY_BLOBS, SKY_GAIN, SKY_GLSL } from '../js/gl/nebula.js';
 import { galaxyFor, Starfield } from '../js/render/starfield.js';
 import { renderScale, wantAa, resizeCanvas } from '../js/gl/context.js';
@@ -1294,6 +1299,420 @@ console.log('\n== небо системы ==');
     'границы циклов в GLSL совпадают с числом облаков в JS');
 }
 
+// --- 8g. Атмосфера вдоль луча ------------------------------------------------
+// Жалоба была конкретная: «очень резкий переход у атмосферы, когда
+// корабль пройдёт эту сферу, чёрный космос сразу становится
+// атмосферой». Причина была в том, что плотность воздуха в картинке не
+// участвовала вовсе — оболочка светилась по кромке и имела КРАЙ.
+//
+// Проверяем поэтому не «красиво», а три вещи, из-за которых край
+// возвращается: столб воздуха считается по той же формуле, что нагрев;
+// на верху атмосферы его практически нет; при снижении он растёт без
+// скачков.
+console.log('\n== атмосфера вдоль луча ==');
+{
+  // Построчный двойник ATMO_FS: те же пересечения, тот же цикл.
+  const STEPS = 16;
+  const column = (r, d, ground, top, H, floorR = ground) => {
+    const C = { x: 0, y: -r, z: 0 };                  // центр тела от камеры
+    const b = d.x * C.x + d.y * C.y + d.z * C.z;
+    const cc = r * r;
+    const disc = b * b - (cc - top * top);
+    if (disc <= 0) return 0;
+    const sq = Math.sqrt(disc);
+    const t0 = Math.max(b - sq, 0);
+    let t1 = b + sq;
+    // Луч обрывается по грунту ПОД КАМЕРОЙ, а сфера дополнительно
+    // опускается до самой камеры, если та ниже (см. ATMO_FS).
+    const gr = Math.min(floorR, Math.sqrt(cc) - 0.002);
+    const discG = b * b - (cc - gr * gr);
+    if (discG > 0) {
+      const tg = b - Math.sqrt(discG);
+      if (tg >= 0) t1 = Math.min(t1, tg);
+    }
+    if (t1 <= t0) return 0;
+    const dt = (t1 - t0) / STEPS;
+    let sum = 0;
+    for (let i = 0; i < STEPS; i++) {
+      const t = t0 + (i + 0.5) * dt;
+      const alt = Math.hypot(d.x * t - C.x, d.y * t - C.y, d.z * t - C.z) - ground;
+      sum += Math.exp(-Math.max(alt, 0) / H);
+    }
+    return sum * dt / H;                              // в долях вертикального
+  };
+
+  const world7 = makeSystem(0x1a7e);
+  const body = world7.bodies.find((b) => b.name === 'Lave II');
+  const R = body.radius;
+  const top = R * (1 + ENTRY.top);
+  const H = R * ENTRY.top / ENTRY.scales;
+  const tauOf = (alt, d) => ATMO_THICK * column(R + alt, d, R, top, H);
+  const alpha = (alt, d) => 1 - Math.exp(-tauOf(alt, d));
+  const glow = (alt, d) => 1 - Math.exp(-tauOf(alt, d) * ATMO_GLOW);
+  // Луч под углом к надиру — им проверяется вид на грунт сверху.
+  const slant = (deg) => ({ x: Math.sin(deg * Math.PI / 180), y: -Math.cos(deg * Math.PI / 180), z: 0 });
+  const UP = { x: 0, y: 1, z: 0 }, SIDE = { x: 1, y: 0, z: 0 }, DOWN = { x: 0, y: -1, z: 0 };
+
+  // Плотность в шейдере и плотность, по которой греется обшивка, — одна
+  // формула. Разойдись они, пламя начиналось бы там, где воздуха уже не
+  // видно (или наоборот).
+  let worstRho = 0;
+  for (let k = 0; k < 10; k++) {
+    const alt = R * ENTRY.top * (k / 10);
+    const shader = Math.exp(-Math.max(alt, 0) / H);
+    const physics = airDensity(body, alt) / (body.press === undefined ? 1 : body.press);
+    worstRho = Math.max(worstRho, Math.abs(shader - physics));
+  }
+  // Ровно на верхней границе физика обрубает оставшиеся e^-5 в ноль, а
+  // картинке обрубать нечего: там просто кончается объём, внутри
+  // которого она считает. На интеграле это те самые 0.7% (см. ниже
+  // вертикальный столб), и видеть их не в чем.
+  ok(worstRho < 1e-12,
+    `плотность в шейдере совпадает с airDensity ниже границы ` +
+    `(расхождение ${worstRho.toExponential(0)})`);
+
+  // Вертикальный столб от грунта до верха должен дать 1 - e^-5 = 0.993
+  // шкалы высоты: это интеграл экспоненты, его можно взять на бумаге.
+  // Сойдётся здесь — значит интегрирование в шейдере верное.
+  const vert = column(R, UP, R, top, H);
+  ok(Math.abs(vert - (1 - Math.exp(-ENTRY.scales))) < 0.02,
+    `вертикальный столб ${vert.toFixed(3)} против аналитических ` +
+    `${(1 - Math.exp(-ENTRY.scales)).toFixed(3)} шкалы высоты`);
+
+  // У горизонта луч идёт вдоль слоёв и набирает примерно sqrt(πR/2H)
+  // столбов. Это тоже берётся на бумаге — и это то, из-за чего у кромки
+  // планеты яркая дуга.
+  const tangent = column(R, SIDE, R, top, H);
+  const expect = Math.sqrt(Math.PI * R / (2 * H));
+  ok(tangent / vert > expect * 0.6 && tangent / vert < expect * 1.2,
+    `у горизонта воздуха в ${(tangent / vert).toFixed(1)} раз больше, чем в зените ` +
+    `(аналитика даёт ${expect.toFixed(1)})`);
+
+  // ГЛАВНОЕ: у верха атмосферы неба практически нет, иначе это и есть
+  // та самая резкая граница. Меряем на 0.9 верха — там, где был сделан
+  // скриншот с жалобой (134 км из 147): ровно на границе касательный луч
+  // вырожден и даёт ноль сам собой.
+  const near = alpha(R * ENTRY.top * 0.9, SIDE);
+  ok(alpha(R * ENTRY.top * 1.2, SIDE) < 0.02 && near < 0.2,
+    `у верхней границы небо почти прозрачно: ${(near * 100).toFixed(0)}% у горизонта ` +
+    `на 0.9 верха, ${(alpha(R * ENTRY.top * 1.2, SIDE) * 100).toFixed(1)}% выше границы`);
+
+  // И никаких скачков при снижении: спускаемся от полутора верхов до
+  // грунта и смотрим самый большой шаг в обе стороны.
+  const sweep = (dir) => {
+    let prev = alpha(R * ENTRY.top * 1.5, dir), up = 0, down = 0, at = 0, last = prev;
+    for (let i = 1; i <= 600; i++) {
+      const alt = R * ENTRY.top * 1.5 * (1 - i / 600);
+      const a = alpha(alt, dir);
+      if (a - prev > up) { up = a - prev; at = alt; }
+      down = Math.min(down, a - prev);
+      prev = a;
+      last = a;
+    }
+    return { up, down, at, last };
+  };
+  for (const [name, dir] of [['к горизонту', SIDE], ['в зенит', UP]]) {
+    const s = sweep(dir);
+    ok(s.up < 0.03 && s.down > -1e-9,
+      `${name}: небо наливается плавно и только густеет — ` +
+      `наибольший шаг ${(s.up * 100).toFixed(2)}% на высоте ${s.at.toFixed(0)} км`);
+  }
+  // Вниз всё наоборот, и это не исключение из правила, а то же правило:
+  // столб считается от глаза, а при снижении воздуха ПОД кораблём
+  // остаётся всё меньше. На грунте под ногами его нет вовсе.
+  {
+    const s = sweep(DOWN);
+    // На грунте под ногами воздуха практически нет: остаются десятки
+    // метров от запаса на точность float32 (см. ATMO_EPS в ATMO_FS),
+    // то есть сотые доли процента.
+    ok(s.up < 0.03 && Math.abs(s.down) < 0.03 && s.last < 1e-3,
+      `вниз: столб под кораблём тает без скачков и на грунте почти пуст ` +
+      `(${(s.last * 100).toFixed(3)}%, последний шаг ${(s.down * 100).toFixed(2)}%)`);
+  }
+
+  // СВЕЧЕНИЕ И ГАШЕНИЕ — разные числа, и вот зачем. Связав их одним,
+  // приходится выбирать: либо небо у грунта чёрное, либо планета с
+  // орбиты залита молоком. Второе и случилось, когда толщину подняли
+  // ради неба.
+  {
+    const downOccl = alpha(R * ENTRY.top * 0.9, slant(0));
+    const slantOccl = alpha(R * ENTRY.top * 0.9, slant(60));
+    ok(downOccl < 0.25 && slantOccl < 0.45,
+      `с верха атмосферы грунт под собой виден: гашение ${(downOccl * 100).toFixed(0)}% ` +
+      `в надир и ${(slantOccl * 100).toFixed(0)}% под 60°`);
+    const zenithOccl = alpha(0, UP), zenithGlow = glow(0, UP);
+    ok(zenithGlow > zenithOccl * 1.5 && zenithOccl < 0.3,
+      `с грунта небо светится сильнее, чем гасит: свечение ` +
+      `${(zenithGlow * 100).toFixed(0)}% против гашения ${(zenithOccl * 100).toFixed(0)}% ` +
+      '(ночью сквозь него видны звёзды)');
+    // Два конца одной ручки. Небо у горизонта обязано быть плотным, а
+    // грунт под собой с орбиты обязан оставаться видимым: при слишком
+    // ярком свечении диск планеты заливало ровной синевой, и это было
+    // первым, что бросилось в глаза.
+    const horizonGlow = glow(0, SIDE), fromSpace = glow(R * ENTRY.top * 1.4, slant(0));
+    ok(horizonGlow > 0.9 && fromSpace < 0.45,
+      `у горизонта небо плотное (${(horizonGlow * 100).toFixed(0)}%), а с орбиты в надир ` +
+      `остаётся дымкой (${(fromSpace * 100).toFixed(0)}%), сквозь которую виден грунт`);
+  }
+
+  // Переход через верхнюю границу. Там код меняет ветку — снаружи видна
+  // ближняя сторона оболочки, изнутри дальняя, — и картинка обязана
+  // этого не заметить. Именно на этой границе было «странно» на двух
+  // скриншотах подряд.
+  {
+    const step = (deg, eps) => {
+      const d = slant(deg);
+      const hi = R * ENTRY.top + eps, lo = R * ENTRY.top - eps;
+      return Math.max(Math.abs(alpha(hi, d) - alpha(lo, d)),
+        Math.abs(glow(hi, d) - glow(lo, d)));
+    };
+    let worst = 0, where = 0;
+    for (const deg of [0, 30, 60, 80, 120, 180]) {
+      const j = step(deg, 0.5);
+      if (j > worst) { worst = j; where = deg; }
+    }
+    // Порог на КИЛОМЕТР высоты. Он не про «незаметно глазу» (это и так
+    // незаметно), а про отсутствие скачка: у разрыва здесь были бы
+    // десятки процентов.
+    ok(worst < 0.02,
+      `на границе атмосферы километр высоты меняет картинку не больше чем на ` +
+      `${(worst * 100).toFixed(2)}% (худший угол ${where}°)`);
+
+    // У самой касательной картинка меняется быстрее — у края шара
+    // хорда набирается круто. Но это КРУТИЗНА, а не разрыв, и отличить
+    // одно от другого просто: уменьшив шаг вчетверо, изменение обязано
+    // уменьшиться тоже. У разрыва оно осталось бы прежним.
+    const far = step(89, 0.5), near = step(89, 0.125);
+    ok(near > 0 && far / near > 1.6,
+      `у касательной изменение убывает вместе с шагом (${(far * 100).toFixed(2)}% ` +
+      `на ±0.5 км против ${(near * 100).toFixed(2)}% на ±0.125 км) — это крутизна, а не разрыв`);
+  }
+
+  // НИЗИНА. Рельеф ниже уровня моря — обычное дело: дно океана на этом
+  // теле лежит на 12 км ниже средней сферы, и корабль там оказывается
+  // ниже неё. Луч вниз обязан упираться в грунт под собой, а не уходить
+  // сквозь планету: иначе в низине кадр заливает молоком, хотя до земли
+  // метры. Замер до правки: столб в надир 58 против 0.01 над средней
+  // сферой.
+  {
+    const deep = -10.9;                    // 1.1 км над грунтом на 12 км ниже
+    const down = ATMO_THICK * column(R + deep, DOWN, R, top, H);
+    const flat = ATMO_THICK * column(R + 1.1, DOWN, R, top, H);
+    ok(down < 0.05 && Math.abs(down - flat) < 0.05,
+      `в низине вниз смотрится так же, как над средней сферой: столб ${down.toFixed(3)} ` +
+      `против ${flat.toFixed(3)}`);
+    // А вбок из низины воздуха, наоборот, БОЛЬШЕ: корабль ниже, слой
+    // над ним толще. Это не ошибка, это тот же интеграл.
+    const side = ATMO_THICK * column(R + deep, SIDE, R, top, H);
+    ok(side > ATMO_THICK * column(R + 1.1, SIDE, R, top, H),
+      `вбок из низины воздуха больше (${side.toFixed(2)} против ` +
+      `${(ATMO_THICK * column(R + 1.1, SIDE, R, top, H)).toFixed(2)})`);
+    // И никакого скачка на самой средней сфере — переход через неё
+    // ничем не отмечен.
+    let worst = 0;
+    for (const deg of [0, 45, 80]) {
+      const d = slant(deg);
+      const hi = ATMO_THICK * column(R + 0.5, d, R, top, H);
+      const lo2 = ATMO_THICK * column(R - 0.5, d, R, top, H);
+      worst = Math.max(worst, Math.abs((1 - Math.exp(-hi)) - (1 - Math.exp(-lo2))));
+    }
+    ok(worst < 0.02,
+      `переход через уровень средней сферы не виден: наибольшая разница ` +
+      `${(worst * 100).toFixed(2)}%`);
+  }
+
+  // ЗЕМЛЯ ПОД НОГАМИ. Рельеф отходит от средней сферы на километры, и
+  // если обрывать луч о неё, то с возвышенности в сотню метров луч вбок
+  // уходит до средней сферы за десятки километров плотного воздуха —
+  // близкая земля прямо перед носом тонет в дымке. Это и был «туман на
+  // десяти метрах высоты».
+  {
+    const hill = R + 0.1;                      // грунт на 100 м выше средней
+    const eye = hill + 0.01;                   // и корабль в 10 м над ним
+    // Смотрим полого вниз — так и видно землю перед собой: под 1° это
+    // полкилометра, под четвертью градуса — два с лишним.
+    const haze = (deg, floorR) => {
+      const a = deg * Math.PI / 180;
+      const d = { x: Math.cos(a), y: -Math.sin(a), z: 0 };
+      return 1 - Math.exp(-ATMO_THICK * column(eye, d, R, top, H, floorR) * ATMO_GLOW);
+    };
+    ok(haze(1, hill) < 0.02 && haze(1, R) > 0.05,
+      `земля в полукилометре перед носом чистая: дымка ${(haze(1, hill) * 100).toFixed(1)}% ` +
+      `по грунту под камерой против ${(haze(1, R) * 100).toFixed(0)}% по средней сфере`);
+    ok(haze(0.25, hill) < 0.1 && haze(0.25, R) > 0.5,
+      `и в двух километрах тоже: ${(haze(0.25, hill) * 100).toFixed(1)}% против ` +
+      `${(haze(0.25, R) * 100).toFixed(0)}% — по средней сфере луч там уходил в касательную`);
+    // А горизонт с той же высоты обязан остаться в дымке: там луч идёт
+    // вдоль слоёв сотни километров, и это не ошибка, а воздух.
+    const hor = 1 - Math.exp(-ATMO_THICK * column(eye, SIDE, R, top, H, hill));
+    ok(hor > 0.85,
+      `горизонт с той же высоты по-прежнему в дымке (${(hor * 100).toFixed(0)}%)`);
+  }
+
+  // Луч в грунт короче касательного: за поверхностью воздуха не видно.
+  ok(column(R + 50, DOWN, R, top, H) < column(R + 50, SIDE, R, top, H),
+    'луч, упирающийся в грунт, обрывается на нём');
+  // И на самой поверхности взгляд вниз не даёт ничего: между глазом и
+  // грунтом воздуха нет. Строгое сравнение здесь складывало воздух
+  // через всю планету и заливало кадр небом на посадке.
+  ok(column(R, DOWN, R, top, H) < 3e-3 && column(R + 0.05, DOWN, R, top, H) < 0.01,
+    'на грунте взгляд вниз даёт практически пустой столб');
+
+  // Текст шейдера — тот же, что у двойника выше.
+  ok(ATMO_FS.includes('exp(-max(alt, 0.0) / uScaleH)')
+    && ATMO_FS.includes('const int STEPS = ' + STEPS)
+    && ATMO_FS.includes('1.0 - exp(-tau)')
+    // Сравнение с грунтом именно НЕстрогое — на этом был баг.
+    && ATMO_FS.includes('if (tg >= 0.0) t1 = min(t1, tg);'),
+    'ATMO_FS считает тот же интеграл теми же шагами и так же обрывается о грунт');
+  ok(!ATMO_FS.includes('uDensity') && !ATMO_FS.includes('vNormal'),
+    'от свечения по кромке (нормаль сферы и uDensity) не осталось следов');
+  // Луч обрывается о ПОЛ (грунт под камерой), а плотность считается от
+  // СРЕДНЕГО радиуса: перепутать их значит либо утопить близкую землю в
+  // дымке, либо сбить профиль плотности на высоту рельефа (а это
+  // километры).
+  ok(ATMO_FS.includes('float ground = min(uFloor, sqrt(cc) - ATMO_EPS);')
+    && ATMO_FS.includes('float alt = length(d * (t0 + (float(i) + 0.5) * dt) - uCenter) - uGround;'),
+    'обрыв луча идёт по uFloor, а плотность — по uGround');
+  // Запас в зажиме — АБСОЛЮТНЫЙ и маленький. Доля радиуса тут выходит
+  // боком: 10⁻⁵ от 4200 км — это 42 м, больше самой высоты полёта у
+  // земли, и такой зажим опускает землю ниже, чем она есть.
+  {
+    const m = ATMO_FS.match(/ATMO_EPS = ([0-9.]+)/);
+    ok(m && Number(m[1]) > 0 && Number(m[1]) < 0.01,
+      `запас зажима ${m ? (Number(m[1]) * 1000).toFixed(0) : '?'} м — абсолютный и ниже ` +
+      'любой высоты, на которой летают');
+  }
+}
+
+// --- 8h. Оболочка ударной волны ---------------------------------------------
+// Жалоба: «этот купол не повторяет реалистичную форму корабля, а просто
+// какой то конус». Так и было — волна строилась телом вращения вокруг
+// вектора скорости, и корпус в ней не участвовал.
+//
+// Проверяется поэтому не «красиво», а три свойства, без которых конус
+// вернётся: оболочка СОДЕРЖИТ корабль целиком, лежит к нему ВПЛОТНУЮ и
+// НЕ является телом вращения.
+console.log('\n== оболочка ударной волны ==');
+{
+  const hull = buildCobra();
+  const g = shockGeometry(hull);
+  const c = g.center;
+  const radAt = (dx, dy, dz) => {
+    // Радиус оболочки в направлении точки: берём ближайшую вершину
+    // оболочки по углу. Для оценки зазора этого достаточно — сетка
+    // икосферы равномерная.
+    const r = Math.hypot(dx, dy, dz) || 1e-12;
+    let best = -2, out = 0;
+    for (let i = 0; i < g.verts; i++) {
+      const px = g.positions[i * 3] - c.x, py = g.positions[i * 3 + 1] - c.y,
+        pz = g.positions[i * 3 + 2] - c.z;
+      const pl = Math.hypot(px, py, pz);
+      const cs = (dx * px + dy * py + dz * pz) / (r * pl);
+      if (cs > best) { best = cs; out = pl; }
+    }
+    return out;
+  };
+
+  // 1. Корабль внутри. Торчащее из пламени крыло — это ровно то, что
+  //    было видно на скриншоте.
+  let worstGap = Infinity;
+  for (const v of hull.verts) {
+    const r = Math.hypot(v.x - c.x, v.y - c.y, v.z - c.z);
+    worstGap = Math.min(worstGap, radAt(v.x - c.x, v.y - c.y, v.z - c.z) - r);
+  }
+  ok(worstGap > 0,
+    `корпус внутри оболочки целиком: минимальный зазор ` +
+    `${(worstGap * 1000).toFixed(1)} м при заданном ${(g.gap * 1000).toFixed(1)} м`);
+
+  // 2. Оболочка вплотную: габариты растут примерно на два зазора по
+  //    каждой оси, а не в разы. Первая попытка (радиус опорной функции)
+  //    давала по оси высоты +36 м вместо +7 — тот самый кокон.
+  const span = (get, cnt) => {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < cnt; i++) {
+      for (let k = 0; k < 3; k++) {
+        const v = get(i, k);
+        if (v < lo[k]) lo[k] = v;
+        if (v > hi[k]) hi[k] = v;
+      }
+    }
+    return hi.map((x, k) => x - lo[k]);
+  };
+  const hs = span((i, k) => [hull.verts[i].x, hull.verts[i].y, hull.verts[i].z][k],
+    hull.verts.length);
+  const gs = span((i, k) => g.positions[i * 3 + k], g.verts);
+  const grow = gs.map((v, k) => v - hs[k]);
+  ok(grow.every((v) => v > 0 && v < g.gap * 4),
+    `оболочка вплотную: прирост габаритов ${grow.map((v) => (v * 1000).toFixed(1)).join(' / ')} м ` +
+    `при зазоре ${(g.gap * 1000).toFixed(1)} м`);
+
+  // 3. НЕ тело вращения. У корабля корпус плоский и широкий, и оболочка
+  //    обязана это повторять: у конуса или шара поперечные размеры
+  //    совпали бы.
+  ok(gs[0] / gs[1] > 2,
+    `оболочка повторяет силуэт: ${(gs[0] * 1000).toFixed(0)} м в размахе против ` +
+    `${(gs[1] * 1000).toFixed(0)} м в высоту (${(gs[0] / gs[1]).toFixed(1)}:1, ` +
+    `у корпуса ${(hs[0] / hs[1]).toFixed(1)}:1)`);
+
+  // 4. Лучевая поверхность: радиусы конечны и положительны, поэтому
+  //    оболочка не может пересечь сама себя — а самопересечение при
+  //    аддитивном смешивании видно удвоенной яркостью в каждой складке.
+  let badRad = 0, badNorm = 0;
+  for (let i = 0; i < g.verts; i++) {
+    if (!(g.rad[i] > 0) || !Number.isFinite(g.rad[i])) badRad++;
+    const px = g.positions[i * 3] - c.x, py = g.positions[i * 3 + 1] - c.y,
+      pz = g.positions[i * 3 + 2] - c.z;
+    if (g.normals[i * 3] * px + g.normals[i * 3 + 1] * py + g.normals[i * 3 + 2] * pz <= 0) {
+      badNorm++;
+    }
+  }
+  ok(badRad === 0 && badNorm === 0,
+    `все ${g.verts} радиусов положительны, все нормали смотрят наружу`);
+
+  // 5. Доводка под поток — построчный двойник PLUME_VS. При развороте
+  //    раскаляться должен подставленный потоку борт, и это должно
+  //    следовать из одной наветренности, без отдельных правил.
+  const wind = (flow) => {
+    let nose = 0, stern = 1, side = 0;
+    for (let i = 0; i < g.verts; i++) {
+      const nx = g.normals[i * 3], ny = g.normals[i * 3 + 1], nz = g.normals[i * 3 + 2];
+      const w = Math.max(0, nx * flow.x + ny * flow.y + nz * flow.z);
+      // Нос, корма и правый борт оболочки — по её же вершинам.
+      if (nz > 0.9) nose = Math.max(nose, w);
+      if (nz < -0.9) stern = Math.min(stern, w);
+      if (nx > 0.9) side = Math.max(side, w);
+    }
+    return { nose, stern, side };
+  };
+  const straight = wind({ x: 0, y: 0, z: 1 });
+  const sideslip = wind({ x: 1, y: 0, z: 0 });
+  ok(straight.nose > 0.9 && straight.stern === 0,
+    `по курсу наветренный нос (${straight.nose.toFixed(2)}), корма в тени ` +
+    `(${straight.stern.toFixed(2)})`);
+  ok(sideslip.side > 0.9 && sideslip.nose < 0.4,
+    `в скольжении раскаляется борт (${sideslip.side.toFixed(2)}), а не нос ` +
+    `(${sideslip.nose.toFixed(2)})`);
+
+  // След тянется НАЗАД и только за кормой: вытяни он весь корпус —
+  // оболочка опять перестала бы повторять корабль.
+  const stretch = (z, span) => {
+    const back = Math.max(0, -z) / span;
+    return Math.min(back * back, 1);
+  };
+  const half = hull.length * 0.5;
+  ok(stretch(half, half) === 0 && stretch(-half, half) === 1
+    && stretch(-half * 0.5, half) < 0.3,
+    `след растёт только к корме: нос ${stretch(half, half)}, ` +
+    `середина кормовой половины ${stretch(-half * 0.5, half).toFixed(2)}, корма 1`);
+
+  // И то же самое в самом шейдере: если он снова начнёт строить тело
+  // вращения (uRad/uLen), это надо заметить здесь, а не глазами.
+  ok(PLUME_VS.includes('dot(aNormal, uFlow)') && PLUME_VS.includes('in vec3 aNormal;')
+    && !PLUME_VS.includes('uRad') && !PLUME_VS.includes('uLen'),
+    'PLUME_VS строит волну по корпусу и потоку, а не как тело вращения');
+}
+
 // --- 9. Геометрия планеты ---------------------------------------------------
 console.log('\n== геометрия планеты ==');
 {
@@ -1380,6 +1799,7 @@ console.log('\n== мок GL: путь отрисовки ==');
     stencilOp: () => { state.stencils++; },
     deleteBuffer: () => {},
     deleteVertexArray: () => {},
+    cullFace: (mode) => { state.cull = mode; },
     createTexture: () => { state.textures++; return {}; },
     deleteTexture: () => { state.texturesFreed++; },
     createFramebuffer: () => ({}),
@@ -1477,6 +1897,133 @@ console.log('\n== мок GL: путь отрисовки ==');
     for (let i = 0; i < 12; i++) scene.render(game);
     ok(baked === 6 && state.skyBakes === 6 && scene.skyFace === 6,
       `небо запечено ${baked} гранями за первые кадры и больше не пересчитывается`);
+
+    // Воздух по обе стороны верхней границы. Жалоба была: «на третьем
+    // скриншоте атмосфера вообще пропала». Причина — изнутри оболочки
+    // видна её ДАЛЬНЯЯ сторона, а она лежит за планетой, и буфер
+    // глубины выбрасывал её над всем грунтом. Теперь веток две, и
+    // проверяется главное: ровно одна из них работает на любой высоте,
+    // и пустой высоты нет.
+    {
+      const air = world.bodies.find((b) => b.atmo);
+      // Мир из одного тела: в системе их четыре с атмосферой, и дальние
+      // тоже попадают в кадр — считать вызовы было бы не по чему.
+      const one = { bodies: [air], star: world.star };
+      const save = { x: cam.pos.x, y: cam.pos.y, z: cam.pos.z };
+      const at = (alt) => {
+        cam.pos.x = air.pos.x;
+        cam.pos.y = air.pos.y + air.radius + alt;
+        cam.pos.z = air.pos.z;
+        lookAlong(cam.basis, normalize(v3(0, -1, 0)));
+        const a = state.draws;
+        scene.drawAir(one, world.star.pos, false);
+        const outside = state.draws - a;
+        const b = state.draws;
+        scene.drawAir(one, world.star.pos, true);
+        return { outside, inside: state.draws - b };
+      };
+      const hTop = air.radius * ENTRY.top;
+      const above = at(hTop + 5), below = at(hTop - 5), low = at(2);
+      // У самой земли и НИЖЕ средней сферы (рельеф ниже уровня моря —
+      // обычное дело, у Lave II дно океана на 12 км ниже): воздух обязан
+      // рисоваться и там.
+      const ground = at(0.179), basin = at(-5);
+      cam.pos.x = save.x; cam.pos.y = save.y; cam.pos.z = save.z;
+      ok(above.outside === 1 && above.inside === 0,
+        `над границей (${(hTop + 5).toFixed(0)} км) воздух рисует ближняя сторона оболочки`);
+      ok(below.outside === 0 && below.inside === 1 && low.outside === 0 && low.inside === 1,
+        `под границей (${(hTop - 5).toFixed(0)} км и 2 км) — дальняя, и воздух не пропадает`);
+      ok(ground.inside === 1 && ground.outside === 0 && basin.inside === 1 && basin.outside === 0,
+        'у самой земли (179 м) и ниже средней сферы (−5 км) воздух тоже рисуется');
+
+      // КАКУЮ сторону оболочки отсекаем. Это стоило чёрного неба у
+      // самой земли, и проверить это одним счётом вызовов нельзя:
+      // отсечение делает GPU.
+      //
+      // Соглашение здесь обратное привычному. Камерное пространство
+      // ЛЕВОЕ (+z вперёд, см. perspective в js/gl/mat4.js), проекция
+      // зеркалит обход вершин, и ближняя половина сферы — обойдённая в
+      // модели против часовой — на экране выходит ПО часовой, то есть
+      // ЗАДНЕЙ гранью. Поэтому снаружи отсекается FRONT, изнутри BACK.
+      // Считаем это прямо из матриц, а не помним наизусть.
+      {
+        const sp = icosphere(1);
+        const cm = makeBasis();
+        lookAlong(cm, { x: 0, y: 0, z: 1 });
+        const mv = new Float32Array(16);
+        modelView(cm, { x: 0, y: 0, z: -10 }, makeBasis(), { x: 0, y: 0, z: 0 }, 1, mv);
+        const to = (i) => {
+          const x = sp.positions[i * 3], y = sp.positions[i * 3 + 1], z = sp.positions[i * 3 + 2];
+          const cz = mv[2] * x + mv[6] * y + mv[10] * z + mv[14];
+          return {
+            x: (mv[0] * x + mv[4] * y + mv[8] * z + mv[12]) / cz,
+            y: (mv[1] * x + mv[5] * y + mv[9] * z + mv[13]) / cz,
+            z: cz,
+          };
+        };
+        let nearCW = 0, nearCCW = 0;
+        for (let t = 0; t < sp.indices.length; t += 3) {
+          const A = to(sp.indices[t]), B = to(sp.indices[t + 1]), C = to(sp.indices[t + 2]);
+          if ((A.z + B.z + C.z) / 3 >= 10) continue;            // только ближняя половина
+          const area = (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x);
+          if (area > 0) nearCCW++; else nearCW++;
+        }
+        ok(nearCCW === 0 && nearCW > 0,
+          `ближняя сторона сферы проецируется ПО часовой (${nearCW} граней из ${nearCW + nearCCW}) ` +
+          '— в этом движке она задняя');
+
+        // Пол, на котором обрывается луч. Изнутри это грунт ПОД
+        // КАМЕРОЙ, снаружи — средний радиус тела. По средней сфере
+        // изнутри близкая земля тонула в дымке (см. ATMO_FS).
+        delete state.uni.uFloor;
+        delete state.uni.uGround;
+        at(2);
+        const inCull = state.cull;
+        const floorIn = state.uni.uFloor, meanIn = state.uni.uGround;
+        const realGround = altitudeOf(air, cam.pos, { dir: v3() }).groundR;
+        ok(Math.abs(floorIn - realGround) < 1e-6 && Math.abs(floorIn - meanIn) > 0.01,
+          `изнутри луч обрывается о грунт под камерой: ${floorIn.toFixed(3)} км против ` +
+          `средних ${meanIn.toFixed(3)} (рельеф ${((floorIn - meanIn) * 1000).toFixed(0)} м)`);
+
+        delete state.uni.uFloor;
+        at(air.radius * ENTRY.top + 5);
+        const outCull = state.cull;
+        ok(state.uni.uFloor === air.radius,
+          'снаружи полом служит средний радиус: в кадре вся полусфера сразу');
+        // Камеру возвращаем: дальше идут проверки, считающие вызовы в
+        // кадре, а с другой точки их число другое.
+        cam.pos.x = save.x; cam.pos.y = save.y; cam.pos.z = save.z;
+        ok(inCull === CONST.BACK && outCull === CONST.FRONT,
+          'изнутри отсекается ближняя сторона, снаружи дальняя — то есть остаётся ровно видимая');
+      }
+
+      // ЗАПУСК внутри атмосферы — отдельный случай, а не то же самое.
+      // Игра сохраняется в полёте, и после перезагрузки страницы сцена
+      // начинается сразу под облаками: всё, что в обычном полёте успело
+      // накопиться за предыдущие кадры, здесь отсутствует.
+      {
+        const camA = new Camera();
+        camA.resize(1600, 900);
+        camA.pos.x = air.pos.x;
+        camA.pos.y = air.pos.y + air.radius + 2;
+        camA.pos.z = air.pos.z;
+        lookAlong(camA.basis, normalize(v3(0, -1, 0)));
+        const fresh = new GlScene(canvas, camA, new Starfield(950, 0x51ee7));
+        const savedCam = game.camera;
+        game.camera = camA;
+        // Проверяем не «drawAir умеет», а что его ЗОВЁТ обычный кадр:
+        // uThick доходит до шейдера только из прохода воздуха.
+        delete state.uni.uThick;
+        const before = state.draws;
+        fresh.render(game);
+        const first = state.draws - before;
+        const drawn = 'uThick' in state.uni;
+        game.camera = savedCam;
+        ok(first > 0 && drawn,
+          `на ПЕРВОМ же кадре после перезагрузки в атмосфере воздух рисуется ` +
+          `(${first} вызовов в кадре)`);
+      }
+    }
 
     // И стоит оно ровно один вызов отрисовки: выборка из готовой карты.
     const count = () => { const b = state.draws; scene.render(game); return state.draws - b; };

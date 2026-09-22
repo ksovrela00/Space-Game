@@ -7,6 +7,8 @@
 //   * типизированные массивы — планеты. Там нормали в вершинах, потому
 //     что затенение должно быть гладким.
 
+import { icosphere } from './icosphere.js';
+
 export class GlMesh {
   constructor(gl, vao, count, mode, indexType, buffers = null) {
     this.gl = gl;
@@ -118,55 +120,152 @@ export function buildIndexedMesh(gl, locs, data) {
 }
 
 /**
- * Оболочка ударной волны для входа в атмосферу.
+ * Оболочка ударной волны — по самому корпусу корабля.
  *
- * Поверхность вращения: от лобовой точки (z = 0) назад по следу
- * (z = -1). Профиль — корень: у лба радиус растёт круто, дальше почти
- * не меняется. Это форма головной волны у ТУПОГО тела, а корабль на
- * гиперзвуке ведёт себя именно так: волна отходит от него и обнимает
- * корпус, а не тянется тонкой иглой от носа.
+ * Что было сломано. Волна строилась телом вращения: парабола вокруг
+ * вектора скорости. Форма корабля в ней не участвовала вовсе, и в кадре
+ * это читалось как оранжевый кокон, из которого торчат крылья, — а не
+ * как обтекание.
  *
- * Меш единичный; настоящие размеры задают uRad и uLen в шейдере.
+ * Волна на гиперзвуке ОТХОДИТ от лобовых поверхностей и прижимается к
+ * бортам, то есть повторяет тело. Поэтому геометрия берётся у корпуса:
+ * вершины разводятся наружу по сглаженным нормалям.
+ *
+ * Дальше оболочка СГЛАЖИВАЕТСЯ несколько раз, и это не косметика. У
+ * корпуса есть щели между крылом и фюзеляжем и ступеньки надстроек, а
+ * волна в такие щели не заходит — она их перекрывает. Без сглаживания
+ * раздутый корпус протыкает сам себя, и на просвет каждая складка видна
+ * удвоенной яркостью.
+ *
+ * После сглаживания вершины возвращаются наружу вдоль своих нормалей,
+ * если их утянуло под обшивку: оболочка обязана остаться снаружи, иначе
+ * корабль будет торчать из собственного пламени.
+ *
+ * @param stand  отход от обшивки в долях длины корпуса
+ * @param passes сколько раз сгладить
  */
-export function buildPlumeMesh(gl, locs, rings = 14, segments = 28) {
-  const verts = (rings + 1) * (segments + 1);
-  const positions = new Float32Array(verts * 3);
-  const t = new Float32Array(verts);
-  for (let i = 0; i <= rings; i++) {
-    const s = i / rings;
-    // Радиус: круто от нуля, потом полого; к хвосту след чуть сужается.
-    const r = Math.sqrt(s) * (1 - 0.28 * s * s);
-    for (let j = 0; j <= segments; j++) {
-      const a = (j / segments) * Math.PI * 2;
-      const o = i * (segments + 1) + j;
-      positions[o * 3] = Math.cos(a) * r;
-      positions[o * 3 + 1] = Math.sin(a) * r;
-      positions[o * 3 + 2] = -s;
-      t[o] = s;
+export function shockGeometry(mesh, stand = 0.055, passes = 2, level = 3) {
+  const L = mesh.length || 1;
+  // Центр — середина габаритов: оболочка задаётся лучами из центра, и
+  // сдвинутый центр перекосил бы её.
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const v of mesh.verts) {
+    lo[0] = Math.min(lo[0], v.x); hi[0] = Math.max(hi[0], v.x);
+    lo[1] = Math.min(lo[1], v.y); hi[1] = Math.max(hi[1], v.y);
+    lo[2] = Math.min(lo[2], v.z); hi[2] = Math.max(hi[2], v.z);
+  }
+  const cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2, cz = (lo[2] + hi[2]) / 2;
+
+  const sph = icosphere(level);
+  const dirs = sph.positions;
+  const idx = sph.indices;
+  const n = dirs.length / 3;
+  const off = stand * L;
+
+  // 1. Опорные плоскости корпуса: докуда он достаёт в каждом
+  //    направлении. Плоскость отодвигается наружу на зазор — и зазор
+  //    получается честным, отсчитанным по нормали плоскости, а не по
+  //    лучу.
+  const h = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const dx = dirs[i * 3], dy = dirs[i * 3 + 1], dz = dirs[i * 3 + 2];
+    let m = -Infinity;
+    for (const v of mesh.verts) {
+      const d = (v.x - cx) * dx + (v.y - cy) * dy + (v.z - cz) * dz;
+      if (d > m) m = d;
+    }
+    h[i] = m + off;
+  }
+
+  // 2. Оболочка — ПЕРЕСЕЧЕНИЕ этих полуплоскостей, посчитанное по
+  //    лучам: вдоль луча берётся ближайшая плоскость, которая его
+  //    ограничивает.
+  //
+  //    Пересечение здесь принципиально. Соблазн взять сам радиус
+  //    опорной функции (h вдоль своего же направления) — и это была
+  //    первая попытка: у плоского тела она раздувает оболочку в шар (у
+  //    диска радиуса R даёт толщину R/2 там, где тела нет вовсе), и
+  //    вместо обтекания опять выходит кокон. Луч до самой дальней грани
+  //    корпуса — другая крайность: тонкие концы крыльев между
+  //    направлениями выборки проскакивают, и они торчат из волны. А
+  //    пересечение полуплоскостей даёт выпуклую оболочку, которая и
+  //    содержит корабль целиком, и лежит к нему вплотную.
+  const rad = new Float64Array(n);
+  const MIN_DOT = 0.05;           // почти перпендикулярные луч не ограничивают
+  for (let i = 0; i < n; i++) {
+    const dx = dirs[i * 3], dy = dirs[i * 3 + 1], dz = dirs[i * 3 + 2];
+    let r = Infinity;
+    for (let j = 0; j < n; j++) {
+      const c = dx * dirs[j * 3] + dy * dirs[j * 3 + 1] + dz * dirs[j * 3 + 2];
+      if (c <= MIN_DOT) continue;
+      const t = h[j] / c;
+      if (t < r) r = t;
+    }
+    rad[i] = r;
+  }
+
+  // 3. Сглаживание РАДИУСОВ, и только наружу. По лучам поверхность
+  //    остаётся лучевой при любом сглаживании, то есть не может ни
+  //    вывернуться, ни пересечь себя; «только наружу» гарантирует, что
+  //    корабль не вылезет из своей же волны на рёбрах многогранника.
+  const nb = Array.from({ length: n }, () => []);
+  for (let t = 0; t < idx.length; t += 3) {
+    for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
+      const i = idx[t + a], j = idx[t + b];
+      if (!nb[i].includes(j)) nb[i].push(j);
+      if (!nb[j].includes(i)) nb[j].push(i);
     }
   }
-  const indices = new Uint16Array(rings * segments * 6);
-  let o = 0;
-  for (let i = 0; i < rings; i++) {
-    for (let j = 0; j < segments; j++) {
-      const a = i * (segments + 1) + j, b = a + 1;
-      const c = a + segments + 1, d = c + 1;
-      indices[o++] = a; indices[o++] = c; indices[o++] = b;
-      indices[o++] = b; indices[o++] = c; indices[o++] = d;
+  const tmp = new Float64Array(n);
+  for (let pass = 0; pass < passes; pass++) {
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (const j of nb[i]) s += rad[j];
+      tmp[i] = Math.max(rad[i], rad[i] * 0.6 + (s / nb[i].length) * 0.4);
+    }
+    rad.set(tmp);
+  }
+
+  const positions = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    positions[i * 3] = cx + dirs[i * 3] * rad[i];
+    positions[i * 3 + 1] = cy + dirs[i * 3 + 1] * rad[i];
+    positions[i * 3 + 2] = cz + dirs[i * 3 + 2] * rad[i];
+  }
+
+  // Нормали оболочки: по ним шейдер считает и наветренность, и свечение
+  // по кромке. Радиальное направление тут не годится — у вытянутого
+  // корпуса оно расходится с настоящей нормалью на десятки градусов.
+  const normals = new Float32Array(n * 3);
+  const ax = new Float64Array(n), ay = new Float64Array(n), az = new Float64Array(n);
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+    const ux = positions[b] - positions[a], uy = positions[b + 1] - positions[a + 1],
+      uz = positions[b + 2] - positions[a + 2];
+    const wx = positions[c] - positions[a], wy = positions[c + 1] - positions[a + 1],
+      wz = positions[c + 2] - positions[a + 2];
+    const fx = uy * wz - uz * wy, fy = uz * wx - ux * wz, fz = ux * wy - uy * wx;
+    for (const v of [idx[t], idx[t + 1], idx[t + 2]]) { ax[v] += fx; ay[v] += fy; az[v] += fz; }
+  }
+  for (let i = 0; i < n; i++) {
+    const l = Math.hypot(ax[i], ay[i], az[i]);
+    if (l > 1e-12) {
+      normals[i * 3] = ax[i] / l; normals[i * 3 + 1] = ay[i] / l; normals[i * 3 + 2] = az[i] / l;
+    } else {
+      normals[i * 3] = dirs[i * 3]; normals[i * 3 + 1] = dirs[i * 3 + 1];
+      normals[i * 3 + 2] = dirs[i * 3 + 2];
     }
   }
-  return buildIndexedMesh(gl, locs, { positions, t, indices });
+
+  const indices = n > 65535 ? new Uint32Array(idx) : new Uint16Array(idx);
+  return { positions, normals, indices, verts: n, center: { x: cx, y: cy, z: cz }, rad, gap: off };
 }
 
-/**
- * Поток частиц для квантового прыжка: по две вершины на частицу
- * (голова и конец хвоста). В атрибут кладутся не координаты, а ПАРАМЕТРЫ
- * частицы — сторона вокруг оси, удаление от оси и фаза; саму траекторию
- * считает вершинный шейдер (см. WARP_VS).
- *
- * Удаление берётся как sqrt(случайного): так частицы ложатся равномерно
- * по площади кольца, а не сбиваются к оси.
- */
+/** Та же оболочка, загруженная в буферы GL. */
+export function buildShockMesh(gl, locs, mesh, stand, passes) {
+  return buildIndexedMesh(gl, locs, shockGeometry(mesh, stand, passes));
+}
+
 export function buildWarpMesh(gl, locs, count, rng, rMin = 0.06, rMax = 1.35) {
   const par = new Float32Array(count * 6);
   const t = new Float32Array(count * 2);

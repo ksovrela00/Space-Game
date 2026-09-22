@@ -33,9 +33,10 @@ import { tileKey, tileTexelAngle } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
+import { ENTRY } from '../game/entry.js';
 import {
-  buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh, buildPlumeMesh,
-  buildDynamicMesh, buildWarpMesh, buildMoteMesh,
+  buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
+  buildDynamicMesh, buildWarpMesh, buildMoteMesh, buildShockMesh,
 } from './mesh.js';
 import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
@@ -94,6 +95,25 @@ const NEAR_CABIN = 5e-5;     // км
 // разница между кабиной и чёрной плитой: при звёздном ambient (0.14)
 // корпус кабины уходит в ноль, и в кадре остаются одни экраны.
 const CABIN_AMBIENT = 0.55;
+// Оптическая толщина воздуха ВЕРТИКАЛЬНО ВВЕРХ от поверхности, при
+// давлении в одну атмосферу: сколько света воздух СЪЕДАЕТ. Настоящий
+// воздух в этом смысле почти прозрачен — ночью сквозь него видны
+// звёзды, с орбиты видно грунт, — поэтому и число маленькое.
+export const ATMO_THICK = 0.2;
+// Во сколько раз свечение «быстрее» гашения. Небо голубое не потому,
+// что воздух непрозрачный, а потому, что он сам светится рассеянным
+// солнцем: вертикально он съедает пятую часть света, но днём это уже
+// небо. Одним числом эти две вещи задавать нельзя — пробовали, и
+// получилась молочная планета с орбиты (см. ATMO_FS).
+//
+// Честное однократное рассеяние дало бы ровно единицу: сколько света
+// из луча ушло, столько в него и пришло. Двойка — надбавка за
+// многократное рассеяние и за то, что у нас нет ни тоновой
+// компрессии, ни адаптации глаза, а настоящее небо кажется ярче своей
+// яркости именно из-за них. Больше брать нельзя: при восьмёрке диск
+// планеты с двухсот километров светился в надир на 79%, то есть грунт
+// пропадал под ровной синевой.
+export const ATMO_GLOW = 2;
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
 const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
 const PATCH_MS = 3.0;        // и на заплатки поверхности
@@ -187,13 +207,25 @@ export class GlScene {
     };
     this.atmoLocs = { aPos: this.pAtmo.attrib('aPos') };
     this.ringLocs = { aPos: this.pRing.attrib('aPos'), aT: this.pRing.attrib('aT') };
-    this.plumeLocs = { aPos: this.pPlume.attrib('aPos'), aT: this.pPlume.attrib('aT') };
-    this.plumeMesh = buildPlumeMesh(gl, this.plumeLocs);
-    // Оси факела строятся по вектору скорости, поэтому свой базис.
-    this.plumeBasis = makeBasis();
+    this.plumeLocs = {
+      aPos: this.pPlume.attrib('aPos'),
+      aNormal: this.pPlume.attrib('aNormal'),
+    };
+    // Оболочка ударной волны строится из меша корабля, а он приходит
+    // только с игрой — поэтому по первому требованию (drawEntryPlume).
+    this.shockMesh = null;
+    this.shockSrc = null;
+    this.tmpFlow = { x: 0, y: 0, z: 0 };
+    this.originZero = { x: 0, y: 0, z: 0 };
 
     // Оболочка атмосферы — одна на все планеты, масштаб задаёт матрица.
-    const shell = icosphere(3);
+    //
+    // Уровень 4, а не 3: меш вписан в сферу, то есть его силуэт чуть
+    // УЖЕ настоящего верха воздуха. На уровне 3 у самой границы
+    // атмосферы этот срез виден как отрезанный край дуги; на четвёртом
+    // расхождение вчетверо меньше, а стоит оболочка всё тот же один
+    // вызов на планету.
+    const shell = icosphere(4);
     this.atmoMesh = buildIndexedMesh(gl, this.atmoLocs, {
       positions: shell.positions,
       indices: shell.indices,
@@ -352,6 +384,22 @@ export class GlScene {
       body.pos.x - cam.pos.x, body.pos.y - cam.pos.y, body.pos.z - cam.pos.z);
     if (d <= body.radius) return Infinity;
     return cam.screenRadius(d, body.radius);
+  }
+
+  /**
+   * Положение точки в осях камеры (км, БЕЗ нормировки).
+   *
+   * Нужно атмосфере: она пересекает луч со сферами тела и потому должна
+   * знать, где центр. Считается в double и приводится к float32 уже как
+   * смещение от камеры — как и все остальные координаты в сцене.
+   */
+  centerInCamera(pos, out = this.tmp3) {
+    const b = this.camera.basis, c = this.camera.pos;
+    const dx = pos.x - c.x, dy = pos.y - c.y, dz = pos.z - c.z;
+    out[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z;
+    out[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z;
+    out[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
+    return out;
   }
 
   setSunDir(objPos, sunPos) {
@@ -986,6 +1034,17 @@ export class GlScene {
     gl.disable(gl.STENCIL_TEST);
     this.setDetail(prog, null, 0);      // дальше — рукотворные объекты
 
+    // Воздух над поверхностью — здесь, пока не нарисованы близкие
+    // предметы (почему именно здесь, см. drawAir). Глубину он не пишет:
+    // проверка глубины для него выключена, и запись сломала бы всё, что
+    // рисуется следом.
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    if (this.drawAir(world, sunPos, true)) prog.use();
+    gl.disable(gl.BLEND);
+    gl.depthMask(true);
+
     // Камни на грунте. Рисуются после поверхности и без деталировки на
     // пиксель: это обычные модели, просто мелкие и в осях тела.
     if (this.rockBody && this.rocks.mesh) {
@@ -1011,6 +1070,98 @@ export class GlScene {
       this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
       this.drawGear(prog, game, sunPos);
     }
+  }
+
+  /**
+   * Воздух над телами: объём, а не плёнка (см. ATMO_FS).
+   *
+   * @param inside true — только те тела, ВНУТРИ атмосферы которых
+   *        сейчас камера; false — только остальные
+   *
+   * Разделение не косметическое. Оболочка — это объём, и вопрос в том,
+   * какая её сторона видна:
+   *
+   *   * СНАРУЖИ видна ближняя сторона. Она лежит перед планетой,
+   *     поэтому обычный порядок прозрачного прохода работает как надо:
+   *     буфер глубины сам отрежет её там, где ближе оказался корабль
+   *     или станция;
+   *   * ИЗНУТРИ ближняя сторона за спиной, и видна дальняя — а она
+   *     лежит ЗА планетой. Буфер глубины отбрасывал её над всем
+   *     грунтом, и воздух пропадал целиком: над головой он почти
+   *     прозрачен по делу, а над поверхностью его просто не было.
+   *     Именно так «атмосфера исчезала» при снижении.
+   *
+   * Поэтому изнутри воздух рисуется БЕЗ проверки глубины и раньше —
+   * сразу после поверхности, но до камней, станций и корабля. Порядок
+   * при этом выходит физически верным сам собой: дымка ложится на
+   * далёкий грунт и не ложится на то, что рядом с камерой.
+   */
+  drawAir(world, sunPos, inside) {
+    const gl = this.gl;
+    const atmo = this.pAtmo;
+    let used = false;
+    for (const body of world.bodies) {
+      if (!body.atmo) continue;
+      if (this.pixelsOf(body) < 3) continue;
+      const top = body.radius * (1 + ENTRY.top);
+      const dist = Math.hypot(
+        body.pos.x - this.camera.pos.x,
+        body.pos.y - this.camera.pos.y,
+        body.pos.z - this.camera.pos.z);
+      if ((dist < top) !== inside) continue;
+      if (!used) {
+        used = true;
+        atmo.use();
+        gl.uniformMatrix4fv(atmo.loc('uProj'), false, this.proj);
+        gl.uniform1f(atmo.loc('uLogFC'), this.logFC);
+        gl.uniform1f(atmo.loc('uGlow'), ATMO_GLOW);
+        // Ровно одно закрашивание пикселя: два сложили бы столб воздуха
+        // дважды. Снаружи нужна ближняя сторона оболочки, изнутри —
+        // дальняя, поэтому и отсекаются разные грани.
+        //
+        // Стороны названы «наоборот» не по ошибке. Камерное пространство
+        // здесь ЛЕВОЕ: +z смотрит вперёд (см. perspective в
+        // js/gl/mat4.js), и проекция зеркалит обход вершин. Ближняя
+        // половина сферы, обойдённая против часовой стрелки в модели,
+        // на экране выходит ПО часовой — то есть задней гранью. В
+        // проекте это всплыло впервые: освещение двустороннее, и
+        // отсечение до сих пор не включалось нигде. Ошибиться здесь
+        // стоило чёрного неба у самой земли — изнутри отсекалась
+        // единственная видимая сторона.
+        gl.enable(gl.CULL_FACE);
+        gl.cullFace(inside ? gl.BACK : gl.FRONT);
+        if (inside) gl.disable(gl.DEPTH_TEST);
+      }
+      gl.uniform3fv(atmo.loc('uColor'), new Float32Array([
+        body.atmo[0] / 255, body.atmo[1] / 255, body.atmo[2] / 255]));
+      gl.uniform3fv(atmo.loc('uCenter'), this.centerInCamera(body.pos));
+      gl.uniform1f(atmo.loc('uGround'), body.radius);
+      // Пол, на котором обрывается луч, — грунт ПОД КАМЕРОЙ. Изнутри
+      // атмосферы это принципиально: рельеф отходит от средней сферы на
+      // километры, и луч, обрывающийся о среднюю сферу, проходит лишние
+      // десятки километров плотного воздуха — близкая земля тонет в
+      // дымке (см. ATMO_FS). Снаружи брать нечего и незачем: там в кадре
+      // вся полусфера сразу, и средний радиус — лучшее приближение.
+      let floorR = body.radius;
+      if (inside) {
+        floorR = altitudeOf(body, this.camera.pos,
+          this._airInfo || (this._airInfo = { dir: { x: 0, y: 0, z: 0 } })).groundR;
+      }
+      gl.uniform1f(atmo.loc('uFloor'), floorR);
+      gl.uniform1f(atmo.loc('uTop'), top);
+      gl.uniform1f(atmo.loc('uScaleH'), body.radius * ENTRY.top / ENTRY.scales);
+      // Тонкий воздух и выглядеть должен тоньше: то же давление, что
+      // жжёт обшивку слабее (js/game/entry.js, airDensity).
+      gl.uniform1f(atmo.loc('uThick'),
+        ATMO_THICK * (body.press === undefined ? 1 : body.press));
+      bodyBasis(body, this.basisTmp);
+      this.drawObject(atmo, this.atmoMesh, body.pos, this.basisTmp, top, sunPos);
+    }
+    if (used) {
+      gl.disable(gl.CULL_FACE);
+      if (inside) gl.enable(gl.DEPTH_TEST);
+    }
+    return used;
   }
 
   // Стойки шасси: каждая рисуется своим вызовом от точки крепления,
@@ -1125,22 +1276,13 @@ export class GlScene {
       this.drawObject(ring, body._ringMesh, body.pos, b, body.radius, sunPos);
     }
 
-    // Атмосферы и ореолы — аддитивно.
+    // Атмосферы тех тел, ДО которых ещё не долетели. Те, внутрь которых
+    // корабль уже вошёл, нарисованы раньше — сразу за поверхностью
+    // (см. drawAir).
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    this.drawAir(world, sunPos, false);
+    // Дальше снова аддитивное: ореолы и плазма светятся.
     gl.blendFunc(gl.ONE, gl.ONE);
-    const atmo = this.pAtmo;
-    atmo.use();
-    gl.uniformMatrix4fv(atmo.loc('uProj'), false, this.proj);
-    gl.uniform1f(atmo.loc('uLogFC'), this.logFC);
-    for (const body of world.bodies) {
-      if (!body.atmo) continue;
-      if (this.pixelsOf(body) < 3) continue;
-      gl.uniform3fv(atmo.loc('uColor'), new Float32Array([
-        body.atmo[0] / 255, body.atmo[1] / 255, body.atmo[2] / 255]));
-      gl.uniform1f(atmo.loc('uDensity'), 0.9);
-      bodyBasis(body, this.basisTmp);
-      this.drawObject(atmo, this.atmoMesh, body.pos, this.basisTmp,
-        body.radius * 1.035, sunPos);
-    }
 
     this.drawEntryPlume(game, sunPos);
     this.drawGlows(game, world);
@@ -1161,9 +1303,17 @@ export class GlScene {
    */
   drawEntryPlume(game, sunPos) {
     const e = game.entry;
-    if (!e || !(e.heat > 0)) return;
+    if (!e || !(e.heat > 0) || !game.shipMesh) return;
     const gl = this.gl;
     const ship = game.ship;
+    // Оболочка считается один раз на корпус: сварка вершин, сглаживание
+    // и нормали стоят миллисекунды, но каждый кадр их тратить незачем —
+    // корпус не меняется.
+    if (this.shockSrc !== game.shipMesh) {
+      if (this.shockMesh) this.shockMesh.dispose();
+      this.shockMesh = buildShockMesh(gl, this.plumeLocs, game.shipMesh);
+      this.shockSrc = game.shipMesh;
+    }
     const prog = this.pPlume;
     prog.use();
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
@@ -1173,21 +1323,22 @@ export class GlScene {
     // Время нужно только дрожанию; секунды по настенным часам годятся.
     gl.uniform1f(prog.loc('uTime'), (Date.now() % 1000000) / 1000);
 
-    const L = (game.shipMesh && game.shipMesh.length) || 0.065;
-    gl.uniform1f(prog.loc('uRad'), L * (0.42 + 0.5 * e.heat));
-    gl.uniform1f(prog.loc('uLen'), L * (1.5 + 7 * e.heat));
+    const L = game.shipMesh.length || 0.065;
+    // Отход волны от лобовых поверхностей: на малом нагреве она
+    // облизывает обшивку, на большом отходит заметным зазором.
+    gl.uniform1f(prog.loc('uStand'), L * (0.04 + 0.28 * e.heat));
+    // Длина следа за кормой.
+    gl.uniform1f(prog.loc('uTail'), L * (0.5 + 6 * e.heat));
+    gl.uniform1f(prog.loc('uSpan'), L * 0.5);
     // Порог затухания вблизи: четверть длины корпуса.
     gl.uniform1f(prog.loc('uNear'), L * 0.25);
 
-    // Базис факела: вперёд — по потоку, «верх» берём у корабля, чтобы
-    // дрожание не крутилось вокруг оси при развороте.
-    lookAlong(this.plumeBasis, e.dir, ship.basis.up);
-    // Лобовая точка чуть впереди носа: волна отходит от тела.
-    const head = this._plumePos || (this._plumePos = { x: 0, y: 0, z: 0 });
-    head.x = ship.pos.x + e.dir.x * L * 0.55;
-    head.y = ship.pos.y + e.dir.y * L * 0.55;
-    head.z = ship.pos.z + e.dir.z * L * 0.55;
-    this.drawObject(prog, this.plumeMesh, head, this.plumeBasis, 1, sunPos);
+    // Поток — в осях КОРАБЛЯ: волна строится по корпусу, поэтому и
+    // наветренность считается в его же координатах. При развороте
+    // раскаляется тот борт, который подставлен потоку.
+    toLocal(ship.basis, this.originZero, e.dir, this.tmpFlow);
+    gl.uniform3f(prog.loc('uFlow'), this.tmpFlow.x, this.tmpFlow.y, this.tmpFlow.z);
+    this.drawObject(prog, this.shockMesh, ship.pos, ship.basis, 1, sunPos);
   }
 
   drawGlows(game, world) {
