@@ -571,6 +571,7 @@ await step('квантовый привод (B) доводит до цели', (
   if (!(game.ship.speed < 0.001)) throw new Error('скорость на выходе ' + game.ship.speed);
 });
 
+
 await step('карта системы (M): масштаб, выбор, назначение цели', () => {
   key('KeyM'); frames(5);
   if (game.state.mode !== 'map') throw new Error('режим ' + game.state.mode);
@@ -1014,6 +1015,183 @@ await step('стоянка на грунте: кнопка вместо экра
     }
   }
   frames(60 * 5);
+});
+
+
+// Отметка центровки обязана показывать НАСТОЯЩЕЕ направление.
+//
+// ЖАЛОБА: «пару раз прыгнул, а теперь при наведении опять ничего не
+// происходит». Причина: projectDir для направления за спиной возвращает
+// зеркальную точку, и цель позади давала кольцо ровно в середине кадра.
+// Игрок наводился на него и держал сколько угодно — привод честно видел
+// промах в 174°, а отметка показывала «точно в цель».
+await step('отметка варпа не врёт, когда цель за спиной', () => {
+  if (game.state.mode === 'docked') { key('Space'); frames(4); }
+  game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  game.ship.speed = 0; game.ship.throttle = 0;
+  // Вид из кабины: там камера смотрит ровно туда же, куда нос, и
+  // середина кадра ЕСТЬ направление носа. От третьего лица камера
+  // догоняет корабль с запаздыванием, и проверка мерила бы её отставание,
+  // а не отметку.
+  if (game.state.view !== 'cockpit') { key('KeyV'); frames(2); }
+
+  key('KeyM'); frames(2);
+  if (game.map.view !== 'galaxy') { key('KeyG'); frames(2); }
+  key('KeyM'); frames(2);
+  key('KeyJ'); frames(2);
+  if (game.warp.phase !== 'align') throw new Error('центровка не началась');
+
+  const name = game.warpTarget.name.toUpperCase();
+  const d = game.warp.dir;
+  const cx = game.camera.w / 2, cy = game.camera.h / 2;
+  const reach = Math.min(game.camera.w, game.camera.h) * 0.25;
+
+  const markAt = () => {
+    texts = [];
+    frames(1);
+    const seen = texts;
+    texts = null;
+    const hit = seen.find((t) => t.s === name);
+    if (!hit) throw new Error('отметки варпа нет в кадре');
+    const one = seen.filter((t) => t.s === name).length;
+    if (one !== 1) throw new Error('отметок варпа в кадре ' + one + ', должна быть одна');
+    return hit;
+  };
+
+  // Носом ТОЧНО НА цель: отметка у середины, промах нулевой.
+  lookAlong(game.ship.basis, { x: d.x, y: d.y, z: d.z }, game.ship.basis.up);
+  frames(30);
+  const on = markAt();
+  if (Math.hypot(on.x - cx, on.y - cy) > reach) {
+    throw new Error('носом на цель, а отметка ушла от середины');
+  }
+  if (!game.warp.aligned) throw new Error('носом на цель, а привод видит промах');
+
+  // Носом ТОЧНО ОТ цели: отметка обязана уйти от середины, а не сесть в неё.
+  lookAlong(game.ship.basis, { x: -d.x, y: -d.y, z: -d.z }, game.ship.basis.up);
+  frames(30);
+  const off = markAt();
+  const away = Math.hypot(off.x - cx, off.y - cy);
+  if (away <= reach) {
+    throw new Error('цель за спиной, а отметка стоит у середины: ' + away.toFixed(0) + ' px');
+  }
+  if (game.warp.aligned) throw new Error('цель за спиной, а привод считает это попаданием');
+
+  key('KeyJ'); frames(2);          // выключаем привод, дальше он не нужен
+  // Вид карты возвращаем к системе: шаги ниже открывают галактику сами.
+  key('KeyM'); frames(1); key('KeyG'); frames(1); key('KeyM'); frames(1);
+});
+
+// Варп-прыжок целиком, как его делает игрок: цель на карте галактики,
+// центровка по отметке, тоннель, выход у чужой звезды.
+//
+// Эта проверка стоит всех остальных вместе взятых для варпа: только здесь
+// enterSystem работает по-настоящему — со сменой мира под ногами у всего
+// остального кода. Логические проверки видят привод, но не видят, что
+// будет с навигацией, картой и приборами, когда тел старой системы не
+// станет прямо посреди кадра.
+await step('варп-прыжок (J) в другую систему целиком', () => {
+  if (game.state.mode === 'docked') { key('Space'); frames(4); }
+  if (game.state.mode !== 'flight') throw new Error('не в полёте: ' + game.state.mode);
+
+  // Уходим в пустоту и глушим тягу. Центровка идёт ПАРАЛЛЕЛЬНО полёту (как
+  // и калибровка квантового привода), то есть корабль всё это время летит
+  // туда, куда развёрнут нос. Шаги выше оставляют его у грунта луны, и
+  // разворот на чужую звезду там означает разворот в землю: проверка
+  // честно разбивалась, и это была её собственная обстановка, а не
+  // поломка привода.
+  game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  game.ship.speed = 0;
+  game.ship.throttle = 0;
+  frames(2);
+
+  const fromName = game.sys.name;
+  const oldWorld = game.world;
+  const oldBodies = game.world.bodies.concat(game.world.stations);
+
+  // Цель — на карте галактики: M, G, Tab. Другого места назначить её нет.
+  key('KeyM'); frames(2);
+  if (game.state.mode !== 'map') throw new Error('карта не открылась');
+  key('KeyG'); frames(2);
+  if (game.map.view !== 'galaxy') throw new Error('карта галактики не открылась');
+  // ЖАЛОБА БЫЛА РОВНО ОБ ЭТОМ: «выбрал систему, нажал J, ничего не
+  // происходит». Цель ставилась только по Tab, и на карте была
+  // подсвеченная система при пустой цели. Теперь выделение на карте
+  // галактики ВСЕГДА означает цель варпа — в том числе то, которое
+  // появилось само при открытии вида.
+  if (!game.warpTarget) throw new Error('открытие галактики не назначило цель');
+  if (game.warpTarget.seed !== game.map.gsel.seed) throw new Error('цель и выбор разошлись');
+  key('ArrowRight'); frames(2);
+  if (game.warpTarget.seed !== game.map.gsel.seed) throw new Error('стрелка не перенесла цель');
+  const toName = game.warpTarget.name;
+  key('KeyM'); frames(2);
+
+  key('KeyJ'); frames(2);
+  if (game.warp.phase !== 'align') throw new Error('центровка не началась: ' + game.warp.phase);
+
+  // Совмещаем нос с осью прыжка — то же, что игрок делает ручкой.
+  const d = game.warp.dir;
+  lookAlong(game.ship.basis, { x: d.x, y: d.y, z: d.z }, game.ship.basis.up);
+  for (let i = 0; i < 600 && game.warp.phase === 'align'; i++) {
+    lookAlong(game.ship.basis, { x: d.x, y: d.y, z: d.z }, game.ship.basis.up);
+    frames(1);
+  }
+  if (game.warp.phase !== 'tunnel') throw new Error('тоннель не открылся');
+
+  // Рывок: первую секунду корабль по-настоящему уходит по оси.
+  const p0 = { ...game.ship.pos };
+  frames(60);
+  const moved = Math.hypot(game.ship.pos.x - p0.x, game.ship.pos.y - p0.y, game.ship.pos.z - p0.z);
+  if (!(moved > 1e5)) throw new Error('рывка не было: прошли ' + moved.toFixed(0) + ' км');
+
+  // Тоннель до конца. Прыжок 20–34 секунды, берём с запасом.
+  for (let i = 0; i < 60 * 45 && game.warp.phase === 'tunnel'; i++) frames(1);
+  if (game.warp.phase !== 'idle') throw new Error('прыжок не кончился');
+
+  if (game.sys.name === fromName) throw new Error('система не сменилась');
+  if (game.sys.name !== toName) throw new Error('прилетели не туда: ' + game.sys.name);
+  if (game.world === oldWorld) throw new Error('мир тот же самый объект');
+
+  // Ни одной ссылки на тела старой системы: это и утечка памяти, и
+  // настоящий баг — приборы показывали бы высоту над планетой, которой
+  // в этой системе нет.
+  const stale = new Set(oldBodies);
+  const held = [];
+  if (stale.has(game.capture)) held.push('захват');
+  // Порт держит через parent всю цепочку старого мира — самая дорогая
+  // из возможных утечек и при этом самая незаметная: переустанавливается
+  // он только при следующей стыковке.
+  if (stale.has(game.lastStation)) held.push('последний порт');
+  if (stale.has(game.aimed)) held.push('цель под прицелом');
+  if (game.zone && stale.has(game.zone.body)) held.push('зона у поверхности');
+  if (game.nearest && stale.has(game.nearest.body)) held.push('ближайшее тело');
+  if (stale.has(game.ship.landedAt)) held.push('стоянка');
+  if (game.nav.list.some((x) => stale.has(x) || stale.has(x.body))) held.push('список целей');
+  if (stale.has(game.map.follow)) held.push('слежение карты');
+  if (stale.has(game.map.sel)) held.push('выбор на карте');
+  if (game.map.items.some((it) => stale.has(it.obj))) held.push('значки карты');
+  if (game.world.bodies.some((b) => stale.has(b))) held.push('тела мира');
+  if (held.length) throw new Error('остались ссылки на старую систему: ' + held.join(', '));
+
+  // Выход — у звезды: четыре её радиуса, носом на неё.
+  const star = game.world.star;
+  const dist = Math.hypot(game.ship.pos.x - star.pos.x, game.ship.pos.y - star.pos.y,
+    game.ship.pos.z - star.pos.z);
+  const k = dist / star.radius;
+  if (k < 3.5 || k > 4.5) throw new Error('вышли не у звезды: ' + k.toFixed(1) + ' радиусов');
+  if (game.ship.speed > 1e-9) throw new Error('скорость на выходе не ноль');
+
+  // И игра после этого живёт: кадры идут, приборы считаются, сейв пишется.
+  frames(120);
+  if (game.state.mode !== 'flight') throw new Error('режим после прыжка: ' + game.state.mode);
+  const saved = JSON.parse(savedJson() || 'null');
+  if (!saved || saved.system !== game.sys.id) throw new Error('система не попала в сейв');
+
+  // Вид карты возвращаем к системе: игрок нажал бы G ещё раз, а шаги
+  // ниже работают с планом системы.
+  key('KeyM'); frames(1); key('KeyG'); frames(1); key('KeyM'); frames(1);
 });
 
 await step('рестарт с начала по Shift+N (с подтверждением)', () => {

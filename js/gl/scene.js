@@ -18,6 +18,7 @@ import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
   PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
+  WARPTUN_VS, WARPTUN_FS,
   SKY_VS, SKY_FS, SKY_BAKE_VS, SKY_BAKE_FS,
 } from './shaders.js';
 import { skyFor, skyUniforms, SKY_GAIN } from './nebula.js';
@@ -40,12 +41,15 @@ import {
 } from './mesh.js';
 import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
-import { requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel } from './planetmesh.js';
+import {
+  requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel, disposePlanetMeshes,
+} from './planetmesh.js';
 import { SurfacePatch } from './patches.js';
 import { RockField } from './rocks.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
+import { warpPower } from '../game/warp.js';
 import { FLOW } from '../game/flow.js';
 import { Q } from '../core/quality.js';
 import { buildCockpit } from '../models/cockpit.js';
@@ -116,6 +120,23 @@ export const ATMO_THICK = 0.2;
 export const ATMO_GLOW = 2;
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
 const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
+
+// Подсветка корабля в варп-тоннеле. Вчетверо выше обычной: теней в
+// тоннеле нет, есть свечение со всех сторон, и с обычным значением
+// корабль читался чёрным силуэтом.
+const WARP_AMBIENT = 0.55;
+
+// Цвет звезды для варп-тоннеля, 0..1. Тоннель окрашен в свет той звезды,
+// ОТКУДА летим, и к концу перекрашивается в свет той, КУДА: выходя из
+// прыжка, видишь снаружи ровно тот оттенок, в котором летел последние
+// секунды. Белая подложка (0.35) нужна, чтобы у красного карлика тоннель
+// не выродился в один оранжевый канал и не потерял объём.
+const _tint = new Float32Array(3);
+function starTint(sys) {
+  const c = sys && sys.cls ? sys.cls.color : [255, 226, 168];
+  for (let i = 0; i < 3; i++) _tint[i] = 0.35 + 0.65 * (c[i] / 255);
+  return _tint;
+}
 const PATCH_MS = 3.0;        // и на заплатки поверхности
 const TILE_MS = 6.0;         // и на плитки (только пока они подгружаются)
 
@@ -178,6 +199,7 @@ export class GlScene {
     this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
     this.pWarp = buildProgram(gl, 'warp', WARP_VS, WARP_FS);
     this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
+    this.pWarpTun = buildProgram(gl, 'warptun', WARPTUN_VS, WARPTUN_FS);
     this.pMote = buildProgram(gl, 'mote', MOTE_VS, MOTE_FS);
 
     // Небо: полоса галактического диска и туманности (js/gl/nebula.js).
@@ -196,6 +218,7 @@ export class GlScene {
     // системы известен только оттуда (см. updateSky).
     this.skyTex = null;
     this.sky = null;
+    this.skySeed = null;      // семя системы, под которое испечено небо
     this.skyFace = 0;
     this.skyScale = new Float32Array(2);
 
@@ -247,6 +270,7 @@ export class GlScene {
       aT: this.pWarp.attrib('aT'),
     }, WARP_COUNT, makeRng(0x7a12));
     this.tunnelQuad = buildQuad(gl, this.pTunnel.attrib('aQuad'));
+    this.warpTunQuad = buildQuad(gl, this.pWarpTun.attrib('aQuad'));
     this.jump = {
       power: 0, axis: { x: 0, y: 0, z: 1 }, cx: 0, cy: 0,
       // Мировые оси потока: сама ось движения и два перпендикуляра.
@@ -331,6 +355,20 @@ export class GlScene {
     watchContextLoss(this.canvas,
       () => { this.ok = false; this.error = 'контекст WebGL потерян'; },
       () => { this.jsMeshes = new WeakMap(); this.init(); this.ok = true; });
+  }
+
+  /**
+   * Заменить звёздный фон на фон другой системы.
+   *
+   * Звёзды и туманности берутся из одного семени, поэтому при переходе
+   * меняются вместе: наклон галактической полосы над чужой звездой
+   * обязан быть другим, иначе прилетел ты куда угодно, а небо осталось
+   * домашнее. Старый буфер удаляется сразу — точек там тысячи.
+   */
+  setStarfield(src) {
+    this.starfieldSrc = src;
+    if (this.stars) this.stars.dispose();
+    this.stars = this.buildStars();
   }
 
   buildStars() {
@@ -521,6 +559,26 @@ export class GlScene {
     gl.stencilMask(0xff);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
+    // Под варп-тоннелем мира нет — ни в кадре, ни в памяти. Когда тоннель
+    // непрозрачен, сцена не рисует НИЧЕГО, кроме него: половину этого
+    // времени старая система уже выгружена, а новая ещё собирается.
+    // Вместо отрисовки идёт прогрев — ровно то, ради чего прыжок и длится
+    // полминуты.
+    const cover = this.warpCover(game);
+    if (cover > 0) {
+      this.warmSystem(world);
+      // Порядок важен: сперва СТЕНЫ, потом корабль. Тоннель —
+      // полноэкранный аддитивный проход, и нарисованный поверх корабля он
+      // ложился на него дымкой, а сам корабль темнел до силуэта. Он
+      // находится ВНУТРИ тоннеля, а не за ним.
+      this.drawWarpTunnel(game, cover);
+      this.drawShipOnly(game);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      this.gpuTimer.end();
+      return;
+    }
+
     this.updateJump(game);
     this.drawStars();
     this.drawOpaque(game, world, sunPos);
@@ -528,6 +586,7 @@ export class GlScene {
     this.drawMotes(game);
     this.drawCockpit(game, sunPos);
     this.drawTunnel();
+    this.drawWarpTunnel(game, 0);
 
     gl.depthMask(true);
     gl.disable(gl.BLEND);
@@ -736,6 +795,143 @@ export class GlScene {
     }
   }
 
+  /**
+   * Насколько варп-тоннель закрывает кадр целиком, 0..1 (0 — не закрывает).
+   *
+   * Порог не 1.0, а 0.97: на последних процентах раскрытия мир под
+   * тоннелем уже не читается, а рисовать его — это полный проход по всем
+   * телам системы впустую.
+   */
+  warpCover(game) {
+    const w = game.warp;
+    if (!w || w.phase !== 'tunnel') return 0;
+    const p = warpPower(w);
+    return p > 0.97 ? p : 0;
+  }
+
+  /**
+   * Прогрев системы под тоннелем: собрать грубые меши всех тел, пока их
+   * никто не видит.
+   *
+   * Без этого прыжок только ПЕРЕНОСИТ «прогрузку» на момент выхода —
+   * игрок вываливается к звезде и смотрит, как из шаров проступают
+   * планеты. Уровень 2 взят намеренно низкий: он собирается быстро, а
+   * уточняется на подлёте обычным порядком.
+   */
+  warmSystem(world) {
+    for (const b of world.bodies) {
+      if (b.kind === 'star') continue;
+      requestPlanetMesh(this.gl, this.meshLocs, b, 2);
+    }
+    if (pendingBuilds()) pumpBuilds(this.gl, this.meshLocs, BUILD_MS * 2);
+  }
+
+  /**
+   * Только корабль и кабина — без единого тела мира.
+   *
+   * Нужно под варп-тоннелем: системы в этот момент нет, а корабль есть, и
+   * он единственное, по чему видно, что это полёт. Настройка программы
+   * повторяет начало drawOpaque, но без поверхности, плиток и трафарета:
+   * их здесь не для чего готовить.
+   */
+  drawShipOnly(game) {
+    const gl = this.gl;
+    const prog = this.pMesh;
+    const ship = game.ship;
+    const w = game.warp;
+
+    // Светит сам тоннель, и светит СПЕРЕДИ: источник ставится далеко по
+    // оси прыжка. Звезда для этого не годится — до смены системы она
+    // осталась в покинутой, после смены корабль стоит к ней вплотную, и в
+    // обоих случаях корабль выходил то чёрным силуэтом, то пересвеченным.
+    // Подсветка снизу поднята: в тоннеле нет теней, есть свечение вокруг.
+    const d = w && w.dir ? w.dir : { x: 0, y: 0, z: 1 };
+    const lit = this._warpLit || (this._warpLit = { x: 0, y: 0, z: 0 });
+    lit.x = ship.pos.x + d.x * 1e7;
+    lit.y = ship.pos.y + d.y * 1e7;
+    lit.z = ship.pos.z + d.z * 1e7;
+
+    prog.use();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uAmbient'), WARP_AMBIENT);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    this.setDetail(prog, null, 0);
+
+    if (game.state.view === 'chase' && game.state.mode !== 'docked' && game.shipMesh) {
+      this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, lit);
+      this.drawGear(prog, game, lit);
+    }
+    this.drawCockpit(game, lit);
+  }
+
+  /**
+   * Точка схода варп-тоннеля в NDC: куда на экране уходит ось прыжка.
+   *
+   * Та же задача, что у квантового тоннеля (см. updateJump), и решается
+   * так же: направление переводится в оси камеры и проецируется. Ось за
+   * спиной не проецируется вовсе — тогда точка схода остаётся прежней, и
+   * тоннель просто уезжает за край кадра.
+   */
+  warpCenter(w, out) {
+    const b = this.camera.basis;
+    const d = w && w.dir ? w.dir : null;
+    if (!d) { out.x = 0; out.y = 0; return out; }
+    const ax = d.x * b.right.x + d.y * b.right.y + d.z * b.right.z;
+    const ay = d.x * b.up.x + d.y * b.up.y + d.z * b.up.z;
+    const az = d.x * b.fwd.x + d.y * b.fwd.y + d.z * b.fwd.z;
+    if (!(az > 0.08)) return out;
+    const cam = this.camera;
+    const px = cam.cx + (ax / az) * cam.focal;
+    const py = cam.cy - (ay / az) * cam.focal;
+    out.x = Math.max(-3, Math.min(3, (px / cam.w) * 2 - 1));
+    out.y = Math.max(-3, Math.min(3, 1 - (py / cam.h) * 2));
+    return out;
+  }
+
+  /** Варп-тоннель: полноэкранный проход поверх всего. */
+  drawWarpTunnel(game, cover) {
+    const w = game.warp;
+    if (!w || w.phase !== 'tunnel') return;
+    const power = cover > 0 ? cover : warpPower(w);
+    if (!(power > 0.01)) return;
+    const gl = this.gl;
+    const prog = this.pWarpTun;
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    prog.use();
+    // Точка схода считается КАЖДЫЙ кадр от оси прыжка в осях камеры, а не
+    // прибита к середине.
+    //
+    // ТО, ЧТО БЫЛО СЛОМАНО: тоннель был экранным и при осмотре камерой
+    // (ПКМ) оставался на месте — двигался только корабль. Со стороны это
+    // читалось не как «повернул голову», а как «корабль крутится внутри
+    // неподвижной трубы».
+    this.warpCenter(game.warp, this._wc || (this._wc = { x: 0, y: 0 }));
+    gl.uniform2f(prog.loc('uCenter'), this._wc.x, this._wc.y);
+    gl.uniform1f(prog.loc('uAspect'), this.canvas.width / Math.max(1, this.canvas.height));
+    // Время — МОНОТОННОЕ, прямо секунды прыжка. Первая версия собирала
+    // его из фазы потока (w.flow * 40), а фаза берётся по модулю единицы:
+    // на каждом обороте, то есть дважды в секунду, время скакало назад на
+    // сорок единиц, и весь узор мгновенно подменялся другим. Это и было
+    // мельтешение, от которого резало глаза.
+    gl.uniform1f(prog.loc('uTime'), w.t);
+    gl.uniform1f(prog.loc('uPower'), power);
+    gl.uniform1f(prog.loc('uMix'), w.total > 0 ? w.t / w.total : 0);
+    gl.uniform3fv(prog.loc('uFrom'), starTint(w.from));
+    gl.uniform3fv(prog.loc('uTo'), starTint(w.to));
+    this.warpTunQuad.draw();
+    this.draws++;
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+  }
+
   /** Полноэкранный тоннель поверх всего. */
   drawTunnel() {
     const j = this.jump;
@@ -761,6 +957,27 @@ export class GlScene {
 
   // Ближайшее тело под камерой: только для него имеет смысл считать
   // подробные заплатки поверхности.
+  /**
+   * Забыть систему целиком: освободить всё, что для неё собрано на GPU.
+   *
+   * Вызывается под тоннелем варп-прыжка, когда мир уже не виден
+   * (js/main.js, enterSystem). Сборщик мусора сам здесь бессилен: меши
+   * планет висят на телах старого мира, но БУФЕРЫ живут в драйвере, и
+   * ссылок из JS на них нет вовсе — без явного удаления каждый прыжок
+   * оставлял бы в видеопамяти целую систему.
+   *
+   * @returns сколько мешей освобождено — по этому числу проверка и
+   *          отличает настоящую выгрузку от забытого вызова.
+   */
+  forgetSystem(world) {
+    if (this.tiles) this.tiles.clear();
+    if (this.rocks) this.rocks.clear();
+    this.tileBody = null;
+    this.rockBody = null;
+    this.skySeed = null;         // небо чужой системы печётся заново
+    return world ? disposePlanetMeshes(world.bodies) : 0;
+  }
+
   nearestSurface(world) {
     const cam = this.camera;
     let best = null, bestGap = Infinity;
@@ -870,13 +1087,22 @@ export class GlScene {
    * будет другим (js/render/starfield.js, galaxyFor).
    */
   updateSky(world) {
-    if (!this.skyOn || this.skyFace >= 6 || !world) return;
+    if (!this.skyOn || !world) return;
     const gl = this.gl;
-    if (!this.skyTex) {
+    // Небо перезапекается, когда сменилось СЕМЯ системы, а не когда его
+    // об этом попросили: у каждой звезды свои туманности и свой наклон
+    // галактического диска, и прилететь в чужую систему под родным небом
+    // значило бы обесценить и то, и другое. Сравнение по семени, а не
+    // флажок «пересобрать», потому что забыть выставить флажок легко, а
+    // заметить чужое небо в кадре — почти нельзя.
+    if (this.skySeed !== world.seed) {
+      this.skySeed = world.seed;
       this.sky = skyFor(world.seed);
       this.skyU = skyUniforms(this.sky);
-      this.skyTex = createSkyTexture(gl, Q.sky);
+      this.skyFace = 0;
     }
+    if (this.skyFace >= 6) return;
+    if (!this.skyTex) this.skyTex = createSkyTexture(gl, Q.sky);
     const f = CUBE_FACES[this.skyFace];
     const prog = this.pSkyBake;
     const u = this.skyU;

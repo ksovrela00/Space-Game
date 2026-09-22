@@ -156,11 +156,17 @@ export function starDistance(body) {
  */
 export function temperatureOf(world, body) {
   const info = KIND_INFO[body.kind] || KIND_INFO.rock;
-  if (info.temp) return info.temp;                     // светило греет само себя
+  // У светила температура своя, и она из КЛАССА звезды: в таблице видов
+  // она одна на все звёзды, а классов пять (js/game/galaxy.js).
+  if (info.temp) return body.temp || info.temp;
   const d = starDistance(body);
-  const home = world.home;
-  const d0 = home.orbit.radius;
-  const a0 = KIND_INFO[home.kind].albedo;
+  // Опора — обитаемая зона системы, а не родная планета. Зона считается
+  // из светимости звезды, поэтому у красного карлика та же 255 K
+  // приходится на 150 тыс. км, а у белой — на полтора миллиона. Пока
+  // опорой была планета (world.home), в чужой системе это значило бы
+  // «где-то там обязана быть планета с земным климатом».
+  const d0 = world.habitable || (world.home && world.home.orbit.radius) || 620000;
+  const a0 = KIND_INFO.ocean.albedo;
   if (!(d > 0)) return info.temp || 0;
   // T ~ d^(-1/2), поправка на альбедо — корень четвёртой степени из
   // поглощённой доли: обе части закона Стефана-Больцмана.

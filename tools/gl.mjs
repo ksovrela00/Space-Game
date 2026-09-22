@@ -17,7 +17,7 @@ import {
   DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
   makeDetailLoad, updateDetailLoad, FW_MAX, FW_TARGET_GPU, FW_TARGET_CPU,
 } from '../js/gl/detail.js';
-import { MESH_FS, MESH_FS_DETAIL, ATMO_FS, PLUME_VS } from '../js/gl/shaders.js';
+import { MESH_FS, MESH_FS_DETAIL, ATMO_FS, PLUME_VS, WARPTUN_FS } from '../js/gl/shaders.js';
 import { shockGeometry } from '../js/gl/mesh.js';
 import { altitudeOf } from '../js/game/surface.js';
 import { buildCobra } from '../js/models/ships.js';
@@ -36,6 +36,9 @@ import { tileBuilder, TILE_TEXEL_TOL } from '../js/gl/tiles.js';
 import { planetGeometry } from '../js/gl/planetmesh.js';
 import { perspective, modelView, dirToCamera, logDepth, logDepthCoef } from '../js/gl/mat4.js';
 import { makeSystem, bodyBasis } from '../js/game/world.js';
+import { makeGalaxy } from '../js/game/galaxy.js';
+import { makeWarp, startWarp, updateWarp, warpPower } from '../js/game/warp.js';
+import { pendingBuilds } from '../js/gl/planetmesh.js';
 
 let fails = 0;
 const ok = (cond, msg) => {
@@ -1748,11 +1751,115 @@ console.log('\n== геометрия планеты ==');
 // собираются, буферы заливаются, матрицы не содержат NaN и draw-вызовы
 // происходят. Именно здесь ловятся ошибки, из-за которых в браузере был бы
 // просто чёрный экран.
+
+// --- Варп-тоннель: то, что видно глазами, но проверяемо текстом ------------
+//
+// Скомпилировать GLSL здесь нечем (см. «Важное ограничение» в README), но
+// три свойства этого шейдера — не вкусовые, а прямые ответы на жалобу
+// «это что за эпилепсия, почему ощущение что я провалился в торнадо».
+// Каждое из них легко вернуть одной правкой, и тогда кадр снова станет
+// невыносимым, а ни одна другая проверка этого не заметит.
+console.log('\n== варп-тоннель ==');
+{
+  const src = WARPTUN_FS;
+
+  // Грубый разбор на скобки: компилятора нет, а опечатка в шейдере
+  // означает чёрный экран ровно в момент прыжка — то есть там, где её
+  // меньше всего ждёшь.
+  const count = (c) => (src.match(new RegExp('\\' + c, 'g')) || []).length;
+  ok(count('{') === count('}') && count('(') === count(')') &&
+     /void main\(\)/.test(src) && /outColor = /.test(src),
+    `шейдер тоннеля цел: ${count('{')} фигурных, ${count('(')} круглых скобок`);
+
+  // ЗАКРУТКА. Была 0.85 — полный оборот на каждый e-кратный радиус, и
+  // стены закручивались быстрее, чем убегали назад: получался смерч, а не
+  // коридор.
+  const twist = /ang \+ lr \* ([0-9.]+)/.exec(src);
+  ok(twist && parseFloat(twist[1]) <= 0.2,
+    `закрутка тоннеля слабая: ${twist ? twist[1] : 'НЕ НАЙДЕНА'} (смерч начинался с 0.85)`);
+
+  // РАДУГА ПО УГЛУ. Цвет в кадре ровно один — звёздный. Разница между
+  // каналами остаётся только от расслоения по потоку, и она мала.
+  ok(!/hue|uSeed/.test(src) && /mix\(uFrom, uTo/.test(src),
+    'цвет тоннеля — цвет звезды, радуги по углу нет');
+
+  // ШОВ НА ЛУЧЕ ±π. Угол там разрывается на целый оборот. Если число
+  // волокон по кругу не целое, шум по обе стороны разрыва разный, и через
+  // весь кадр от середины влево идёт полоса — а расслоение по каналам
+  // красит её в красный. Именно её и было видно.
+  const harm = (src.match(/H\d B? ?= ?[0-9.]+/g) || [])
+    .concat(src.match(/H\dB = [0-9.]+/g) || [])
+    .map((m) => parseFloat(m.split('=')[1]));
+  ok(harm.length >= 4 && harm.every((h) => Number.isInteger(h)) &&
+     /float fibre\(float turn/.test(src),
+    `волокон по кругу целое число: ${harm.join(', ')} — решётку есть по чему замыкать`);
+
+  // ШОВ НА ЛУЧЕ ±π. Угол там разрывается ровно на оборот, и обе стороны
+  // разрыва обязаны дать одно и то же значение шума. Ловится это только
+  // счётом: на глаз шов — бледная полоса через полкадра, а в мок-контексте
+  // его не видно вовсе.
+  //
+  // Ниже — JS-двойник шума из шейдера, строка в строку. Первая попытка
+  // чинила шов «целыми гармониками», и двойник показал, что этого мало:
+  // шум по целому сдвигу попадает в ДРУГУЮ ячейку решётки, и разрыв
+  // доходил до 0.20 по волокну при размахе в единицу. Помогает только
+  // замыкание индекса решётки по модулю периода (vnoiseW в шейдере).
+  {
+    const fr = (x) => x - Math.floor(x);
+    const md = (x, y) => x - y * Math.floor(x / y);
+    const hash21 = (px, py) => {
+      let x = fr(px * 123.34), y = fr(py * 456.21);
+      const d = x * (x + 45.32) + y * (y + 45.32);
+      x = fr(x + d); y = fr(y + d);
+      return fr(x * y);
+    };
+    const vnoiseW = (px, py, period) => {
+      const ix = Math.floor(px), iy = Math.floor(py);
+      let fx = fr(px), fy = fr(py);
+      fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+      const x0 = md(ix, period), x1 = md(ix + 1, period);
+      const a = hash21(x0, iy), b = hash21(x1, iy);
+      const c = hash21(x0, iy + 1), d = hash21(x1, iy + 1);
+      const lo = a + (b - a) * fx, hi = c + (d - c) * fx;
+      return lo + (hi - lo) * fy;
+    };
+    const fibre = (turn, flow, h1, h2) => {
+      const n = vnoiseW(turn * h1, flow, h1) * 0.66
+              + vnoiseW(turn * h2 + 7, flow * 2.1 + 11, h2) * 0.34;
+      return Math.pow(Math.max(0, n - 0.40) / 0.60, 2);
+    };
+
+    let worst = 0;
+    for (const [h1, h2] of [[harm[0], harm[2]], [harm[1], harm[3]]]) {
+      for (let i = 0; i < 3000; i++) {
+        const flow = i * 0.01;
+        worst = Math.max(worst, Math.abs(fibre(0.5, flow, h1, h2) - fibre(-0.5, flow, h1, h2)));
+      }
+    }
+    // Двойник считает МАТЕМАТИКУ, а к коду его привязывает текст: без
+    // этой пары проверка зелёная и при сломанном шейдере — двойник ведь
+    // сам по себе остаётся правильным. Это ровно та ловушка, в которую
+    // проверка и попала с первого раза.
+    const wraps = /x0 = mod\(i\.x, period\)/.test(src) &&
+                  /x1 = mod\(i\.x \+ 1\.0, period\)/.test(src) &&
+                  /vnoiseW\(vec2\(turn \* h1/.test(src);
+    ok(worst < 1e-9 && wraps,
+      `шва на луче ±π нет: худший разрыв волокна ${worst.toExponential(1)}` +
+      (wraps ? '' : ', НО РЕШЁТКА В ШЕЙДЕРЕ НЕ ЗАМКНУТА'));
+  }
+
+
+  const disp = /0\.03 \+ ([0-9.]+) \* smoothstep/.exec(src);
+  ok(disp && parseFloat(disp[1]) <= 0.2,
+    `расслоение по каналам — подцветка кромки, а не радуга: ${disp ? disp[1] : 'НЕ НАЙДЕНО'}`);
+}
+
 console.log('\n== мок GL: путь отрисовки ==');
 {
   const state = {
     nan: 0, nanWhere: [], draws: 0, buffers: 0, programs: 0, vaos: 0, stencils: 0,
     textures: 0, texturesFreed: 0, bakes: 0, skyBakes: 0, mipmaps: 0,
+    buffersFreed: 0, seqOf: null, seq: [], vec2: {}, orderOn: false, order: [],
     // Размах значений каждого скалярного uniform-а за всё время: по
     // нему видно и то, дошёл ли параметр до шейдера вообще, и то,
     // меняется ли он от плитки к плитке.
@@ -1786,10 +1893,23 @@ console.log('\n== мок GL: путь отрисовки ==');
     getProgramInfoLog: () => '',
     getAttribLocation: () => { attribIdx = (attribIdx + 1) % 8; return attribIdx; },
     getUniformLocation: (p, name) => ({ name }),
+    // Двухкомпонентные uniform-ы запоминаются целиком: по uCenter видно,
+    // едет ли точка схода тоннеля за камерой.
+    uniform2f: (loc, a, b) => {
+      if (!loc) return;
+      state.vec2[loc.name] = [a, b];
+      if (state.orderOn) state.order.push(loc.name);
+    },
     uniform1f: (loc, v) => {
       if (!loc) return;
+      if (state.orderOn) state.order.push(loc.name);
       state.uni[loc.name] = Math.max(state.uni[loc.name] ?? -Infinity, v);
       state.uniMin[loc.name] = Math.min(state.uniMin[loc.name] ?? Infinity, v);
+      // Порядок значений, а не только размах: есть величины, у которых
+      // важна монотонность. Время варп-тоннеля собиралось из фазы по
+      // модулю единицы и дважды в секунду скакало назад — по размаху это
+      // не видно вовсе, а в кадре узор мгновенно подменялся другим.
+      if (state.seqOf === loc.name) state.seq.push(v);
     },
     createBuffer: () => { state.buffers++; return {}; },
     createVertexArray: () => { state.vaos++; return {}; },
@@ -1797,7 +1917,7 @@ console.log('\n== мок GL: путь отрисовки ==');
     drawElements: () => { state.draws++; },
     stencilFunc: () => { state.stencils++; },
     stencilOp: () => { state.stencils++; },
-    deleteBuffer: () => {},
+    deleteBuffer: () => { state.buffersFreed++; },
     deleteVertexArray: () => {},
     cullFace: (mode) => { state.cull = mode; },
     createTexture: () => { state.textures++; return {}; },
@@ -1854,8 +1974,8 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 13,
-    `собрано программ: ${state.programs} (меш, звёзды, небо, запекание неба, полосы, тоннель, ` +
+  ok(state.programs === 14,
+    `собрано программ: ${state.programs} (меш, звёзды, небо, запекание неба, полосы, тоннель, варп-тоннель, ` +
     'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности)');
 
   const world = makeSystem(0x1a7e);
@@ -2650,6 +2770,137 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(worstN === 0 && edges.length > 0,
       `заплатки: зависание на ${edges.length + 3} высотах не пересобирает набор`);
     globalThis.location = undefined;
+  }
+
+
+  // --- Смена звёздной системы -----------------------------------------------
+  //
+  // Самое дорогое место всей затеи с варпом. Меши планет висят НА ТЕЛАХ
+  // старого мира (body._glMeshes), и сборщик мусора уберёт обёртки, но не
+  // буферы: те живут в драйвере, и ссылок из JS на них нет вовсе. Без
+  // явной выгрузки каждый прыжок оставлял бы в видеопамяти целую систему.
+  {
+    for (let i = 0; i < 4; i++) scene.render(game);
+    const had = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
+    const freedBefore = state.buffersFreed;
+    const freed = scene.forgetSystem(world);
+    const left = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
+    ok(had > 0 && freed >= had && left === 0 && state.buffersFreed > freedBefore &&
+       pendingBuilds() === 0,
+      `выгрузка системы: было ${had} тел с мешами, освобождено ${freed} мешей и ` +
+      `${state.buffersFreed - freedBefore} буферов, осталось ${left}, очередь сборки ${pendingBuilds()}`);
+  }
+
+  // Небо чужой системы обязано быть другим: у каждой звезды свои
+  // туманности и свой наклон галактической полосы. Печётся оно один раз
+  // за систему — и ровно один раз ещё, когда система сменилась.
+  {
+    const other = makeGalaxy().systems[3];
+    const next = makeSystem(other);
+    const baked = state.skyBakes;
+    game.world = next;
+    for (let i = 0; i < 10; i++) scene.render(game);
+    ok(scene.skySeed === next.seed && state.skyBakes === baked + 6,
+      `небо перепечено под новую систему: ещё ${state.skyBakes - baked} граней, ` +
+      `семя ${next.seed} (было ${world.seed})`);
+    game.world = world;
+    scene.setStarfield(new Starfield(400, next.seed));
+    for (let i = 0; i < 8; i++) scene.render(game);
+  }
+
+  // Под варп-тоннелем мир не рисуется вовсе: половину этого времени
+  // старой системы уже нет в памяти, а новая ещё собирается. Вместо
+  // отрисовки идёт прогрев — иначе прыжок только переносил бы «прогрузку»
+  // на момент выхода.
+  {
+    const normal = frame();
+    scene.forgetSystem(world);
+    game.warp = makeWarp();
+    startWarp(game.warp, makeGalaxy().systems[0], makeGalaxy().systems[3]);
+    game.warp.phase = 'tunnel';
+    game.warp.t = game.warp.total * 0.5;     // середина: тоннель глухой
+    game.warp.power = warpPower(game.warp);
+    const covered = frame();
+    const warmed = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
+    ok(warpPower(game.warp) > 0.97 && covered < normal / 3 && covered > 0 && warmed > 0,
+      `в тоннеле кадр из ${covered} вызовов против ${normal} обычных, ` +
+      `прогрето ${warmed} тел`);
+
+    // Корабль в тоннеле остаётся. Жалоба была прямая: «куда пропала
+    // моделька корабля» — первая версия не рисовала вообще ничего, кроме
+    // стен, и прыжок читался как заставка, а не как полёт.
+    {
+      game.state.view = 'chase';
+      const withShip = frame();
+      game.shipMesh = null;
+      const without = frame();
+      game.shipMesh = buildCobra();
+      ok(withShip > without,
+        `корабль виден в тоннеле: ${withShip} вызовов против ${without} без модели`);
+    }
+
+    // Время тоннеля обязано идти только вперёд. Оно собиралось из фазы
+    // потока по модулю единицы и дважды в секунду скакало назад на сорок
+    // единиц: узор мгновенно подменялся другим, и от кадра резало глаза.
+    {
+      state.seqOf = 'uTime';
+      state.seq.length = 0;
+      // Привод крутится ПО-НАСТОЯЩЕМУ: именно updateWarp копит фазу
+      // потока по модулю единицы, и именно её обороты давали скачок.
+      // Шаг крупный нарочно — за двадцать шагов фаза обернётся четырежды.
+      for (let i = 0; i < 20; i++) { updateWarp(game.warp, ship, 0.1); frame(); }
+      state.seqOf = null;
+      const back = state.seq.filter((v, i) => i > 0 && v < state.seq[i - 1]).length;
+      ok(state.seq.length >= 20 && back === 0,
+        `время тоннеля не идёт назад: ${state.seq.length} значений, ` +
+        `${state.seq[0].toFixed(2)}…${state.seq[state.seq.length - 1].toFixed(2)}, ` +
+        `скачков назад ${back}`);
+    }
+
+    // Тоннель рисуется ПОД кораблём. Нарисованный поверх, он ложился на
+    // корабль дымкой, а сам корабль темнел до силуэта: он внутри тоннеля,
+    // а не за ним. Порядок читается по тому, чей uniform ушёл раньше.
+    {
+      game.state.view = 'chase';
+      state.order.length = 0;
+      state.orderOn = true;
+      frame();
+      state.orderOn = false;
+      const tun = state.order.indexOf('uMix');        // только у тоннеля
+      const ship = state.order.indexOf('uAmbient');   // только у мешей
+      ok(tun >= 0 && ship >= 0 && tun < ship,
+        `тоннель рисуется раньше корабля: uMix на ${tun}, uAmbient на ${ship}`);
+    }
+
+    // Точка схода едет за камерой. Тоннель был экранным и при осмотре
+    // камерой оставался на месте — двигался только корабль, и это
+    // читалось как «корабль крутится внутри неподвижной трубы».
+    {
+      // Смотрим вдоль оси прыжка: точка схода считается только для оси
+      // ПЕРЕД камерой — за спиной её не спроецировать вовсе.
+      const d = game.warp.dir;
+      lookAlong(cam.basis, normalize(v3(d.x, d.y, d.z)));
+      frame();
+      const before = state.vec2.uCenter.slice();
+      const b = cam.basis;
+      rotateBasis(b, 0, 0.35, 0);                     // повернули голову
+      frame();
+      const after = state.vec2.uCenter.slice();
+      rotateBasis(b, 0, -0.35, 0);
+      frame();
+      ok(Math.hypot(after[0] - before[0], after[1] - before[1]) > 0.2,
+        `точка схода идёт за камерой: (${before.map((v) => v.toFixed(2)).join(', ')}) -> ` +
+        `(${after.map((v) => v.toFixed(2)).join(', ')})`);
+    }
+
+    // На раскрытии и на гашении мир ещё виден — иначе система исчезала бы
+    // рывком, а не уходила в тоннель.
+    game.warp.t = 0.2;
+    const opening = frame();
+    ok(warpPower(game.warp) < 0.97 && opening > covered * 2,
+      `на раскрытии тоннеля мир ещё рисуется: ${opening} вызовов при силе ` +
+      `${warpPower(game.warp).toFixed(2)}`);
+    game.warp = null;
   }
 
   ok(state.nan === 0,

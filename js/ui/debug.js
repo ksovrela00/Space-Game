@@ -70,6 +70,17 @@ export function drawDebug(r, game, dbg) {
         `обдув ${(game.entry.speed * 1000).toFixed(0)} м/с, плотность ` +
         `${game.entry.rho.toFixed(3)}, высота ${(game.entry.alt).toFixed(1)} км`
       : '',
+    // Система и состояние варпа: при отладке прыжка надо видеть и то,
+    // куда летим, и то, сменился ли мир под тоннелем.
+    game.sys
+      ? `система ${game.sys.name} (${game.sys.cls.id}, зона ${Math.round(game.sys.hab / 1000)} тыс. км)` +
+        (game.warpTarget ? `   цель варпа ${game.warpTarget.name}` : '') +
+        (game.warp && game.warp.phase !== 'idle'
+          ? `   варп: ${game.warp.phase} ${game.warp.phase === 'align'
+            ? game.warp.calib.toFixed(2) : (game.warp.total - game.warp.t).toFixed(1) + ' с'}` +
+            (game.warp.handed ? ' (система сменена)' : '')
+          : '')
+      : '',
     game.audio ? audioLine(game.audio, game.sound) : '',
     game.dockAssist
       ? `порт x${game.dockAssist.q.local.x.toFixed(3)} y${game.dockAssist.q.local.y.toFixed(3)} z${game.dockAssist.q.local.z.toFixed(3)} align ${game.dockAssist.q.align.toFixed(2)} roll ${game.dockAssist.q.roll.toFixed(2)}`

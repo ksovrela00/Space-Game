@@ -31,6 +31,7 @@ import { LIMITS } from '../game/docking.js';
 import { canJump } from '../game/quantum.js';
 import { currentTarget } from '../game/nav.js';
 import { say } from '../game/state.js';
+import { galaxy, systemDistance, warpSeconds, SPREAD } from '../game/galaxy.js';
 
 const CY = '#4fb3e0';
 const CY_DIM = 'rgba(79,179,224,0.35)';
@@ -50,6 +51,12 @@ const PAD_BOT = 40;
 
 export function makeMap() {
   return {
+    // Карта одна, а видов у неё два: система и галактика. Отдельным
+    // экраном галактику делать не стали — это тот же вопрос «куда
+    // лететь», только на другом масштабе, и переключаться между ними
+    // одной клавишей быстрее, чем открывать второе окно.
+    view: 'system',        // system | galaxy
+    gsel: null,            // выбранная система (в виде галактики)
     zoom: 1,
     cx: 0, cz: 0,          // центр вида в мировых километрах (плоскость XZ)
     sel: null,             // выбранный объект (о нём карточка)
@@ -227,6 +234,12 @@ export function mapInput(game, input) {
   map.mx = input.mouse.x;
   map.my = input.mouse.y;
 
+  if (input.pressed('KeyG')) {
+    map.view = map.view === 'galaxy' ? 'system' : 'galaxy';
+    map.items.length = 0;         // попадания курсора считаются от нового вида
+  }
+  if (map.view === 'galaxy') { galaxyInput(game, input); return; }
+
   // Колесо — масштаб вокруг курсора.
   const wheel = input.takeWheel();
   if (wheel) zoomBy(map, Math.exp(-wheel * 0.0015), map.mx, map.my);
@@ -276,6 +289,248 @@ export function mapInput(game, input) {
       game.selectTarget(t);
       say(game.state, 'ЦЕЛЬ: ' + t.name);
     }
+  }
+}
+
+// --- карта галактики ---------------------------------------------------------
+//
+// Второй вид той же карты: тот же вопрос «куда лететь», только систему
+// целиком видно точкой. Здесь и назначается цель варп-прыжка — больше
+// назначать её негде, в полёте другая система ничем себя не проявляет.
+
+/** Список систем в порядке удалённости от текущей — по нему ходят стрелки. */
+export function galaxyList(cur) {
+  const all = galaxy().systems.slice();
+  all.sort((a, b) => systemDistance(cur, a) - systemDistance(cur, b));
+  return all;
+}
+
+/**
+ * Выбор системы СРАЗУ делает её целью варпа.
+ *
+ * На карте системы выбор и цель разведены намеренно: там перебирают
+ * объекты, чтобы прочитать про них, и назначение целью — отдельное
+ * решение. В галактике читать нечего: состав чужой системы неизвестен до
+ * прибытия, и единственное, зачем её выбирают, — чтобы туда лететь.
+ *
+ * ТО, ЧТО БЫЛО СЛОМАНО: цель ставилась только по Tab. Выбрав систему
+ * щелчком и нажав J, игрок получал отказ «цель не выбрана» — при том, что
+ * система на карте была выбрана и подсвечена. Лишний обряд там, где
+ * выбирать больше не из чего.
+ */
+function aimGalaxy(game, s) {
+  const map = game.map;
+  map.gsel = s;
+  if (!s || s.seed === game.sys.seed) return false;
+  if (game.warpTarget && game.warpTarget.seed === s.seed) return false;
+  game.warpTarget = s;
+  say(game.state, 'ЦЕЛЬ ВАРПА: ' + s.name.toUpperCase() + ' · ' +
+    systemDistance(game.sys, s).toFixed(1) + ' СВ. ЛЕТ · ' +
+    Math.round(warpSeconds(game.sys, s)) + ' С', GREEN);
+  return true;
+}
+
+function galaxyInput(game, input) {
+  const map = game.map;
+  const cur = game.sys;
+  const list = galaxyList(cur);
+  // Открыли галактику впервые — цель назначается сразу, ближайшим
+  // соседом. Иначе на карте есть подсвеченная система, а цели нет, и это
+  // расхождение и есть та самая ловушка: игрок видит выбор, жмёт J и
+  // получает «цель не выбрана». Выделение на этой карте ВСЕГДА означает
+  // цель варпа, без исключений.
+  if (!map.gsel) aimGalaxy(game, game.warpTarget || list[1] || list[0]);
+
+  if (input.mouse.clicked) {
+    const hit = pickAt(map, map.mx, map.my);
+    if (hit) aimGalaxy(game, hit);
+  }
+
+  const dir = (input.pressed('ArrowRight', 'KeyD') ? 1 : 0) -
+              (input.pressed('ArrowLeft', 'KeyA') ? 1 : 0);
+  if (dir) {
+    let i = list.findIndex((s) => s.seed === map.gsel.seed);
+    i = i < 0 ? 0 : (i + dir + list.length) % list.length;
+    aimGalaxy(game, list[i]);
+  }
+
+  // Tab оставлен рабочим: он ничего не меняет, но и не наказывает за
+  // привычку с карты системы — там он и есть способ назначить цель.
+  if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
+    const t = map.gsel;
+    if (!t) say(game.state, 'СИСТЕМА НЕ ВЫБРАНА', AMBER);
+    else if (t.seed === cur.seed) say(game.state, 'ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ', AMBER);
+    else if (!aimGalaxy(game, t)) {
+      say(game.state, 'ЦЕЛЬ ВАРПА: ' + t.name.toUpperCase() + ' · J В ПОЛЁТЕ', GREEN);
+    }
+  }
+}
+
+function drawGalaxy(ctx, map, game, w, h) {
+  const cur = game.sys;
+  const systems = galaxy().systems;
+  if (!map.gsel) map.gsel = game.warpTarget || systems.find((s) => s.seed !== cur.seed) || cur;
+
+  const panelW = Math.max(240, Math.min(360, Math.round(w * 0.26)));
+  map.vx = 0; map.vy = PAD_TOP;
+  map.vw = Math.max(80, w - panelW - 16);
+  map.vh = Math.max(80, h - PAD_TOP - PAD_BOT);
+
+  // Вид всегда целиком: галактика маленькая, и масштабировать её незачем —
+  // вся ценность карты в том, что семь систем видно разом.
+  const cx = map.vx + map.vw / 2, cy = map.vy + map.vh / 2;
+  const sc = Math.min(map.vw, map.vh) * 0.42 / SPREAD;
+  const px = (s) => cx + s.pos.x * sc;
+  const py = (s) => cy + s.pos.z * sc;
+
+  ctx.save();
+  ctx.font = '11px Consolas, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = CY;
+  ctx.fillText('КАРТА ГАЛАКТИКИ', 18, 28);
+  ctx.fillStyle = 'rgba(159,217,230,0.65)';
+  ctx.fillText('ВЫ В СИСТЕМЕ ' + cur.name.toUpperCase(), 250, 28);
+
+  // Круги дальности от текущей системы: по ним расстояние читается без
+  // линейки, а заодно видно, что галактика плоская.
+  ctx.strokeStyle = 'rgba(79,179,224,0.16)';
+  ctx.lineWidth = 1;
+  for (let ly = 5; ly <= SPREAD; ly += 5) {
+    ctx.beginPath();
+    ctx.arc(px(cur), py(cur), ly * sc, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  const sel = map.gsel;
+  const tgt = game.warpTarget;
+
+  // Линия до выбранной: по ней и читается прыжок.
+  if (sel && sel.seed !== cur.seed) {
+    ctx.strokeStyle = 'rgba(120,224,143,0.5)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(px(cur), py(cur));
+    ctx.lineTo(px(sel), py(sel));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const d = systemDistance(cur, sel);
+    ctx.fillStyle = GREEN;
+    ctx.textAlign = 'center';
+    ctx.fillText(d.toFixed(1) + ' СВ. ЛЕТ · ' + Math.round(warpSeconds(cur, sel)) + ' С',
+      (px(cur) + px(sel)) / 2, (py(cur) + py(sel)) / 2 - 6);
+  }
+
+  map.items.length = 0;
+  for (const s of systems) {
+    const x = px(s), y = py(s);
+    map.items.push({ obj: s, sx: x, sy: y });
+
+    // Стойка вниз показывает высоту над плоскостью диска: без неё
+    // галактика читается плоской, а системы расходятся ещё и по вертикали.
+    const stalk = s.pos.y * sc;
+    if (Math.abs(stalk) > 1) {
+      ctx.strokeStyle = 'rgba(79,179,224,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x, y - stalk);
+      ctx.stroke();
+    }
+
+    // Размер точки — от светимости: белая звезда крупнее карлика, и
+    // класс системы виден раньше, чем прочитано её имя.
+    const r = 3 + Math.min(4, Math.sqrt(s.cls.lum) * 2.2);
+    ctx.fillStyle = rgb(s.cls.color);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (s.seed === cur.seed) {
+      ctx.strokeStyle = PALE;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+    if (tgt && s.seed === tgt.seed) {
+      ctx.strokeStyle = AMBER;
+      ctx.beginPath();
+      ctx.arc(x, y, r + 9, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (sel && s.seed === sel.seed) {
+      ctx.strokeStyle = GREEN;
+      ctx.strokeRect(x - r - 7, y - r - 7, (r + 7) * 2, (r + 7) * 2);
+    }
+
+    ctx.fillStyle = s.seed === cur.seed ? PALE : 'rgba(159,217,230,0.8)';
+    ctx.textAlign = 'center';
+    ctx.fillText(s.name.toUpperCase(), x, y + r + 14);
+  }
+
+  drawSystemCard(ctx, game, sel, w - panelW - 6, PAD_TOP - 8, panelW, h - PAD_TOP - PAD_BOT + 18);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(159,217,230,0.6)';
+  ctx.fillText('←,→ / ЛКМ — ВЫБРАТЬ СИСТЕМУ (ОНА СРАЗУ СТАНОВИТСЯ ЦЕЛЬЮ ВАРПА)', 18, h - 26);
+  ctx.fillText('G — НАЗАД К СИСТЕМЕ · M — ЗАКРЫТЬ · ПРЫЖОК — J В ПОЛЁТЕ', 18, h - 12);
+  ctx.restore();
+}
+
+function drawSystemCard(ctx, game, s, x, y, w, h) {
+  ctx.fillStyle = 'rgba(2,10,18,0.9)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+  if (!s) return;
+
+  const cur = game.sys;
+  const pad = 12;
+  let ty = y + 22;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = AMBER;
+  ctx.font = 'bold 13px Consolas, monospace';
+  ctx.fillText(s.name.toUpperCase(), x + pad, ty);
+  ty += 16;
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = CY;
+  ctx.fillText(s.cls.ru.toUpperCase() + ' · КЛАСС ' + s.cls.id, x + pad, ty);
+  ty += 18;
+
+  const d = systemDistance(cur, s);
+  const rows = [
+    ['Температура', Math.round(s.cls.temp) + ' K'],
+    ['Светимость', s.cls.lum.toFixed(2) + ' солнечной'],
+    ['Обитаемая зона', Math.round(s.hab / 1000) + ' тыс. км'],
+    ['Расстояние', s.seed === cur.seed ? '— вы здесь' : d.toFixed(1) + ' св. лет'],
+    ['Прыжок', s.seed === cur.seed ? '—' : Math.round(warpSeconds(cur, s)) + ' секунд'],
+  ];
+  const keyW = 118;
+  for (const [k, v] of rows) {
+    ctx.fillStyle = 'rgba(79,179,224,0.75)';
+    ctx.fillText(k, x + pad, ty);
+    ctx.fillStyle = PALE;
+    ctx.fillText(v, x + pad + keyW, ty);
+    ty += 14;
+  }
+  ty += 8;
+
+  // Что внутри системы — НЕ показываем, и это не забывчивость. Система
+  // собирается только по прибытии (js/main.js, enterSystem), и в памяти
+  // её нет. Обещать состав планет заранее значило бы либо держать все
+  // системы разом, либо врать.
+  ctx.fillStyle = 'rgba(159,217,230,0.72)';
+  const note = s.seed === cur.seed
+    ? 'Текущая система. Её карта — на клавише G.'
+    : 'Что там внутри, известно только по прибытии: система собирается ' +
+      'под тоннелем прыжка.';
+  for (const line of wrap(ctx, note, w - pad * 2)) { ctx.fillText(line, x + pad, ty); ty += 13; }
+
+  if (game.warpTarget && game.warpTarget.seed === s.seed) {
+    ty += 8;
+    ctx.fillStyle = AMBER;
+    ctx.fillText('ЦЕЛЬ ВАРПА · J В ПОЛЁТЕ', x + pad, ty);
   }
 }
 
@@ -425,6 +680,15 @@ export function drawMap(r, game) {
   const map = game.map;
   const world = game.world;
 
+  if (map.view === 'galaxy') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,4,10,0.94)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    drawGalaxy(ctx, map, game, w, h);
+    return;
+  }
+
   const panelW = Math.max(240, Math.min(360, Math.round(w * 0.26)));
   map.vx = 0; map.vy = PAD_TOP;
   map.vw = Math.max(80, w - panelW - 16);
@@ -458,6 +722,8 @@ export function drawMap(r, game) {
   ctx.fillText('КОЛЕСО / W,S — МАСШТАБ · ЛКМ — ВЫБОР · ТЯНУТЬ — СДВИГ', 18, h - 26);
   ctx.fillText('←,→ — ПО ОБЪЕКТАМ · ПРОБЕЛ — К ВЫБРАННОМУ · TAB — НАЗНАЧИТЬ ЦЕЛЬЮ · ' +
     'X — СБРОС · M — ЗАКРЫТЬ', 18, h - 12);
+  ctx.fillStyle = 'rgba(255,204,102,0.7)';
+  ctx.fillText('G — КАРТА ГАЛАКТИКИ', 18, h - 40);
   ctx.restore();
 }
 

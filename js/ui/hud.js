@@ -4,6 +4,7 @@
 import { v3, dot, clamp, normalize } from '../core/vec3.js';
 import { SHIP } from '../game/ship.js';
 import { QUANTUM } from '../game/quantum.js';
+import { warpDistance, offWarpAxis } from '../game/warp.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
 import { gearLabel, landedInfo, LAND } from '../game/landing.js';
 import { SLOT, STATION_D } from '../models/station.js';
@@ -101,6 +102,15 @@ export function drawHud(r, game) {
   ctx.save();
   ctx.textBaseline = 'alphabetic';
 
+  // В варпе приборов нет по той же причине, что и в квантовом прыжке, и
+  // ещё по одной: системы, к которой они относились бы, в этот момент
+  // просто не существует.
+  if (game.warp && game.warp.phase === 'tunnel') {
+    drawWarpPanel(ctx, w, h, game.warp, state);
+    ctx.restore();
+    return;
+  }
+
   // В прыжке приборов нет: смотреть на них некогда и не на что. Остаётся
   // то, что в прыжке вообще что-то значит, — остаток и скорость.
   if (q && q.phase === 'jump') {
@@ -115,6 +125,7 @@ export function drawHud(r, game) {
   if (state.view === 'cockpit' && !game.cockpit) drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam, ship);
   drawVelocityMarker(ctx, cam, ship);
+  drawWarpAim(ctx, cam, game);
   // После удара корабль какое-то время летит сам по себе — об этом надо
   // сказать, иначе непонятно, почему он не слушается.
   if (ship.stun > 0) {
@@ -236,6 +247,132 @@ function drawFlash(ctx, w, h, q) {
  * тоже, а всё, что можно сделать, — дождаться выхода или сорвать его.
  * Поэтому на экране только то, что в эти секунды меняется.
  */
+/**
+ * Приборы варп-прыжка: отдельная панель на всё окно.
+ *
+ * Здесь нет ни дистанции, ни цели под прицелом, и это не упущение.
+ * Координат во время прыжка не существует: половину тоннеля старой
+ * системы уже нет в памяти, а новая ещё собирается. Единственное, что в
+ * этот момент правда, — сколько осталось лететь и куда.
+ */
+function drawWarpPanel(ctx, w, h, warp, state) {
+  const cx = w / 2, cy = h / 2;
+  const g = ctx.createRadialGradient(cx, cy, Math.min(w, h) * 0.10,
+    cx, cy, Math.max(w, h) * 0.66);
+  g.addColorStop(0, 'rgba(6,4,26,0)');
+  g.addColorStop(1, 'rgba(6,4,26,0.72)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.textAlign = 'center';
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = '#c9a8ff';
+  ctx.fillText('ВАРП · ' + (warp.from ? warp.from.name.toUpperCase() : '—') +
+    ' → ' + (warp.to ? warp.to.name.toUpperCase() : '—'), cx, 40);
+
+  const left = Math.max(0, warp.total - warp.t);
+  ctx.font = '30px Consolas, monospace';
+  ctx.fillStyle = '#e8dcff';
+  ctx.fillText(left.toFixed(1) + ' С', cx, h - 96);
+
+  ctx.font = '12px Consolas, monospace';
+  ctx.fillStyle = AMBER;
+  ctx.fillText(warpDistance(warp).toFixed(1) + ' СВЕТОВЫХ ЛЕТ', cx, h - 72);
+
+  const bw = clamp(w * 0.25, 160, 380);
+  bar(ctx, cx - bw / 2, h - 60, bw, 5,
+    warp.total > 0 ? warp.t / warp.total : 0, '#a98cff');
+
+  // Смена системы — единственное событие внутри тоннеля, и о нём стоит
+  // сказать прямо: иначе полминуты выглядят как зависание.
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = warp.handed ? GREEN : 'rgba(201,168,255,0.75)';
+  ctx.fillText(warp.handed ? 'СИСТЕМА ЗАГРУЖЕНА' : 'ВЫГРУЗКА СИСТЕМЫ', cx, h - 40);
+
+  // Сообщения в тоннеле нужны: ими говорится о смене системы.
+  ctx.textAlign = 'left';
+  ctx.font = '12px Consolas, monospace';
+  let my = 26;
+  for (const m of state.messages) {
+    ctx.globalAlpha = clamp(m.t, 0, 1);
+    ctx.fillStyle = m.color || AMBER;
+    ctx.fillText(m.text, 20, my);
+    my += 16;
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * Центровка варпа: куда повернуть нос. Без этой отметки прыжок
+ * невозможен вообще — направление на другую систему ничем в кадре не
+ * обозначено, там просто звёзды.
+ */
+function drawWarpAim(ctx, cam, game) {
+  const warp = game.warp;
+  if (!warp || warp.phase !== 'align' || !warp.dir) return;
+  const p = projectDir(cam, warp.dir.x, warp.dir.y, warp.dir.z, _warpPt);
+  const cx = cam.w / 2, cy = cam.h / 2;
+  const pad = 34;
+  let x = clamp(p.x, pad, cam.w - pad);
+  let y = clamp(p.y, pad, cam.h - pad);
+
+  // ТО, ЧТО БЫЛО СЛОМАНО: projectDir для направления ЗА СПИНОЙ возвращает
+  // зеркальную точку — она оказывается спереди. Цель позади давала кольцо
+  // ровно в середине кадра, игрок наводился на него и держал сколько
+  // угодно: привод честно видел промах в 174°, а отметка показывала
+  // «точно в цель». Разворачиваем точку обратно и отодвигаем к краю: в
+  // кадре по-прежнему ОДНА отметка, и она всегда показывает, куда
+  // доворачивать.
+  if (p.back) {
+    let dx = cx - p.x, dy = cy - p.y;
+    let L = Math.hypot(dx, dy);
+    // Цель РОВНО за спиной: зеркальная точка приходится в самую середину,
+    // и направления доворота из неё не вывести — оно любое. Тогда отметка
+    // ставится вверх: «разворачивайся», а куда именно, неважно.
+    if (L < 1e-3) { dx = 0; dy = -1; L = 1; }
+    const R = Math.min(cam.w, cam.h) * 0.40;
+    x = cx + (dx / L) * R;
+    y = cy + (dy / L) * R;
+  }
+  const col = warp.aligned ? GREEN : '#c9a8ff';
+
+  ctx.save();
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 1.5;
+  // Кольцо с лучами: непохоже ни на прицел, ни на рамку цели — в кадре и
+  // так две отметки, и третья обязана читаться с первого взгляда.
+  ctx.beginPath();
+  ctx.arc(x, y, 13, 0, Math.PI * 2);
+  ctx.stroke();
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2 + Math.PI / 4;
+    ctx.beginPath();
+    ctx.moveTo(x + Math.cos(a) * 16, y + Math.sin(a) * 16);
+    ctx.lineTo(x + Math.cos(a) * 23, y + Math.sin(a) * 23);
+    ctx.stroke();
+  }
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillStyle = col;
+  ctx.textAlign = 'center';
+  ctx.fillText(warp.to ? warp.to.name.toUpperCase() : 'ВАРП', x, y - 22);
+  ctx.restore();
+
+  ctx.textAlign = 'center';
+  ctx.font = '12px Consolas, monospace';
+  ctx.fillStyle = col;
+  // Промах числом: отметка говорит КУДА, число — СКОЛЬКО ещё. Без него
+  // «почти навёлся» и «ровно наоборот» выглядят на экране одинаково.
+  const miss = offWarpAxis(game.ship, warp.from, warp.to) * 57.2958;
+  ctx.fillText(warp.aligned
+    ? 'ВАРП: РАСКРУТКА'
+    : 'ВАРП: СОВМЕСТИ НОС С ОТМЕТКОЙ · МИМО ' + miss.toFixed(0) + '°',
+    cam.w / 2, cam.h - 118);
+  const bw = clamp(cam.w * 0.2, 140, 300);
+  bar(ctx, cam.w / 2 - bw / 2, cam.h - 112, bw, 6, warp.calib, col);
+}
+
+const _warpPt = { x: 0, y: 0 };
+
 function drawJumpPanel(ctx, w, h, q, state) {
   const cx = w / 2, cy = h / 2;
   // Виньетка: края кадра гаснут в синеву. Тоннель в сцене аддитивный,

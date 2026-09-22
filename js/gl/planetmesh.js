@@ -148,6 +148,35 @@ export function pumpBuilds(gl, locs, msBudget = 4) {
 
 export const pendingBuilds = () => QUEUE.length;
 
+/**
+ * Освободить всё, что собрано для этих тел: буферы GPU и очередь сборки.
+ *
+ * Нужно при смене звёздной системы. Меши висят НА САМИХ телах
+ * (`body._glMeshes`), поэтому сборщик мусора убрал бы их вместе со старым
+ * миром — но только объекты-обёртки. Буферы живут в драйвере и по ссылкам
+ * из JS не считаются: их надо удалять руками, иначе каждый прыжок оставлял
+ * бы в видеопамяти целую систему.
+ *
+ * Очередь чистится тем же вызовом: в ней лежат задания на тела, которых
+ * уже нет, и pumpBuilds честно достроил бы их и залил в GPU.
+ */
+export function disposePlanetMeshes(bodies) {
+  const dead = new Set(bodies);
+  let freed = 0;
+  for (const body of bodies) {
+    if (body._glMeshes) {
+      for (const m of body._glMeshes.values()) { m.dispose(); freed++; }
+      body._glMeshes.clear();
+    }
+    if (body._glQueued) body._glQueued.clear();
+    body._glLevel = undefined;
+  }
+  for (let i = QUEUE.length - 1; i >= 0; i--) {
+    if (dead.has(QUEUE[i].body)) QUEUE.splice(i, 1);
+  }
+  return freed;
+}
+
 /** Выбор уровня по видимому размеру с гистерезисом. */
 export function planetLevel(body, screenPx) {
   const prev = body._glLevel === undefined ? -1 : body._glLevel;

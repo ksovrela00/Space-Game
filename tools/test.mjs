@@ -3,6 +3,15 @@ import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
 import { ROMAN } from '../js/core/rng.js';
+import {
+  makeGalaxy, systemDistance, warpSeconds, SYSTEM_COUNT, MIN_APART,
+  HOME_SEED, HAB_HOME, WARP_MIN, WARP_MAX,
+} from '../js/game/galaxy.js';
+import {
+  makeWarp, updateWarp, startWarp, canWarp, warpAxis, warpPower,
+  handoverAt, placeAtStar, finishWarp, WARP,
+} from '../js/game/warp.js';
+import { HOME_LAYOUT } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
 import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
@@ -3994,6 +4003,173 @@ console.log('\n== телефон: профиль, джойстик, полный
     ok(/no-store/i.test(body) && /Header unset ETag/i.test(rules),
       'исходники раздаются без кеша: no-store и без ETag — перезагрузка страницы берёт свежий код');
   }
+}
+
+
+// --- 18. Галактика и варп-привод --------------------------------------------
+console.log('\n== галактика ==');
+{
+  const g = makeGalaxy();
+  const g2 = makeGalaxy();
+  ok(g.systems.length === SYSTEM_COUNT &&
+     g.systems.every((s, i) => s.name === g2.systems[i].name && s.seed === g2.systems[i].seed),
+    `галактика детерминирована: ${g.systems.length} систем, ` +
+    g.systems.map((s) => s.name).join(', '));
+
+  const home = g.systems[0];
+  ok(home.name === 'Lave' && home.seed === HOME_SEED &&
+     home.pos.x === 0 && home.pos.y === 0 && home.pos.z === 0,
+    'родная система первая и стоит в начале координат');
+
+  const names = new Set(g.systems.map((s) => s.name));
+  ok(names.size === g.systems.length, 'имена систем не повторяются');
+
+  let closest = Infinity;
+  for (let i = 0; i < g.systems.length; i++) {
+    for (let j = i + 1; j < g.systems.length; j++) {
+      closest = Math.min(closest, systemDistance(g.systems[i], g.systems[j]));
+    }
+  }
+  ok(closest >= MIN_APART,
+    `системы не слипаются: ближайшая пара в ${closest.toFixed(1)} св. годах (предел ${MIN_APART})`);
+
+  // Разброс расстояний — это разброс времени прыжка, то есть весь смысл
+  // выбора цели. Когда радиусы выпадали случайно, все шесть соседей
+  // оказывались на 16–21 световом годе, и любой прыжок шёл одинаково.
+  const away = g.systems.slice(1).map((s) => systemDistance(home, s)).sort((a, b) => a - b);
+  ok(away[0] < 12 && away[away.length - 1] > 20,
+    `от дома есть и ближние, и дальние: ${away.map((d) => d.toFixed(0)).join(', ')} св. лет`);
+
+  const times = g.systems.slice(1).map((s) => warpSeconds(home, s));
+  ok(times.every((t) => t >= WARP_MIN && t <= WARP_MAX),
+    `прыжок всегда десятки секунд: ${times.map((t) => t.toFixed(0)).join(', ')} с`);
+
+  // Крайние классы звёзд видно сильнее всего: у карлика система вчетверо
+  // теснее и светит оранжевым, у белой растянута и залита голубым. Если
+  // бросать класс с весами, в пятой части галактик карлика нет вовсе.
+  const cls = new Set(g.systems.map((s) => s.cls.id));
+  ok(cls.has('M') && cls.has('A') && cls.size >= 4,
+    'в галактике есть и красный карлик, и белая: классы ' + [...cls].sort().join(', '));
+
+  // Обитаемая зона — не украшение: по ней расставлены планеты и по ней
+  // же считаются все температуры.
+  ok(g.systems.every((s) => Math.abs(s.hab - HAB_HOME * Math.sqrt(s.cls.lum)) < 1e-6),
+    'обитаемая зона идёт как корень из светимости');
+}
+
+console.log('\n== системы галактики ==');
+{
+  const g = makeGalaxy();
+  for (const s of g.systems) {
+    const w = makeSystem(s);
+    const orbits = w.planets.map((p) => p.orbit.radius);
+    const grow = orbits.every((r, i) => i === 0 || r > orbits[i - 1]);
+    const inStar = w.planets.some((p) => p.orbit.radius < w.star.radius * 2);
+    const land = w.bodies.filter(isLandable).length;
+    ok(grow && !inStar && w.planets.length >= 4 && w.stations.length >= 1 && land >= 1 &&
+       orbits[orbits.length - 1] <= 5000000,
+      `${w.name}: ${w.planets.length} планет, ${w.stations.length} портов, ${land} мест посадки, ` +
+      `край ${(orbits[orbits.length - 1] / 1e6).toFixed(2)} млн км` +
+      (grow ? '' : ' — ОРБИТЫ НЕ РАСТУТ') + (inStar ? ' — ПЛАНЕТА В ЗВЕЗДЕ' : ''));
+  }
+
+  // Размер системы обязан зависеть от звезды, иначе класс ни на чём не
+  // сказывается и все системы на одно лицо.
+  const size = (s) => {
+    const w = makeSystem(s);
+    return w.planets[w.planets.length - 1].orbit.radius;
+  };
+  const dim = g.systems.filter((s) => s.cls.id === 'M').map(size);
+  const bright = g.systems.filter((s) => s.cls.id === 'A' || s.cls.id === 'F').map(size);
+  ok(dim.length && bright.length && Math.max(...dim) < Math.max(...bright),
+    `у тусклой звезды система теснее: карлики до ${(Math.max(...dim) / 1e6).toFixed(2)} млн км, ` +
+    `яркие до ${(Math.max(...bright) / 1e6).toFixed(2)} млн`);
+
+  // Родная система — рукотворная, и она не должна была поехать от того,
+  // что рядом появился генератор.
+  const lave = makeSystem(HOME_SEED);
+  ok(lave.planets.length === HOME_LAYOUT.length &&
+     lave.planets.every((p, i) => p.kind === HOME_LAYOUT[i].kind &&
+       p.radius === HOME_LAYOUT[i].r && p.orbit.radius === HOME_LAYOUT[i].orbit),
+    'родная система собрана по рукотворному макету, а не генератором');
+
+  // Ни одна система не повторяет другую: иначе прыжок не имеет смысла.
+  const shapes = g.systems.map((s) => {
+    const w = makeSystem(s);
+    return w.planets.map((p) => p.kind + p.radius).join('|');
+  });
+  ok(new Set(shapes).size === shapes.length, 'все системы разные по составу');
+}
+
+console.log('\n== варп-привод ==');
+{
+  const g = makeGalaxy();
+  const from = g.systems[0], to = g.systems[3];
+  const sh = makeShip();
+  const w = makeWarp();
+
+  ok(!canWarp(sh, from, null).ok && !canWarp(sh, from, from).ok && canWarp(sh, from, to).ok,
+    'без цели и в свою же систему прыжок не начинается');
+  sh.dockedAt = {};
+  ok(!canWarp(sh, from, to).ok, 'из порта не прыгнуть: ' + canWarp(sh, from, to).reason);
+  sh.dockedAt = null;
+  sh.landedAt = {};
+  ok(!canWarp(sh, from, to).ok, 'с грунта не прыгнуть: ' + canWarp(sh, from, to).reason);
+  sh.landedAt = null;
+
+  startWarp(w, from, to);
+  ok(w.phase === 'align' && Math.abs(w.total - warpSeconds(from, to)) < 1e-9,
+    `центровка начата, прыжок на ${w.total.toFixed(0)} с`);
+
+  // Нос в другую сторону: готовность не копится, а тает.
+  const axis = warpAxis(from, to, v3());
+  lookAlong(sh.basis, v3(-axis.x, -axis.y, -axis.z), v3(0, 1, 0));
+  w.calib = 0.5;
+  updateWarp(w, sh, 0.5);
+  ok(!w.aligned && w.calib < 0.5, `мимо оси готовность тает: ${w.calib.toFixed(2)}`);
+
+  // Нос по оси: копится и уходит в прыжок. Готовность обнуляется руками —
+  // проверка выше уже подъела её отклонением от оси, и полная раскрутка
+  // мерялась бы от середины.
+  lookAlong(sh.basis, axis, v3(0, 1, 0));
+  w.calib = 0;
+  let ev = null, t = 0;
+  for (let i = 0; i < 60 * 10 && ev !== 'engage'; i++) { ev = updateWarp(w, sh, STEP); t += STEP; }
+  ok(ev === 'engage' && w.phase === 'tunnel' && Math.abs(t - WARP.spool) < 0.2,
+    `по оси привод раскручивается за ${t.toFixed(1)} с (ожидание ${WARP.spool})`);
+
+  // Тоннель: смена системы ровно один раз, выход по времени.
+  let hands = 0, arrive = -1, tt = 0, coverFrom = -1, coverTo = -1;
+  for (let i = 0; i < 60 * 60; i++) {
+    const e = updateWarp(w, sh, STEP);
+    tt += STEP;
+    const p = warpPower(w);
+    if (coverFrom < 0 && p > 0.97) coverFrom = tt;
+    if (coverFrom >= 0 && p > 0.97) coverTo = tt;
+    if (e === 'handover') hands++;
+    if (e === 'arrive') { arrive = tt; break; }
+  }
+  ok(hands === 1 && Math.abs(arrive - w.total) < 0.05,
+    `смена системы один раз, выход через ${arrive.toFixed(1)} с из ${w.total.toFixed(1)}`);
+
+  // Систему меняют ПОД непрозрачным тоннелем — иначе подмена видна.
+  ok(coverFrom > 0 && handoverAt(w) > coverFrom && handoverAt(w) < coverTo,
+    `смена на ${handoverAt(w).toFixed(1)} с попадает в глухой участок ` +
+    `${coverFrom.toFixed(1)}–${coverTo.toFixed(1)} с`);
+
+  // Выход — у звезды, носом на неё.
+  const dest = makeSystem(to);
+  placeAtStar(w, sh, dest.star);
+  const d = Math.hypot(sh.pos.x - dest.star.pos.x, sh.pos.y - dest.star.pos.y,
+    sh.pos.z - dest.star.pos.z);
+  const toStar = normalize(v3(dest.star.pos.x - sh.pos.x, dest.star.pos.y - sh.pos.y,
+    dest.star.pos.z - sh.pos.z));
+  ok(Math.abs(d - dest.star.radius * WARP.exitR) < 1e-6 &&
+     dot(toStar, sh.basis.fwd) > 0.999 && sh.speed === 0,
+    `выход в ${(d / dest.star.radius).toFixed(1)} радиусах звезды, носом на неё, скорость ноль`);
+
+  finishWarp(w, sh);
+  ok(w.phase === 'idle' && sh.speed === 0 && w.to === null, 'после выхода привод выключен и ход погашен');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

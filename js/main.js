@@ -13,6 +13,10 @@ import { GlScene } from './gl/scene.js';
 import { buildCobra, buildGear } from './models/ships.js';
 import { buildStation, STATION_D } from './models/station.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
+import { homeSystem, systemById } from './game/galaxy.js';
+import {
+  makeWarp, updateWarp, startWarp, stopWarp, canWarp, placeAtStar, finishWarp,
+} from './game/warp.js';
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
 import {
   makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById,
@@ -69,12 +73,12 @@ const TELEPORT_ALTS = [2000, 400, 100, 20, 3, 0.3, 0.05];
 
 const screenCanvas = document.getElementById('screen');
 const hudCanvas = document.getElementById('hud');
-// Seed системы. Из него же строится небо: и звёзды, и полоса
+// Текущая система. Из её семени строится и небо: и звёзды, и полоса
 // галактического диска, и туманности (js/render/starfield.js,
-// js/gl/nebula.js). Когда систем станет несколько, менять придётся одно
-// это число — небо поедет за системой само.
-const SYSTEM_SEED = 0x1a7e;
-const starfield = new Starfield(Q.stars, SYSTEM_SEED);
+// js/gl/nebula.js). Всё это меняется вместе с системой при варп-прыжке —
+// см. enterSystem.
+let sys = homeSystem();
+let starfield = new Starfield(Q.stars, sys.seed);
 
 // Камера одна на всех: по ней считает и 3D-сцена, и прицельные рамки HUD.
 const camera = new Camera();
@@ -95,7 +99,7 @@ if (wantGl) {
 }
 if (!scene) renderer = new Renderer(screenCanvas, { camera });
 
-const world = makeSystem(SYSTEM_SEED);
+let world = makeSystem(sys);
 const ship = makeShip();
 const shipMesh = buildCobra();
 const stationMesh = buildStation();
@@ -114,6 +118,9 @@ const game = {
   nav: makeNav(world),
   map: makeMap(),        // состояние карты системы: масштаб, центр, выбор
   quantum: makeQuantum(),
+  sys,                   // описание текущей системы из галактики
+  warp: makeWarp(),      // межсистемный прыжок
+  warpTarget: null,      // система, отмеченная целью на карте галактики
   state: makeState(),
   audio: makeAudio(),
   sound,                 // нужен отладочному оверлею: сэмплы или синтез
@@ -156,6 +163,66 @@ const _sun = v3();
 const _camDir = v3();
 const _camRight = v3();
 const _tmp = v3();
+
+// --- смена звёздной системы --------------------------------------------------
+
+/**
+ * Перейти в другую систему: старую выгрузить целиком, новую собрать.
+ *
+ * Это самая опасная операция во всей игре, и опасна она не сборкой, а
+ * ССЫЛКАМИ. Тела старого мира разложены по десятку мест: цель навигации,
+ * захват, ближайшее тело, зона у поверхности, подсказка стыковки, отметки
+ * сканера, слежение карты, порт, где стоит корабль. Любая уцелевшая
+ * ссылка означает и утечку памяти (старая система не соберётся сборщиком
+ * целиком), и настоящий баг: прибор показывал бы высоту над планетой,
+ * которой в этой системе нет.
+ *
+ * Поэтому порядок такой: сперва оборвать ВСЁ, потом отпустить GPU, и
+ * только потом собирать. Обратный порядок (собрать, потом выгрузить)
+ * держал бы в памяти две системы разом — ровно то, чего просили не
+ * делать, и то, что в сетевой игре недопустимо тем более.
+ */
+function enterSystem(target) {
+  const old = world;
+
+  // 1. Оборвать ссылки на тела старого мира.
+  stopQuantum(game.quantum);
+  stopLanding(ship);
+  stopDockingComputer(ship);
+  ship.dockedAt = null;
+  ship.landedAt = null;
+  ship.landedPose = null;
+  game.capture = null;
+  game.nearest = null;
+  game.zone = null;
+  game.entry = null;
+  game.aimed = null;
+  game.dockAssist = null;
+  game.landInfo = null;
+  game.lastStation = null;
+  game.info = null;
+  game.statusLine = null;
+  game.scanBlips.length = 0;
+  game.map.follow = null;
+  game.map.hover = null;
+  game.map.sel = null;
+  game.map.items.length = 0;
+
+  // 2. Отпустить видеопамять. Меши планет висят на телах старого мира, но
+  //    буферы живут в драйвере, и сборщик мусора до них не дотянется.
+  if (scene) scene.forgetSystem(old);
+
+  // 3. Собрать новую.
+  sys = target;
+  world = makeSystem(target);
+  game.world = world;
+  game.sys = target;
+  game.nav = makeNav(world);
+  starfield = new Starfield(Q.stars, target.seed);
+  if (scene) scene.setStarfield(starfield);
+  resetMap(game.map, world);
+  return world;
+}
 
 // --- переходы состояний ------------------------------------------------------
 
@@ -282,6 +349,11 @@ game.restart = () => {
   ship.boosting = false;
   placeShip(ship, v3(), makeBasis());
 
+  // Начать заново — значит и вернуться домой: в чужой системе нет ни
+  // родного порта, ни того, с чего игра начинается.
+  stopWarp(game.warp);
+  game.warpTarget = null;
+  if (sys.seed !== homeSystem().seed) enterSystem(homeSystem());
   world.time = 0;
   updateWorld(world, 0);
   stopQuantum(game.quantum);
@@ -443,6 +515,13 @@ function selectTarget(t) {
 function save() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
+      // Система — первым делом: всё остальное в сейве (цель, порт, точка
+      // стоянки) хранится идентификаторами тел, а те имеют смысл только
+      // внутри своей системы.
+      system: sys.id,
+      // Цель варпа — часть плана полёта, как и обычная цель: выбрал
+      // систему, отложил игру, вернулся.
+      warpTo: game.warpTarget ? game.warpTarget.id : null,
       pos: ship.pos,
       basis: ship.basis,
       hull: ship.hull,
@@ -470,6 +549,11 @@ function load() {
   let s = null;
   try { s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { s = null; }
   if (!s) return false;
+  // Система восстанавливается ДО всего остального: пока она не та, любой
+  // идентификатор из сейва указывает в чужой список тел.
+  const saved = systemById(s.system === undefined ? 0 : s.system);
+  if (saved && saved.seed !== sys.seed) enterSystem(saved);
+  game.warpTarget = s.warpTo === null || s.warpTo === undefined ? null : systemById(s.warpTo);
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
   updateWorld(world, s.time || 0);
   game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
@@ -545,6 +629,12 @@ function handleKeys(dt) {
     say(st, 'ГРОМКОСТЬ ' + Math.round(game.audio.vol * 100) + '%');
     save();
   }
+
+  // В тоннеле не работает ничего, кроме звука: карта чужой системы —
+  // это карта того, чего сейчас нет (половину прыжка мир вообще не
+  // собран), а справка и смена вида просто вернули бы игрока в кадр,
+  // которого не рисуется.
+  if (game.warp.phase === 'tunnel') return;
 
   if (input.pressed('KeyH')) {
     if (st.mode === ST.HELP) game.closeOverlay();
@@ -656,6 +746,31 @@ function handleKeys(dt) {
     }
   }
 
+  // J — варп-привод: центровка на другую систему, повторное нажатие
+  // отменяет. В тоннеле кнопка не делает ничего: оборвать прыжок между
+  // системами нельзя в принципе — обрывать некуда, старой системы уже
+  // нет в памяти, а до новой ещё не долетели.
+  if (input.pressed('KeyJ')) {
+    const w = game.warp;
+    if (w.phase === 'tunnel') {
+      say(st, 'ВАРП НЕ ПРЕРЫВАЕТСЯ', '#ffcc66');
+    } else if (w.phase === 'align') {
+      stopWarp(w);
+      say(st, 'ВАРП ОТКЛЮЧЁН');
+    } else {
+      const to = game.warpTarget;
+      const res = canWarp(ship, sys, to);
+      if (!res.ok) say(st, res.reason, '#ff7a66');
+      else {
+        stopQuantum(game.quantum);
+        stopDockingComputer(ship);
+        stopLanding(ship);
+        startWarp(w, sys, to);
+        say(st, 'ВАРП: ЦЕНТРОВКА НА ' + to.name.toUpperCase(), '#9fd9ff', 4);
+      }
+    }
+  }
+
   // K — телепорт к цели, Shift+K — сменить высоту и телепортироваться.
   if (input.pressed('KeyK')) {
     if (input.isDown('ShiftLeft', 'ShiftRight')) {
@@ -755,6 +870,38 @@ function step(dt) {
   game.statusLine = null;
   updateGear(ship, dt);
 
+  // --- варп: в тоннеле не происходит вообще ничего. Ни столкновений, ни
+  // тяготения, ни атмосферы — и не потому, что «так проще»: половину
+  // тоннеля старой системы уже нет в памяти, а новая ещё собирается, и
+  // считать касание не обо что.
+  const w = game.warp;
+  if (w.phase === 'tunnel') {
+    const ev = updateWarp(w, ship, dt);
+    game.entry = null;
+    game.zone = null;
+    game.capture = null;
+    if (ev === 'handover') {
+      // Вот ради этого момента тоннель и длится полминуты.
+      //
+      // Корабль ставится к звезде СРАЗУ, а не в конце: с этой секунды он
+      // физически уже в новой системе, и его координаты снова что-то
+      // значат. Оставь перестановку на выход — и всё, что успеет
+      // сохраниться или посчитаться за оставшиеся пятнадцать секунд,
+      // будет посчитано для точки, которой нет ни в одной системе.
+      enterSystem(w.to);
+      placeAtStar(w, ship, world.star);
+      game.nearest = nearestBody(world, ship.pos);
+      say(st, 'СИСТЕМА ' + w.to.name.toUpperCase(), '#9fd9ff', 3);
+    } else if (ev === 'arrive') {
+      finishWarp(w, ship);
+      game.warpTarget = null;
+      audioReset(game.audio, ship);
+      say(st, 'ПРИБЫТИЕ: ' + sys.name.toUpperCase(), '#78e08f', 4);
+      save();
+    }
+    return;
+  }
+
   // --- квантовый прыжок: корабль ведёт привод, и больше в этом шаге не
   // происходит ничего. Ни столкновений, ни атмосферы, ни посадки —
   // коридор проверен заранее, а лететь на 60 000 км/с мимо проверок
@@ -785,6 +932,16 @@ function step(dt) {
     game.statusLine = updateDockingComputer(ship, dt);
   } else {
     readControls(ship);
+  }
+
+  // Центровка варпа идёт параллельно полёту, как и калибровка квантового:
+  // корабль слушается ручек, привод копит готовность, пока нос в допуске.
+  if (w.phase === 'align') {
+    const ev = updateWarp(w, ship, dt);
+    if (ev === 'abort') say(st, w.reason || 'ВАРП ОТМЕНЁН', '#ff7a66');
+    else if (ev === 'engage') say(st, 'ВАРП', '#9fd9ff', 1.5);
+  } else {
+    updateWarp(w, ship, dt);                // только затухание вспышки
   }
 
   // Калибровка идёт параллельно обычному полёту: корабль слушается,
@@ -972,6 +1129,10 @@ function updateCamOrbit(dt) {
 const FOV_BASE = 68 * Math.PI / 180;
 const FOV_JUMP = 92 * Math.PI / 180;
 const FOV_BOOST = 80 * Math.PI / 180;
+// Варп шире квантового прыжка: там за стенами тоннеля ещё видна система и
+// слишком широкий угол ломал бы её перспективу, а здесь за стенами нет
+// ничего — ни одного объекта, чью форму можно было бы исказить.
+const FOV_WARP = 104 * Math.PI / 180;
 let fovNow = FOV_BASE;
 
 function updateFov(dt) {
@@ -988,9 +1149,16 @@ function updateFov(dt) {
   const boost = FOV_BASE + (FOV_BOOST - FOV_BASE) *
     Math.min(1, 0.8 * over + 0.6 * ship.boostPunch);
 
+  // Варп: рывок на входе и на выходе. Поле зрения раздвигается сильнее,
+  // чем в квантовом прыжке, и держится всю дорогу — в тоннеле смотреть
+  // всё равно не на что, зато стены разлетаются заметно шире.
+  const w = game.warp;
+  const wf = w.phase === 'tunnel' ? Math.min(1, 0.55 + 0.45 * w.power) : 0;
+  const warp = FOV_BASE + (FOV_WARP - FOV_BASE) * Math.min(1, wf + 0.55 * w.punch);
+
   // Не сумма, а что сильнее: в прыжке форсаж всё равно недоступен, и
   // складывать их значит получить угол, которого не задумывал никто.
-  const want = Math.max(jump, boost);
+  const want = Math.max(jump, boost, warp);
   // Вверх поле зрения идёт резче, чем возвращается: рывок — событие, а
   // возврат — послевкусие.
   fovNow += (want - fovNow) * Math.min(1, dt * (want > fovNow ? 10 : 5));
@@ -1052,7 +1220,8 @@ function updateChase(dt) {
   // скорость падает с тысяч км/с до нуля за кадр, и разность скоростей
   // даёт ускорение, которого не бывает. Именно этот единственный кадр и
   // швырял камеру вперёд на пол-корпуса.
-  const onRails = !!(game.quantum && game.quantum.phase !== 'idle');
+  const onRails = !!((game.quantum && game.quantum.phase !== 'idle') ||
+    (game.warp && game.warp.phase === 'tunnel'));
   const railed = onRails || c.wasRailed;
   c.wasRailed = onRails;
   if (railed) {
@@ -1316,7 +1485,12 @@ function frame(now) {
   input.endFrame();
 
   saveTimer += dt;
-  if (saveTimer > 5) { saveTimer = 0; save(); }
+  // В тоннеле не сохраняемся вовсе. Между системами у корабля нет
+  // осмысленного места: до смены он в старой системе на миллионе
+  // километров от всего, после — уже у чужой звезды. Перезагрузка посреди
+  // прыжка должна возвращать туда, откуда прыгали, а это последний сейв
+  // ДО него.
+  if (saveTimer > 5 && game.warp.phase !== 'tunnel') { saveTimer = 0; save(); }
 
   requestAnimationFrame(frame);
 }
