@@ -2,6 +2,7 @@
 // и отдельными файлами их пришлось бы догружать по сети.
 
 import { DETAIL_GLSL, BAKE_DETAIL_GLSL } from './detail.js';
+import { SKY_GLSL } from './nebula.js';
 
 // Глубина пишется логарифмически (см. mat4.js): иначе на диапазоне от
 // метров до миллионов километров начинается z-fighting.
@@ -65,7 +66,21 @@ uniform float uLogFC;
 // uSurfMode = 0 — текстуры нет (корабли, станции, светило).
 uniform sampler2D uSurfTex;
 uniform float uSurfMode;
-${detail ? DETAIL_GLSL : ''}
+${detail ? `
+// Во сколько раз расширен след пикселя: ручка цены кадра, её ведёт
+// регулятор в js/gl/detail.js. Единица — полная резкость.
+uniform float uFwScale;
+// За каким углом к солнцу мелкий рельеф считать незачем.
+//
+// Наклон нормали ограничен (см. ниже, pert при |pert| > 1.6), то есть
+// не больше atan(1.6) = 58°. Значит за 148° от солнца ни один склон
+// света уже не поймает, и от рельефа остаётся только подкраска
+// впадин и валов — на поверхности, освещённой одним рассеянным светом
+// (uAmbient = 0.14), это доли процента яркости кадра. Считать ради них
+// двадцать вызовов шума на пиксель не стоит: над ночной стороной это
+// весь экран.
+const float NIGHT_SKIP = -0.85;
+${DETAIL_GLSL}` : ''}
 
 out vec4 outColor;
 
@@ -97,9 +112,11 @@ ${detail ? `
   if (uDetail > 0.5) {
     vec3 dirL = normalize(vLocal);
     // След пикселя на поверхности в радианах. Нулевым он быть не должен:
-    // на него делится плавное появление деталей.
-    float fw = max(max(length(dFdx(dirL)), length(dFdy(dirL))), 1e-9);
-    if (uBakeFw <= 0.0 || fw < 2.0 * uBakeFw) {
+    // на него делится плавное появление деталей. Множитель не меньше
+    // единицы — иначе не выставленный uniform (нуль) обнулил бы след.
+    float fw = max(max(length(dFdx(dirL)), length(dFdy(dirL))), 1e-9)
+             * max(uFwScale, 1.0);
+    if ((uBakeFw <= 0.0 || fw < 2.0 * uBakeFw) && dot(n, uSunDir) > NIGHT_SKIP) {
       vec3 helper = abs(dirL.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
       vec3 U = normalize(cross(helper, dirL));
       vec3 V = cross(dirL, U);
@@ -285,6 +302,75 @@ in vec4 vColor;
 out vec4 outColor;
 void main() {
   outColor = vec4(vColor.rgb, 1.0) * (0.25 + vColor.a * 0.75);
+}`;
+
+// --- Небо: полоса диска и туманности ----------------------------------------
+//
+// Считается один раз в кубическую карту (js/gl/nebula.js объясняет,
+// почему именно так), а в кадре остаётся одна выборка на пиксель.
+
+export const SKY_BAKE_VS = `#version 300 es
+in vec2 aQuad;
+out vec2 vSt;
+void main() {
+  gl_Position = vec4(aQuad, 0.0, 1.0);
+  vSt = aQuad;                     // [-1, 1] по обеим осям
+}`;
+
+export const SKY_BAKE_FS = `#version 300 es
+precision highp float;
+
+in vec2 vSt;
+
+// Оси запекаемой грани куба (js/gl/bake.js, CUBE_FACES). Порядок тот же,
+// в каком грань выбирает оборудование при выборке по направлению, —
+// иначе небо окажется сшитым наизнанку.
+uniform vec3 uFaceF;
+uniform vec3 uFaceU;
+uniform vec3 uFaceV;
+${SKY_GLSL}
+
+out vec4 outColor;
+
+void main() {
+  outColor = vec4(skyColor(normalize(uFaceF + uFaceU * vSt.x + uFaceV * vSt.y)), 1.0);
+}`;
+
+export const SKY_VS = `#version 300 es
+in vec2 aQuad;
+
+uniform mat3 uView;      // мир -> камера, только поворот (как у звёзд)
+uniform vec2 uScale;     // tan(fov/2) с учётом формата кадра
+
+out vec3 vRay;
+
+void main() {
+  gl_Position = vec4(aQuad, 0.0, 1.0);
+  // Луч через пиксель. До нормировки он ЛИНЕЕН по экранным
+  // координатам, поэтому интерполяция по треугольнику даёт ровно то же,
+  // что полный расчёт на каждый пиксель, — но бесплатно.
+  //
+  // Умножение вектора СЛЕВА на матрицу — это умножение на
+  // транспонированную, то есть поворот из камеры обратно в мир. Матрица
+  // ортонормирована, обращать её больше нечем и незачем.
+  vRay = vec3(aQuad * uScale, 1.0) * uView;
+}`;
+
+export const SKY_FS = `#version 300 es
+precision highp float;
+
+in vec3 vRay;
+uniform samplerCube uSky;
+
+out vec4 outColor;
+
+void main() {
+  vec3 c = texture(uSky, normalize(vRay)).rgb;
+  // Небо тёмное и очень плавное, а текстура восьмибитная: без подмеса
+  // шума в полградуса яркости по нему пошли бы ступеньки кольцами —
+  // на градиентах у самой границы видимого это первое, что заметно.
+  float d = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  outColor = vec4(c + (d - 0.5) / 255.0, 1.0);
 }`;
 
 // --- Поток частиц в прыжке ---------------------------------------------------

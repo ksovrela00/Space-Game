@@ -31,6 +31,31 @@ export function createBakeTexture(gl, size) {
   return { tex, size, target: gl.TEXTURE_2D };
 }
 
+/**
+ * Кубическая карта под небо (js/gl/nebula.js): шесть граней, линейная
+ * фильтрация, без мипов.
+ *
+ * Мипы ей не нужны, и это не экономия: на грань приходится 90°, то есть
+ * при любом разумном поле зрения тексель неба КРУПНЕЕ пикселя, и
+ * выборка всегда идёт с увеличением. В ES 3.0 фильтрация кубической
+ * карты бесшовная по спецификации, поэтому на стыках граней ничего
+ * подклеивать не надо.
+ */
+export function createSkyTexture(gl, size) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex);
+  for (let f = 0; f < 6; f++) {
+    gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, gl.RGBA, size, size, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, null);
+  }
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+  return { tex, size, target: gl.TEXTURE_CUBE_MAP };
+}
+
 /** Заглушка 1x1: чтобы сэмплер всегда смотрел в готовую текстуру. */
 export function createBlankTexture(gl) {
   const tex = gl.createTexture();
@@ -99,13 +124,16 @@ export class Baker {
   }
 
   /**
-   * @param tex  объект из createBakeTexture
-   * @param draw что нарисовать (уже с выставленными uniform-ами)
+   * @param tex    объект из createBakeTexture
+   * @param draw   что нарисовать (уже с выставленными uniform-ами)
+   * @param attach куда цеплять: обычная текстура или ОДНА грань
+   *               кубической карты (TEXTURE_CUBE_MAP_POSITIVE_X + i) —
+   *               кубическая карта пишется только по граням
    */
-  pass(tex, draw) {
+  pass(tex, draw, attach = tex.target) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex.tex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, attach, tex.tex, 0);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
       this.ok = false;
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);

@@ -25,6 +25,14 @@ export function drawDebug(r, game, dbg) {
     `fps ${dbg.fps.toFixed(0)}   ${rs.backend}: треугольников ${rs.polys}, вызовов ${rs.items}` +
       (rs.detail ? ', деталь на пиксель' : ''),
     rs.gpu ? `GPU ${rs.gpu}` : '',
+    // Цена кадра. Время карты — от таймера драйвера, а не от fps: при
+    // синхронизации кадров fps стоит на шестидесяти, пока запас есть,
+    // и по нему не видно, сколько его осталось.
+    rs.frameMs
+      ? `кадр ${rs.frameMs.toFixed(1)} мс` +
+        (rs.gpuMs ? `, карта ${rs.gpuMs.toFixed(1)} мс` : ' (таймера карты нет)') +
+        (rs.fw > 1.01 ? `, деталь мягче ×${rs.fw.toFixed(1)}` : ', деталь полная')
+      : '',
     `pos ${s.pos.x.toFixed(1)} ${s.pos.y.toFixed(1)} ${s.pos.z.toFixed(1)}`,
     `speed ${s.speed.toFixed(4)} км/с  тяга ${s.throttle.toFixed(2)}` +
       `  форсаж ${(s.boost * 100).toFixed(0)}%${s.boosting ? ' (жмут)' : ''}`,

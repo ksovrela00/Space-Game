@@ -9,17 +9,25 @@
 // уже как смещение ОТ КАМЕРЫ (см. mat4.js) — иначе на орбитах в миллионы
 // километров float32 теряет километры, и близкие объекты дрожат.
 
-import { createContext, rendererName, resizeCanvas, watchContextLoss } from './context.js';
+import {
+  createContext, rendererName, resizeCanvas, watchContextLoss, renderScale,
+} from './context.js';
+import { GpuTimer } from './gputime.js';
 import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
   PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
+  SKY_VS, SKY_FS, SKY_BAKE_VS, SKY_BAKE_FS,
 } from './shaders.js';
-import { detailUniforms, tileDetailUniforms } from './detail.js';
+import { skyFor, skyUniforms, SKY_GAIN } from './nebula.js';
+import {
+  detailUniforms, tileDetailUniforms, makeDetailLoad, updateDetailLoad,
+  FW_TARGET_GPU, FW_TARGET_CPU, FW_MAX,
+} from './detail.js';
 import { terrainOf } from './terrain.js';
 import { edgeAngle } from './icosphere.js';
-import { Baker, createBlankTexture } from './bake.js';
+import { Baker, createBlankTexture, createSkyTexture, CUBE_FACES } from './bake.js';
 import { TileSet } from './tiles.js';
 import { tileKey, tileTexelAngle } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
@@ -152,6 +160,25 @@ export class GlScene {
     this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
     this.pMote = buildProgram(gl, 'mote', MOTE_VS, MOTE_FS);
 
+    // Небо: полоса галактического диска и туманности (js/gl/nebula.js).
+    // Не соберётся — сцена остаётся рабочей, фон просто чёрный, как был.
+    this.skyOn = true;
+    try {
+      this.pSky = buildProgram(gl, 'sky', SKY_VS, SKY_FS);
+      this.pSkyBake = buildProgram(gl, 'skybake', SKY_BAKE_VS, SKY_BAKE_FS);
+      this.skyQuad = buildQuad(gl, this.pSky.attrib('aQuad'));
+      this.skyBakeQuad = buildQuad(gl, this.pSkyBake.attrib('aQuad'));
+    } catch (e) {
+      console.error('Небо не собралось, фон остаётся чёрным:\n' + e.message);
+      this.skyOn = false;
+    }
+    // Текстура неба печётся по грани за кадр при первом же кадре: seed
+    // системы известен только оттуда (см. updateSky).
+    this.skyTex = null;
+    this.sky = null;
+    this.skyFace = 0;
+    this.skyScale = new Float32Array(2);
+
     this.meshLocs = {
       aPos: this.pMesh.attrib('aPos'),
       aNormal: this.pMesh.attrib('aNormal'),
@@ -228,17 +255,35 @@ export class GlScene {
     const q = new URLSearchParams(
       typeof location !== 'undefined' ? location.search : '');
     this.tilesOn = (q.get('surface') || 'tiles') === 'tiles';
+    // Проход запекания общий: и у плиток поверхности, и у неба. Это один
+    // кадровый буфер, поэтому держать их раздельно незачем.
+    this.baker = new Baker(gl);
     if (this.tilesOn) {
       try {
         this.pBake = buildProgram(gl, 'bake', BAKE_VS, BAKE_FS);
         this.bakeQuad = buildQuad(gl, this.pBake.attrib('aQuad'));
-        this.baker = new Baker(gl);
         this.tiles = new TileSet(gl, this.meshLocs, this.baker, this.pBake, this.bakeQuad);
       } catch (e) {
         console.error('Запекание поверхности не собралось, рисуем заплатками:\n' + e.message);
         this.tilesOn = false;
       }
     }
+
+    // Цена кадра: таймер карты (js/gl/gputime.js) и регулятор
+    // детализации (js/gl/detail.js). `?fw=N` закрепляет множитель следа
+    // пикселя: 1 — всегда полная резкость, как было до регулятора,
+    // больше — насильно грубее. Это и есть способ посмотреть глазами,
+    // чем деталь платит за кадры.
+    this.gpuTimer = new GpuTimer(gl);
+    this.detailLoad = makeDetailLoad();
+    const fwPin = parseFloat(q.get('fw'));
+    this.fwPin = Number.isFinite(fwPin) ? Math.max(1, Math.min(FW_MAX, fwPin)) : 0;
+    this.fwScale = this.fwPin || 1;
+    this.frameMs = 0;
+    this.lastFrame = 0;
+    // Масштаб буфера кадра (`?scale=`). Читается один раз: менять его на
+    // ходу значит пересобирать буферы посреди полёта.
+    this.scale = renderScale();
 
     this.proj = new Float32Array(16);
     this.mv = new Float32Array(16);
@@ -294,7 +339,7 @@ export class GlScene {
   }
 
   resize() {
-    const changed = resizeCanvas(this.gl, this.canvas);
+    const changed = resizeCanvas(this.gl, this.canvas, Q.maxDpr, this.scale);
     // Камера общая с HUD; следим, чтобы focal соответствовал размеру окна.
     this.camera.resize(window.innerWidth, window.innerHeight);
     return changed;
@@ -328,10 +373,35 @@ export class GlScene {
     this.applyDetail(prog, u);
   }
 
+  /**
+   * Цена кадра и деталь по ней.
+   *
+   * Замер относится к ПРЕДЫДУЩЕМУ кадру (ответ таймера приходит с
+   * задержкой), поэтому берётся до начала нового. Длительность кадра
+   * сглаживается: она скачет и при ровной картинке, а пауза больше
+   * половины секунды — это не нагрузка, а свёрнутое окно.
+   */
+  updateDetailBudget() {
+    const now = performance.now();
+    const period = this.lastFrame ? now - this.lastFrame : 0;
+    this.lastFrame = now;
+    if (period > 0 && period < 500) {
+      this.frameMs = this.frameMs > 0
+        ? this.frameMs + (period - this.frameMs) * 0.1
+        : period;
+    }
+    const gpu = this.gpuTimer.poll();
+    if (this.fwPin > 0) { this.fwScale = this.fwPin; return; }
+    this.fwScale = this.gpuTimer.available && gpu > 0
+      ? updateDetailLoad(this.detailLoad, gpu, FW_TARGET_GPU)
+      : updateDetailLoad(this.detailLoad, this.frameMs, FW_TARGET_CPU);
+  }
+
   applyDetail(prog, u) {
     const gl = this.gl;
     gl.uniform1f(prog.loc('uDetail'), u.on);
     if (!u.on) return;
+    gl.uniform1f(prog.loc('uFwScale'), this.fwScale);
     gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
     gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
     gl.uniform1i(prog.loc('uSeed'), u.seed);
@@ -364,6 +434,10 @@ export class GlScene {
     const sunPos = world.star.pos;
 
     this.resize();
+    this.updateDetailBudget();
+    // Таймер охватывает весь кадр, включая запекание плиток: это тоже
+    // работа карты, и регулятор обязан её видеть.
+    this.gpuTimer.begin();
     this.tris = 0;
     this.draws = 0;
     this.rockDraws = 0;
@@ -381,6 +455,7 @@ export class GlScene {
     this.pending = pendingBuilds();
     if (this.pending) pumpBuilds(gl, this.meshLocs, BUILD_MS);
     this.updatePatches(game);
+    this.updateSky(world);
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 1);
@@ -409,6 +484,7 @@ export class GlScene {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
+    this.gpuTimer.end();
   }
 
   /**
@@ -700,7 +776,11 @@ export class GlScene {
       this._tinfo || (this._tinfo = { dir: { x: 0, y: 0, z: 0 } }));
     const dir = localDir(body, this.camera.pos,
       this._tdir || (this._tdir = { x: 0, y: 0, z: 0 }));
-    this.tiles.update(body, dir, info.alt, this.camera.focal, TILE_MS);
+    // Допуск плиток считается в пикселях, поэтому уменьшенный буфер
+    // кадра (`?scale=`) должен уменьшить и фокусное: при половинном
+    // разрешении та же плитка даёт вдвое меньшую ошибку на экране, и
+    // дробить её дальше незачем.
+    this.tiles.update(body, dir, info.alt, this.camera.focal * this.scale, TILE_MS);
     this.tileBody = this.tiles.rootsReady ? body : null;
   }
 
@@ -730,6 +810,77 @@ export class GlScene {
     this.setDetail(prog, null, 0);
   }
 
+  /**
+   * Небо системы: полоса галактического диска и туманности.
+   *
+   * Печётся ОДИН раз на запуск и по ОДНОЙ грани куба за кадр. Шесть
+   * граней по 512² — это полтора миллиона текселей процедурного шума,
+   * примерно полкадра поверхности: разом это заметный рывок на старте, а
+   * по грани не видно вовсе, и к седьмому кадру небо готово.
+   *
+   * Seed берётся из системы: небо — её часть, и у другой звезды оно
+   * будет другим (js/render/starfield.js, galaxyFor).
+   */
+  updateSky(world) {
+    if (!this.skyOn || this.skyFace >= 6 || !world) return;
+    const gl = this.gl;
+    if (!this.skyTex) {
+      this.sky = skyFor(world.seed);
+      this.skyU = skyUniforms(this.sky);
+      this.skyTex = createSkyTexture(gl, Q.sky);
+    }
+    const f = CUBE_FACES[this.skyFace];
+    const prog = this.pSkyBake;
+    const u = this.skyU;
+    const ok = this.baker.pass(this.skyTex, () => {
+      prog.use();
+      gl.uniform3f(prog.loc('uFaceF'), f.F[0], f.F[1], f.F[2]);
+      gl.uniform3f(prog.loc('uFaceU'), f.U[0], f.U[1], f.U[2]);
+      gl.uniform3f(prog.loc('uFaceV'), f.V[0], f.V[1], f.V[2]);
+      gl.uniform3fv(prog.loc('uPole'), u.pole);
+      gl.uniform3fv(prog.loc('uCore'), u.core);
+      gl.uniform1f(prog.loc('uSigma'), u.sigma);
+      gl.uniform1f(prog.loc('uGain'), SKY_GAIN);
+      gl.uniform1i(prog.loc('uBlobs'), u.count);
+      gl.uniform3fv(prog.loc('uBlobDir'), u.dirs);
+      gl.uniform3fv(prog.loc('uBlobCol'), u.cols);
+      gl.uniform3fv(prog.loc('uBlobPar'), u.pars);
+      // Сдвиг решётки шума: у каждой системы своя, иначе облака разных
+      // систем вышли бы одной и той же формы.
+      gl.uniform1f(prog.loc('uSkySeed'), ((world.seed >>> 0) % 1024) / 1024);
+      this.skyBakeQuad.draw();
+    }, gl.TEXTURE_CUBE_MAP_POSITIVE_X + this.skyFace);
+    // Кадровый буфер не собрался (нет нужного формата) — небо просто
+    // остаётся чёрным, а не пропадает вместе со сценой.
+    if (!ok) { this.skyOn = false; return; }
+    this.skyFace++;
+  }
+
+  /**
+   * Небо — фон: рисуется первым, без глубины и без смешивания, одной
+   * выборкой из кубической карты на пиксель. Всё остальное ложится
+   * поверх обычным порядком.
+   */
+  drawSky(viewMat3) {
+    if (!this.skyOn || !this.skyTex || this.skyFace === 0) return;
+    const gl = this.gl;
+    const prog = this.pSky;
+    prog.use();
+    const t = Math.tan(this.camera.fov / 2);
+    this.skyScale[0] = t * (this.canvas.width / Math.max(1, this.canvas.height));
+    this.skyScale[1] = t;
+    gl.uniformMatrix3fv(prog.loc('uView'), false, viewMat3);
+    gl.uniform2fv(prog.loc('uScale'), this.skyScale);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_CUBE_MAP, this.skyTex.tex);
+    gl.uniform1i(prog.loc('uSky'), 0);
+    this.skyQuad.draw();
+    this.draws++;
+    // Снимаем привязку: на этом же блоке текстур дальше работает
+    // поверхность, и оставлять на нём кубическую карту незачем.
+    gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+  }
+
   drawStars() {
     const gl = this.gl;
     const b = this.camera.basis;
@@ -741,6 +892,9 @@ export class GlScene {
 
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
+
+    // Небо — под звёздами: та же бесконечность, тот же поворот.
+    this.drawSky(m);
 
     // Звёзды рисуются всегда, в том числе в прыжке: они бесконечно
     // далеко и стоять на месте — их законное поведение. Лететь мимо

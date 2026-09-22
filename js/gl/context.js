@@ -1,7 +1,40 @@
 // Создание и обслуживание контекста WebGL2.
 import { Q } from '../core/quality.js';
 
-export function createContext(canvas) {
+const search = () => (typeof location !== 'undefined' ? location.search : '');
+
+/**
+ * Масштаб буфера кадра: `?scale=0.7` рисует сцену в 0.7 от разрешения
+ * окна и растягивает её обратно средствами браузера.
+ *
+ * Зачем такая ручка. Дорогая работа в кадре — процедурная поверхность,
+ * и стоит она по числу закрашенных пикселей: в окне 2549 × 1308 их
+ * 3.3 миллиона, при 0.7 остаётся 1.6 — ровно вдвое меньше работы.
+ * Приборы этим НЕ портятся: они рисуются на своём холсте в полном
+ * разрешении (см. index.html), поэтому надписи остаются резкими, а
+ * мягче становится только сама сцена.
+ *
+ * Нижняя граница — не вкус: ниже 0.35 пропадают камни и стойки шасси,
+ * то есть предметы, по которым глаз меряет высоту.
+ */
+export function renderScale(str = search()) {
+  const v = parseFloat(new URLSearchParams(str || '').get('scale'));
+  if (!Number.isFinite(v)) return 1;
+  return Math.max(0.35, Math.min(1, v));
+}
+
+/**
+ * Сглаживание краёв: `?aa=0` выключает. На процедурной поверхности оно
+ * почти ничего не даёт — нормаль там и так считается на пиксель, — а
+ * буфер на слабой карте занимает вчетверо больше памяти и полосы.
+ * Заметно сглаживание на кромке планеты, корпусе и стойках шасси,
+ * поэтому по умолчанию оно включено.
+ */
+export function wantAa(str = search()) {
+  return new URLSearchParams(str || '').get('aa') !== '0';
+}
+
+export function createContext(canvas, aa = wantAa()) {
   let gl = null;
   try {
     gl = canvas.getContext('webgl2', {
@@ -11,7 +44,7 @@ export function createContext(canvas) {
       // подробная земля, грубая сфера рисоваться не должна (её грани
       // отклоняются от подробной поверхности на километры).
       stencil: true,
-      antialias: true,
+      antialias: aa,
       premultipliedAlpha: false,
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
@@ -36,10 +69,11 @@ export function rendererName(gl) {
 
 /**
  * Подгонка размера буфера под окно.
+ * @param scale масштаб буфера (см. renderScale)
  * @returns true, если размер поменялся
  */
-export function resizeCanvas(gl, canvas, maxDpr = Q.maxDpr) {
-  const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+export function resizeCanvas(gl, canvas, maxDpr = Q.maxDpr, scale = 1) {
+  const dpr = Math.min(window.devicePixelRatio || 1, maxDpr) * scale;
   const w = Math.max(1, Math.round(window.innerWidth * dpr));
   const h = Math.max(1, Math.round(window.innerHeight * dpr));
   if (canvas.width === w && canvas.height === h) return false;

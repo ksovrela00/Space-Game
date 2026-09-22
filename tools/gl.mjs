@@ -15,7 +15,12 @@ import {
 import {
   detailWindow, detailUniforms, tileDetailUniforms, DETAIL_GLSL,
   DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
+  makeDetailLoad, updateDetailLoad, FW_MAX, FW_TARGET_GPU, FW_TARGET_CPU,
 } from '../js/gl/detail.js';
+import { MESH_FS, MESH_FS_DETAIL } from '../js/gl/shaders.js';
+import { skyFor, skyUniforms, SKY_BLOBS, SKY_GAIN, SKY_GLSL } from '../js/gl/nebula.js';
+import { galaxyFor, Starfield } from '../js/render/starfield.js';
+import { renderScale, wantAa, resizeCanvas } from '../js/gl/context.js';
 import { patchPlan, patchBuilder, PATCH } from '../js/gl/patches.js';
 import { cubeLookup } from '../js/gl/bake.js';
 import {
@@ -663,6 +668,156 @@ console.log('\n== деталь в шейдере ==');
   }
 }
 
+// --- 8c3. Регулятор детализации и цена кадра --------------------------------
+// Деталь на пиксель — самая дорогая работа в кадре, и единственная
+// допустимая ручка её цены — расширение следа пикселя (js/gl/detail.js).
+// Здесь проверяется не «стало быстрее» (этого без GPU не увидеть), а то,
+// из-за чего регулятор был бы вреден: выход за границы, движение в
+// мёртвой зоне и несимметричность не в ту сторону.
+console.log('\n== регулятор детализации ==');
+{
+  // Тяжёлый кадр: множитель растёт, но не выше предела.
+  const heavy = makeDetailLoad();
+  let hist = [];
+  for (let i = 0; i < 400; i++) hist.push(updateDetailLoad(heavy, 40, FW_TARGET_GPU));
+  const grew = hist.every((v, i) => i === 0 || v >= hist[i - 1]);
+  ok(grew && Math.abs(hist[hist.length - 1] - FW_MAX) < 1e-9,
+    `при кадре 40 мс след расширяется монотонно до предела ×${FW_MAX} ` +
+    `(за ${hist.findIndex((v) => v > FW_MAX - 0.01) + 1} кадров)`);
+
+  // Лёгкий кадр: возвращается к полной резкости и НЕ уходит ниже.
+  let back = [];
+  for (let i = 0; i < 600; i++) back.push(updateDetailLoad(heavy, 4, FW_TARGET_GPU));
+  const fell = back.every((v, i) => i === 0 || v <= back[i - 1]);
+  ok(fell && back[back.length - 1] === 1 && Math.min(...back) === 1,
+    'при кадре 4 мс возвращается ровно к единице и ниже не опускается');
+
+  // Возврат должен быть медленнее срыва: иначе на пороге картинка
+  // «дышит» — резкость то появляется, то уходит каждые несколько кадров.
+  const upFrames = hist.findIndex((v) => v > 2) + 1;
+  const downFrames = back.findIndex((v) => v < 2) + 1;
+  ok(upFrames > 0 && downFrames > upFrames * 2,
+    `вверх до ×2 за ${upFrames} кадров, обратно за ${downFrames} — возврат плавнее`);
+
+  // Мёртвая зона: кадр ровно в норме не двигает деталь вовсе.
+  const calm = makeDetailLoad();
+  for (let i = 0; i < 200; i++) updateDetailLoad(calm, FW_TARGET_GPU, FW_TARGET_GPU);
+  ok(calm.scale === 1, 'кадр ровно в норме деталь не трогает');
+
+  // Мусор вместо замера (таймер не готов, окно свернули) не должен
+  // сдвинуть ничего: один выброс увёл бы деталь в самую грубую.
+  const junk = makeDetailLoad();
+  junk.scale = 2.5;
+  for (const bad of [0, -1, NaN, Infinity, undefined]) updateDetailLoad(junk, bad, FW_TARGET_GPU);
+  ok(junk.scale === 2.5, 'нулевой и нечисловой замер деталь не двигают');
+
+  // Пауза (свернули окно) даёт один кадр длиной в секунды. Деталь от
+  // него почти не шевелится и возвращается за доли секунды.
+  const stall = makeDetailLoad();
+  updateDetailLoad(stall, 5000, FW_TARGET_GPU);
+  const afterStall = stall.scale;
+  let frames = 0;
+  while (stall.scale > 1 && frames < 600) { updateDetailLoad(stall, 4, FW_TARGET_GPU); frames++; }
+  ok(afterStall < 1.05 && frames < 60,
+    `кадр в 5 с поднимает деталь только до ×${afterStall.toFixed(3)} ` +
+    `и отпускает через ${frames} кадров`);
+
+  // Порог по длительности кадра обязан лежать ВЫШЕ синхронизации на
+  // шестидесяти: иначе регулятор срезал бы деталь на машине, которая
+  // ровно держит 60 кадров в секунду.
+  ok(FW_TARGET_CPU > 1000 / 60 && FW_TARGET_GPU < 1000 / 60,
+    `порог по кадру ${FW_TARGET_CPU} мс выше 16.7, по таймеру карты ${FW_TARGET_GPU} мс — ниже`);
+  const vsync = makeDetailLoad();
+  for (let i = 0; i < 300; i++) updateDetailLoad(vsync, 1000 / 60, FW_TARGET_CPU);
+  ok(vsync.scale === 1, 'ровные 60 кадров в секунду деталь не срезают');
+}
+
+// Главное в регуляторе — что он вообще уменьшает работу. Окно
+// детализации считается от следа пикселя, поэтому расширение следа
+// обязано срезать и октавы, и масштабы кратеров. Если бы множитель не
+// доходил до dLimits, регулятор крутился бы впустую, и заметить это без
+// GPU было бы нечем.
+{
+  const world6 = makeSystem(0x1a7e);
+  const moon = world6.bodies.find((b) => b.kind === 'moon');
+  const t = makeTerrain(moon);
+  // Самый дорогой случай: тексель плитки растянут на весь допуск
+  // (TILE_TEXEL_TOL пикселей), то есть шейдер тянет деталь от текселя
+  // до пикселя целиком.
+  const texel = tileTexelAngle(8);
+  const u = tileDetailUniforms(t, texel);
+  const work = (k) => {
+    const win = detailWindow(t, texel * 2, texel / TILE_TEXEL_TOL * k);
+    const oct = Math.min(win.octTo - u.octFrom, DETAIL_MAX_OCT);
+    const cs = Math.min(win.csTo - u.csFrom, DETAIL_MAX_CS);
+    // Во что это обходится на пиксель: шум считается трижды (значение и
+    // два конечных разностных шага) плюс маска «морей», у кратеров
+    // каждый масштаб — 27 ячеек решётки.
+    return { oct, cs, cost: 3 * Math.max(0, oct) + 3 + Math.max(0, cs) * 27 };
+  };
+  const one = work(1), top = work(FW_MAX);
+  ok(one.oct === DETAIL_MAX_OCT - 1 && one.cs === DETAIL_MAX_CS,
+    `на пределе допуска окно почти во весь бюджет: ${one.oct} октав, ` +
+    `${one.cs} масштабов кратеров`);
+  ok(top.oct < one.oct && top.cs < one.cs && top.cost < one.cost * 0.7,
+    `след ×${FW_MAX} срезает окно до ${top.oct} октав и ${top.cs} масштабов: ` +
+    `${one.cost} -> ${top.cost} условных единиц на пиксель ` +
+    `(${(100 - top.cost / one.cost * 100).toFixed(0)}% работы долой)`);
+  // Монотонность: каждая ступень регулятора не должна добавлять работы.
+  let prev = one.cost, mono = true;
+  for (const k of [1.5, 2, 3, 4, 6, FW_MAX]) {
+    const c = work(k).cost;
+    if (c > prev) mono = false;
+    prev = c;
+  }
+  ok(mono, 'работа на пиксель монотонно убывает по всей шкале регулятора');
+}
+
+// Множитель следа обязан доходить до шейдера и обязан быть не меньше
+// единицы: нуль в этом uniform обнулил бы след пикселя, а на него
+// делится всё плавное появление деталей.
+{
+  const src = DETAIL_GLSL;
+  ok(MESH_FS_DETAIL.includes('uniform float uFwScale')
+    && MESH_FS_DETAIL.includes('max(uFwScale, 1.0)'),
+    'шейдер меша объявляет uFwScale и не даёт ему уйти ниже единицы');
+  ok(!src.includes('uFwScale'),
+    'сам DETAIL_GLSL про множитель не знает — он общий с запеканием, ' +
+    'а там след равен текселю');
+  ok(!MESH_FS.includes('uFwScale') && !MESH_FS.includes('NIGHT_SKIP'),
+    'запасной шейдер без детали собирается без этих uniform-ов');
+  // Порог ночи: за ним ни один склон света не поймает. Наклон ограничен
+  // 1.6, то есть atan(1.6) = 58°, значит порог обязан быть не мягче
+  // косинуса (180 - 58)°.
+  const m = MESH_FS_DETAIL.match(/NIGHT_SKIP = (-?[0-9.]+)/);
+  const safe = Math.cos(Math.PI - Math.atan(1.6));
+  ok(m && Number(m[1]) <= safe,
+    `порог ночи ${m ? m[1] : '?'} не мягче предельного склона (${safe.toFixed(3)})`);
+}
+
+// Масштаб буфера кадра: ручка на слабую карту. Проверяем разбор и то,
+// что он действительно уменьшает буфер, а не только число в адресе.
+{
+  ok(renderScale('') === 1 && renderScale('?scale=abc') === 1 && renderScale(null) === 1,
+    'без ?scale= и при мусоре масштаб буфера — единица');
+  ok(renderScale('?scale=0.7') === 0.7 && renderScale('?scale=3') === 1
+    && renderScale('?scale=0.01') === 0.35,
+    'масштаб зажат в [0.35, 1]');
+  ok(wantAa('') && wantAa('?aa=1') && !wantAa('?aa=0'),
+    'сглаживание выключается только явным ?aa=0');
+
+  const fake = { width: 0, height: 0, style: {} };
+  const glStub = { viewport() {} };
+  globalThis.window = { innerWidth: 1600, innerHeight: 900, devicePixelRatio: 1 };
+  resizeCanvas(glStub, fake, 2, 1);
+  const full = fake.width * fake.height;
+  resizeCanvas(glStub, fake, 2, 0.5);
+  const half = fake.width * fake.height;
+  ok(full === 1600 * 900 && Math.abs(half / full - 0.25) < 0.01,
+    `?scale=0.5 оставляет четверть пикселей (${full} -> ${half}), ` +
+    'при этом холст приборов не затронут');
+}
+
 // --- 8d. Заплатки поверхности -----------------------------------------------
 console.log('\n== заплатки поверхности ==');
 {
@@ -1036,6 +1191,109 @@ console.log('\n== плитки поверхности ==');
   }
 }
 
+// --- 8f. Небо системы --------------------------------------------------------
+// Главное требование пользователя: ничего узнаваемого и повторяющегося.
+// У другой звёздной системы должно быть другое небо, а звёзды и полоса
+// диска обязаны лежать в ОДНОЙ плоскости — разъехавшись, они сразу
+// выдают, что полоса нарисована отдельно.
+console.log('\n== небо системы ==');
+{
+  const unit = (v) => Math.abs(Math.hypot(v.x, v.y, v.z) - 1) < 1e-9;
+  const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+
+  const g = galaxyFor(0x1a7e);
+  ok(unit(g.pole) && unit(g.core) && unit(g.e1) && unit(g.e2),
+    'оси диска единичные');
+  ok(Math.abs(dot(g.pole, g.core)) < 1e-9 && Math.abs(dot(g.e1, g.e2)) < 1e-9
+    && Math.abs(dot(g.pole, g.e1)) < 1e-9,
+    'полюс, ядро и оси плоскости взаимно перпендикулярны');
+  ok(Math.abs(g.pole.y) >= 0.15 && Math.abs(g.pole.y) <= 0.95,
+    `наклон полосы к плоскости системы ${(Math.acos(Math.abs(g.pole.y)) * 57.3).toFixed(0)}° ` +
+    '— не вдоль орбит и не точно поперёк');
+
+  // Тот же seed — то же небо (иначе оно менялось бы при каждой
+  // перезагрузке), другой seed — другое.
+  const same = galaxyFor(0x1a7e);
+  ok(dot(g.pole, same.pole) > 1 - 1e-12 && g.sigma === same.sigma,
+    'по одному seed небо получается одинаковым');
+  // Требовать, чтобы у любых двух систем РАЗОШЁЛСЯ наклон полосы,
+  // нельзя: полюс берётся равномерно, и у восьми систем (28 пар)
+  // случайное совпадение наклона в пределах десятка градусов —
+  // нормальное событие с вероятностью около четверти. Требование другое
+  // и точное: не должно совпасть ВСЁ сразу, иначе это буквально одно и
+  // то же небо.
+  const seeds = [0x1a7e, 0x2b31, 0x77aa, 0xc0de, 0x51ee7, 1, 2, 3, 4, 5];
+  const alike = (a, b) => 1 - Math.abs(dot(a, b)) < 0.02;
+  let twins = 0, closest = 'нет';
+  for (let i = 0; i < seeds.length; i++) {
+    for (let j = i + 1; j < seeds.length; j++) {
+      const a = galaxyFor(seeds[i]), b = galaxyFor(seeds[j]);
+      if (alike(a.pole, b.pole) && alike(a.core, b.core)
+        && Math.abs(a.sigma - b.sigma) < 0.005) {
+        twins++;
+        closest = `${seeds[i].toString(16)} и ${seeds[j].toString(16)}`;
+      }
+    }
+  }
+  ok(twins === 0,
+    `у десяти систем нет двух одинаковых небес (совпавших пар ${twins}, ${closest})`);
+  const sets = seeds.map((s) => skyFor(s).blobs.map((b) => b.kind[0]).join(''));
+  ok(new Set(sets).size > 5,
+    `набор туманностей у систем разный: ${new Set(sets).size} различных из ` +
+    `${seeds.length} (по первым буквам: ${sets.slice(0, 4).join(', ')})`);
+
+  // Облака: в диске, не внахлёст, цвета в пределах разумного.
+  const sky = skyFor(0x1a7e);
+  ok(sky.blobs.length > 0 && sky.blobs.length <= SKY_BLOBS,
+    `туманностей ${sky.blobs.length}: ${sky.blobs.map((b) => b.kind).join(', ')}`);
+  let apart = 1, worstLat = 0, badCol = 0;
+  for (let i = 0; i < sky.blobs.length; i++) {
+    const b = sky.blobs[i];
+    if (!unit(b.dir)) badCol++;
+    if (b.color.some((c) => !(c >= 0 && c <= 1))) badCol++;
+    worstLat = Math.max(worstLat, Math.abs(dot(b.dir, sky.galaxy.pole)));
+    for (let j = i + 1; j < sky.blobs.length; j++) {
+      apart = Math.min(apart, dot(b.dir, sky.blobs[j].dir));
+    }
+  }
+  ok(badCol === 0 && apart < 0.83,
+    `облака не сливаются: ближайшая пара в ${(Math.acos(apart) * 57.3).toFixed(0)}° друг от друга`);
+  ok(worstLat <= 0.43,
+    `облака лежат в диске: дальше всех ${(Math.asin(worstLat) * 57.3).toFixed(0)}° от плоскости`);
+
+  // Звёзды сгущаются к той же плоскости, что и полоса. Это и есть
+  // условие «полоса не отдельно от своих звёзд».
+  {
+    const seed = 0x51ee7;
+    const gal = galaxyFor(seed);
+    const field = new Starfield(4000, seed);
+    let inBand = 0;
+    for (let i = 0; i < field.count; i++) {
+      const lat = Math.abs(field.dirs[i * 3] * gal.pole.x
+        + field.dirs[i * 3 + 1] * gal.pole.y + field.dirs[i * 3 + 2] * gal.pole.z);
+      if (lat < 0.26) inBand++;                 // ±15° от плоскости
+    }
+    const share = inBand / field.count;
+    // Равномерная россыпь дала бы ровно 26% (доля пояса на сфере
+    // считается по площади: она равна синусу широты).
+    ok(share > 0.40,
+      `в полосе ±15° лежит ${(share * 100).toFixed(0)}% звёзд против 26% при ` +
+      'равномерной россыпи — сгущение к диску есть');
+    let badDir = 0;
+    for (let i = 0; i < field.count; i++) {
+      const l = Math.hypot(field.dirs[i * 3], field.dirs[i * 3 + 1], field.dirs[i * 3 + 2]);
+      if (Math.abs(l - 1) > 1e-9) badDir++;
+    }
+    ok(badDir === 0, 'все направления звёзд остались единичными');
+  }
+
+  // Небо обязано остаться ФОНОМ: ярче звёзд оно превратится в туман, на
+  // котором не видно ни звёзд, ни целей.
+  ok(SKY_GAIN > 0 && SKY_GAIN < 0.35, `общая яркость неба ${SKY_GAIN} — фоновая`);
+  ok(SKY_GLSL.includes('uBlobDir[' + SKY_BLOBS + ']'),
+    'границы циклов в GLSL совпадают с числом облаков в JS');
+}
+
 // --- 9. Геометрия планеты ---------------------------------------------------
 console.log('\n== геометрия планеты ==');
 {
@@ -1075,7 +1333,7 @@ console.log('\n== мок GL: путь отрисовки ==');
 {
   const state = {
     nan: 0, nanWhere: [], draws: 0, buffers: 0, programs: 0, vaos: 0, stencils: 0,
-    textures: 0, texturesFreed: 0, bakes: 0, mipmaps: 0,
+    textures: 0, texturesFreed: 0, bakes: 0, skyBakes: 0, mipmaps: 0,
     // Размах значений каждого скалярного uniform-а за всё время: по
     // нему видно и то, дошёл ли параметр до шейдера вообще, и то,
     // меняется ли он от плитки к плитке.
@@ -1126,7 +1384,14 @@ console.log('\n== мок GL: путь отрисовки ==');
     deleteTexture: () => { state.texturesFreed++; },
     createFramebuffer: () => ({}),
     checkFramebufferStatus: () => CONST.FRAMEBUFFER_COMPLETE,
-    framebufferTexture2D: () => { state.bakes++; },
+    // Запекание поверхности пишет в обычную текстуру, небо — в ГРАНЬ
+    // кубической карты. Считаем их порознь: у неба шесть проходов на
+    // весь запуск, у плиток — по проходу на плитку, и перепутать эти
+    // счётчики значит не заметить, что небо печётся каждый кадр.
+    framebufferTexture2D: (target, attach, texTarget) => {
+      if (texTarget === CONST.TEXTURE_2D) state.bakes++;
+      else state.skyBakes++;
+    },
     generateMipmap: () => { state.mipmaps++; },
     getParameter: () => 'mock-gpu',
     getExtension: () => null,
@@ -1169,9 +1434,9 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 11,
-    `собрано программ: ${state.programs} (меш, звёзды, полосы, тоннель, пылинки, ореол, атмосфера, ` +
-    'кольца, плазма входа, тень, запекание)');
+  ok(state.programs === 13,
+    `собрано программ: ${state.programs} (меш, звёзды, небо, запекание неба, полосы, тоннель, ` +
+    'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -1201,6 +1466,27 @@ console.log('\n== мок GL: путь отрисовки ==');
   const d1 = frame();
   ok(d1 > 0 && scene.tris > 0,
     `кадр у станции: ${d1} вызовов, ${scene.tris} треугольников`);
+
+  // Небо (js/gl/nebula.js): шесть граней кубической карты, по одной за
+  // кадр, и больше НИКОГДА. Небо не зависит ни от времени, ни от места,
+  // поэтому пересчёт его в кадре — чистая потеря, которую по картинке не
+  // видно вовсе: она выглядит точно так же.
+  {
+    for (let i = 0; i < 8; i++) scene.render(game);
+    const baked = state.skyBakes;
+    for (let i = 0; i < 12; i++) scene.render(game);
+    ok(baked === 6 && state.skyBakes === 6 && scene.skyFace === 6,
+      `небо запечено ${baked} гранями за первые кадры и больше не пересчитывается`);
+
+    // И стоит оно ровно один вызов отрисовки: выборка из готовой карты.
+    const count = () => { const b = state.draws; scene.render(game); return state.draws - b; };
+    const withSky = count();
+    scene.skyOn = false;
+    const without = count();
+    scene.skyOn = true;
+    ok(withSky - without === 1,
+      `небо в кадре — один вызов (${without} без него, ${withSky} с ним)`);
+  }
 
   // Вид от третьего лица: добавляется корабль и факелы двигателей.
   game.state.view = 'chase';
@@ -1425,6 +1711,22 @@ console.log('\n== мок GL: путь отрисовки ==');
         `шейдеру передан тексель каждой плитки: от ${(lo * moon.radius * 1000).toFixed(1)} м ` +
         `(уровень ${deepest}) до ${(seen * moon.radius * 1000 / 1000).toFixed(1)} км`);
     }
+
+    // Множитель следа пикселя обязан доходить до шейдера на каждом
+    // кадре и не выходить из [1, FW_MAX]: нуль обнулил бы след (на него
+    // делится появление деталей), а значение ниже единицы означало бы,
+    // что регулятор просит деталь МЕЛЬЧЕ пикселя — работу, которой не
+    // видно.
+    // Значения берём с запасным нулём: если uniform не передан вовсе,
+    // проверка обязана сказать это внятно, а не упасть на toFixed.
+    const fwLo = state.uniMin.uFwScale ?? 0, fwHi = state.uni.uFwScale ?? 0;
+    ok(fwLo >= 1 && fwHi <= FW_MAX,
+      `шейдер получает множитель следа: от ×${fwLo.toFixed(2)} до ×${fwHi.toFixed(2)}`);
+    // Мок расширения таймера не отдаёт — это штатный путь, и на нём
+    // регулятор ведётся по длительности кадра. Кадры в проверке идут
+    // подряд и быстро, значит деталь должна остаться полной.
+    ok(!scene.gpuTimer.available && scene.gpuTimer.ms === 0 && scene.fwScale === 1,
+      'без таймера карты кадр считается по длительности, деталь остаётся полной');
 
     // Ни одной дырки: всё, что выбрано к отрисовке, готово.
     let holes = 0;

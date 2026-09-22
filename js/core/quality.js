@@ -63,6 +63,7 @@ export function qualityFor(dev) {
       dust: 150,
       motes: 400,
       stars: 950,
+      sky: 512,             // сторона грани кубической карты неба
       detail: true,         // процедурный рельеф на пиксель
       touchUi: dev.touch,   // сенсорные органы — по наличию касаний
       hudScale: 1,
@@ -82,6 +83,7 @@ export function qualityFor(dev) {
     dust: 80,
     motes: 220,
     stars: 600,
+    sky: 256,
     detail: false,
     touchUi: true,
     hudScale,

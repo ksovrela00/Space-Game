@@ -63,7 +63,12 @@ const TELEPORT_ALTS = [2000, 400, 100, 20, 3, 0.3, 0.05];
 
 const screenCanvas = document.getElementById('screen');
 const hudCanvas = document.getElementById('hud');
-const starfield = new Starfield(Q.stars, 0x51ee7);
+// Seed системы. Из него же строится небо: и звёзды, и полоса
+// галактического диска, и туманности (js/render/starfield.js,
+// js/gl/nebula.js). Когда систем станет несколько, менять придётся одно
+// это число — небо поедет за системой само.
+const SYSTEM_SEED = 0x1a7e;
+const starfield = new Starfield(Q.stars, SYSTEM_SEED);
 
 // Камера одна на всех: по ней считает и 3D-сцена, и прицельные рамки HUD.
 const camera = new Camera();
@@ -84,7 +89,7 @@ if (wantGl) {
 }
 if (!scene) renderer = new Renderer(screenCanvas, { camera });
 
-const world = makeSystem(0x1a7e);
+const world = makeSystem(SYSTEM_SEED);
 const ship = makeShip();
 const shipMesh = buildCobra();
 const stationMesh = buildStation();
@@ -1217,6 +1222,12 @@ function render() {
   st.polys = scene ? scene.tris : renderer.polys;
   st.items = scene ? scene.draws : renderer.items.length;
   st.gpu = scene ? scene.name : null;
+  // Цена кадра: его длительность, чистое время карты (если драйвер
+  // отдаёт таймер) и множитель детализации, выбранный по ним
+  // регулятором (js/gl/detail.js).
+  st.frameMs = scene ? scene.frameMs : 0;
+  st.gpuMs = scene && scene.gpuTimer && scene.gpuTimer.available ? scene.gpuTimer.ms : 0;
+  st.fw = scene ? scene.fwScale : 1;
   st.pending = scene ? scene.pending || 0 : 0;
   st.detail = scene ? !!scene.detailOn : false;
   st.patches = scene && scene.patch ? scene.patch.levels : 0;
