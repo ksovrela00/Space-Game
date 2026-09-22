@@ -90,6 +90,12 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v); },
   removeItem: (k) => { delete store[k]; },
 };
+// Сейв ищется по началу ключа, а не по полному имени. Версия в ключе
+// меняется всякий раз, когда старое сохранение перестаёт быть
+// осмысленным (последний раз — когда в систему добавили планеты и
+// сдвинулись id тел), и три проверки ниже каждый раз падали не по делу.
+// Отсутствие сейва так же видно: ключ не найдётся и разбор упадёт.
+const savedJson = () => store[Object.keys(store).find((k) => k.startsWith('solar_trader_save_')) || ''];
 let rafCb = null;
 globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
 globalThis.performance = { now: () => nowMs };
@@ -944,7 +950,7 @@ await step('стоянка на грунте: кнопка вместо экра
 
   // Стоянка обязана попасть в сейв: в локальных осях тела, иначе через
   // сутки эти координаты указывали бы в пустоту.
-  const saved = JSON.parse(store['solar_trader_save_v1']);
+  const saved = JSON.parse(savedJson());
   if (!saved.landed || !saved.landed.pose || !saved.landed.id) {
     throw new Error('стоянка не сохранена: ' + JSON.stringify(saved.landed));
   }
@@ -1046,7 +1052,7 @@ await step('рестарт с начала по Shift+N (с подтвержде
     throw new Error('счётчики не обнулены: ' + JSON.stringify(game.stats));
   }
   if (game.world.time > 1) throw new Error('часы мира не обнулены: ' + game.world.time);
-  const saved = JSON.parse(store['solar_trader_save_v1'] || 'null');
+  const saved = JSON.parse(savedJson() || 'null');
   if (!saved || saved.hull !== 100 || (saved.stats && saved.stats.docks !== 0)) {
     throw new Error('сохранение не переписано: ' + JSON.stringify(saved && saved.stats));
   }
@@ -1076,8 +1082,8 @@ await step('изменение размера окна', () => {
 
 await step('сохранение в localStorage', () => {
   frames(60 * 6);
-  if (!store['solar_trader_save_v1']) throw new Error('сейв не записан');
-  JSON.parse(store['solar_trader_save_v1']);
+  if (!savedJson()) throw new Error('сейв не записан');
+  JSON.parse(savedJson());
 });
 
 console.log('\nвызовов ctx:', Object.entries(calls)

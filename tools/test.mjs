@@ -2,6 +2,7 @@
 import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
+import { ROMAN } from '../js/core/rng.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
 import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
@@ -69,8 +70,29 @@ const ok = (cond, msg, extra = '') => {
 console.log('\n== мир ==');
 const world = makeSystem(0x1a7e);
 updateWorld(world, 1);
-ok(world.planets.length === 6, 'планет: ' + world.planets.length);
-ok(world.stations.length === 3, 'станций: ' + world.stations.length);
+ok(world.planets.length === 9, 'планет: ' + world.planets.length);
+ok(world.stations.length === 4, 'станций: ' + world.stations.length);
+
+// Номер планеты — это её место по расстоянию от звезды, и ничто другое.
+// Проверка нужна ровно потому, что список макета пишется руками: вставить
+// тело не на своё место по орбите легко, а заметить это в полёте — нет.
+{
+  const orbits = world.planets.map((p) => p.orbit.radius);
+  const grow = orbits.every((r, i) => i === 0 || r > orbits[i - 1]);
+  const named = world.planets.every((p, i) => p.name === `Lave ${ROMAN[i]}`);
+  ok(grow && named,
+    'нумерация идёт от звезды наружу: ' +
+    world.planets.map((p) => `${p.name} ${(p.orbit.radius / 1000).toFixed(0)}т`).join(', '));
+
+  // Год растёт вместе с орбитой. Раньше период брался из номера в
+  // списке, а не из радиуса, и диапазоны соседей перекрывались: дальняя
+  // планета могла обойти ближнюю, и карточка тела честно показала бы
+  // эту невозможную пару.
+  const years = world.planets.map((p) => p.orbit.period);
+  ok(years.every((t, i) => i === 0 || t > years[i - 1]),
+    'дальше от звезды — длиннее год: ' +
+    years.map((t) => (t / 3.15e7).toFixed(0)).join(' < ') + ' лет');
+}
 for (const p of world.planets) {
   const v = len(p.vel);
   ok(v < SHIP.maxSpeed * 0.35, `${p.name}: орбитальная скорость ${v.toFixed(3)} км/с < ${(SHIP.maxSpeed * 0.35).toFixed(2)}`);
@@ -803,20 +825,42 @@ function jumpTest(targetName, maxHops = 4) {
     minGap = Math.min(minGap, r.minGap === undefined ? Infinity : r.minGap);
     if (r.status !== 'arrived') return { status: r.status, reason: r.reason, t, hops };
     if (leg === target) {
-      return { status: 'arrived', t, d0, hops, alt: r.alt, vMax, minGap, speed: r.speed };
+      return {
+        status: 'arrived', t, d0, hops, alt: r.alt, vMax, minGap, speed: r.speed,
+        // Станция и тело выходят на РАЗНЫХ расстояниях (exitStation против
+        // exitAlt), и проверке надо знать, во что она целилась.
+        station: target.kind === 'station', radius: target.radius,
+      };
     }
   }
   return { status: 'too-many-hops', t, hops };
 }
 
-for (const name of ['Lave III', 'Lave V', 'Lave VI', 'Lave I']) {
+// Проверяются ВСЕ тела системы и все станции, а не выборка. Список
+// раньше был записан именами руками — и после добавления трёх планет
+// молча съехал: те же четыре строки стали проверять другие тела, а
+// дальний край системы не проверял никто. Достижимость каждого тела —
+// это ровно то, что ломается при добавлении планеты: коридор может
+// оказаться навсегда перекрыт соседом, а выход — внутри рельефа.
+{
+  const all = makeSystem(0x1a7e);
+  var jumpTargets = [...all.planets.map((p) => p.name), ...all.stations.map((s) => s.name)];
+}
+for (const name of jumpTargets) {
   const r = jumpTest(name);
   ok(r.status === 'arrived',
     `перелёт к ${name}: ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с, прыжков ${r.hops}`,
     r.d0 ? `${(r.d0 / 1e6).toFixed(2)} млн км, до ${r.vMax.toFixed(0)} км/с` : (r.reason || ''));
   if (r.status === 'arrived') {
-    ok(Math.abs(r.alt - QUANTUM.exitAlt) < 1 || r.alt > QUANTUM.exitAlt,
-      `выход над ${name} на заданной высоте: ${r.alt.toFixed(0)} км`);
+    // У тела выход может оказаться ВЫШЕ заданного: у крупных берётся доля
+    // радиуса плюс запас на рельеф (exitFrac). У станции такой поправки
+    // нет — там расстояние обязано совпасть точь-в-точь, иначе стыковаться
+    // придётся с другой дистанции, чем рассчитан докинг-компьютер.
+    const wantAlt = r.station ? QUANTUM.exitStation - r.radius : QUANTUM.exitAlt;
+    ok(r.station ? Math.abs(r.alt - wantAlt) < 1e-6
+                 : (Math.abs(r.alt - wantAlt) < 1 || r.alt > wantAlt),
+      `выход над ${name} на заданной высоте: ${r.alt.toFixed(1)} км ` +
+      `(ожидание ${wantAlt.toFixed(1)})`);
     ok(r.speed < 1e-6, `скорость на выходе у ${name} нулевая: ${r.speed.toFixed(6)} км/с`);
     ok(r.minGap > 0, `по дороге к ${name} ни во что не влетели (мин. зазор ${r.minGap.toFixed(0)} км)`);
   }
@@ -1480,6 +1524,14 @@ console.log('\n== гравитация и захват ==');
   sh.gear.out = true; sh.gear.t = 1;
   sh.throttle = 1;
   const p0 = { x: sh.pos.x, y: sh.pos.y, z: sh.pos.z };
+  // Подъём меряется РАДИУСОМ от центра тела, а не высотой над грунтом.
+  // Высотой мерить нельзя: за десять секунд корабль уходит вперёд на три
+  // с лишним километра, и грунт под ним за это время сам поднимается или
+  // проваливается на сотни метров — у луны размах рельефа 18 км. Раньше
+  // здесь стояла именно высота, и проверка проходила случайно: стоило
+  // системе пересобраться с другими кратерами под этим курсом, и те же
+  // 230 м набора читались как 113.
+  const r0 = Math.hypot(p0.x - moon.pos.x, p0.y - moon.pos.y, p0.z - moon.pos.z);
   for (let i = 0; i < 60 * 10; i++) {
     updateWorld(w, STEP);
     const cap = captureBody(w, sh.pos);
@@ -1488,9 +1540,9 @@ console.log('\n== гравитация и захват ==');
     sh.control.lift = 1;                     // держим R
     updateShip(sh, STEP, gravityField(cap, sh));
   }
-  const z = landingContext(w, sh);
   const moved = v3(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
-  const climb = z.alt - 2;
+  const climb = Math.hypot(sh.pos.x - moon.pos.x, sh.pos.y - moon.pos.y,
+    sh.pos.z - moon.pos.z) - r0;
   const fwd = Math.hypot(moved.x, moved.y, moved.z);
   // Подъём идёт с полным ускорением движков (liftTWR·g): вес держит
   // компенсатор высоты, и на него тяга больше не тратится.
@@ -2738,15 +2790,38 @@ console.log('\n== карта системы ==');
   ok(Math.abs(tHome - (T_EQ_HOME + KIND_INFO.ocean.heat)) < 1e-9,
     `родная планета откалибрована: ${(tHome - 273.15).toFixed(1)} °C`);
 
+  // Наружу становится холоднее — но сам список температур монотонным быть
+  // НЕ обязан, и с девятью планетами перестал им быть. Газовый гигант с
+  // собственным теплом (+30 K) теплее ледяной планеты, которая ближе к
+  // звезде, но отражает 60% света вместо 50%. Так же устроены настоящие:
+  // Юпитер теплее Европы, хотя дальше. Поэтому проверяется не порядок в
+  // списке, а то, что каждое исключение из него чем-то оплачено —
+  // собственным теплом или альбедо. Раньше стояло голое «каждая
+  // следующая холоднее», и держалось оно лишь на том, что в системе был
+  // ровно один экземпляр каждого вида.
   const temps = world.planets.map((p) => temperatureOf(world, p));
-  ok(temps.every((t, i) => i === 0 || t < temps[i - 1]),
-    'от светила наружу становится холоднее: ' +
+  const unpaid = world.planets.filter((p, i) => {
+    if (i === 0 || temps[i] < temps[i - 1]) return false;
+    const a = KIND_INFO[p.kind], b = KIND_INFO[world.planets[i - 1].kind];
+    return !(a.heat > b.heat || a.albedo < b.albedo);
+  });
+  ok(unpaid.length === 0,
+    'наружу холоднее, а исключения объяснены теплом и альбедо: ' +
     temps.map((t) => (t - 273.15).toFixed(0) + '°').join(' > '));
+
+  // Внутри одного вида поправок нет вовсе, и там порядок обязан быть
+  // строгим: две ледяные планеты и два газовых гиганта на разных орбитах.
+  const pairs = ['ice', 'gas'].map((k) => world.planets.filter((p) => p.kind === k));
+  ok(pairs.every((g) => g.length > 1 &&
+    g.every((p, i) => i === 0 || temperatureOf(world, p) < temperatureOf(world, g[i - 1]))),
+    'одинаковые виды на разных орбитах: ' + pairs.map((g) => g.map((p) =>
+      `${p.name} ${(temperatureOf(world, p) - 273.15).toFixed(0)}°`).join(' > ')).join('; '));
 
   // Два тела одного типа на разных орбитах — на них закон виден начисто,
   // без поправок на альбедо и собственное тепло.
-  const m1 = world.planets.find((p) => p.kind === 'gas').moons[0];
-  const m2 = world.planets.find((p) => p.kind === 'ice').moons[0];
+  const withMoons = world.planets.filter((p) => p.moons.length);
+  const m1 = withMoons[0].moons[0];
+  const m2 = withMoons[withMoons.length - 1].moons[0];
   const ratio = temperatureOf(world, m1) / temperatureOf(world, m2);
   const want = Math.sqrt(starDistance(m2) / starDistance(m1));
   ok(Math.abs(ratio - want) < 1e-12,
@@ -2833,7 +2908,10 @@ console.log('\n== карта системы ==');
   // тела, иначе в списке шесть точек на каждое тело и ничего больше.
   const plain = mapObjects(world, null);
   const withMarks = mapObjects(world, home);
-  ok(plain.length === 1 + world.planets.length + world.stations.length + 3 &&
+  // Луны считаются из мира, а не числом: их количество задаётся макетом
+  // системы и меняется каждый раз, когда в неё добавляют планету.
+  const moonCount = world.planets.reduce((n, p) => n + p.moons.length, 0);
+  ok(plain.length === 1 + world.planets.length + world.stations.length + moonCount &&
      withMarks.length === plain.length + 6,
     `в списке карты ${plain.length} объектов, с маркерами выбранного тела — ${withMarks.length}`);
 
