@@ -184,16 +184,21 @@ export function makeShip() {
 // Ручное управление -> control. Автопилот пишет в те же поля.
 export function readControls(ship) {
   const c = ship.control;
-  c.pitch = input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']);
+  // Клавиши и сенсорный джойстик складываются: у клавиши только три
+  // положения, у джойстика — все промежуточные, и терять их нельзя.
+  // Складываются, а не выбирается один источник: на планшете с
+  // клавиатурой работать должны оба, и ни один не должен «выигрывать».
+  const pad = input.pad;
+  c.pitch = clamp(input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']) + pad.pitch, -1, 1);
   // Буквы — схема WASD: A/D рыскают, Q/E кренят.
   // Стрелки — классическая схема Elite: тангаж и крен.
-  c.roll = input.axis(['KeyQ', 'ArrowLeft'], ['KeyE', 'ArrowRight']);
-  c.yaw = input.axis(['KeyA'], ['KeyD']);
-  c.thr = input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']);
+  c.roll = clamp(input.axis(['KeyQ', 'ArrowLeft'], ['KeyE', 'ArrowRight']) + pad.roll, -1, 1);
+  c.yaw = clamp(input.axis(['KeyA'], ['KeyD']) + pad.yaw, -1, 1);
+  c.thr = clamp(input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']) + pad.thr, -1, 1);
   // Вертикальный ход — отдельный канал, доступный всегда: с ним можно
   // и садиться брюхом вниз, не опуская нос, и просто держать высоту над
   // поверхностью, продолжая лететь вперёд.
-  c.lift = input.axis(['KeyF'], ['KeyR']);
+  c.lift = clamp(input.axis(['KeyF'], ['KeyR']) + pad.lift, -1, 1);
   // Форсаж — именно на УДЕРЖАНИИ: отпустил, и он кончился.
   c.boost = input.isDown('Space') ? 1 : 0;
   if (input.pressed('KeyX')) ship.throttle = 0;

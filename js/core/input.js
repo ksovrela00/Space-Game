@@ -18,6 +18,45 @@ class Input {
       right: false, dx: 0, dy: 0,
       left: false, x: 0, y: 0, pdx: 0, pdy: 0, wheel: 0, clicked: false,
     };
+    // Аналоговые оси с сенсорных органов (js/ui/touch.js). Клавиша даёт
+    // только -1, 0 и +1, а джойстик — всё между ними, и терять это
+    // нельзя: на телефоне иначе нечем вести корабль плавно.
+    this.pad = { pitch: 0, yaw: 0, roll: 0, thr: 0, lift: 0, on: false };
+    // Клавиши, «нажатые» сенсорными кнопками. Держим их в том же
+    // наборе, что и настоящие: тогда всё управление игрой — выбор цели,
+    // прыжок, шасси, вид — работает от касаний БЕЗ единой правки в
+    // игровой логике.
+    this.virtual = new Set();
+    // Какие из них ДЕРЖАТ прямо сейчас: без этого «нажато в этом кадре»
+    // срабатывало бы каждый кадр удержания, и одно касание кнопки
+    // шасси выпускало бы и убирало их без остановки.
+    this.held = new Set();
+  }
+
+  /** Сенсорная кнопка нажата и отпущена в этом кадре. */
+  tap(code) {
+    this.down.add(code);
+    this.pressedThisFrame.add(code);
+    this.virtual.add(code);
+  }
+
+  /** Сенсорная кнопка на удержании. */
+  hold(code, on) {
+    if (on) {
+      if (!this.held.has(code)) this.pressedThisFrame.add(code);
+      this.held.add(code);
+      this.down.add(code);
+      this.virtual.add(code);
+    } else if (this.held.has(code)) {
+      // Отпускаем ТОЛЬКО то, что держали сами. Без этой оговорки
+      // сенсорный слой каждый кадр гасил бы настоящие клавиши: он
+      // проходит по всем своим кнопкам и «отпускает» ненажатые, а
+      // Space, Q/E и R/F есть и на клавиатуре — форсаж, крен и
+      // подъёмные движки переставали работать с неё вовсе.
+      this.held.delete(code);
+      this.down.delete(code);
+      this.virtual.delete(code);
+    }
   }
 
   attach(target = window) {
@@ -114,8 +153,20 @@ class Input {
     return (this.isDown(...posCodes) ? 1 : 0) - (this.isDown(...negCodes) ? 1 : 0);
   }
 
-  endFrame() { this.pressedThisFrame.clear(); this.mouse.clicked = false; }
-  releaseAll() { this.down.clear(); this.pressedThisFrame.clear(); }
+  endFrame() {
+    this.pressedThisFrame.clear();
+    this.mouse.clicked = false;
+    // Короткое нажатие сенсорной кнопки живёт ровно кадр: удержание
+    // ставится заново каждый кадр (js/ui/touch.js).
+    for (const code of this.virtual) this.down.delete(code);
+    this.virtual.clear();
+  }
+  releaseAll() {
+    this.down.clear(); this.pressedThisFrame.clear();
+    this.virtual.clear(); this.held.clear();
+    const p = this.pad;
+    p.pitch = 0; p.yaw = 0; p.roll = 0; p.thr = 0; p.lift = 0;
+  }
 }
 
 export const input = new Input();

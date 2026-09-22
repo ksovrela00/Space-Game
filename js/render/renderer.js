@@ -6,6 +6,7 @@
 import { v3, dot } from '../core/vec3.js';
 import { Camera } from './camera.js';
 import { clipNear } from './clip.js';
+import { Q } from '../core/quality.js';
 
 // Доля рассеянного света. Ниже ~0.2 станция на ночной стороне планеты
 // становится почти неразличимой, а стыковаться там всё равно приходится.
@@ -32,7 +33,7 @@ export class Renderer {
   }
 
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, Q.maxDpr);
     const w = Math.max(1, window.innerWidth);
     const h = Math.max(1, window.innerHeight);
     this.dpr = dpr;

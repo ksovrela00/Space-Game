@@ -12,6 +12,7 @@ import { gravityAt } from '../game/gravity.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
 import { dirToWorld } from '../core/basis.js';
 import { CY, CY_DIM, AMBER, GREEN, RED } from './theme.js';
+import { Q } from '../core/quality.js';
 import {
   engineScreen, targetScreen, scopeScreen, commsScreen, systemsScreen,
 } from './panels.js';
@@ -158,9 +159,22 @@ export function drawHud(r, game) {
     onPanel(ctx, cam, ship, slots.upRight, 280, 175,
       () => systemsScreen(ctx, 280, 175, game));
   } else {
-    drawThrustBlock(ctx, 18, h - lh - 20, game, approach);
-    drawTargetBlock(ctx, w - 250, h - th - 20, game, approach, target, q);
-    drawScanner(ctx, w / 2, h - 60, game);
+    // Угловые панели рисуются в своих пикселях и ПРИЖИМАЮТСЯ к углам
+    // через преобразование холста. Масштаб берётся из профиля
+    // устройства: на телефоне в горизонте всего 393 точки высоты, и
+    // панель в 112 пикселей занимала бы треть кадра (js/core/quality.js).
+    const k = Q.hudScale;
+    const corner = (x, y, draw) => {
+      ctx.save();
+      ctx.translate(x, y);
+      if (k !== 1) ctx.scale(k, k);
+      draw();
+      ctx.restore();
+    };
+    corner(18, h - lh * k - 20, () => drawThrustBlock(ctx, 0, 0, game, approach));
+    corner(w - 18 - 232 * k, h - th * k - 20,
+      () => drawTargetBlock(ctx, 0, 0, game, approach, target, q));
+    corner(w / 2, h - 60 * k, () => drawScanner(ctx, 0, 0, game));
   }
 
   // На грунте — кнопка вместо экрана поверх игры.

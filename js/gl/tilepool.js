@@ -1,3 +1,4 @@
+import { Q } from '../core/quality.js';
 // Пул рабочих потоков для сборки плиток.
 //
 // Зачем. Плитка стоит 5-13 мс чистого счёта, а в кадре на всю сборку
@@ -22,7 +23,10 @@
 // молча выключается, и TileSet считает по-старому, порциями в кадре.
 
 const WORKER_URL = new URL('./tileworker.js', import.meta.url);
-const MAX_WORKERS = 3;
+// Потоков сборки — из профиля устройства: на телефоне их меньше, и не
+// ради процессора, а ради памяти — каждый держит свою копию генератора
+// рельефа (js/core/quality.js).
+const MAX_WORKERS = Q.workers;
 
 export class TilePool {
   constructor(max = MAX_WORKERS) {

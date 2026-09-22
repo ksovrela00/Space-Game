@@ -81,7 +81,9 @@ globalThis.window = {
 };
 // Явно просим Canvas-2D-рендер: WebGL здесь не подменить, его путь
 // проверяется отдельно в tools/gl.mjs через мок GL-контекста.
-globalThis.location = { search: '?renderer=2d' };
+// touch=1 — принудительно мобильный профиль: касаний в Node нет, а
+// сенсорные органы проверять надо (js/core/quality.js).
+globalThis.location = { search: '?renderer=2d&touch=1' };
 const store = {};
 globalThis.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
@@ -104,6 +106,21 @@ const key = (code, shift = false) => {
 // знает, поэтому слушать здесь надо ровно то же окно, что и в игре —
 // иначе проверка зелёная, а в браузере не работает: так и вышло, когда
 // события вешались на канвас приборов.
+/**
+ * Касание: браузер шлёт список ИЗМЕНИВШИХСЯ точек, а не всех активных,
+ * поэтому мок устроен так же — иначе проверка проверяла бы не то, что
+ * приходит игре на самом деле.
+ */
+const touch = (type, points) => {
+  const ev = {
+    type,
+    changedTouches: points.map((p) => ({ identifier: p.id, clientX: p.x, clientY: p.y })),
+    cancelable: true,
+    preventDefault() {},
+  };
+  for (const fn of winListeners[type] || []) fn(ev);
+};
+
 const mouse = (type, opts = {}) => {
   for (const fn of winListeners[type] || []) {
     fn({ button: 2, movementX: 0, movementY: 0, preventDefault() {}, ...opts });
@@ -255,6 +272,70 @@ await step('осмотр камерой правой кнопкой из-за с
     throw new Error('камера не вернулась: ' + game.camOrbit.yaw.toFixed(3));
   }
   if (game.state.view !== view0) { key('KeyV'); frames(2); }
+});
+
+await step('сенсорное управление: джойстик, тяга, кнопки', async () => {
+  // Весь путь целиком: событие браузера -> разбор касаний -> управление
+  // кораблём. Раскладку берём ту же, что считает игра, — иначе проверка
+  // проверяла бы сама себя.
+  const { touchLayout } = await import('../js/ui/touch.js');
+  const L = touchLayout(window.innerWidth, window.innerHeight,
+    { left: 0, right: 0, top: 0, bottom: 0 });
+  const ship = game.ship;
+
+  // Джойстик: палец кладём в центр поля и ведём вниз — нос идёт вверх.
+  touch('touchstart', [{ id: 1, x: L.stick.x, y: L.stick.y }]);
+  touch('touchmove', [{ id: 1, x: L.stick.x, y: L.stick.y + L.stick.r }]);
+  frames(3);
+  if (!(ship.control.pitch > 0.8)) {
+    throw new Error('джойстик не ведёт нос: тангаж ' + ship.control.pitch.toFixed(2));
+  }
+  touch('touchend', [{ id: 1, x: L.stick.x, y: L.stick.y + L.stick.r }]);
+  frames(3);
+  if (ship.control.pitch !== 0) {
+    throw new Error('отпущенный джойстик не вернулся: ' + ship.control.pitch.toFixed(2));
+  }
+
+  // Ползунок тяги: абсолютное положение.
+  const top = L.thr.y - L.thr.h / 2;
+  touch('touchstart', [{ id: 2, x: L.thr.x, y: top + L.thr.h * 0.5 }]);
+  frames(2);
+  if (Math.abs(ship.throttle - 0.5) > 0.03) {
+    throw new Error('ползунок не задал тягу: ' + ship.throttle.toFixed(2));
+  }
+  touch('touchend', [{ id: 2, x: L.thr.x, y: top + L.thr.h * 0.5 }]);
+  ship.throttle = 0;
+  frames(2);
+
+  // Кнопка: шасси выпускается тем же действием, что и по клавише G.
+  const gear = L.buttons.find((b) => b.id === 'gear');
+  const out0 = game.ship.gear.out;
+  touch('touchstart', [{ id: 3, x: gear.x, y: gear.y }]);
+  frames(2);
+  touch('touchend', [{ id: 3, x: gear.x, y: gear.y }]);
+  frames(2);
+  if (game.ship.gear.out === out0) throw new Error('кнопка шасси не сработала');
+  // Возвращаем как было БЕЗ ожидания хода механизма: три секунды
+  // модельного времени здесь ничего не проверяют, а следующим шагам
+  // сдвигают мир.
+  game.ship.gear.out = out0;
+  game.ship.gear.t = out0 ? 1 : 0;
+
+  // Палец по свободному месту — осмотр камерой, а не промах по кнопке.
+  const yaw0 = game.camOrbit.yaw;
+  touch('touchstart', [{ id: 5, x: window.innerWidth / 2, y: window.innerHeight / 2 }]);
+  for (let i = 1; i <= 6; i++) {
+    touch('touchmove', [{ id: 5, x: window.innerWidth / 2 + i * 30, y: window.innerHeight / 2 }]);
+    frames(1);
+  }
+  if (!(game.camOrbit.yaw > yaw0 + 0.2)) {
+    throw new Error('палец по свободному месту не вертит камеру: ' + game.camOrbit.yaw.toFixed(2));
+  }
+  touch('touchend', [{ id: 5, x: window.innerWidth / 2, y: window.innerHeight / 2 }]);
+  frames(45);
+  if (Math.abs(game.camOrbit.yaw) > 0.05) {
+    throw new Error('камера не вернулась после касания: ' + game.camOrbit.yaw.toFixed(2));
+  }
 });
 
 await step('кабина: приборы на доске, осмотр головой, штурвал за ручками', async () => {

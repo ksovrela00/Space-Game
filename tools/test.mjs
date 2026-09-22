@@ -46,6 +46,12 @@ import { buildStation, SLOT } from '../js/models/station.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
 import { buildCockpit, makeYoke, updateYoke, YOKE } from '../js/models/cockpit.js';
+import { qualityFor, fullscreenAvailable } from '../js/core/quality.js';
+import {
+  makeTouch, touchLayout, touchUpdate, touchApply, touchDrag, TOUCH,
+} from '../js/ui/touch.js';
+import { input } from '../js/core/input.js';
+import { readFileSync } from 'node:fs';
 import { Renderer } from '../js/render/renderer.js';
 import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
@@ -3703,6 +3709,212 @@ console.log('\n== кабина ==');
     ok(Math.abs(slow - fast) < YOKE.pitch * 0.05,
       `ход штурвала почти не зависит от частоты кадров: ${(slow * DEG).toFixed(1)}° ` +
       `при 12 Гц против ${(fast * DEG).toFixed(1)}° при 240 Гц`);
+  }
+}
+
+console.log('\n== телефон: профиль, джойстик, полный экран ==');
+{
+  // iPhone 14 Pro в горизонте: 852 x 393 точки CSS при плотности 3.
+  const phone = { touch: true, coarse: true, small: true, mobile: true, dpr: 3, w: 852, h: 393 };
+  const desk = { touch: false, coarse: false, small: false, mobile: false, dpr: 2, w: 1920, h: 1080 };
+  const qp = qualityFor(phone), qd = qualityFor(desk);
+
+  // ГЛАВНОЕ ЧИСЛО мобильной оптимизации — не «уровень графики», а
+  // площадь кадра: она входит в стоимость линейно и целиком.
+  {
+    const full = phone.w * phone.dpr * phone.h * phone.dpr;
+    const capped = phone.w * qp.maxDpr * phone.h * qp.maxDpr;
+    ok(qp.maxDpr <= 2 && capped < full * 0.5,
+      `плотность пикселей ограничена: ${(full / 1e6).toFixed(1)} Мп честного кадра против ` +
+      `${(capped / 1e6).toFixed(1)} Мп рисуемого (в ${(full / capped).toFixed(1)} раза меньше работы)`);
+  }
+
+  // Второе по весу — рельеф на пиксель: он считается для каждого
+  // закрашенного пикселя поверхности.
+  ok(qd.detail === true && qp.detail === false,
+    'мелкий рельеф на пиксель на телефоне выключен, на настольной машине остаётся');
+
+  // Бюджеты объектов урезаны, но не обнулены: играть надо во всё то же.
+  ok(qp.tileBudget < qd.tileBudget && qp.targetDraw < qd.targetDraw &&
+     qp.workers < qd.workers && qp.rocks < qd.rocks && qp.dust < qd.dust &&
+     qp.tileBudget > 0 && qp.rocks > 0 && qp.dust > 0,
+    `бюджеты урезаны: плиток ${qd.tileBudget}->${qp.tileBudget}, в кадре ` +
+    `${qd.targetDraw}->${qp.targetDraw}, потоков ${qd.workers}->${qp.workers}, ` +
+    `камней ${qd.rocks}->${qp.rocks}, пыли ${qd.dust}->${qp.dust}`);
+
+  // Приборы на 393 точках высоты обязаны ужаться, иначе панель занимает
+  // треть кадра.
+  ok(qp.hudScale < 0.85 && qp.hudScale >= 0.6 && qd.hudScale === 1,
+    `масштаб приборов на телефоне ${qp.hudScale.toFixed(2)}, на мониторе ${qd.hudScale}`);
+  ok(qp.touchUi === true && qd.touchUi === false,
+    'сенсорные органы появляются по грубому указателю, а не по ширине экрана');
+
+  // Настольный профиль обязан остаться ровно тем, чем был до появления
+  // профилей: иначе «оптимизация телефона» молча ухудшила бы игру на
+  // мониторе.
+  ok(qd.tileBudget === 440 && qd.targetDraw === 220 && qd.texelTol === 40 &&
+     qd.workers === 3 && qd.rocks === 520 && qd.dust === 150 && qd.stars === 950,
+    'настольный профиль не изменился ни в одном числе');
+
+  // --- раскладка органов -----------------------------------------------------
+  // Вырезы iPhone в горизонте: остров съедает полосу сбоку, снизу идёт
+  // полоса жеста «домой».
+  const insets = { left: 59, right: 0, top: 0, bottom: 21 };
+  const L = touchLayout(phone.w, phone.h, insets);
+
+  {
+    // Ничего не должно вылезать за экран и залезать под вырез.
+    const bad = [];
+    const check = (name, x, y, rx, ry = rx) => {
+      if (x - rx < insets.left || x + rx > phone.w - insets.right ||
+          y - ry < insets.top || y + ry > phone.h - insets.bottom) bad.push(name);
+    };
+    check('джойстик', L.stick.x, L.stick.y, L.stick.r);
+    check('тяга', L.thr.x, L.thr.y, L.thr.w / 2, L.thr.h / 2);
+    for (const b of L.buttons) check(b.id, b.x, b.y, b.r);
+    ok(bad.length === 0,
+      `все органы в безопасной области 852x393 с вырезом ${insets.left} слева` +
+      (bad.length ? ': ' + bad.join(', ') : ''));
+  }
+
+  {
+    // Кнопки не должны налезать друг на друга: палец шириной в сантиметр
+    // нажмёт обе.
+    let worst = Infinity, pair = '';
+    for (let i = 0; i < L.buttons.length; i++) {
+      for (let j = i + 1; j < L.buttons.length; j++) {
+        const a = L.buttons[i], b = L.buttons[j];
+        const gap = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+        if (gap < worst) { worst = gap; pair = `${a.id}/${b.id}`; }
+      }
+    }
+    ok(worst > 4, `кнопки не слипаются: минимальный зазор ${worst.toFixed(0)} точек (${pair})`);
+  }
+
+  // --- сам джойстик ----------------------------------------------------------
+  const ship = makeShip();
+  const press = (t, x, y, id = 1) => touchUpdate(t, [{ id, x, y }], L);
+
+  {
+    // Тянем ручку вниз — нос идёт вверх, как у штурвала: потянул на
+    // себя, пошёл вверх.
+    const t = makeTouch();
+    press(t, L.stick.x, L.stick.y);                  // палец лёг в центр
+    press(t, L.stick.x, L.stick.y + L.stick.r);      // и уехал вниз
+    touchApply(t, ship);
+    ok(input.pad.pitch > 0.8 && Math.abs(input.pad.yaw) < 0.01,
+      `ручка на себя — нос вверх: тангаж ${input.pad.pitch.toFixed(2)}, ` +
+      `рыскание ${input.pad.yaw.toFixed(2)}`);
+  }
+
+  {
+    // Вправо — рыскание вправо, и значение ПЛАВНОЕ: в этом весь смысл
+    // джойстика против клавиши.
+    const t = makeTouch();
+    press(t, L.stick.x, L.stick.y);
+    press(t, L.stick.x + L.stick.r * 0.5, L.stick.y);
+    touchApply(t, ship);
+    const half = input.pad.yaw;
+    press(t, L.stick.x + L.stick.r * 2, L.stick.y);  // за край поля
+    touchApply(t, ship);
+    ok(half > 0.3 && half < 0.6 && Math.abs(input.pad.yaw - 1) < 1e-6,
+      `ход ручки плавный: полпути даёт ${half.toFixed(2)}, за краем — ровно 1.00`);
+  }
+
+  {
+    // Мёртвая зона: палец никогда не стоит ровно в центре.
+    const t = makeTouch();
+    press(t, L.stick.x, L.stick.y);
+    press(t, L.stick.x + L.stick.r * 0.05, L.stick.y + L.stick.r * 0.05);
+    touchApply(t, ship);
+    ok(input.pad.pitch === 0 && input.pad.yaw === 0,
+      'дрожание пальца в центре ручки не сдвигает корабль');
+  }
+
+  {
+    // Отпустили — ручка вернулась в ноль сама.
+    const t = makeTouch();
+    press(t, L.stick.x, L.stick.y + L.stick.r);
+    touchUpdate(t, [], L);
+    touchApply(t, ship);
+    ok(input.pad.pitch === 0 && t.stick.id === null,
+      'отпущенная ручка возвращается в ноль');
+  }
+
+  {
+    // Ползунок тяги задаёт САМУ тягу: пальцем «подержать Shift» нельзя.
+    const t = makeTouch();
+    const top = L.thr.y - L.thr.h / 2;
+    press(t, L.thr.x, top + L.thr.h * 0.25);          // на три четверти вверх
+    touchApply(t, ship);
+    ok(Math.abs(ship.throttle - 0.75) < 0.02,
+      `ползунок задаёт тягу абсолютно: ${ship.throttle.toFixed(2)} на трёх четвертях хода`);
+  }
+
+  {
+    // Кнопка нажимает ТУ ЖЕ клавишу, что и с клавиатуры: игровая логика
+    // о касаниях не знает вовсе.
+    const t = makeTouch();
+    const gear = L.buttons.find((b) => b.id === 'gear');
+    press(t, gear.x, gear.y);
+    touchApply(t, ship);
+    const pressedOnce = input.pressed('KeyG');
+    input.endFrame();
+    // Держим палец дальше — второго нажатия быть не должно.
+    press(t, gear.x, gear.y);
+    touchApply(t, ship);
+    const again = input.pressed('KeyG');
+    input.endFrame();
+    ok(pressedOnce && !again,
+      'кнопка шасси срабатывает один раз на касание, а не каждый кадр удержания');
+  }
+
+  {
+    // Форсаж — на удержании: отпустил, и он кончился.
+    const t = makeTouch();
+    const boost = L.buttons.find((b) => b.id === 'boost');
+    press(t, boost.x, boost.y);
+    touchApply(t, ship);
+    const held = input.isDown('Space');
+    input.endFrame();
+    touchUpdate(t, [], L);
+    touchApply(t, ship);
+    const after = input.isDown('Space');
+    input.endFrame();
+    ok(held && !after, 'форсаж держится, пока палец на кнопке');
+  }
+
+  {
+    // Палец по свободному месту — это осмотр камерой, а не промах по
+    // кнопке.
+    const t = makeTouch();
+    press(t, phone.w / 2, phone.h / 2);
+    press(t, phone.w / 2 + 40, phone.h / 2);
+    const d = touchDrag(t);
+    ok(t.look.id !== null && Math.abs(d.x - 40) < 1e-6,
+      `свободное место ведёт камеру: сдвиг ${d.x.toFixed(0)} точек`);
+  }
+
+  // Полный экран: на iPhone его нет вовсе, и кнопку там показывать
+  // нельзя — она бы не работала.
+  ok(fullscreenAvailable(null) === false,
+    'без документа полного экрана нет — кнопка не рисуется');
+  ok(fullscreenAvailable({ documentElement: { requestFullscreen() {} } }) === true &&
+     fullscreenAvailable({ documentElement: {} }) === false,
+    'кнопка полного экрана появляется только там, где браузер его умеет');
+
+  // Кеш исходников. Игра — это ES-модули, импортирующие друг друга по
+  // относительным путям: версию в имени одного файла не поставить, а
+  // смесь нового и старого кода — худший из исходов, потому что такой
+  // версии не существовало никогда. Поэтому кеш выключен на сервере, и
+  // правило проверяется как всё остальное: файл легко потерять при
+  // переносе на другую машину.
+  {
+    const rules = readFileSync(new URL('../.htaccess', import.meta.url), 'utf8');
+    const js = /FilesMatch[^>]*js[^>]*>[\s\S]*?<\/FilesMatch>/i.exec(rules);
+    const body = js ? js[0] : '';
+    ok(/no-store/i.test(body) && /Header unset ETag/i.test(rules),
+      'исходники раздаются без кеша: no-store и без ETag — перезагрузка страницы берёт свежий код');
   }
 }
 

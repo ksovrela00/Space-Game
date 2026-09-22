@@ -22,6 +22,7 @@ import { faceDir } from './quadtree.js';
 import { cubeLookup } from './bake.js';
 import { terrainOf } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
+import { Q } from '../core/quality.js';
 
 export const ROCKS = {
   // Выше этой высоты камни не строятся: со двухсот метров камень в метр
@@ -43,7 +44,7 @@ export const ROCKS = {
   // приходится наравне с остальными.
   sizeMin: 0.0007,     // км — 70 см
   sizeMax: 0.0030,     // км — 3 м
-  max: 520,            // предел на поле: дальше растёт только цена
+  max: Q.rocks,        // предел на поле: дальше растёт только цена
   // Камней за один кадр. Каждый — это выборка рельефа, самая дорогая
   // функция в игре; собранное целиком поле стоило бы десять миллисекунд,
   // то есть заметный рывок при каждом переезде.

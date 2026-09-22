@@ -1,4 +1,5 @@
 // Создание и обслуживание контекста WebGL2.
+import { Q } from '../core/quality.js';
 
 export function createContext(canvas) {
   let gl = null;
@@ -37,7 +38,7 @@ export function rendererName(gl) {
  * Подгонка размера буфера под окно.
  * @returns true, если размер поменялся
  */
-export function resizeCanvas(gl, canvas, maxDpr = 2) {
+export function resizeCanvas(gl, canvas, maxDpr = Q.maxDpr) {
   const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
   const w = Math.max(1, Math.round(window.innerWidth * dpr));
   const h = Math.max(1, Math.round(window.innerHeight * dpr));

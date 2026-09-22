@@ -32,6 +32,13 @@ import { makeDust, updateDust } from './game/dust.js';
 import { makeFlow, updateFlow } from './game/flow.js';
 import { makeYoke, updateYoke, buildCockpit } from './models/cockpit.js';
 import {
+  Q, DEVICE, toggleFullscreen, fullscreenAvailable, isFullscreen as isFull,
+} from './core/quality.js';
+import {
+  makeTouch, touchLayout, touchUpdate, touchApply, touchDraw, touchDrag,
+  fullscreenButton, drawFullscreenButton,
+} from './ui/touch.js';
+import {
   toggleGear, updateGear, gearLabel, landingContext,
   startLanding, stopLanding, updateLandingComputer, checkTouchdown, bounceOff, settle,
   updateLandedPose, takeoff, landingReadout, landedInfo, LAND,
@@ -56,7 +63,7 @@ const TELEPORT_ALTS = [2000, 400, 100, 20, 3, 0.3, 0.05];
 
 const screenCanvas = document.getElementById('screen');
 const hudCanvas = document.getElementById('hud');
-const starfield = new Starfield(950, 0x51ee7);
+const starfield = new Starfield(Q.stars, 0x51ee7);
 
 // Камера одна на всех: по ней считает и 3D-сцена, и прицельные рамки HUD.
 const camera = new Camera();
@@ -109,6 +116,7 @@ const game = {
   dust: makeDust(),      // пыль из-под движков у самой земли
   flow: makeFlow(),      // пылинки за бортом: ими видно скорость и форсаж
   yoke: makeYoke(),      // положение штурвала в кабине (вид от 1-го лица)
+  touch: makeTouch(),    // сенсорные органы: джойстик, тяга, кнопки
   capture: null,         // тело, в чьём гравитационном захвате корабль
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   // Камера из-за спины со своей инерцией: она догоняет корабль, а не
@@ -910,13 +918,20 @@ function rotAround(v, axis, ang, out) {
 // отпущена — камера сама возвращается за спину.
 const LOOK = 0.0042;        // рад на пиксель
 const _drag = { x: 0, y: 0 };
+const _touchLook = { x: 0, y: 0 };
 function updateCamOrbit(dt) {
   const o = game.camOrbit;
   input.takeDrag(_drag);
   // Осматриваться можно и стоя на грунте: посадка больше не экран
   // поверх игры, а такое же состояние в кадре, как полёт.
   const canLook = game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED;
-  const look = input.mouse.right && canLook;
+  // Палец по свободному месту экрана крутит камеру так же, как правая
+  // кнопка мыши: отдельного жеста для этого заводить незачем.
+  if (Q.touchUi && canLook) {
+    touchDrag(game.touch, _touchLook);
+    _drag.x += _touchLook.x; _drag.y += _touchLook.y;
+  }
+  const look = (input.mouse.right || (Q.touchUi && game.touch.look.id !== null)) && canLook;
   // В кабине голова поворачивается на шее, а не облетает корабль:
   // назад — только через плечо (110°), вниз — до приборной доски.
   // Отсюда и разные пределы, а не одно «крутить как угодно».
@@ -1219,6 +1234,12 @@ function render() {
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
+  // Сенсорные органы поверх приборов, но только в полёте и на грунте:
+  // в меню и на карте они мешают, а делать нечего.
+  if (Q.touchUi && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
+    touchDraw(hud.ctx, game.touch, touchArea, game);
+  }
+  if (game.fsButton) drawFullscreenButton(hud.ctx, game.fsButton, isFull());
   drawDebug(hud, game, dbg);
 }
 
@@ -1233,6 +1254,14 @@ function frame(now) {
   last = now;
   if (dt > 0.25) dt = 0.25;      // после переключения таба не «телепортируемся»
   tickDebug(dbg, dt);
+
+  // Касания разбираются ДО управления: джойстик и кнопки должны попасть
+  // в тот же кадр, что и клавиши, иначе палец отстаёт от клавиатуры на
+  // кадр (на 60 Гц это заметно на посадке).
+  if (Q.touchUi) {
+    touchUpdate(game.touch, [...touchPoints.values()], touchArea);
+    touchApply(game.touch, ship);
+  }
 
   handleKeys(dt);
 
@@ -1298,8 +1327,53 @@ function devSpawn() {
   selectTarget(st);
 }
 
+// Активные касания: их держит браузер, но не отдаёт списком — только
+// событиями. Собираем сами, в точках CSS, и разбираем раз в кадр
+// (js/ui/touch.js): касание — это состояние, а не событие.
+const touchPoints = new Map();
+let touchArea = null;
+
+/**
+ * Вырезы экрана. У iPhone в горизонте остров съедает полосу с одной
+ * стороны, а снизу идёт полоса жеста «домой»: органы под ними просто не
+ * нажимаются. Размеры отдаёт сам браузер через env(safe-area-inset-*),
+ * поэтому читаем их с невидимой распорки в разметке, а не угадываем.
+ */
+function safeInsets() {
+  const el = document.getElementById('safe');
+  if (!el || typeof getComputedStyle !== 'function') return { left: 0, right: 0, top: 0, bottom: 0 };
+  const cs = getComputedStyle(el);
+  const px = (v) => Math.max(0, Math.round(parseFloat(v) || 0));
+  return {
+    left: px(cs.paddingLeft), right: px(cs.paddingRight),
+    top: px(cs.paddingTop), bottom: px(cs.paddingBottom),
+  };
+}
+
+function relayoutTouch() {
+  const w = window.innerWidth, h = window.innerHeight;
+  touchArea = touchLayout(w, h, safeInsets());
+  game.fsButton = fullscreenAvailable() ? fullscreenButton(w, safeInsets()) : null;
+}
+
+function attachTouch(target = window) {
+  const take = (e) => {
+    for (const t of e.changedTouches || []) {
+      if (e.type === 'touchend' || e.type === 'touchcancel') touchPoints.delete(t.identifier);
+      else touchPoints.set(t.identifier, { id: t.identifier, x: t.clientX, y: t.clientY });
+    }
+    // Прокрутка, зум двумя пальцами и «потяни, чтобы обновить» на
+    // странице, которая целиком занята игрой, — только помеха.
+    if (e.cancelable) e.preventDefault();
+  };
+  for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+    target.addEventListener(type, take, { passive: false });
+  }
+}
+
 function resizeAll() {
   hud.resize();
+  relayoutTouch();
   if (renderer) renderer.resize();
   if (scene) scene.resize();
 }
@@ -1307,6 +1381,15 @@ function resizeAll() {
 function boot() {
   input.attach(window);
   input.attachMouse(window);
+  attachTouch(window);
+  // Полный экран включается только из обработчика нажатия — так требует
+  // браузер. Поэтому кнопка слушает настоящий клик, а не разбирается в
+  // кадре вместе с остальным вводом.
+  window.addEventListener('click', (e) => {
+    const b = game.fsButton;
+    if (!b) return;
+    if (Math.hypot(e.clientX - b.x, e.clientY - b.y) <= b.r + 6) toggleFullscreen();
+  });
 
   // Файлы качаем сразу — сеть жеста не требует. А вот звуковой контекст
   // до жеста создавать нельзя: браузер поднимет его в состоянии
@@ -1342,6 +1425,17 @@ function boot() {
 
   const bootEl = document.getElementById('boot');
   const startBtn = document.getElementById('bootBtn');
+  // Полный экран — со стартового экрана: там есть настоящее нажатие,
+  // которого требует браузер, и это единственный момент, когда игрок
+  // заведомо смотрит на кнопку. На iPhone режима нет вовсе, поэтому
+  // кнопки там нет, а вместо неё — подсказка про «На экран Домой».
+  const fsBtn = document.getElementById('fsBtn');
+  if (fsBtn && fullscreenAvailable()) {
+    fsBtn.style.display = '';
+    fsBtn.addEventListener('click', () => toggleFullscreen());
+  }
+  const hint = document.getElementById('touchHint');
+  if (hint && Q.touchUi) hint.style.display = '';
   const start = () => {
     booted = true;
     wake();

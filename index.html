@@ -2,12 +2,27 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover — чтобы кадр шёл под вырезы экрана, а не в рамке;
+     отключённый зум — чтобы двойное касание на джойстике не увеличивало
+     страницу вместо управления кораблём. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- «На экран Домой» на iPhone: полноэкранного режима там нет вовсе
+     (Safari даёт его только видео), и это единственный способ убрать
+     адресную строку. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
 <title>ELITE :: Solar Trader</title>
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 <!-- 3D-сцена: WebGL2, а при его отсутствии — Canvas 2D -->
+<!-- Невидимая распорка: через неё читаются вырезы экрана
+     (env(safe-area-inset-*)), потому что из JS их иначе не спросить. -->
+<div id="safe"></div>
+
 <canvas id="screen"></canvas>
 <!-- Приборная панель отдельным прозрачным слоем поверх сцены -->
 <canvas id="hud"></canvas>
@@ -35,7 +50,12 @@
       нажать <b>B</b>. Привод калибруется три секунды и уходит в прыжок,
       выход — в 250 км над целью. Если планета перекрыла коридор, привод
       сам предложит обходную точку.</p>
+    <p class="sub" id="touchHint" style="display:none">На телефоне: слева джойстик —
+      ведёт нос, справа ползунок тяги, между ними кнопки. Палец по свободному
+      месту вертит камеру. Чтобы убрать адресную строку — «Поделиться» →
+      «На экран Домой».</p>
     <button class="btn" id="bootBtn">ВЗЛЁТ</button>
+    <button class="btn ghost" id="fsBtn" style="display:none">ВО ВЕСЬ ЭКРАН</button>
   </div>
 </div>
 

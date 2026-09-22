@@ -38,6 +38,7 @@ import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
 import { FLOW } from '../game/flow.js';
+import { Q } from '../core/quality.js';
 import { buildCockpit } from '../models/cockpit.js';
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
@@ -68,7 +69,7 @@ const MOTE_COLOR = new Float32Array([0.88, 0.91, 0.98]);
 // Четыре сотни на два километра — это крошка на каждые триста метров:
 // в кадре десятки черт. Считать их нечем и незачем: буфер статический,
 // на кадр приходится один вызов отрисовки.
-const MOTE_COUNT = 400;
+const MOTE_COUNT = Q.motes;
 // Единичный базис: тень уже посчитана в мировых осях, поворачивать её
 // нечем и незачем.
 const IDENTITY_BASIS = {
@@ -127,7 +128,10 @@ export class GlScene {
     // Мелкий рельеф на пиксель — основной вариант; если он не соберётся
     // на каком-то драйвере, сцена должна остаться рабочей, поэтому есть
     // запасной шейдер без детали.
-    this.detailOn = new URLSearchParams(
+    // Мелкий рельеф на пиксель — самая дорогая работа в кадре: она идёт
+    // на каждый закрашенный пиксель поверхности. На телефоне его нет по
+    // профилю (js/core/quality.js), и это главный выигрыш кадра.
+    this.detailOn = Q.detail && new URLSearchParams(
       typeof location !== 'undefined' ? location.search : '').get('detail') !== '0';
     if (this.detailOn) {
       try {
@@ -745,7 +749,7 @@ export class GlScene {
     gl.uniformMatrix4fv(this.pStars.loc('uProj'), false, this.proj);
     gl.uniformMatrix3fv(this.pStars.loc('uView'), false, m);
     gl.uniform1f(this.pStars.loc('uPointScale'),
-      Math.min(window.devicePixelRatio || 1, 2));
+      Math.min(window.devicePixelRatio || 1, Q.maxDpr));
     this.stars.draw();
     this.draws++;
 
