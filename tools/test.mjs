@@ -87,8 +87,14 @@ import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
 import { lookAlong } from '../js/core/basis.js';
 import { box, prismZ, loft } from '../js/models/geometry.js';
+import { L, setLang, getLang, hasEn, LANGS } from '../js/core/lang.js';
 
 const STEP = 1 / 60;
+// Проверки сверяют РУССКИЕ надписи — как и весь остальной набор
+// (tools/smoke.mjs). Английский путь проверяется отдельно, в разделе
+// «перевод»: там язык переключается и сверяется уже он.
+setLang('ru');
+
 let fails = 0;
 const ok = (cond, msg, extra = '') => {
   if (!cond) fails++;
@@ -4804,6 +4810,117 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   const vFast = exitVelocity(peer);
   ok(vFast.x === 0 && vFast.y === 0 && vFast.z === 0,
     'за пилотом, ушедшим в прыжок, не улетаем: ' + vFast.x + ' км/с');
+}
+
+// --- перевод ----------------------------------------------------------------
+//
+// Перевод разъезжается с игрой за неделю, если за ним не следить. Следит
+// эта проверка, и следит по исходникам: она читает сами файлы игры и
+// требует, чтобы КАЖДАЯ русская строка либо проходила через L(), либо
+// лежала в словаре. Поэтому новую надпись нельзя добавить молча — набор
+// упадёт и назовёт файл.
+{
+  console.log('\n== перевод ==');
+
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+
+  // Отладочный оверлей не переводится намеренно: это инструмент
+  // разработки, а не игры, и держать его в двух видах — работа без отдачи.
+  // Слой GL исключён целиком — там GLSL и сообщения драйверу; те его
+  // строки, что видит игрок, всё равно обёрнуты и переведены.
+  const SKIP = (p) => p.startsWith('js/gl/')
+    || ['js/core/lang.js', 'js/core/lang.en.js', 'js/core/quality.js',
+      'js/core/sound.js', 'js/game/audio.js', 'js/ui/debug.js'].includes(p);
+
+  const walk = (dir, out = []) => {
+    for (const nm of readdirSync(dir)) {
+      const p = join(dir, nm).replace(/\\/g, '/');
+      if (statSync(p).isDirectory()) walk(p, out);
+      else if (p.endsWith('.js') && !SKIP(p)) out.push(p);
+    }
+    return out;
+  };
+
+  /** Границы строковых литералов: строки, комментарии и шаблоны различаются. */
+  const literals = (src) => {
+    const out = [];
+    let i = 0;
+    while (i < src.length) {
+      const c = src[i];
+      if (c === '/' && src[i + 1] === '/') { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j + 1; continue; }
+      if (c === '/' && src[i + 1] === '*') { const j = src.indexOf('*/', i + 2); i = j < 0 ? src.length : j + 2; continue; }
+      if (c === "'" || c === '"' || c === '`') {
+        let j = i + 1;
+        let depth = 0;
+        while (j < src.length) {
+          if (src[j] === '\\') { j += 2; continue; }
+          if (c === '`' && src[j] === '$' && src[j + 1] === '{') { depth++; j += 2; continue; }
+          if (c === '`' && src[j] === '}' && depth) { depth--; j++; continue; }
+          if (src[j] === c && !depth) break;
+          if (c !== '`' && src[j] === '\n') break;
+          j++;
+        }
+        out.push({ a: i, b: j + 1, q: c, body: src.slice(i + 1, j) });
+        i = j + 1;
+        continue;
+      }
+      i++;
+    }
+    return out;
+  };
+
+  const RU = /[А-Яа-яЁё]/;
+  // Файлы, где русский лежит ДАННЫМИ, а не надписью: каталог тел и звёзд,
+  // оружие, стартовый набор пилота и раскладка сенсорных кнопок (она
+  // считается один раз, поэтому подпись переводится при отрисовке).
+  const DATA = ['js/game/bodyinfo.js', 'js/game/galaxy.js', 'js/game/player.js',
+    'js/game/weapons.js', 'js/ui/touch.js'];
+  const files = walk('js');
+  const loose = [];
+  const noTranslation = [];
+
+  for (const f of files) {
+    const src = readFileSync(f, 'utf8');
+    for (const lit of literals(src)) {
+      if (!RU.test(lit.body)) continue;
+      const before = src.slice(Math.max(0, lit.a - 2), lit.a);
+      const wrapped = before === 'L(';
+      // Каталожные названия (ru: '...') — это КЛЮЧИ: они лежат по-русски и
+      // переводятся при показе, поэтому обёртки у них нет, а перевод обязан
+      // быть.
+      // Каталог — это ДАННЫЕ, а не надписи прибора: названия типов тел,
+      // оружия, товаров и лента стартового набора лежат по-русски и
+      // переводятся при показе (L(c.name) и подобное). Обёртки у них нет и
+      // быть не должно — иначе перевод застыл бы на том языке, который был
+      // при загрузке модуля. Перевод при этом обязателен и проверяется.
+      const isCatalog = DATA.includes(f);
+      if (wrapped || isCatalog) {
+        if (!hasEn(lit.body) && lit.q !== '`') noTranslation.push(f + ': ' + lit.body.slice(0, 40));
+        continue;
+      }
+      if (lit.q === '`') continue;          // шаблоны разбираются глазами
+      loose.push(f + ': ' + lit.body.slice(0, 40));
+    }
+  }
+
+  ok(loose.length === 0,
+    'все русские надписи проходят через перевод'
+    + (loose.length ? ': ' + loose.length + ' мимо, первая — ' + loose[0] : ''));
+  ok(noTranslation.length === 0,
+    'у каждой надписи есть английский'
+    + (noTranslation.length ? ': нет ' + noTranslation.length + ', первая — ' + noTranslation[0] : ''));
+
+  // Сам переключатель.
+  setLang('en');
+  ok(L('КОРПУС') === 'HULL' && L('ЩИТ') === 'SHIELD', 'по-английски приборы подписаны иначе');
+  ok(getLang() === 'en' && !!LANGS.ru && !!LANGS.en, 'язык переключился, оба в списке');
+  ok(L('такой строки нет в словаре') === 'такой строки нет в словаре',
+    'без перевода возвращается русский: пустое место на приборе хуже');
+  setLang('ru');
+  ok(L('КОРПУС') === 'КОРПУС', 'по-русски строка возвращается как есть');
+  setLang('нет такого языка');
+  ok(getLang() === 'ru', 'неизвестный язык не принимается');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

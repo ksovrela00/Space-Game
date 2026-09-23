@@ -15,6 +15,7 @@
 
 import { token } from './api.js';
 import { smoothPing } from './quality.js';
+import { L } from '../core/lang.js';
 
 /** Порт сокет-сервера (server/ws/server.php). */
 export const PORT = 3893;
@@ -108,7 +109,7 @@ function open() {
     ws = new WebSocket(url());
   } catch (e) {
     net.state = 'down';
-    net.error = 'сокет не открылся';
+    net.error = L('сокет не открылся');
     retry();
     return;
   }
@@ -183,7 +184,7 @@ function open() {
     retry();
   };
 
-  ws.onerror = () => { net.error = 'обрыв связи'; };
+  ws.onerror = () => { net.error = L('обрыв связи'); };
 }
 
 function retry() {

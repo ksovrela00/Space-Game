@@ -36,6 +36,7 @@ import { shipShadow } from '../game/shadow.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
 import { ENTRY } from '../game/entry.js';
+import { L } from '../core/lang.js';
 import { SHIELD_AXES } from '../models/ships.js';
 
 import {
@@ -165,7 +166,7 @@ export class GlScene {
     this.tris = 0;
     this.draws = 0;
     if (!this.ok) {
-      this.error = 'WebGL2 недоступен';
+      this.error = L('WebGL2 недоступен');
       return;
     }
     try {
@@ -379,7 +380,7 @@ export class GlScene {
     this.logFC = logDepthCoef(FAR);
 
     watchContextLoss(this.canvas,
-      () => { this.ok = false; this.error = 'контекст WebGL потерян'; },
+      () => { this.ok = false; this.error = L('контекст WebGL потерян'); },
       () => { this.jsMeshes = new WeakMap(); this.init(); this.ok = true; });
   }
 

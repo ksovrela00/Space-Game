@@ -16,6 +16,7 @@
 
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { nearestBody } from './world.js';
+import { L } from '../core/lang.js';
 
 export function makeNav(world) {
   const nav = { list: [], index: 0 };
@@ -146,11 +147,11 @@ export function targetById(world, id) {
 
 export function targetLabel(t) {
   if (!t) return '—';
-  if (t.isPeer) return t.name || 'ПИЛОТ';
+  if (t.isPeer) return t.name || L('ПИЛОТ');
   if (t.isStation) return t.name;
   if (t.isMarker) return t.name;
-  if (t.kind === 'star') return t.name + ' (звезда)';
-  if (t.kind === 'moon') return t.name + ' (луна)';
+  if (t.kind === 'star') return t.name + L(' (звезда)');
+  if (t.kind === 'moon') return t.name + L(' (луна)');
   return t.name;
 }
 

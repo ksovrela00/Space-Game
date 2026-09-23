@@ -18,6 +18,7 @@ import { setGravity } from './gravity.js';
 import { HOME_SEED, HOME_CLASS, HAB_HOME, systemBySeed } from './galaxy.js';
 import { pressureOf } from './bodyinfo.js';
 import { STATION_R } from '../models/station.js';
+import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
 
@@ -219,7 +220,7 @@ function makeMarkers(b) {
       out.push({
         id: 'm' + b.id + '-' + n,
         kind: 'marker',
-        name: b.name + ' · ОМ-' + n,
+        name: b.name + L(' · ОМ-') + n,
         isMarker: true,
         body: b,
         radius: 0,
@@ -364,15 +365,15 @@ export function planLayout(rng, hab, starR = 62000) {
   out[best].station = true;
   out[best].home = true;
   let ports = 1;
-  for (const L of out) {
+  for (const row of out) {
     if (ports >= STATION_MAX) break;
-    if (!L.station && L.kind !== 'lava' && rng.chance(0.28)) { L.station = true; ports++; }
+    if (!row.station && row.kind !== 'lava' && rng.chance(0.28)) { row.station = true; ports++; }
   }
 
   // Садиться можно только на безвоздушное. Система, где не на что сесть,
   // формально жива, но делать в ней нечего — поэтому если ни одного
   // такого тела не вышло, ближайшему газовому гиганту добавляется луна.
-  const landable = out.some((L) => L.kind === 'lava' || L.kind === 'rock' || L.moons > 0);
+  const landable = out.some((r) => r.kind === 'lava' || r.kind === 'rock' || r.moons > 0);
   if (!landable) out[out.length - 1].moons = 1;
   return out;
 }
@@ -464,21 +465,21 @@ export function makeSystem(spec = HOME_SEED) {
   const planets = [];
   let home = null;
 
-  layout.forEach((L, i) => {
+  layout.forEach((row, i) => {
     const plane = orbitPlane(rng);
     const p = makeBody(rng, {
-      kind: L.kind,
+      kind: row.kind,
       name: `${systemName} ${ROMAN[i]}`,
-      radius: L.r,
+      radius: row.r,
       // Период суток привязан к радиусу: скорость поверхности выходит
       // 0.1–0.3 км/с, как у настоящих планет. Раньше периоды были в сотни
       // раз короче — вращение красиво читалось с орбиты, но поверхность
       // при этом «ехала» со скоростью в десятки км/с, и сесть на неё было
       // физически невозможно (см. js/game/landing.js).
-      spinPeriod: L.r * rng.range(20, 60),
+      spinPeriod: row.r * rng.range(20, 60),
       parent: star,
       orbit: {
-        radius: L.orbit,
+        radius: row.orbit,
         // Год — по третьему закону Кеплера от радиуса орбиты (T ∝ r^1.5).
         // Раньше множитель брался из НОМЕРА в списке: `range(1.5e9, 4.0e9)
         // * (1 + i * 0.6)`. Это ломалось двумя способами. Вставь планету
@@ -488,23 +489,23 @@ export function makeSystem(spec = HOME_SEED) {
         // (620 тыс. км) обходила звезду за 153 года, а Lave III
         // (1.02 млн км) — за 147, то есть ближняя планета отставала от
         // дальней. Панель тела честно показывала эту невозможную пару.
-        period: KEPLER * Math.pow(L.orbit, 1.5) * rng.range(0.9, 1.1),
+        period: KEPLER * Math.pow(row.orbit, 1.5) * rng.range(0.9, 1.1),
         phase: rng.range(0, TAU),
         A: plane.A,
         B: plane.B,
       },
-      rings: L.rings ? {
+      rings: row.rings ? {
         inner: 1.4, outer: 2.3,
         color: jitter(rng, [206, 186, 150], 10),
       } : null,
     });
 
-    if (L.station) {
+    if (row.station) {
       p.station = makeStation(rng, p, `${makeName(rng)} Station`);
       p.station.planetName = p.name;
     }
 
-    for (let m = 0; m < (L.moons || 0); m++) {
+    for (let m = 0; m < (row.moons || 0); m++) {
       const mplane = orbitPlane(rng);
       const mr = p.radius * rng.range(0.16, 0.30);
       const moon = makeBody(rng, {
@@ -524,7 +525,7 @@ export function makeSystem(spec = HOME_SEED) {
       p.moons.push(moon);
     }
 
-    if (L.home) home = p;
+    if (row.home) home = p;
     planets.push(p);
   });
 

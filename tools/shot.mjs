@@ -239,7 +239,12 @@ globalThis.location = {
   // кадров, и искать причину пришлось в другом конце проекта.
   replace(url) { throw new Error('игра ушла со страницы на ' + url); },
 };
-globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+// Язык проверок — русский: в них сверяются НАДПИСИ, и держать их в двух
+// видах значило бы писать каждую проверку дважды. Английский путь
+// проверяется отдельным шагом, который язык переключает сам.
+globalThis.localStorage = {
+  getItem: (k) => (k === 'solar_lang' ? 'ru' : null), setItem() {}, removeItem() {},
+};
 let rafCb = null, nowMs = 0;
 globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
 globalThis.performance = { now: () => nowMs };

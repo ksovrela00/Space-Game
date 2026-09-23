@@ -118,7 +118,10 @@ globalThis.location = {
   replace(url) { this.replaced = url; },
   replaced: null,
 };
-const store = {};
+// Язык проверок — русский: в них сверяются НАДПИСИ, и держать их в двух
+// видах значило бы писать каждую проверку дважды. Английский путь
+// проверяется отдельным шагом, который язык переключает сам.
+const store = { solar_lang: 'ru' };
 globalThis.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
@@ -205,6 +208,7 @@ const { SHIP } = await import('../js/game/ship.js');
 const { fmtCrowns } = await import('../js/ui/menu.js');
 const { addMission } = await import('../js/game/player.js');
 const { net } = await import('../js/net/socket.js');
+const { setLang } = await import('../js/core/lang.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -244,6 +248,69 @@ await step('станция в кадре, полигоны рисуются', ()
   frames(10);
   if (!(game.renderStats.polys > 0)) throw new Error('нарисовано 0 полигонов рядом со станцией');
   if (!(calls.fill > 100)) throw new Error('слишком мало заливок: ' + calls.fill);
+});
+
+// Английский язык целиком: приборы, меню, карта и справка. Проверка
+// смотрит не только на то, что нужные слова появились, но и на то, что
+// РУССКИХ не осталось, — наполовину переведённый экран выглядит хуже
+// нетронутого.
+await step('английский язык: приборы, меню, карта, справка', () => {
+  const CYR = /[А-Яа-яЁё]/;
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  // Сообщения на экране написаны на прежнем языке — они и должны такими
+  // остаться: переписывать сказанное задним числом незачем. Для проверки
+  // их просто убираем.
+  game.state.messages.length = 0;
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+
+  const shown = (n = 3) => {
+    texts = [];
+    frames(n);
+    const list = texts.map((t) => t.s);
+    texts = null;
+    return list;
+  };
+
+  setLang('en');
+  const hud = shown();
+  if (!hud.some((s) => s.indexOf('THRUST') >= 0)) throw new Error('в приборах нет THRUST');
+  if (!hud.some((s) => s.indexOf('HULL') >= 0)) throw new Error('в приборах нет HULL');
+  const ruHud = hud.filter((s) => CYR.test(s));
+  if (ruHud.length) throw new Error('в приборах осталось русское: ' + ruHud.slice(0, 3).join(' | '));
+
+  // Меню пилота.
+  key('KeyI');
+  const menu = shown();
+  if (!menu.some((s) => s.indexOf('PILOT MENU') >= 0)) throw new Error('меню не переведено');
+  if (!menu.some((s) => s.indexOf('CARGO') >= 0)) throw new Error('разделы меню не переведены');
+  const ruMenu = menu.filter((s) => CYR.test(s));
+  if (ruMenu.length) throw new Error('в меню осталось русское: ' + ruMenu.slice(0, 3).join(' | '));
+  key('KeyI');
+  frames(2);
+
+  // Карта системы: там же и карточка объекта, собранная из каталога.
+  key('KeyM');
+  const map = shown();
+  if (!map.some((s) => s.indexOf('SYSTEM MAP') >= 0)) throw new Error('карта не переведена');
+  const ruMap = map.filter((s) => CYR.test(s));
+  if (ruMap.length) throw new Error('на карте осталось русское: ' + ruMap.slice(0, 3).join(' | '));
+  key('KeyM');
+  frames(2);
+
+  // Справка — это HTML поверх игры, и её текст надо смотреть в разметке.
+  key('KeyH');
+  frames(3);
+  const help = nodes.panel.innerHTML;
+  key('KeyH');
+  frames(3);
+  if (help.indexOf('CONTROLS') < 0) throw new Error('справка не переведена');
+  if (CYR.test(help.replace(/&[a-z]+;/g, ''))) {
+    throw new Error('в справке осталось русское: '
+      + (help.match(/[^<>]*[А-Яа-яЁё][^<>]*/) || [''])[0].slice(0, 60));
+  }
+
+  setLang('ru');
+  frames(2);
 });
 
 await step('ручное управление: тяга, рыскание, крен, тангаж', () => {

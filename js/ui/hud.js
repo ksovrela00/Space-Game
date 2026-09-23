@@ -14,6 +14,7 @@ import { altitudeOf, worldPoint } from '../game/surface.js';
 import { dirToWorld } from '../core/basis.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, PEER } from './theme.js';
 import { Q } from '../core/quality.js';
+import { L, numLocale } from '../core/lang.js';
 import {
   engineScreen, targetScreen, scopeScreen, commsScreen, systemsScreen,
 } from './panels.js';
@@ -49,28 +50,28 @@ const _p2 = { x: 0, y: 0 };
 
 export const fmtDist = (km) => {
   if (!isFinite(km)) return '—';
-  if (km < 1) return (km * 1000).toFixed(0) + ' м';
-  if (km < 1000) return km.toFixed(1) + ' км';
-  if (km < 1e6) return Math.round(km).toLocaleString('ru-RU') + ' км';
-  return (km / 1e6).toFixed(2) + ' млн км';
+  if (km < 1) return (km * 1000).toFixed(0) + L(' м');
+  if (km < 1000) return km.toFixed(1) + L(' км');
+  if (km < 1e6) return Math.round(km).toLocaleString(numLocale()) + L(' км');
+  return (km / 1e6).toFixed(2) + L(' млн км');
 };
 
 export const fmtTime = (s) => {
   if (!isFinite(s)) return '—';
-  if (s < 90) return Math.ceil(s) + ' с';
+  if (s < 90) return Math.ceil(s) + L(' с');
   // Секунды округляются ДО деления на минуты, иначе на 29 мин 59.6 с
   // выходит «29 мин 60 с»: минуты берутся от неокруглённого времени, а
   // остаток округляется до полной минуты. Поймано на сроке задания.
   const total = Math.round(s);
   const m = Math.floor(total / 60);
-  if (m < 60) return m + ' мин ' + (total - m * 60) + ' с';
-  return Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
+  if (m < 60) return m + L(' мин ') + (total - m * 60) + L(' с');
+  return Math.floor(m / 60) + L(' ч ') + (m % 60) + L(' мин');
 };
 
 export const fmtSpeed = (kms) => {
-  if (kms < 10) return kms.toFixed(2) + ' км/с';
-  if (kms < 1000) return kms.toFixed(0) + ' км/с';
-  return (kms / 1000).toFixed(1) + ' тыс. км/с';
+  if (kms < 10) return kms.toFixed(2) + L(' км/с');
+  if (kms < 1000) return kms.toFixed(0) + L(' км/с');
+  return (kms / 1000).toFixed(1) + L(' тыс. км/с');
 };
 
 const panel = (ctx, x, y, w, h) => {
@@ -142,7 +143,7 @@ export function drawHud(r, game) {
     ctx.textAlign = 'center';
     ctx.font = '13px Consolas, monospace';
     ctx.fillStyle = RED;
-    ctx.fillText('БЕЗ УПРАВЛЕНИЯ', w / 2, h / 2 + 56);
+    ctx.fillText(L('БЕЗ УПРАВЛЕНИЯ'), w / 2, h / 2 + 56);
   }
   // Все цели видны сразу — выбирать их наведением можно, только если
   // видно, куда наводиться. Выбранная рисуется поверх остальных своей
@@ -279,17 +280,17 @@ function drawWarpPanel(ctx, w, h, warp, state) {
   ctx.textAlign = 'center';
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = '#c9a8ff';
-  ctx.fillText('ВАРП · ' + (warp.from ? warp.from.name.toUpperCase() : '—') +
+  ctx.fillText(L('ВАРП · ') + (warp.from ? warp.from.name.toUpperCase() : '—') +
     ' → ' + (warp.to ? warp.to.name.toUpperCase() : '—'), cx, 40);
 
   const left = Math.max(0, warp.total - warp.t);
   ctx.font = '30px Consolas, monospace';
   ctx.fillStyle = '#e8dcff';
-  ctx.fillText(left.toFixed(1) + ' С', cx, h - 96);
+  ctx.fillText(left.toFixed(1) + L(' С'), cx, h - 96);
 
   ctx.font = '12px Consolas, monospace';
   ctx.fillStyle = AMBER;
-  ctx.fillText(warpDistance(warp).toFixed(1) + ' СВЕТОВЫХ ЛЕТ', cx, h - 72);
+  ctx.fillText(warpDistance(warp).toFixed(1) + L(' СВЕТОВЫХ ЛЕТ'), cx, h - 72);
 
   const bw = clamp(w * 0.25, 160, 380);
   bar(ctx, cx - bw / 2, h - 60, bw, 5,
@@ -299,7 +300,7 @@ function drawWarpPanel(ctx, w, h, warp, state) {
   // сказать прямо: иначе полминуты выглядят как зависание.
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = warp.handed ? GREEN : 'rgba(201,168,255,0.75)';
-  ctx.fillText(warp.handed ? 'СИСТЕМА ЗАГРУЖЕНА' : 'ВЫГРУЗКА СИСТЕМЫ', cx, h - 40);
+  ctx.fillText(warp.handed ? L('СИСТЕМА ЗАГРУЖЕНА') : L('ВЫГРУЗКА СИСТЕМЫ'), cx, h - 40);
 
   // Сообщения в тоннеле нужны: ими говорится о смене системы.
   ctx.textAlign = 'left';
@@ -337,14 +338,14 @@ function drawWarpAim(ctx, cam, game) {
   // доворачивать.
   if (p.back) {
     let dx = cx - p.x, dy = cy - p.y;
-    let L = Math.hypot(dx, dy);
+    let len2d = Math.hypot(dx, dy);
     // Цель РОВНО за спиной: зеркальная точка приходится в самую середину,
     // и направления доворота из неё не вывести — оно любое. Тогда отметка
     // ставится вверх: «разворачивайся», а куда именно, неважно.
-    if (L < 1e-3) { dx = 0; dy = -1; L = 1; }
+    if (len2d < 1e-3) { dx = 0; dy = -1; len2d = 1; }
     const R = Math.min(cam.w, cam.h) * 0.40;
-    x = cx + (dx / L) * R;
-    y = cy + (dy / L) * R;
+    x = cx + (dx / len2d) * R;
+    y = cy + (dy / len2d) * R;
   }
   const col = warp.aligned ? GREEN : '#c9a8ff';
 
@@ -366,7 +367,7 @@ function drawWarpAim(ctx, cam, game) {
   ctx.font = '10px Consolas, monospace';
   ctx.fillStyle = col;
   ctx.textAlign = 'center';
-  ctx.fillText(warp.to ? warp.to.name.toUpperCase() : 'ВАРП', x, y - 22);
+  ctx.fillText(warp.to ? warp.to.name.toUpperCase() : L('ВАРП'), x, y - 22);
   ctx.restore();
 
   ctx.textAlign = 'center';
@@ -376,8 +377,8 @@ function drawWarpAim(ctx, cam, game) {
   // «почти навёлся» и «ровно наоборот» выглядят на экране одинаково.
   const miss = offWarpAxis(game.ship, warp.from, warp.to) * 57.2958;
   ctx.fillText(warp.aligned
-    ? 'ВАРП: РАСКРУТКА'
-    : 'ВАРП: СОВМЕСТИ НОС С ОТМЕТКОЙ · МИМО ' + miss.toFixed(0) + '°',
+    ? L('ВАРП: РАСКРУТКА')
+    : L('ВАРП: СОВМЕСТИ НОС С ОТМЕТКОЙ · МИМО ') + miss.toFixed(0) + '°',
     cam.w / 2, cam.h - 118);
   const bw = clamp(cam.w * 0.2, 140, 300);
   bar(ctx, cam.w / 2 - bw / 2, cam.h - 112, bw, 6, warp.calib, col);
@@ -401,7 +402,7 @@ function drawJumpPanel(ctx, w, h, q, state) {
 
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = CY;
-  ctx.fillText('КВАНТОВЫЙ ПРЫЖОК · ' + (q.target ? q.target.name : '—'), cx, 40);
+  ctx.fillText(L('КВАНТОВЫЙ ПРЫЖОК · ') + (q.target ? q.target.name : '—'), cx, 40);
 
   ctx.font = '28px Consolas, monospace';
   ctx.fillStyle = '#d8f2ff';
@@ -418,7 +419,7 @@ function drawJumpPanel(ctx, w, h, q, state) {
 
   ctx.font = '10px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('B — СОРВАТЬ ПРЫЖОК', cx, h - 40);
+  ctx.fillText(L('B — СОРВАТЬ ПРЫЖОК'), cx, h - 40);
 
   // Сообщения в прыжке всё же нужны: ими говорится о срыве.
   ctx.textAlign = 'left';
@@ -451,7 +452,7 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
   const { ship } = game;
   const b = game.capture;
   const zone = game.zone;
-  const L = game.landInfo;
+  const li = game.landInfo;
 
   const BW = clamp(w * 0.10, 120, 220);
   const BH = clamp(h * 0.13, 92, 160);
@@ -494,21 +495,21 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
   // Вертикальная и боковая скорость относительно грунта: у поверхности
   // это главные числа, по ним же проверяется касание.
   let vUp = null, hSp = null;
-  if (L) { vUp = L.vspeed; hSp = L.hspeed; } else if (zone) {
+  if (li) { vUp = li.vspeed; hSp = li.hspeed; } else if (zone) {
     vUp = dot(zone.relVel, zone.upWorld);
     const hx = zone.relVel.x - zone.upWorld.x * vUp;
     const hy = zone.relVel.y - zone.upWorld.y * vUp;
     const hz = zone.relVel.z - zone.upWorld.z * vUp;
     hSp = Math.hypot(hx, hy, hz);
   }
-  const ms = (v) => (v === null ? '—' : (v * 1000).toFixed(0) + ' м/с');
+  const ms = (v) => (v === null ? '—' : (v * 1000).toFixed(0) + L(' м/с'));
 
-  stat(left, rowY[0], 'left', 'СКОРОСТЬ', fmtSpeed(ship.speed), '#d8f2ff', 16);
-  stat(right, rowY[0], 'right', 'ВЫСОТА', fmtDist(Math.max(0, alt)), '#d8f2ff', 16);
-  stat(left, rowY[1], 'left', 'ВЕРТ', ms(vUp), L ? (L.vspeedOk ? GREEN : RED) : null, 13);
-  stat(right, rowY[1], 'right', 'ДО ЦЕЛИ',
+  stat(left, rowY[0], 'left', L('СКОРОСТЬ'), fmtSpeed(ship.speed), '#d8f2ff', 16);
+  stat(right, rowY[0], 'right', L('ВЫСОТА'), fmtDist(Math.max(0, alt)), '#d8f2ff', 16);
+  stat(left, rowY[1], 'left', L('ВЕРТ'), ms(vUp), li ? (li.vspeedOk ? GREEN : RED) : null, 13);
+  stat(right, rowY[1], 'right', L('ДО ЦЕЛИ'),
     game.info ? fmtDist(game.info.gap) : '—', AMBER, 13);
-  stat(left, rowY[2], 'left', 'БОК', ms(hSp), L ? (L.hspeedOk ? GREEN : RED) : null, 13);
+  stat(left, rowY[2], 'left', L('БОК'), ms(hSp), li ? (li.hspeedOk ? GREEN : RED) : null, 13);
   stat(right, rowY[2], 'right', 'ETA', game.info ? fmtTime(game.info.eta) : '—', '#9fd9ff', 13);
 
   // Гравитация — вертикальной шкалой справа от рамки: она про
@@ -532,23 +533,23 @@ function drawApproachPanel(ctx, cx, cy, w, h, game) {
   ctx.textAlign = 'center';
   ctx.font = '9px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('ТЯЖЕСТЬ', gx, gy0 - 8);
+  ctx.fillText(L('ТЯЖЕСТЬ'), gx, gy0 - 8);
   ctx.fillStyle = AMBER;
-  ctx.fillText('ЗАХВАТ · ' + b.name.toUpperCase().slice(0, 14), gx, gy1 + 16);
+  ctx.fillText(L('ЗАХВАТ · ') + b.name.toUpperCase().slice(0, 14), gx, gy1 + 16);
   ctx.font = '12px Consolas, monospace';
   ctx.fillStyle = '#d8f2ff';
-  ctx.fillText(gHere.toFixed(2) + ' м/с²', gx, gy1 + 32);
+  ctx.fillText(gHere.toFixed(2) + L(' м/с²'), gx, gy1 + 32);
   ctx.font = '9px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('у грунта ' + b.g0.toFixed(1), gx, gy1 + 45);
+  ctx.fillText(L('у грунта ') + b.g0.toFixed(1), gx, gy1 + 45);
 
   // Посадочные условия — теми же цветами, что и скорости выше: зелёное
   // значит «в допуске касания».
-  if (L) {
+  if (li) {
     const chips = [
-      ['ШАССИ', L.gearOk ? 'ГОТОВО' : 'УБРАНО', L.gearOk],
-      ['НАКЛОН', (Math.acos(clamp(L.tilt, -1, 1)) * 57.3).toFixed(0) + '°', L.tiltOk],
-      ['УКЛОН', (L.slope * 57.3).toFixed(0) + '°', L.slopeOk],
+      [L('ШАССИ'), li.gearOk ? L('ГОТОВО') : L('УБРАНО'), li.gearOk],
+      [L('НАКЛОН'), (Math.acos(clamp(li.tilt, -1, 1)) * 57.3).toFixed(0) + '°', li.tiltOk],
+      [L('УКЛОН'), (li.slope * 57.3).toFixed(0) + '°', li.slopeOk],
     ];
     const step = (right - left) / chips.length;
     ctx.font = '9px Consolas, monospace';
@@ -690,8 +691,8 @@ function onPanel(ctx, cam, ship, slot, bw, bh, draw) {
     // z снизу (0.02), рассчитанная на длину 1. Точка доски — это метры,
     // то есть тысячные километра, и без нормировки подпорка съела бы всю
     // перспективу, схлопнув приборы в точку у центра кадра.
-    const L = Math.hypot(_pw.x, _pw.y, _pw.z) || 1;
-    return projectDir(cam, _pw.x / L, _pw.y / L, _pw.z / L, out);
+    const ln = Math.hypot(_pw.x, _pw.y, _pw.z) || 1;
+    return projectDir(cam, _pw.x / ln, _pw.y / ln, _pw.z / ln, out);
   };
   const c = put(0, 0, _p0);
   if (c.back) return false;
@@ -722,11 +723,11 @@ function drawThrustBlock(ctx, px, py, game, approach) {
   ctx.textAlign = 'left';
   const back = ship.throttle < -0.001;
   ctx.fillStyle = back ? AMBER : CY;
-  ctx.fillText(back ? 'ТЯГА НАЗАД' : 'ТЯГА', px + 10, py + 18);
+  ctx.fillText(back ? L('ТЯГА НАЗАД') : L('ТЯГА'), px + 10, py + 18);
   bar(ctx, px + 10, py + 24, 112, 8, Math.abs(ship.throttle), back ? AMBER : CY);
   if (!approach) {
     ctx.fillStyle = CY;
-    ctx.fillText('СКОРОСТЬ', px + 10, py + 52);
+    ctx.fillText(L('СКОРОСТЬ'), px + 10, py + 52);
     ctx.font = '15px Consolas, monospace';
     ctx.fillStyle = '#d8f2ff';
     ctx.fillText(fmtSpeed(ship.speed), px + 10, py + 70);
@@ -737,18 +738,18 @@ function drawThrustBlock(ctx, px, py, game, approach) {
   const boostY = approach ? py + 48 : py + 88;
   ctx.fillStyle = ship.boosting ? AMBER
     : (ship.boostLock ? RED : (ship.boost > 0.999 ? CY : CY_DIM));
-  ctx.fillText('ФОРСАЖ', px + 10, boostY);
+  ctx.fillText(L('ФОРСАЖ'), px + 10, boostY);
   bar(ctx, px + 58, boostY - 7, 64, 7, ship.boost,
     ship.boosting ? AMBER : (ship.boostLock ? RED : CY));
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('КОРПУС', px + 10, boostY + 14);
+  ctx.fillText(L('КОРПУС'), px + 10, boostY + 14);
   bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
     ship.hull > 40 ? GREEN : RED);
   // Щит — своей строкой и своим цветом: он и восстанавливается сам, и
   // тратится первым, поэтому смотреть на него надо отдельно от корпуса.
   if (SHIP.maxShield > 0) {
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('ЩИТ', px + 10, boostY + 28);
+    ctx.fillText(L('ЩИТ'), px + 10, boostY + 28);
     bar(ctx, px + 58, boostY + 21, 64, 7, ship.shield / SHIP.maxShield, CY);
   }
 
@@ -769,7 +770,7 @@ function drawTargetBlock(ctx, tx, ty, game, approach, target, q) {
   ctx.font = '10px Consolas, monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('ЦЕЛЬ', tx + 10, ty + 18);
+  ctx.fillText(L('ЦЕЛЬ'), tx + 10, ty + 18);
   ctx.font = '13px Consolas, monospace';
   ctx.fillStyle = AMBER;
   ctx.fillText(targetLabel(target).slice(0, 24), tx + 10, ty + 36);
@@ -778,7 +779,7 @@ function drawTargetBlock(ctx, tx, ty, game, approach, target, q) {
   ctx.font = '11px Consolas, monospace';
   if (!approach) {
     ctx.fillStyle = '#9fd9ff';
-    ctx.fillText('ДИСТ  ' + fmtDist(game.info.gap), tx + 10, ty + 56);
+    ctx.fillText(L('ДИСТ  ') + fmtDist(game.info.gap), tx + 10, ty + 56);
     ctx.fillText('ETA   ' + fmtTime(game.info.eta), tx + 10, ty + 72);
   }
   const stateY = approach ? ty + 58 : ty + 90;
@@ -786,11 +787,11 @@ function drawTargetBlock(ctx, tx, ty, game, approach, target, q) {
     // Калибровка: полоса и прямая подсказка, чего привод ждёт. Без
     // подсказки «почему не стартует» — самый частый вопрос к нему.
     ctx.fillStyle = q.aligned ? GREEN : AMBER;
-    ctx.fillText(q.aligned ? 'КАЛИБРОВКА' : 'НАВЕДИСЬ НА ЦЕЛЬ', tx + 10, stateY);
+    ctx.fillText(q.aligned ? L('КАЛИБРОВКА') : L('НАВЕДИСЬ НА ЦЕЛЬ'), tx + 10, stateY);
     bar(ctx, tx + 10, stateY + 4, 120, 6, q.calib, q.aligned ? GREEN : AMBER);
   } else if (ship.docking) {
     ctx.fillStyle = GREEN;
-    ctx.fillText('ДОКИНГ', tx + 10, stateY);
+    ctx.fillText(L('ДОКИНГ'), tx + 10, stateY);
   }
   drawCompass(ctx, tx + 178, ty + th / 2, approach ? 24 : 34, ship, game.info.dir);
 }
@@ -855,36 +856,36 @@ function drawLandedPrompt(ctx, cam, game) {
   if (info) {
     ctx.font = '10px Consolas, monospace';
     ctx.fillStyle = 'rgba(159,217,230,0.7)';
-    const hemi = info.lat >= 0 ? 'с.ш.' : 'ю.ш.';
+    const hemi = info.lat >= 0 ? L('с.ш.') : L('ю.ш.');
     ctx.fillText(
       `${info.body.name.toUpperCase()} · ${Math.abs(info.lat).toFixed(2)}° ${hemi}, ` +
-      `${info.lon.toFixed(2)}° · ПЛОЩАДКА ${fmtDist(info.height)} · ` +
-      `ПОСАДОК ${game.stats ? game.stats.landings || 0 : 0}`,
+      info.lon.toFixed(2) + L('° · ПЛОЩАДКА ') + fmtDist(info.height)
+        + L(' · ПОСАДОК ') + (game.stats ? game.stats.landings || 0 : 0),
       mid, y - 8);
   }
 
   if (t > 0) {
     ctx.font = 'bold 15px Consolas, monospace';
     ctx.fillStyle = AMBER;
-    ctx.fillText(t >= 1 ? 'ОТРЫВ' : 'ВЗЛЁТ', mid, y + 22);
+    ctx.fillText(t >= 1 ? L('ОТРЫВ') : L('ВЗЛЁТ'), mid, y + 22);
     ctx.font = '11px Consolas, monospace';
     ctx.fillStyle = '#d8f2ff';
-    ctx.fillText(t >= 1 ? 'ДЕРЖИТЕСЬ' :
-      'ДЕРЖАТЬ ЕЩЁ ' + ((1 - t) * LAND.holdOff).toFixed(1) + ' с', mid, y + 40);
+    ctx.fillText(t >= 1 ? L('ДЕРЖИТЕСЬ') :
+      L('ДЕРЖАТЬ ЕЩЁ ') + ((1 - t) * LAND.holdOff).toFixed(1) + L(' с'), mid, y + 40);
   } else if (ship.secured) {
     ctx.font = 'bold 14px Consolas, monospace';
     ctx.fillStyle = GREEN;
-    ctx.fillText('НА ГРУНТЕ · ДВИГАТЕЛИ ОТКЛЮЧЕНЫ', mid, y + 22);
+    ctx.fillText(L('НА ГРУНТЕ · ДВИГАТЕЛИ ОТКЛЮЧЕНЫ'), mid, y + 22);
     ctx.font = '11px Consolas, monospace';
     ctx.fillStyle = 'rgba(159,217,230,0.8)';
-    ctx.fillText('УДЕРЖАТЬ ПРОБЕЛ ' + LAND.holdOff + ' с — ВЗЛЁТ', mid, y + 40);
+    ctx.fillText(L('УДЕРЖАТЬ ПРОБЕЛ ') + LAND.holdOff + L(' с — ВЗЛЁТ'), mid, y + 40);
   } else {
     ctx.font = 'bold 15px Consolas, monospace';
     ctx.fillStyle = CY;
-    ctx.fillText('ГОТОВ К ПОСАДКЕ', mid, y + 22);
+    ctx.fillText(L('ГОТОВ К ПОСАДКЕ'), mid, y + 22);
     ctx.font = '11px Consolas, monospace';
     ctx.fillStyle = 'rgba(159,217,230,0.8)';
-    ctx.fillText('ПРОБЕЛ — ЗАФИКСИРОВАТЬ · УДЕРЖАТЬ — ВЗЛЁТ', mid, y + 40);
+    ctx.fillText(L('ПРОБЕЛ — ЗАФИКСИРОВАТЬ · УДЕРЖАТЬ — ВЗЛЁТ'), mid, y + 40);
   }
   ctx.restore();
 }
@@ -1075,13 +1076,13 @@ function drawLink(ctx, game) {
 
   let text;
   if (live) {
-    text = (l.ping === null ? '— мс' : Math.round(l.ping) + ' мс')
-      + (l.loss > 0.05 ? '  ПОТЕРИ ' + Math.round(l.loss * 100) + '%' : '');
+    text = (l.ping === null ? L('— мс') : Math.round(l.ping) + L(' мс'))
+      + (l.loss > 0.05 ? L('  ПОТЕРИ ') + Math.round(l.loss * 100) + '%' : '');
   } else {
-    text = l.api === 'offline' ? 'АВТОНОМНО'
-      : l.mode === 'connecting' ? 'СОЕДИНЕНИЕ'
-        : l.mode === 'down' ? 'СВЯЗЬ ОБОРВАНА'
-          : 'БЕЗ СЕТИ';
+    text = l.api === 'offline' ? L('АВТОНОМНО')
+      : l.mode === 'connecting' ? L('СОЕДИНЕНИЕ')
+        : l.mode === 'down' ? L('СВЯЗЬ ОБОРВАНА')
+          : L('БЕЗ СЕТИ');
   }
 
   ctx.save();
@@ -1200,7 +1201,7 @@ function drawPeerMarks(ctx, cam, game) {
     const th = game.targetHull;
     const hull = th && th.id === p.id && (game.now || 0) - th.at < 6
       ? '  ' + Math.round((th.hull / (th.max || 100)) * 100) + '%' : '';
-    const label = (p.name || 'ПИЛОТ') + '  ' + fmtDist(dist3(cam.pos, p.pos)) + hull;
+    const label = (p.name || L('ПИЛОТ')) + '  ' + fmtDist(dist3(cam.pos, p.pos)) + hull;
 
     // Корпус и щит — полосками НАД квадратом. Числами их пришлось бы
     // читать, а в бою читать некогда: нужен один взгляд, чтобы понять,
@@ -1253,7 +1254,7 @@ function drawAimedLabel(ctx, cam, game, target) {
     ctx.fillText(text, cam.cx, y);
   };
   line(targetLabel(t) + '   ' + fmtDist(dist3(cam.pos, t.pos)), cam.cy + bh + 84, '#ffffff');
-  line('TAB — ВЫБРАТЬ ЦЕЛЬ', cam.cy + bh + 100, AMBER);
+  line(L('TAB — ВЫБРАТЬ ЦЕЛЬ'), cam.cy + bh + 100, AMBER);
   ctx.restore();
 }
 
@@ -1335,7 +1336,7 @@ function drawScanner(ctx, cx, cy, game) {
     ctx.fillStyle = '#ff9f6b';
     ctx.font = '11px Consolas, monospace';
     ctx.textAlign = 'right';
-    ctx.fillText('ПИЛОТОВ РЯДОМ ' + peers, cx + rw, cy - rh - 6);
+    ctx.fillText(L('ПИЛОТОВ РЯДОМ ') + peers, cx + rw, cy - rh - 6);
   }
   ctx.strokeStyle = CY_DIM;
   ctx.lineWidth = 1;
@@ -1349,7 +1350,7 @@ function drawScanner(ctx, cx, cy, game) {
   ctx.font = '9px Consolas, monospace';
   ctx.fillStyle = CY_DIM;
   ctx.textAlign = 'center';
-  ctx.fillText('СКАНЕР ' + fmtDist(range), cx, cy + rh + 13);
+  ctx.fillText(L('СКАНЕР ') + fmtDist(range), cx, cy + rh + 13);
 
   const b = game.ship.basis;
   const sp = game.ship.pos;
@@ -1405,13 +1406,13 @@ function drawDockAssist(ctx, cx, cy, a) {
   ctx.font = '10px Consolas, monospace';
   ctx.textAlign = 'center';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('СТВОР ПОРТА  ' + fmtDist(Math.max(0, a.q.local.z - STATION_D)), 0, -h / 2 - 8);
+  ctx.fillText(L('СТВОР ПОРТА  ') + fmtDist(Math.max(0, a.q.local.z - STATION_D)), 0, -h / 2 - 8);
 
   ctx.textAlign = 'left';
   const rows = [
-    ['ОСЬ', a.q.align > LIMITS.align],
-    ['КРЕН', a.rollOk],
-    ['СКОР', a.q.speed < LIMITS.speed],
+    [L('ОСЬ'), a.q.align > LIMITS.align],
+    [L('КРЕН'), a.rollOk],
+    [L('СКОР'), a.q.speed < LIMITS.speed],
   ];
   let ry = h / 2 + 16;
   for (const [label, ok] of rows) {

@@ -25,6 +25,7 @@
 import { clamp } from '../core/vec3.js';
 import { input } from '../core/input.js';
 import { CY, CY_DIM, AMBER, GREEN } from './theme.js';
+import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
 
@@ -44,10 +45,10 @@ export const TOUCH = {
  * за экран и залезать под вырез.
  */
 export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 0 }) {
-  const L = insets.left || 0, R = insets.right || 0, B = insets.bottom || 0;
+  const padL = insets.left || 0, R = insets.right || 0, B = insets.bottom || 0;
   const pad = TOUCH.pad;
   const stick = {
-    x: L + pad + TOUCH.stickR,
+    x: padL + pad + TOUCH.stickR,
     y: h - B - pad - TOUCH.stickR,
     r: TOUCH.stickR,
   };
@@ -121,8 +122,8 @@ export function touchUpdate(t, points, layout) {
     if (t.stick.id === p.id) {
       const dx = (p.x - layout.stick.x) / layout.stick.r;
       const dy = (p.y - layout.stick.y) / layout.stick.r;
-      const L = Math.hypot(dx, dy) || 1;
-      const k = L > 1 ? 1 / L : 1;
+      const len = Math.hypot(dx, dy) || 1;
+      const k = len > 1 ? 1 / len : 1;
       t.stick.dx = dx * k; t.stick.dy = dy * k;
       continue;
     }
@@ -247,7 +248,7 @@ export function touchDraw(ctx, t, layout, game) {
   ctx.fillRect(r.x - r.w / 2 + 2, top + r.h * (1 - frac) + 2, r.w - 4, r.h * frac - 4);
   ctx.fillStyle = CY;
   ctx.font = '10px Consolas, monospace';
-  ctx.fillText('ТЯГА', r.x, top - 10);
+  ctx.fillText(L('ТЯГА'), r.x, top - 10);
 
   // Кнопки.
   ctx.font = '10px Consolas, monospace';
@@ -260,7 +261,9 @@ export function touchDraw(ctx, t, layout, game) {
     ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
     ring(ctx, b.x, b.y, b.r, lit ? AMBER : CY_DIM);
     ctx.fillStyle = lit ? AMBER : CY;
-    ctx.fillText(b.label, b.x, b.y + 0.5);
+    // Раскладка считается один раз, а язык можно сменить на ходу —
+    // поэтому подпись переводится ЗДЕСЬ, при отрисовке.
+    ctx.fillText(L(b.label), b.x, b.y + 0.5);
   }
 
   ctx.restore();

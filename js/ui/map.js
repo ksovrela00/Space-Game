@@ -32,6 +32,7 @@ import { canJump } from '../game/quantum.js';
 import { currentTarget } from '../game/nav.js';
 import { say } from '../game/state.js';
 import { galaxy, systemDistance, warpSeconds, SPREAD } from '../game/galaxy.js';
+import { L } from '../core/lang.js';
 
 const CY = '#4fb3e0';
 const CY_DIM = 'rgba(79,179,224,0.35)';
@@ -284,10 +285,10 @@ export function mapInput(game, input) {
 
   if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
     const t = map.sel;
-    if (!t) say(game.state, 'ОБЪЕКТ НЕ ВЫБРАН', AMBER);
+    if (!t) say(game.state, L('ОБЪЕКТ НЕ ВЫБРАН'), AMBER);
     else {
       game.selectTarget(t);
-      say(game.state, 'ЦЕЛЬ: ' + t.name);
+      say(game.state, L('ЦЕЛЬ: ') + t.name);
     }
   }
 }
@@ -324,9 +325,9 @@ function aimGalaxy(game, s) {
   if (!s || s.seed === game.sys.seed) return false;
   if (game.warpTarget && game.warpTarget.seed === s.seed) return false;
   game.warpTarget = s;
-  say(game.state, 'ЦЕЛЬ ВАРПА: ' + s.name.toUpperCase() + ' · ' +
-    systemDistance(game.sys, s).toFixed(1) + ' СВ. ЛЕТ · ' +
-    Math.round(warpSeconds(game.sys, s)) + ' С', GREEN);
+  say(game.state, L('ЦЕЛЬ ВАРПА: ') + s.name.toUpperCase() + ' · ' +
+    systemDistance(game.sys, s).toFixed(1) + L(' СВ. ЛЕТ · ') +
+    Math.round(warpSeconds(game.sys, s)) + L(' С'), GREEN);
   return true;
 }
 
@@ -358,10 +359,10 @@ function galaxyInput(game, input) {
   // привычку с карты системы — там он и есть способ назначить цель.
   if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
     const t = map.gsel;
-    if (!t) say(game.state, 'СИСТЕМА НЕ ВЫБРАНА', AMBER);
-    else if (t.seed === cur.seed) say(game.state, 'ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ', AMBER);
+    if (!t) say(game.state, L('СИСТЕМА НЕ ВЫБРАНА'), AMBER);
+    else if (t.seed === cur.seed) say(game.state, L('ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ'), AMBER);
     else if (!aimGalaxy(game, t)) {
-      say(game.state, 'ЦЕЛЬ ВАРПА: ' + t.name.toUpperCase() + ' · J В ПОЛЁТЕ', GREEN);
+      say(game.state, L('ЦЕЛЬ ВАРПА: ') + t.name.toUpperCase() + L(' · J В ПОЛЁТЕ'), GREEN);
     }
   }
 }
@@ -387,9 +388,9 @@ function drawGalaxy(ctx, map, game, w, h) {
   ctx.font = '11px Consolas, monospace';
   ctx.textAlign = 'left';
   ctx.fillStyle = CY;
-  ctx.fillText('КАРТА ГАЛАКТИКИ', 18, 28);
+  ctx.fillText(L('КАРТА ГАЛАКТИКИ'), 18, 28);
   ctx.fillStyle = 'rgba(159,217,230,0.65)';
-  ctx.fillText('ВЫ В СИСТЕМЕ ' + cur.name.toUpperCase(), 250, 28);
+  ctx.fillText(L('ВЫ В СИСТЕМЕ ') + cur.name.toUpperCase(), 250, 28);
 
   // Круги дальности от текущей системы: по ним расстояние читается без
   // линейки, а заодно видно, что галактика плоская.
@@ -416,7 +417,7 @@ function drawGalaxy(ctx, map, game, w, h) {
     const d = systemDistance(cur, sel);
     ctx.fillStyle = GREEN;
     ctx.textAlign = 'center';
-    ctx.fillText(d.toFixed(1) + ' СВ. ЛЕТ · ' + Math.round(warpSeconds(cur, sel)) + ' С',
+    ctx.fillText(d.toFixed(1) + L(' СВ. ЛЕТ · ') + Math.round(warpSeconds(cur, sel)) + L(' С'),
       (px(cur) + px(sel)) / 2, (py(cur) + py(sel)) / 2 - 6);
   }
 
@@ -472,8 +473,8 @@ function drawGalaxy(ctx, map, game, w, h) {
 
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(159,217,230,0.6)';
-  ctx.fillText('←,→ / ЛКМ — ВЫБРАТЬ СИСТЕМУ (ОНА СРАЗУ СТАНОВИТСЯ ЦЕЛЬЮ ВАРПА)', 18, h - 26);
-  ctx.fillText('G — НАЗАД К СИСТЕМЕ · M — ЗАКРЫТЬ · ПРЫЖОК — J В ПОЛЁТЕ', 18, h - 12);
+  ctx.fillText(L('←,→ / ЛКМ — ВЫБРАТЬ СИСТЕМУ (ОНА СРАЗУ СТАНОВИТСЯ ЦЕЛЬЮ ВАРПА)'), 18, h - 26);
+  ctx.fillText(L('G — НАЗАД К СИСТЕМЕ · M — ЗАКРЫТЬ · ПРЫЖОК — J В ПОЛЁТЕ'), 18, h - 12);
   ctx.restore();
 }
 
@@ -495,16 +496,16 @@ function drawSystemCard(ctx, game, s, x, y, w, h) {
   ty += 16;
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = CY;
-  ctx.fillText(s.cls.ru.toUpperCase() + ' · КЛАСС ' + s.cls.id, x + pad, ty);
+  ctx.fillText(L(s.cls.ru).toUpperCase() + L(' · КЛАСС ') + s.cls.id, x + pad, ty);
   ty += 18;
 
   const d = systemDistance(cur, s);
   const rows = [
-    ['Температура', Math.round(s.cls.temp) + ' K'],
-    ['Светимость', s.cls.lum.toFixed(2) + ' солнечной'],
-    ['Обитаемая зона', Math.round(s.hab / 1000) + ' тыс. км'],
-    ['Расстояние', s.seed === cur.seed ? '— вы здесь' : d.toFixed(1) + ' св. лет'],
-    ['Прыжок', s.seed === cur.seed ? '—' : Math.round(warpSeconds(cur, s)) + ' секунд'],
+    [L('Температура'), Math.round(s.cls.temp) + ' K'],
+    [L('Светимость'), s.cls.lum.toFixed(2) + L(' солнечной')],
+    [L('Обитаемая зона'), Math.round(s.hab / 1000) + L(' тыс. км')],
+    [L('Расстояние'), s.seed === cur.seed ? L('— вы здесь') : d.toFixed(1) + L(' св. лет')],
+    [L('Прыжок'), s.seed === cur.seed ? '—' : Math.round(warpSeconds(cur, s)) + L(' секунд')],
   ];
   const keyW = 118;
   for (const [k, v] of rows) {
@@ -522,15 +523,15 @@ function drawSystemCard(ctx, game, s, x, y, w, h) {
   // системы разом, либо врать.
   ctx.fillStyle = 'rgba(159,217,230,0.72)';
   const note = s.seed === cur.seed
-    ? 'Текущая система. Её карта — на клавише G.'
-    : 'Что там внутри, известно только по прибытии: система собирается ' +
-      'под тоннелем прыжка.';
+    ? L('Текущая система. Её карта — на клавише G.')
+    : L('Что там внутри, известно только по прибытии: система собирается ') +
+      L('под тоннелем прыжка.');
   for (const line of wrap(ctx, note, w - pad * 2)) { ctx.fillText(line, x + pad, ty); ty += 13; }
 
   if (game.warpTarget && game.warpTarget.seed === s.seed) {
     ty += 8;
     ctx.fillStyle = AMBER;
-    ctx.fillText('ЦЕЛЬ ВАРПА · J В ПОЛЁТЕ', x + pad, ty);
+    ctx.fillText(L('ЦЕЛЬ ВАРПА · J В ПОЛЁТЕ'), x + pad, ty);
   }
 }
 
@@ -547,9 +548,9 @@ export function fmtMass(kg) {
   const m = kg / 10 ** e;
   const earth = kg / EARTH_MASS;
   const rel = earth >= 0.01
-    ? earth.toFixed(earth < 1 ? 2 : 1) + ' Земли'
-    : (kg / MOON_MASS).toFixed(2) + ' Луны';
-  return `${m.toFixed(2)}·10${sup(e)} кг · ${rel}`;
+    ? earth.toFixed(earth < 1 ? 2 : 1) + L(' Земли')
+    : (kg / MOON_MASS).toFixed(2) + L(' Луны');
+  return m.toFixed(2) + '·10' + sup(e) + L(' кг · ') + rel;
 }
 
 const plural = (n, one, few, many) => {
@@ -562,22 +563,22 @@ const plural = (n, one, few, many) => {
 export function fmtYears(sec) {
   const years = sec / (365.25 * 24 * 3600);
   if (years < 1) return fmtTime(sec);
-  return years.toFixed(years < 10 ? 1 : 0) + ' ' + plural(Math.round(years), 'год', 'года', 'лет');
+  return years.toFixed(years < 10 ? 1 : 0) + ' ' + plural(Math.round(years), L('год'), L('года'), L('лет'));
 }
 
 const fmtTemp = (k) => {
   const c = toCelsius(k);
-  if (k > 1000) return Math.round(k) + ' К (' + Math.round(c) + ' °C)';
+  if (k > 1000) return Math.round(k) + L(' К (') + Math.round(c) + ' °C)';
   return (c > 0 ? '+' : '') + c.toFixed(0) + ' °C';
 };
 
 // --- карточка объекта --------------------------------------------------------
 
 function landingNote(b) {
-  if (b.kind === 'star') return 'исключена';
-  if (!isSolid(b)) return 'поверхности нет';
-  if (!isLandable(b)) return 'нужен аэродинамический спуск';
-  return 'возможна: шасси и R/F';
+  if (b.kind === 'star') return L('исключена');
+  if (!isSolid(b)) return L('поверхности нет');
+  if (!isLandable(b)) return L('нужен аэродинамический спуск');
+  return L('возможна: шасси и R/F');
 }
 
 /**
@@ -594,62 +595,64 @@ export function objectCard(game, obj) {
 
   const range = () => {
     const d = Math.hypot(obj.pos.x - ship.pos.x, obj.pos.y - ship.pos.y, obj.pos.z - ship.pos.z);
-    rows.push(['ДО КОРАБЛЯ', fmtDist(Math.max(0, d - (obj.radius || 0)))]);
+    rows.push([L('ДО КОРАБЛЯ'), fmtDist(Math.max(0, d - (obj.radius || 0)))]);
   };
 
   if (obj.isMarker) {
-    card.desc = 'Точка в пустоте, к которой можно прыгнуть. Нужна, когда ' +
-      'прямой коридор до цели перекрыт телом, над которым висишь: сначала ' +
-      'прыжок сюда, потом к цели.';
-    rows.push(['ТЕЛО', obj.body.name]);
-    rows.push(['УДАЛЕНИЕ', fmtDist(obj.dist) +
-      ' (' + (obj.dist / obj.body.radius).toFixed(0) + ' радиуса)']);
+    card.desc = L('Точка в пустоте, к которой можно прыгнуть. Нужна, когда ') +
+      L('прямой коридор до цели перекрыт телом, над которым висишь: сначала ') +
+      L('прыжок сюда, потом к цели.');
+    rows.push([L('ТЕЛО'), obj.body.name]);
+    rows.push([L('УДАЛЕНИЕ'), fmtDist(obj.dist) +
+      ' (' + (obj.dist / obj.body.radius).toFixed(0) + L(' радиуса)')]);
     range();
   } else if (obj.isStation) {
     const p = obj.parent;
-    card.desc = 'Орбитальный порт: единственное место, где восстанавливают ' +
-      'корпус. Створ смотрит от планеты, барабан вращается — крен на входе ' +
-      'согласуют с ним.';
-    rows.push(['ПЛАНЕТА', p ? p.name : '—']);
-    rows.push(['ВЫСОТА ОРБИТЫ', p ? fmtDist(obj.orbit.radius - p.radius) : '—']);
-    rows.push(['ОБОРОТ ВОКРУГ', fmtTime(obj.orbit.period)]);
-    rows.push(['ВРАЩЕНИЕ', 'оборот за ' + fmtTime(2 * Math.PI / obj.spinRate)]);
-    rows.push(['СТЫКОВКА', 'скорость до ' + LIMITS.speed.toFixed(2) + ' км/с']);
+    card.desc = L('Орбитальный порт: единственное место, где восстанавливают ') +
+      L('корпус. Створ смотрит от планеты, барабан вращается — крен на входе ') +
+      L('согласуют с ним.');
+    rows.push([L('ПЛАНЕТА'), p ? p.name : '—']);
+    rows.push([L('ВЫСОТА ОРБИТЫ'), p ? fmtDist(obj.orbit.radius - p.radius) : '—']);
+    rows.push([L('ОБОРОТ ВОКРУГ'), fmtTime(obj.orbit.period)]);
+    rows.push([L('ВРАЩЕНИЕ'), L('оборот за ') + fmtTime(2 * Math.PI / obj.spinRate)]);
+    rows.push([L('СТЫКОВКА'), L('скорость до ') + LIMITS.speed.toFixed(2) + L(' км/с')]);
     range();
   } else {
     // Тело: звезда, планета или луна.
-    card.desc = info ? info.desc : '';
-    rows.push(['РАДИУС', fmtDist(obj.radius)]);
-    rows.push(['МАССА', fmtMass(massOf(obj))]);
-    rows.push(['ПЛОТНОСТЬ', ((DENSITY[obj.kind] || DENSITY.rock) / 1000).toFixed(2) + ' г/см³']);
-    rows.push(['ТЯЖЕСТЬ', obj.g0.toFixed(2) + ' м/с² (' + (obj.g0 / 9.81).toFixed(2) + ' g)']);
-    rows.push(['ВТОРАЯ КОСМ.', escapeSpeed(obj).toFixed(2) + ' км/с']);
-    rows.push(['ТЕМПЕРАТУРА', fmtTemp(temperatureOf(world, obj))]);
-    if (obj.spin) rows.push(['СУТКИ', fmtTime(dayLength(obj))]);
+    // Описание лежит в каталоге по-русски (js/game/bodyinfo.js) и
+    // переводится здесь, на показе, — как и название типа.
+    card.desc = info ? L(info.desc) : '';
+    rows.push([L('РАДИУС'), fmtDist(obj.radius)]);
+    rows.push([L('МАССА'), fmtMass(massOf(obj))]);
+    rows.push([L('ПЛОТНОСТЬ'), ((DENSITY[obj.kind] || DENSITY.rock) / 1000).toFixed(2) + L(' г/см³')]);
+    rows.push([L('ТЯЖЕСТЬ'), obj.g0.toFixed(2) + L(' м/с² (') + (obj.g0 / 9.81).toFixed(2) + ' g)']);
+    rows.push([L('ВТОРАЯ КОСМ.'), escapeSpeed(obj).toFixed(2) + L(' км/с')]);
+    rows.push([L('ТЕМПЕРАТУРА'), fmtTemp(temperatureOf(world, obj))]);
+    if (obj.spin) rows.push([L('СУТКИ'), fmtTime(dayLength(obj))]);
     if (obj.orbit) {
-      rows.push(['ОРБИТА', fmtDist(obj.orbit.radius) +
-        ' вокруг ' + (obj.parent ? obj.parent.name : 'светила')]);
-      rows.push(['ГОД', fmtYears(obj.orbit.period)]);
+      rows.push([L('ОРБИТА'), fmtDist(obj.orbit.radius) +
+        L(' вокруг ') + (obj.parent ? obj.parent.name : L('светила'))]);
+      rows.push([L('ГОД'), fmtYears(obj.orbit.period)]);
     }
     if (obj.kind !== 'star') {
-      rows.push(['ОТ СВЕТИЛА', fmtDist(starDistance(obj))]);
-      rows.push(['ЗАХВАТ', fmtDist(obj.soi) +
-        ' (' + (obj.soi / obj.radius).toFixed(0) + ' радиусов)']);
+      rows.push([L('ОТ СВЕТИЛА'), fmtDist(starDistance(obj))]);
+      rows.push([L('ЗАХВАТ'), fmtDist(obj.soi) +
+        ' (' + (obj.soi / obj.radius).toFixed(0) + L(' радиусов)')]);
     }
 
     const air = atmosphereOf(obj);
     if (air) {
-      rows.push(['АТМОСФЕРА', air.press.toFixed(2) + ' бар, до ' + fmtDist(air.top)]);
-      if (air.mix) rows.push(['СОСТАВ', air.mix.map(([g, s]) => g + ' ' + s + '%').join(' · ')]);
+      rows.push([L('АТМОСФЕРА'), air.press.toFixed(2) + L(' бар, до ') + fmtDist(air.top)]);
+      if (air.mix) rows.push([L('СОСТАВ'), air.mix.map(([g, s]) => L(g) + ' ' + s + '%').join(' · ')]);
     } else {
-      rows.push(['АТМОСФЕРА', 'нет']);
+      rows.push([L('АТМОСФЕРА'), L('нет')]);
     }
 
-    rows.push(['ПОСАДКА', landingNote(obj)]);
-    if (obj.rings) rows.push(['КОЛЬЦА', 'есть']);
-    if (obj.station) rows.push(['СТАНЦИЯ', obj.station.name]);
+    rows.push([L('ПОСАДКА'), landingNote(obj)]);
+    if (obj.rings) rows.push([L('КОЛЬЦА'), L('есть')]);
+    if (obj.station) rows.push([L('СТАНЦИЯ'), obj.station.name]);
     if (obj.moons && obj.moons.length) {
-      rows.push(['ЛУНЫ', obj.moons.length + ': ' + obj.moons.map((m) => m.name).join(', ')]);
+      rows.push([L('ЛУНЫ'), obj.moons.length + ': ' + obj.moons.map((m) => m.name).join(', ')]);
     }
     if (obj.kind !== 'star') range();
   }
@@ -658,7 +661,7 @@ export function objectCard(game, obj) {
   // же кодом, что и сам прыжок, поэтому «свободен» здесь означает, что
   // B сработает, а не «наверное, получится».
   const jump = canJump(world, ship, obj);
-  rows.push(['КОРИДОР', jump.ok ? 'свободен — B' : jump.reason.toLowerCase()]);
+  rows.push([L('КОРИДОР'), jump.ok ? L('свободен — B') : jump.reason.toLowerCase()]);
   card.jumpOk = jump.ok;
   return card;
 }
@@ -706,10 +709,10 @@ export function drawMap(r, game) {
 
   ctx.textAlign = 'left';
   ctx.fillStyle = CY;
-  ctx.fillText('КАРТА СИСТЕМЫ ' + world.name.toUpperCase(), 18, 28);
+  ctx.fillText(L('КАРТА СИСТЕМЫ ') + world.name.toUpperCase(), 18, 28);
   ctx.fillStyle = 'rgba(159,217,230,0.65)';
-  ctx.fillText('МАСШТАБ ×' + (map.zoom < 10 ? map.zoom.toFixed(1) : Math.round(map.zoom)) +
-    (map.follow ? '   ЗА ' + map.follow.name.toUpperCase() : ''), 250, 28);
+  ctx.fillText(L('МАСШТАБ ×') + (map.zoom < 10 ? map.zoom.toFixed(1) : Math.round(map.zoom)) +
+    (map.follow ? L('   ЗА ') + map.follow.name.toUpperCase() : ''), 250, 28);
 
   drawPlan(ctx, map, game, world);
   drawScaleBar(ctx, map);
@@ -719,11 +722,11 @@ export function drawMap(r, game) {
   // обрезанная подсказка хуже, чем её отсутствие.
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(159,217,230,0.6)';
-  ctx.fillText('КОЛЕСО / W,S — МАСШТАБ · ЛКМ — ВЫБОР · ТЯНУТЬ — СДВИГ', 18, h - 26);
-  ctx.fillText('←,→ — ПО ОБЪЕКТАМ · ПРОБЕЛ — К ВЫБРАННОМУ · TAB — НАЗНАЧИТЬ ЦЕЛЬЮ · ' +
-    'X — СБРОС · M — ЗАКРЫТЬ', 18, h - 12);
+  ctx.fillText(L('КОЛЕСО / W,S — МАСШТАБ · ЛКМ — ВЫБОР · ТЯНУТЬ — СДВИГ'), 18, h - 26);
+  ctx.fillText(L('←,→ — ПО ОБЪЕКТАМ · ПРОБЕЛ — К ВЫБРАННОМУ · TAB — НАЗНАЧИТЬ ЦЕЛЬЮ · ') +
+    L('X — СБРОС · M — ЗАКРЫТЬ'), 18, h - 12);
   ctx.fillStyle = 'rgba(255,204,102,0.7)';
-  ctx.fillText('G — КАРТА ГАЛАКТИКИ', 18, h - 40);
+  ctx.fillText(L('G — КАРТА ГАЛАКТИКИ'), 18, h - 40);
   ctx.restore();
 }
 
@@ -796,7 +799,7 @@ function drawPlan(ctx, map, game, world) {
   ctx.stroke();
   ctx.fillStyle = GREEN;
   ctx.textAlign = 'left';
-  ctx.fillText('КОРАБЛЬ', shx + 9, shy + 13);
+  ctx.fillText(L('КОРАБЛЬ'), shx + 9, shy + 13);
 
   // Подсветка того, что под курсором: без неё непонятно, во что попадёшь.
   map.hover = pickAt(map, map.mx, map.my);
@@ -911,8 +914,8 @@ function drawPanel(ctx, game, x, y, w, h) {
 
   if (!obj) {
     ctx.fillStyle = 'rgba(159,217,230,0.7)';
-    const help = 'Объект не выбран. Ткни в планету, станцию или луну — ' +
-      'здесь будет всё, что о ней известно.';
+    const help = L('Объект не выбран. Ткни в планету, станцию или луну — ') +
+      L('здесь будет всё, что о ней известно.');
     for (const line of wrap(ctx, help, w - pad * 2)) { ctx.fillText(line, x + pad, ty); ty += 14; }
     return;
   }
@@ -956,5 +959,5 @@ function drawPanel(ctx, game, x, y, w, h) {
   const cur = currentTarget(game.nav);
   const isCur = obj === cur || (obj.isMarker && cur === obj.body);
   ctx.fillStyle = isCur ? GREEN : AMBER;
-  ctx.fillText(isCur ? '● ТЕКУЩАЯ ЦЕЛЬ' : 'TAB — НАЗНАЧИТЬ ЦЕЛЬЮ', x + pad, y + h - 14);
+  ctx.fillText(isCur ? L('● ТЕКУЩАЯ ЦЕЛЬ') : L('TAB — НАЗНАЧИТЬ ЦЕЛЬЮ'), x + pad, y + h - 14);
 }

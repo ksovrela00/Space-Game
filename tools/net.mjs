@@ -80,7 +80,10 @@ Object.defineProperty(globalThis, 'navigator', {
   writable: true,
 });
 
-const store = {};
+// Язык проверок — русский: в них сверяются НАДПИСИ, и держать их в двух
+// видах значило бы писать каждую проверку дважды. Английский путь
+// проверяется отдельным шагом, который язык переключает сам.
+const store = { solar_lang: 'ru' };
 globalThis.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },

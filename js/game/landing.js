@@ -27,6 +27,7 @@ import {
 import { groundDrift, gravityAt } from './gravity.js';
 import { GEAR_FEET } from '../models/ships.js';
 import { lookAlong } from '../core/basis.js';
+import { L } from '../core/lang.js';
 
 export const LAND = {
   vspeed: 0.030,    // км/с — предельная вертикальная скорость касания (30 м/с)
@@ -87,7 +88,7 @@ const _nWorld = v3();
 const _fwd = v3();
 const _alt = { dir: v3() };
 
-const fmtKm = (km) => (Math.abs(km) < 1 ? (km * 1000).toFixed(0) + ' м' : km.toFixed(1) + ' км');
+const fmtKm = (km) => (Math.abs(km) < 1 ? (km * 1000).toFixed(0) + L(' м') : km.toFixed(1) + L(' км'));
 
 // --- Шасси -------------------------------------------------------------------
 
@@ -108,10 +109,10 @@ export const gearReady = (ship) => ship.gear.out && ship.gear.t > 0.995;
 
 export const gearLabel = (ship) => {
   const g = ship.gear;
-  if (g.out && g.t >= 0.995) return 'ШАССИ ВЫПУЩЕНО';
-  if (g.out) return 'ВЫПУСК ШАССИ…';
-  if (g.t > 0.005) return 'УБОРКА ШАССИ…';
-  return 'ШАССИ УБРАНО';
+  if (g.out && g.t >= 0.995) return L('ШАССИ ВЫПУЩЕНО');
+  if (g.out) return L('ВЫПУСК ШАССИ…');
+  if (g.t > 0.005) return L('УБОРКА ШАССИ…');
+  return L('ШАССИ УБРАНО');
 };
 
 // --- Обстановка у поверхности ------------------------------------------------
@@ -192,11 +193,11 @@ export function landingReadout(ship, zone) {
 
 export function startLanding(ship, body, pos) {
   if (!isLandable(body)) {
-    return { ok: false, reason: 'СЕСТЬ МОЖНО ТОЛЬКО НА ТЕЛО БЕЗ АТМОСФЕРЫ' };
+    return { ok: false, reason: L('СЕСТЬ МОЖНО ТОЛЬКО НА ТЕЛО БЕЗ АТМОСФЕРЫ') };
   }
   const d = Math.hypot(pos.x - body.pos.x, pos.y - body.pos.y, pos.z - body.pos.z);
   if (d - body.radius > body.radius * LAND.range) {
-    return { ok: false, reason: 'ТЕЛО СЛИШКОМ ДАЛЕКО — СНАЧАЛА ПРЫЖОК (B)' };
+    return { ok: false, reason: L('ТЕЛО СЛИШКОМ ДАЛЕКО — СНАЧАЛА ПРЫЖОК (B)') };
   }
   // Площадка выбирается не сейчас, а на малой высоте: пока корабль
   // снижается, поверхность успевает уехать из-под него на десятки
@@ -208,7 +209,7 @@ export function startLanding(ship, body, pos) {
     slope: 0,
     searchSpan: 0,
     tries: 0,
-    phase: 'подход',
+    phase: L('подход'),
   };
   ship.autopilot = null;
   ship.docking = null;
@@ -257,17 +258,17 @@ function brakeLimit(body, pos, alt, gearOut = true) {
  * @returns строка статуса для HUD
  */
 export function updateLandingComputer(ship, dt, zone = null) {
-  const L = ship.landing;
-  if (!L) return null;
-  const b = L.body;
+  const la = ship.landing;
+  if (!la) return null;
+  const b = la.body;
   const alt = altitudeOf(b, ship.pos, _alt);
 
   // Высоко — идём обычным полётом ВЕРТИКАЛЬНО ВНИЗ, к точке прямо под
   // собой. Целиться в конкретную площадку здесь нельзя: пока корабль
   // снижается, она уезжает, и задача превращается в погоню за целью,
   // которая не медленнее преследователя.
-  if (alt.alt > LAND.landAlt && !L.site) {
-    L.phase = 'подход';
+  if (alt.alt > LAND.landAlt && !la.site) {
+    la.phase = L('подход');
     worldPoint(b, alt.dir, alt.groundR + LAND.hold, _target);
     const dist = Math.hypot(
       _target.x - ship.pos.x, _target.y - ship.pos.y, _target.z - ship.pos.z);
@@ -288,7 +289,8 @@ export function updateLandingComputer(ship, dt, zone = null) {
     let vEff = Math.min(dist / 8, vMax, brakeLimit(b, ship.pos, alt.alt, gearOut));
     if (off > 0.35) vEff = Math.min(vEff, vMax * 0.3);
     ship.throttle = clamp(vEff / vMax, 0, 1);
-    return `ПОСАДКА: ПОДХОД, высота ${fmtKm(alt.alt)}, до площадки ${fmtKm(dist)}`;
+    return L('ПОСАДКА: ПОДХОД, высота ') + fmtKm(alt.alt)
+      + L(', до площадки ') + fmtKm(dist);
   }
 
   // --- Спуск: брюхом вниз, тягой доводим снос, движками — высоту.
@@ -300,18 +302,18 @@ export function updateLandingComputer(ship, dt, zone = null) {
   // придётся ползти на малой тяге.
   // Если под нами всё круто, поиск повторяется с вдвое большим радиусом,
   // но не бесконечно: иначе корабль бегал бы по всей луне.
-  if (!L.site || (L.slope > LAND.slope && L.tries < 4)) {
-    if (L.site) L.tries++;
-    L.searchSpan = L.site ? L.searchSpan * 2 : Math.max(0.6, b.radius * 0.0006);
-    const site = findSite(b, alt.dir, L.searchSpan);
-    L.site = v3(site.dir.x, site.dir.y, site.dir.z);
-    L.siteR = groundRadius(b, site.dir);
-    L.slope = site.slope;
-    L.moved = site.moved;
+  if (!la.site || (la.slope > LAND.slope && la.tries < 4)) {
+    if (la.site) la.tries++;
+    la.searchSpan = la.site ? la.searchSpan * 2 : Math.max(0.6, b.radius * 0.0006);
+    const site = findSite(b, alt.dir, la.searchSpan);
+    la.site = v3(site.dir.x, site.dir.y, site.dir.z);
+    la.siteR = groundRadius(b, site.dir);
+    la.slope = site.slope;
+    la.moved = site.moved;
   }
 
   // Боковое смещение от площадки в мировых осях.
-  worldPoint(b, L.site, L.siteR, _target);
+  worldPoint(b, la.site, la.siteR, _target);
   let sx = _target.x - ship.pos.x, sy = _target.y - ship.pos.y, sz = _target.z - ship.pos.z;
   const along = sx * _up.x + sy * _up.y + sz * _up.z;
   sx -= _up.x * along; sy -= _up.y * along; sz -= _up.z * along;
@@ -366,10 +368,12 @@ export function updateLandingComputer(ship, dt, zone = null) {
   const full = Math.max(SHIP.liftMin, g * SHIP.liftTWR);
   ship.control.lift = clamp((vert - vUp) * LAND.liftGain / full, -1, 1);
 
-  L.phase = ready ? 'спуск' : 'выравнивание';
+  la.phase = ready ? L('спуск') : L('выравнивание');
   return ready
-    ? `ПОСАДКА: СПУСК, высота ${fmtKm(alt.alt)}, вертикальная ${(-vert * 1000).toFixed(0)} м/с`
-    : `ПОСАДКА: ВЫРАВНИВАНИЕ, снос ${fmtKm(lateral)}, рассогласование ${(attErr * 57.3).toFixed(0)}°`;
+    ? L('ПОСАДКА: СПУСК, высота ') + fmtKm(alt.alt)
+      + L(', вертикальная ') + (-vert * 1000).toFixed(0) + L(' м/с')
+    : L('ПОСАДКА: ВЫРАВНИВАНИЕ, снос ') + fmtKm(lateral)
+      + L(', рассогласование ') + (attErr * 57.3).toFixed(0) + '°';
 }
 
 // --- Касание ------------------------------------------------------------------
@@ -427,7 +431,7 @@ export function checkTouchdown(ship, zone) {
   // На планету с атмосферой сесть нельзя — касание её поверхности
   // означает удар, каким бы мягким он ни был.
   if (!isLandable(zone.body)) {
-    return { result: 'crash', reason: 'Столкновение с поверхностью ' + zone.body.name + '.' };
+    return { result: 'crash', reason: L('Столкновение с поверхностью ') + zone.body.name + '.' };
   }
 
   // Скорости — относительно грунта: он сам может двигаться.
@@ -466,17 +470,18 @@ export function checkTouchdown(ship, zone) {
     // Разрушать за это нельзя — с этого и началась правка: касание на
     // метре в секунду не должно стоить корабля.
     if (!gear && poseOk) {
-      return { result: 'landed', damage: LAND.belly, reason: 'Посадка без шасси.' };
+      return { result: 'landed', damage: LAND.belly, reason: L('Посадка без шасси.') };
     }
     if (!gear) {
-      return { result: 'crash', reason: 'Касание поверхности без шасси, с перекосом.' };
+      return { result: 'crash', reason: L('Касание поверхности без шасси, с перекосом.') };
     }
     if (tilt < LAND.tilt) {
-      return { result: 'crash', reason: 'Корабль не выровнен по площадке — опрокидывание.' };
+      return { result: 'crash', reason: L('Корабль не выровнен по площадке — опрокидывание.') };
     }
     return {
       result: 'crash',
-      reason: `Уклон площадки ${(zone.slope * 57.3).toFixed(0)}° — шасси не держит.`,
+      reason: L('Уклон площадки ') + (zone.slope * 57.3).toFixed(0)
+        + L('° — шасси не держит.'),
     };
   }
 
@@ -485,8 +490,8 @@ export function checkTouchdown(ship, zone) {
     damage,
     hit,
     reason: gear
-      ? `Жёсткое касание: ${(hit * 1000).toFixed(0)} м/с.`
-      : `Удар корпусом: ${(hit * 1000).toFixed(0)} м/с.`,
+      ? L('Жёсткое касание: ') + (hit * 1000).toFixed(0) + L(' м/с.')
+      : L('Удар корпусом: ') + (hit * 1000).toFixed(0) + L(' м/с.'),
   };
 }
 

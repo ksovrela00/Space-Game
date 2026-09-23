@@ -1,6 +1,6 @@
 {
  "version": 1,
- "generatedAt": "2026-09-23T09:35:36.927Z",
+ "generatedAt": "2026-09-23T11:01:52.975Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
@@ -28,7 +28,7 @@
  "equipment": [
   {
    "code": "engine",
-   "name": "МАРШЕВЫЙ ДВИГАТЕЛЬ",
+   "name": "MAIN ENGINE",
    "slot": "engine",
    "spec": {
     "maxSpeed": 1.2,
@@ -39,7 +39,7 @@
   },
   {
    "code": "rcs",
-   "name": "МАНЕВРОВЫЕ",
+   "name": "THRUSTERS",
    "slot": "rcs",
    "spec": {
     "lateral": 0.5,
@@ -51,7 +51,7 @@
   },
   {
    "code": "lift",
-   "name": "ПОДЪЁМНЫЕ ДВИГАТЕЛИ",
+   "name": "LIFT ENGINES",
    "slot": "lift",
    "spec": {
     "twr": 3,
@@ -61,7 +61,7 @@
   },
   {
    "code": "boost",
-   "name": "ФОРСАЖ",
+   "name": "BOOST",
    "slot": "boost",
    "spec": {
     "mul": 3,
@@ -72,7 +72,7 @@
   },
   {
    "code": "quantum",
-   "name": "КВАНТОВЫЙ ПРИВОД",
+   "name": "QUANTUM DRIVE",
    "slot": "drive",
    "spec": {
     "speed": 60000
@@ -81,7 +81,7 @@
   },
   {
    "code": "warp",
-   "name": "ВАРП-ПРИВОД",
+   "name": "WARP DRIVE",
    "slot": "warp",
    "spec": {
     "interstellar": true
@@ -90,7 +90,7 @@
   },
   {
    "code": "dock",
-   "name": "ДОКИНГ-КОМПЬЮТЕР",
+   "name": "DOCKING COMPUTER",
    "slot": "computer",
    "spec": {
     "range": 120
@@ -99,7 +99,7 @@
   },
   {
    "code": "land",
-   "name": "ПОСАДОЧНЫЙ КОМПЬЮТЕР",
+   "name": "LANDING COMPUTER",
    "slot": "computer",
    "spec": {
     "airless": true
@@ -108,7 +108,7 @@
   },
   {
    "code": "scanner",
-   "name": "СКАНЕР",
+   "name": "SCANNER",
    "slot": "scanner",
    "spec": {
     "steps": [
@@ -124,7 +124,7 @@
   },
   {
    "code": "laser_g",
-   "name": "ЛАЗЕРНАЯ ПУШКА · КАРДАН",
+   "name": "LASER CANNON · GIMBAL",
    "slot": "gun",
    "spec": {
     "kind": "laser",
@@ -139,7 +139,7 @@
   },
   {
    "code": "missile",
-   "name": "РАКЕТНАЯ УСТАНОВКА · НЕПОДВИЖНАЯ",
+   "name": "MISSILE RACK · FIXED",
    "slot": "gun",
    "spec": {
     "kind": "missile",
@@ -154,7 +154,7 @@
   },
   {
    "code": "turret",
-   "name": "ТУРЕЛЬ · КРУГОВАЯ",
+   "name": "TURRET · ALL-ROUND",
    "slot": "gun",
    "spec": {
     "kind": "turret",
@@ -169,7 +169,7 @@
   },
   {
    "code": "gear",
-   "name": "ШАССИ",
+   "name": "GEAR",
    "slot": "gear",
    "spec": {
     "time": 2.4,
@@ -179,7 +179,7 @@
   },
   {
    "code": "hold",
-   "name": "ТРЮМ",
+   "name": "HOLD",
    "slot": "hold",
    "spec": {
     "tons": 20
@@ -188,7 +188,7 @@
   },
   {
    "code": "shield",
-   "name": "ЩИТЫ",
+   "name": "SHIELDS",
    "slot": "shield",
    "spec": {
     "max": 40,

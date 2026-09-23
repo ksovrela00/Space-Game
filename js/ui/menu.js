@@ -23,10 +23,11 @@ import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.j
 import { fmtTime, fmtSpeed } from './hud.js';
 import { modules } from '../game/loadout.js';
 import { session } from '../net/session.js';
+import { L, numLocale } from '../core/lang.js';
 
 const MONO = 'Consolas, monospace';
 
-export const TABS = ['КОРАБЛЬ', 'ГРУЗ', 'ЗАДАНИЯ', 'ФИНАНСЫ'];
+export const TABS = [L('КОРАБЛЬ'), L('ГРУЗ'), L('ЗАДАНИЯ'), L('ФИНАНСЫ')];
 
 export function makeMenu() {
   return {
@@ -70,9 +71,9 @@ export function menuInput(menu, input) {
 
 /** Кроны с разрядами и знаком: «+1 200 кр», «−35 кр». */
 export const fmtCrowns = (n, signed = false) => {
-  const v = Math.round(Math.abs(n)).toLocaleString('ru-RU');
+  const v = Math.round(Math.abs(n)).toLocaleString(numLocale());
   const sign = n < 0 ? '−' : (signed ? '+' : '');
-  return sign + v + ' ' + CROWN;
+  return sign + v + ' ' + L(CROWN);
 };
 
 /** Часы пилота: сколько он в деле. */
@@ -84,7 +85,7 @@ export const fmtClock = (s) => {
   return hh + ':' + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
 };
 
-const fmtTons = (t) => (t >= 10 ? t.toFixed(0) : t.toFixed(1)) + ' т';
+const fmtTons = (t) => (t >= 10 ? t.toFixed(0) : t.toFixed(1)) + L(' т');
 
 /** Строка «подпись — значение»: подпись слева, значение прижато вправо. */
 function row(ctx, x, y, w, label, value, color = INK, dim = CY_DIM) {
@@ -143,48 +144,48 @@ function drawShip(ctx, b, game, fs) {
   const { ship } = game;
   const hullFrac = ship.hull / SHIP.maxHull;
   const fuelFrac = ship.fuel / SHIP.fuelMax;
-  const m = (km) => (km * 1000).toFixed(1) + ' м';
+  const m = (km) => (km * 1000).toFixed(1) + L(' м');
 
   // Содержимое описывается СПИСКОМ, а не рисуется на месте: одна и та же
   // карточка ложится в две колонки на мониторе и в одну на телефоне, и
   // держать для этого две копии вёрстки — верный способ развести их.
   const left = [
-    { t: 'name', s: (ship.mesh && ship.mesh.name ? ship.mesh.name : 'КОРАБЛЬ').toUpperCase() },
-    { t: 'sub', s: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ' },
-    { t: 'head', s: 'ГАБАРИТЫ' },
-    { t: 'row', a: 'ДЛИНА', b: m(HULL_SIZE.z) },
-    { t: 'row', a: 'ШИРИНА', b: m(HULL_SIZE.x) },
-    { t: 'row', a: 'ВЫСОТА', b: m(HULL_SIZE.y) },
-    { t: 'head', s: 'СОСТОЯНИЕ' },
-    { t: 'row', a: 'КОРПУС', b: Math.round(ship.hull) + ' %', c: hullColor(hullFrac) },
+    { t: 'name', s: (ship.mesh && ship.mesh.name ? ship.mesh.name : L('КОРАБЛЬ')).toUpperCase() },
+    { t: 'sub', s: L('ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ') },
+    { t: 'head', s: L('ГАБАРИТЫ') },
+    { t: 'row', a: L('ДЛИНА'), b: m(HULL_SIZE.z) },
+    { t: 'row', a: L('ШИРИНА'), b: m(HULL_SIZE.x) },
+    { t: 'row', a: L('ВЫСОТА'), b: m(HULL_SIZE.y) },
+    { t: 'head', s: L('СОСТОЯНИЕ') },
+    { t: 'row', a: L('КОРПУС'), b: Math.round(ship.hull) + ' %', c: hullColor(hullFrac) },
     { t: 'bar', frac: hullFrac, c: hullColor(hullFrac) },
   ];
   if (SHIP.maxShield > 0) {
     const sf = ship.shield / SHIP.maxShield;
     // Щит меряется ЕДИНИЦАМИ, а не процентами: процент от сорока — это
     // число, из которого не понять, выдержит ли он ещё одно попадание.
-    left.push({ t: 'row', a: 'ЩИТЫ',
+    left.push({ t: 'row', a: L('ЩИТЫ'),
       b: Math.round(ship.shield) + ' / ' + SHIP.maxShield, c: hullColor(sf) });
     left.push({ t: 'bar', frac: sf, c: CY });
   } else {
     // Пустая строка читалась бы как поломка прибора, поэтому «нет щитов»
     // написано словами.
-    left.push({ t: 'row', a: 'ЩИТЫ', b: 'НЕ УСТАНОВЛЕНЫ', c: CY_DIM });
+    left.push({ t: 'row', a: L('ЩИТЫ'), b: L('НЕ УСТАНОВЛЕНЫ'), c: CY_DIM });
   }
-  left.push({ t: 'row', a: 'ТОПЛИВО',
-    b: ship.fuel.toFixed(1) + ' / ' + SHIP.fuelMax.toFixed(1) + ' т', c: AMBER });
+  left.push({ t: 'row', a: L('ТОПЛИВО'),
+    b: ship.fuel.toFixed(1) + ' / ' + SHIP.fuelMax.toFixed(1) + L(' т'), c: AMBER });
   left.push({ t: 'bar', frac: fuelFrac, c: AMBER });
 
   // Значения берутся из настоящих констант, а не переписаны сюда: иначе
   // карточка начнёт врать в тот день, когда двигатель перенастроят.
   const right = [
-    { t: 'head', s: 'ХАРАКТЕРИСТИКИ' },
-    { t: 'row', a: 'ПРЕДЕЛ ХОДА', b: SHIP.maxSpeed.toFixed(2) + ' км/с' },
-    { t: 'row', a: 'НА ФОРСАЖЕ', b: (SHIP.maxSpeed * SHIP.boostMax).toFixed(1) + ' км/с' },
-    { t: 'row', a: 'РАЗГОН', b: SHIP.accel.toFixed(2) + ' км/с²' },
-    { t: 'row', a: 'ТОРМОЖЕНИЕ', b: SHIP.brake.toFixed(2) + ' км/с²' },
-    { t: 'row', a: 'ПОПЕРЁК КУРСА', b: SHIP.lateral.toFixed(2) + ' км/с²' },
-    { t: 'head', s: 'УСТАНОВЛЕННЫЕ МОДУЛИ' },
+    { t: 'head', s: L('ХАРАКТЕРИСТИКИ') },
+    { t: 'row', a: L('ПРЕДЕЛ ХОДА'), b: SHIP.maxSpeed.toFixed(2) + L(' км/с') },
+    { t: 'row', a: L('НА ФОРСАЖЕ'), b: (SHIP.maxSpeed * SHIP.boostMax).toFixed(1) + L(' км/с') },
+    { t: 'row', a: L('РАЗГОН'), b: SHIP.accel.toFixed(2) + L(' км/с²') },
+    { t: 'row', a: L('ТОРМОЖЕНИЕ'), b: SHIP.brake.toFixed(2) + L(' км/с²') },
+    { t: 'row', a: L('ПОПЕРЁК КУРСА'), b: SHIP.lateral.toFixed(2) + L(' км/с²') },
+    { t: 'head', s: L('УСТАНОВЛЕННЫЕ МОДУЛИ') },
     // Список общий с сервером (js/game/loadout.js): карточка в игре и
     // каталог в базе обязаны говорить об одном и том же железе.
     ...modules().map((m) => ({ t: 'row', a: m.name, b: m.value, c: m.installed ? INK : CY_DIM })),
@@ -257,11 +258,11 @@ function drawCargo(ctx, b, game, fs) {
   ctx.font = `${Math.round(fs * 1.5)}px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = INK;
-  ctx.fillText('ЗАНЯТО ' + used.toFixed(1) + ' / ' + SHIP.hold.toFixed(1) + ' Т', b.x, y);
+  ctx.fillText(L('ЗАНЯТО ') + used.toFixed(1) + ' / ' + SHIP.hold.toFixed(1) + L(' Т'), b.x, y);
   ctx.font = `${fs}px ${MONO}`;
   ctx.textAlign = 'right';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('СВОБОДНО ' + fmtTons(free), b.x + b.w, y);
+  ctx.fillText(L('СВОБОДНО ') + fmtTons(free), b.x + b.w, y);
 
   y += fs * 0.7;
   bar(ctx, b.x, y, b.w, Math.max(6, Math.round(fs * 0.6)), used / SHIP.hold,
@@ -271,19 +272,19 @@ function drawCargo(ctx, b, game, fs) {
   if (!p.cargo.length) {
     ctx.textAlign = 'center';
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('ТРЮМ ПУСТ', b.x + b.w / 2, y + fs * 2);
+    ctx.fillText(L('ТРЮМ ПУСТ'), b.x + b.w / 2, y + fs * 2);
     return;
   }
 
-  head(ctx, b.x, y, b.w, 'НАИМЕНОВАНИЕ');
+  head(ctx, b.x, y, b.w, L('НАИМЕНОВАНИЕ'));
   ctx.textAlign = 'right';
   ctx.fillStyle = CY;
-  ctx.fillText('МАССА', b.x + b.w, y);
+  ctx.fillText(L('МАССА'), b.x + b.w, y);
   y += line * 0.9;
 
   for (const c of p.cargo) {
     if (y > b.y + b.h - line * 0.5) break;
-    row(ctx, b.x, y, b.w, c.name, fmtTons(c.tons), INK, INK);
+    row(ctx, b.x, y, b.w, L(c.name), fmtTons(c.tons), INK, INK);
     // Доля трюма под этой позицией: по полоскам видно, чем он забит,
     // без арифметики в уме.
     bar(ctx, b.x, y + fs * 0.35, b.w, Math.max(3, Math.round(fs * 0.28)),
@@ -299,8 +300,8 @@ function drawMissions(ctx, b, game, fs) {
   if (!p.missions.length) {
     ctx.textAlign = 'center';
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('АКТИВНЫХ ЗАДАНИЙ НЕТ', b.x + b.w / 2, b.y + b.h / 2);
-    ctx.fillText('БРАТЬ ИХ БУДЕТ ГДЕ НА СТАНЦИЯХ', b.x + b.w / 2, b.y + b.h / 2 + line);
+    ctx.fillText(L('АКТИВНЫХ ЗАДАНИЙ НЕТ'), b.x + b.w / 2, b.y + b.h / 2);
+    ctx.fillText(L('БРАТЬ ИХ БУДЕТ ГДЕ НА СТАНЦИЯХ'), b.x + b.w / 2, b.y + b.h / 2 + line);
     return;
   }
 
@@ -310,13 +311,13 @@ function drawMissions(ctx, b, game, fs) {
     const dead = missionExpired(m);
 
     ctx.font = `${Math.round(fs * 1.15)}px ${MONO}`;
-    row(ctx, b.x, y, b.w, m.title, fmtCrowns(m.reward), dead ? RED : GREEN, INK);
+    row(ctx, b.x, y, b.w, L(m.title), fmtCrowns(m.reward), dead ? RED : GREEN, INK);
     ctx.font = `${fs}px ${MONO}`;
     y += line;
 
     row(ctx, b.x, y, b.w,
-      dead ? 'СРОК ВЫШЕЛ' : 'ОСТАЛОСЬ ' + fmtTime(m.left),
-      dead ? 'ПРОСРОЧЕНО' : '', dead ? RED : AMBER, dead ? RED : AMBER);
+      dead ? L('СРОК ВЫШЕЛ') : L('ОСТАЛОСЬ ') + fmtTime(m.left),
+      dead ? L('ПРОСРОЧЕНО') : '', dead ? RED : AMBER, dead ? RED : AMBER);
     y += fs * 0.5;
     bar(ctx, b.x, y, b.w, Math.max(3, Math.round(fs * 0.25)),
       m.total > 0 ? m.left / m.total : 0, dead ? RED : AMBER);
@@ -324,7 +325,7 @@ function drawMissions(ctx, b, game, fs) {
 
     ctx.textAlign = 'left';
     ctx.fillStyle = CY_DIM;
-    for (const s of wrap(ctx, m.desc, b.w)) {
+    for (const s of wrap(ctx, L(m.desc), b.w)) {
       // Длинное описание обрывается по нижней кромке поля, а не лезет за
       // рамку: проверять высоту только перед заданием мало — оно само
       // может оказаться в три строки.
@@ -349,17 +350,17 @@ function drawFinance(ctx, b, game, fs) {
   ctx.font = `${fs}px ${MONO}`;
   ctx.textAlign = 'right';
   ctx.fillStyle = GREEN;
-  ctx.fillText('ПРИШЛО ' + fmtCrowns(t.in, true), b.x + b.w, y - line * 0.8);
+  ctx.fillText(L('ПРИШЛО ') + fmtCrowns(t.in, true), b.x + b.w, y - line * 0.8);
   ctx.fillStyle = RED;
-  ctx.fillText('УШЛО −' + fmtCrowns(t.out), b.x + b.w, y);
+  ctx.fillText(L('УШЛО −') + fmtCrowns(t.out), b.x + b.w, y);
 
   y += line * 1.4;
-  head(ctx, b.x, y, b.w, 'ВРЕМЯ');
+  head(ctx, b.x, y, b.w, L('ВРЕМЯ'));
   ctx.textAlign = 'left';
   ctx.fillStyle = CY;
-  ctx.fillText('ОПЕРАЦИЯ', b.x + fs * 6.5, y);
+  ctx.fillText(L('ОПЕРАЦИЯ'), b.x + fs * 6.5, y);
   ctx.textAlign = 'right';
-  ctx.fillText('СУММА', b.x + b.w, y);
+  ctx.fillText(L('СУММА'), b.x + b.w, y);
   y += line;
 
   // Лента идёт СВЕЖИМ ВВЕРХ: последнее движение денег — то, ради чего
@@ -371,7 +372,7 @@ function drawFinance(ctx, b, game, fs) {
     ctx.fillStyle = CY_DIM;
     ctx.fillText(fmtClock(e.t), b.x, y);
     ctx.fillStyle = INK;
-    ctx.fillText(e.label, b.x + fs * 6.5, y);
+    ctx.fillText(L(e.label), b.x + fs * 6.5, y);
     ctx.textAlign = 'right';
     ctx.fillStyle = e.sum >= 0 ? GREEN : RED;
     ctx.fillText(fmtCrowns(e.sum, true), b.x + b.w, y);
@@ -381,12 +382,12 @@ function drawFinance(ctx, b, game, fs) {
   if (hidden > 0) {
     ctx.textAlign = 'left';
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('…ещё ' + hidden + ' записей выше', b.x, y);
+    ctx.fillText(L('…ещё ') + hidden + L(' записей выше'), b.x, y);
   }
   if (!p.ledger.length) {
     ctx.textAlign = 'center';
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('ДВИЖЕНИЯ СРЕДСТВ НЕ БЫЛО', b.x + b.w / 2, y + line);
+    ctx.fillText(L('ДВИЖЕНИЯ СРЕДСТВ НЕ БЫЛО'), b.x + b.w / 2, y + line);
   }
 }
 
@@ -430,9 +431,9 @@ export function drawMenu(r, game) {
   ctx.fillStyle = INK;
   // В шапке видно, ЧЬИ это дела и живы ли они. Без пометки о связи игрок
   // не отличит «баланс такой» от «баланс был такой полчаса назад».
-  const who = session.mode === 'online' ? 'МЕНЮ ПИЛОТА · ' + session.name.toUpperCase()
-    : session.mode === 'offline' ? 'МЕНЮ ПИЛОТА · АВТОНОМНО'
-      : 'МЕНЮ ПИЛОТА';
+  const who = session.mode === 'online' ? L('МЕНЮ ПИЛОТА · ') + session.name.toUpperCase()
+    : session.mode === 'offline' ? L('МЕНЮ ПИЛОТА · АВТОНОМНО')
+      : L('МЕНЮ ПИЛОТА');
   ctx.fillText(who, x + fs, y + headH * 0.68);
   ctx.textAlign = 'right';
   ctx.fillStyle = game.player.balance < 0 ? RED : AMBER;
@@ -491,10 +492,10 @@ export function drawMenu(r, game) {
   ctx.font = `${fs}px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('1–4 РАЗДЕЛ · I ЗАКРЫТЬ', x + fs, fy + footH * 0.68);
+  ctx.fillText(L('1–4 РАЗДЕЛ · I ЗАКРЫТЬ'), x + fs, fy + footH * 0.68);
   ctx.textAlign = 'right';
   ctx.fillStyle = AMBER;
-  ctx.fillText('КОРАБЛЬ В ПОЛЁТЕ · ' + fmtSpeed(game.ship.speed), x + w - fs, fy + footH * 0.68);
+  ctx.fillText(L('КОРАБЛЬ В ПОЛЁТЕ · ') + fmtSpeed(game.ship.speed), x + w - fs, fy + footH * 0.68);
 
   ctx.restore();
 }

@@ -101,6 +101,10 @@ html, body {
 .btn:hover { background: #7fd4ff; }
 .btn.ghost { background: transparent; color: #7fb6d4; border: 1px solid #1d5f86; }
 .btn.ghost:hover { color: #d8f2ff; border-color: #4fb3e0; }
+/* Выбор языка. Выбранный подсвечен: две одинаковые кнопки не говорят,
+   на каком языке игра сейчас, — а это первое, что хочется знать. */
+.langs { margin: 0 0 14px; }
+.btn.on { color: #d8f2ff; border-color: #4fb3e0; background: rgba(79,179,224,0.12); }
 
 /* Мелкий экран: телефон в горизонте — это 393 точки высоты, и стартовый
    экран с полным списком клавиш в них не помещается. На сенсорном

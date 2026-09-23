@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>SOLAR TRADER :: вход</title>
+<title>SOLAR TRADER :: login</title>
 <link rel="stylesheet" href="css/style.css">
 <style>
   /* Форма входа — единственное место в игре, где есть поля ввода,
@@ -28,34 +28,61 @@
 <div class="overlay">
   <div class="panel">
     <h1>SOLAR TRADER</h1>
-    <p class="sub">вход пилота</p>
+    <p class="sub" id="subTitle"></p>
 
     <form id="form" autocomplete="on">
-      <label class="field"><span>ЛОГИН</span>
+      <label class="field"><span id="lbLogin"></span>
         <input id="login" name="login" autocomplete="username" autocapitalize="off"
                spellcheck="false" required></label>
-      <label class="field"><span>ПАРОЛЬ</span>
+      <label class="field"><span id="lbPass"></span>
         <input id="pass" name="pass" type="password" autocomplete="current-password" required></label>
       <p class="err" id="err"></p>
-      <button class="btn" id="go" type="submit">ВОЙТИ</button>
+      <button class="btn" id="go" type="submit"></button>
     </form>
 
     <div id="have" style="display:none">
       <p class="who" id="whoLine"></p>
-      <button class="btn" id="play">В ИГРУ</button>
-      <button class="btn ghost" id="out">ВЫЙТИ</button>
+      <button class="btn" id="play"></button>
+      <button class="btn ghost" id="out"></button>
     </div>
 
-    <p class="sub" id="note">Регистрации здесь нет: учётную запись заводят
-      командой <b>php server/cli/player.php add &lt;логин&gt; &lt;пароль&gt;</b>.
-      Играть без сервера — <a href="index.html?offline=1" style="color:#4fb3e0">автономно</a>.</p>
+    <p class="sub" id="note"></p>
+    <p class="sub">
+      <button class="btn ghost" id="langEn">ENGLISH</button>
+      <button class="btn ghost" id="langRu">РУССКИЙ</button>
+    </p>
   </div>
 </div>
 
 <script type="module">
 import * as api from './js/net/api.js';
+import { L, initLang, setLang, getLang, numLocale } from './js/core/lang.js';
+
+initLang();
 
 const $ = (id) => document.getElementById(id);
+
+// Подписи собирает скрипт: держать страницу входа в двух видах значило бы
+// править её дважды при каждой мелкой правке.
+function paint() {
+  $('subTitle').textContent = L('вход пилота');
+  $('lbLogin').textContent = L('ЛОГИН');
+  $('lbPass').textContent = L('ПАРОЛЬ');
+  $('go').textContent = L('ВОЙТИ');
+  $('play').textContent = L('В ИГРУ');
+  $('out').textContent = L('ВЫЙТИ');
+  $('note').innerHTML = L('Регистрации здесь нет: учётную запись заводят командой')
+    + ' <b>php server/cli/player.php add &lt;логин&gt; &lt;пароль&gt;</b>. '
+    + L('Играть без сервера —')
+    + ' <a href="index.html?offline=1" style="color:#4fb3e0">' + L('автономно') + '</a>.';
+  for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
+    $(id).classList.toggle('on', getLang() === code);
+  }
+}
+for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
+  $(id).addEventListener('click', () => { setLang(code); paint(); });
+}
+paint();
 const err = $('err');
 const form = $('form');
 
@@ -74,7 +101,7 @@ async function whoAmI() {
     return st.player;
   } catch (e) {
     // Протухший токен api.js уже забыл — просто показываем форму.
-    if (e.code !== 'auth') fail('сервер не отвечает: ' + e.message);
+    if (e.code !== 'auth') fail(L('сервер не отвечает: ') + e.message);
     return null;
   }
 }
@@ -89,8 +116,8 @@ whoAmI().then((me) => {
   form.style.display = 'none';
   $('have').style.display = '';
   $('note').style.display = 'none';
-  $('whoLine').textContent = 'ВХОД ВЫПОЛНЕН: ' + (me.name || me.login)
-    + ' · ' + me.balance.toLocaleString('ru-RU') + ' кр';
+  $('whoLine').textContent = L('ВХОД ВЫПОЛНЕН: ') + (me.name || me.login)
+    + ' · ' + me.balance.toLocaleString(numLocale()) + ' ' + L('кр');
   $('play').addEventListener('click', toGame);
   $('out').addEventListener('click', async () => {
     await api.logout();

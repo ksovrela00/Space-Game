@@ -7,6 +7,7 @@ import { SHIP } from './ship.js';
 import { aimAt, flyVelocity, levelRoll } from './pilot.js';
 import { STATION_R, STATION_D, SLOT } from '../models/station.js';
 import { HULL_HALF } from '../models/ships.js';
+import { L } from '../core/lang.js';
 
 export const LIMITS = {
   speed: 0.28,     // км/с — максимальная относительная скорость входа
@@ -79,7 +80,7 @@ export function startDockingComputer(ship, station) {
     station.pos.x - ship.pos.x,
     station.pos.y - ship.pos.y,
     station.pos.z - ship.pos.z);
-  if (d > DOCK_RANGE) return { ok: false, reason: 'СТАНЦИЯ СЛИШКОМ ДАЛЕКО — ПРЫЖОК (B)' };
+  if (d > DOCK_RANGE) return { ok: false, reason: L('СТАНЦИЯ СЛИШКОМ ДАЛЕКО — ПРЫЖОК (B)') };
   ship.docking = { station, phase: 'gate' };
   ship.autopilot = null;
   return { ok: true };
@@ -145,7 +146,7 @@ export function updateDockingComputer(ship, dt) {
     ship.throttle = clamp(
       (Math.min(dist / 10, off > 0.3 ? 0.25 : SHIP.maxSpeed)) / SHIP.maxSpeed, 0, 1);
     if (dist < 0.5) d.phase = 'gate';
-    return `ДОКИНГ-КОМПЬЮТЕР: ОБХОД СТАНЦИИ ${dist.toFixed(1)} км`;
+    return L('ДОКИНГ-КОМПЬЮТЕР: ОБХОД СТАНЦИИ ') + dist.toFixed(1) + L(' км');
   }
 
   if (d.phase === 'gate') {
@@ -156,7 +157,7 @@ export function updateDockingComputer(ship, dt) {
     ship.throttle = clamp(
       (Math.min(dist / 8, off > 0.25 ? 0.25 : SHIP.maxSpeed)) / SHIP.maxSpeed, 0, 1);
     if (dist < 0.25) d.phase = 'hold';
-    return `ДОКИНГ-КОМПЬЮТЕР: ПОДХОД К СТВОРУ ${dist.toFixed(1)} км`;
+    return L('ДОКИНГ-КОМПЬЮТЕР: ПОДХОД К СТВОРУ ') + dist.toFixed(1) + L(' км');
   }
 
   if (d.phase === 'hold') {
@@ -169,7 +170,8 @@ export function updateDockingComputer(ship, dt) {
     _vec.z = st.vel.z - latZ * 0.35 + b.fwd.z * (GATE_Z - p.z) * 0.2;
     flyVelocity(ship, { x: _vec.x, y: _vec.y, z: _vec.z });
     if (lateral < 0.02 && rollErr < 0.10) d.phase = 'enter';
-    return `ДОКИНГ-КОМПЬЮТЕР: ВЫРАВНИВАНИЕ, снос ${(lateral * 1000).toFixed(0)} м, крен ${(rollErr * 57.3).toFixed(0)}°`;
+    return L('ДОКИНГ-КОМПЬЮТЕР: ВЫРАВНИВАНИЕ, снос ') + (lateral * 1000).toFixed(0)
+      + L(' м, крен ') + (rollErr * 57.3).toFixed(0) + '°';
   }
 
   // enter: сближение по оси со скоростью, привязанной к остатку пути,
@@ -181,5 +183,6 @@ export function updateDockingComputer(ship, dt) {
   const vy = st.vel.y - b.fwd.y * closing - latY * 0.5;
   const vz = st.vel.z - b.fwd.z * closing - latZ * 0.5;
   flyVelocity(ship, { x: vx, y: vy, z: vz }, 2.0);
-  return `ДОКИНГ-КОМПЬЮТЕР: ВХОД ${(Math.max(0, gap) * 1000).toFixed(0)} м, снос ${(lateral * 1000).toFixed(0)} м`;
+  return L('ДОКИНГ-КОМПЬЮТЕР: ВХОД ') + (Math.max(0, gap) * 1000).toFixed(0)
+    + L(' м, снос ') + (lateral * 1000).toFixed(0) + L(' м');
 }

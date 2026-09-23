@@ -20,6 +20,7 @@
 import { v3, set, normalize } from '../core/vec3.js';
 import { lookAlong, aimAngles } from '../core/basis.js';
 import { bodyPosAt, nearestBody } from './world.js';
+import { L } from '../core/lang.js';
 
 export const QUANTUM = {
   // Скорость — характеристика КОРАБЛЯ (ship.quantumSpeed), здесь только
@@ -175,10 +176,10 @@ function segDist(from, dx, dy, dz, s0, s1, p) {
 
 /** Можно ли прыгать: есть цель, корабль в полёте, коридор чист. */
 export function canJump(world, ship, target) {
-  if (!target) return { ok: false, reason: 'ЦЕЛЬ НЕ ВЫБРАНА' };
-  if (ship.landedAt || ship.dockedAt) return { ok: false, reason: 'ПРИВОД НЕ РАБОТАЕТ НА СТОЯНКЕ' };
+  if (!target) return { ok: false, reason: L('ЦЕЛЬ НЕ ВЫБРАНА') };
+  if (ship.landedAt || ship.dockedAt) return { ok: false, reason: L('ПРИВОД НЕ РАБОТАЕТ НА СТОЯНКЕ') };
   const block = corridorBlock(world, ship.pos, target, quantumSpeed(ship));
-  if (block) return { ok: false, reason: 'КОРИДОР ПЕРЕКРЫТ: ' + block.name, block };
+  if (block) return { ok: false, reason: L('КОРИДОР ПЕРЕКРЫТ: ') + block.name, block };
   return { ok: true };
 }
 

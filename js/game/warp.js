@@ -18,6 +18,7 @@
 import { v3, normalize } from '../core/vec3.js';
 import { aimAngles, lookAlong } from '../core/basis.js';
 import { systemDir, systemDistance, warpSeconds } from './galaxy.js';
+import { L } from '../core/lang.js';
 
 export const WARP = {
   // Допуск по прицелу. 2.5° держать рукой тяжело: камера из-за спины
@@ -86,10 +87,10 @@ const _axis = v3();
  * а это и есть настоящее ограничение.
  */
 export function canWarp(ship, from, to) {
-  if (!to) return { ok: false, reason: 'ЦЕЛЬ ВАРПА НЕ ВЫБРАНА: M, ЗАТЕМ G, ЗАТЕМ СИСТЕМУ' };
-  if (!from || to.seed === from.seed) return { ok: false, reason: 'ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ' };
-  if (ship.dockedAt) return { ok: false, reason: 'СНАЧАЛА ОТСТЫКОВКА' };
-  if (ship.landedAt) return { ok: false, reason: 'СНАЧАЛА ВЗЛЁТ' };
+  if (!to) return { ok: false, reason: L('ЦЕЛЬ ВАРПА НЕ ВЫБРАНА: M, ЗАТЕМ G, ЗАТЕМ СИСТЕМУ') };
+  if (!from || to.seed === from.seed) return { ok: false, reason: L('ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ') };
+  if (ship.dockedAt) return { ok: false, reason: L('СНАЧАЛА ОТСТЫКОВКА') };
+  if (ship.landedAt) return { ok: false, reason: L('СНАЧАЛА ВЗЛЁТ') };
   return { ok: true };
 }
 

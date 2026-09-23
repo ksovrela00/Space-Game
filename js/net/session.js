@@ -18,6 +18,7 @@
 //    правда. Иначе два браузера с одним пилотом разъедутся молча.
 
 import * as api from './api.js';
+import { L } from '../core/lang.js';
 
 /** Не чаще раза в столько секунд дёргаем сервер сохранением. */
 export const SAVE_EVERY = 8;
@@ -148,7 +149,7 @@ export async function dock(systemId, localId) {
  * и остаток крон.
  */
 export async function repair() {
-  if (!isOnline()) throw Object.assign(new Error('нет связи с сервером'), { code: 'offline' });
+  if (!isOnline()) throw Object.assign(new Error(L('нет связи с сервером')), { code: 'offline' });
   const r = await api.repair();
   await refresh();
   return r;

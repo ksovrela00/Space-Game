@@ -13,6 +13,7 @@
 
 import { SHIP } from './ship.js';
 import { WEAPONS } from './weapons.js';
+import { L, numLocale } from '../core/lang.js';
 
 /**
  * Ступени дальности сканера, км.
@@ -33,10 +34,10 @@ export const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
  */
 function gun(w, installed) {
   return {
-    code: w.code, slot: 'gun', name: w.name + ' · ' + w.mountName,
+    code: w.code, slot: 'gun', name: L(w.name) + ' · ' + L(w.mountName),
     value: installed
-      ? w.damage + ' × ' + w.rate + '/с, до ' + w.range + ' км'
-      : 'ГНЕЗДО СВОБОДНО',
+      ? w.damage + ' × ' + w.rate + L('/с, до ') + w.range + L(' км')
+      : L('ГНЕЗДО СВОБОДНО'),
     installed,
     spec: {
       kind: w.kind, mount: w.mount, damage: w.damage, rate: w.rate,
@@ -56,48 +57,48 @@ function gun(w, installed) {
 export function modules() {
   return [
     {
-      code: 'engine', slot: 'engine', name: 'МАРШЕВЫЙ ДВИГАТЕЛЬ',
-      value: SHIP.maxSpeed.toFixed(2) + ' км/с', installed: true,
+      code: 'engine', slot: 'engine', name: L('МАРШЕВЫЙ ДВИГАТЕЛЬ'),
+      value: SHIP.maxSpeed.toFixed(2) + L(' км/с'), installed: true,
       spec: { maxSpeed: SHIP.maxSpeed, accel: SHIP.accel, brake: SHIP.brake },
     },
     {
-      code: 'rcs', slot: 'rcs', name: 'МАНЕВРОВЫЕ',
-      value: SHIP.lateral.toFixed(2) + ' км/с²', installed: true,
+      code: 'rcs', slot: 'rcs', name: L('МАНЕВРОВЫЕ'),
+      value: SHIP.lateral.toFixed(2) + L(' км/с²'), installed: true,
       spec: { lateral: SHIP.lateral, pitch: SHIP.pitchRate, yaw: SHIP.yawRate, roll: SHIP.rollRate },
     },
     {
-      code: 'lift', slot: 'lift', name: 'ПОДЪЁМНЫЕ ДВИГАТЕЛИ',
-      value: '×' + SHIP.liftTWR + ' к весу', installed: true,
+      code: 'lift', slot: 'lift', name: L('ПОДЪЁМНЫЕ ДВИГАТЕЛИ'),
+      value: '×' + SHIP.liftTWR + L(' к весу'), installed: true,
       spec: { twr: SHIP.liftTWR, min: SHIP.liftMin },
     },
     {
-      code: 'boost', slot: 'boost', name: 'ФОРСАЖ',
-      value: '×' + SHIP.boostMax + ', ' + SHIP.boostBurn + ' с', installed: true,
+      code: 'boost', slot: 'boost', name: L('ФОРСАЖ'),
+      value: '×' + SHIP.boostMax + ', ' + SHIP.boostBurn + L(' с'), installed: true,
       spec: { mul: SHIP.boostMax, burn: SHIP.boostBurn, fill: SHIP.boostFill },
     },
     {
-      code: 'quantum', slot: 'drive', name: 'КВАНТОВЫЙ ПРИВОД',
-      value: (SHIP.quantumSpeed / 1000).toFixed(0) + ' тыс. км/с', installed: true,
+      code: 'quantum', slot: 'drive', name: L('КВАНТОВЫЙ ПРИВОД'),
+      value: (SHIP.quantumSpeed / 1000).toFixed(0) + L(' тыс. км/с'), installed: true,
       spec: { speed: SHIP.quantumSpeed },
     },
     {
-      code: 'warp', slot: 'warp', name: 'ВАРП-ПРИВОД',
-      value: 'МЕЖСИСТЕМНЫЙ', installed: true,
+      code: 'warp', slot: 'warp', name: L('ВАРП-ПРИВОД'),
+      value: L('МЕЖСИСТЕМНЫЙ'), installed: true,
       spec: { interstellar: true },
     },
     {
-      code: 'dock', slot: 'computer', name: 'ДОКИНГ-КОМПЬЮТЕР',
-      value: 'ЕСТЬ', installed: true,
+      code: 'dock', slot: 'computer', name: L('ДОКИНГ-КОМПЬЮТЕР'),
+      value: L('ЕСТЬ'), installed: true,
       spec: { range: 120 },
     },
     {
-      code: 'land', slot: 'computer', name: 'ПОСАДОЧНЫЙ КОМПЬЮТЕР',
-      value: 'ЕСТЬ', installed: true,
+      code: 'land', slot: 'computer', name: L('ПОСАДОЧНЫЙ КОМПЬЮТЕР'),
+      value: L('ЕСТЬ'), installed: true,
       spec: { airless: true },
     },
     {
-      code: 'scanner', slot: 'scanner', name: 'СКАНЕР',
-      value: SCANNER_STEPS[SCANNER_STEPS.length - 1].toLocaleString('ru-RU') + ' км',
+      code: 'scanner', slot: 'scanner', name: L('СКАНЕР'),
+      value: SCANNER_STEPS[SCANNER_STEPS.length - 1].toLocaleString(numLocale()) + L(' км'),
       installed: true,
       spec: { steps: SCANNER_STEPS },
     },
@@ -105,20 +106,20 @@ export function modules() {
     gun(WEAPONS.missile, false),
     gun(WEAPONS.turret, false),
     {
-      code: 'gear', slot: 'gear', name: 'ШАССИ',
-      value: SHIP.gearTime.toFixed(1) + ' с', installed: true,
+      code: 'gear', slot: 'gear', name: L('ШАССИ'),
+      value: SHIP.gearTime.toFixed(1) + L(' с'), installed: true,
       spec: { time: SHIP.gearTime, speed: SHIP.gearSpeed },
     },
     {
-      code: 'hold', slot: 'hold', name: 'ТРЮМ',
-      value: SHIP.hold + ' т', installed: true,
+      code: 'hold', slot: 'hold', name: L('ТРЮМ'),
+      value: SHIP.hold + L(' т'), installed: true,
       spec: { tons: SHIP.hold },
     },
     {
-      code: 'shield', slot: 'shield', name: 'ЩИТЫ',
+      code: 'shield', slot: 'shield', name: L('ЩИТЫ'),
       value: SHIP.maxShield > 0
-        ? SHIP.maxShield + ' ед., +' + SHIP.shieldRegen + '/с через ' + SHIP.shieldDelay + ' с'
-        : 'НЕТ',
+        ? SHIP.maxShield + L(' ед., +') + SHIP.shieldRegen + L('/с через ') + SHIP.shieldDelay + L(' с')
+        : L('НЕТ'),
       installed: SHIP.maxShield > 0,
       spec: { max: SHIP.maxShield, regen: SHIP.shieldRegen, delay: SHIP.shieldDelay },
     },

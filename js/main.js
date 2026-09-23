@@ -54,7 +54,7 @@ import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import { PEER } from './ui/theme.js';
 import { SCANNER_STEPS } from './game/loadout.js';
 import {
-  showDocked, showCrash, showHelp, hideOverlay,
+  showDocked, showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
 import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
@@ -72,6 +72,7 @@ import {
 import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 import { gpuKind } from './gl/context.js';
+import { L, initLang, setLang, getLang } from './core/lang.js';
 
 const STEP = 1 / 60;
 // v2 — после того, как в систему добавили три планеты. Сохранение хранит
@@ -109,7 +110,7 @@ let renderer = null;
 if (wantGl) {
   scene = new GlScene(screenCanvas, camera, starfield);
   if (!scene.ok) {
-    console.warn('WebGL2 недоступен (' + scene.error + '), рисуем на Canvas 2D');
+    console.warn(L('WebGL2 недоступен (') + scene.error + L('), рисуем на Canvas 2D'));
     scene = null;
   }
 }
@@ -290,7 +291,7 @@ function dockAt(station, restoring = false) {
       game.port = r.station;
       applyServer(game.player, session.player);
       if (r.fee > 0) {
-        say(game.state, 'СТЫКОВОЧНЫЙ СБОР · ' + r.fee + ' кр', '#ffcc66', 3);
+        say(game.state, L('СТЫКОВОЧНЫЙ СБОР · ') + r.fee + L(' кр'), '#ffcc66', 3);
       }
       showDocked(game);
     });
@@ -304,9 +305,9 @@ game.repair = async () => {
     const r = await serverRepair();
     ship.hull = r.hull;
     applyServer(game.player, session.player);
-    say(game.state, 'РЕМОНТ КОРПУСА · −' + r.cost + ' кр', '#78e08f', 3);
+    say(game.state, L('РЕМОНТ КОРПУСА · −') + r.cost + L(' кр'), '#78e08f', 3);
   } catch (e) {
-    say(game.state, 'РЕМОНТ: ' + e.message, '#ff7a66', 4);
+    say(game.state, L('РЕМОНТ: ') + e.message, '#ff7a66', 4);
   }
   showDocked(game);
 };
@@ -329,7 +330,7 @@ game.launch = () => {
   ship.dockedAt = null;
   audioReset(game.audio, ship);
   audioCue(game.audio, 'launch');
-  say(game.state, 'ВЫЛЕТ РАЗРЕШЁН. УДАЧНОГО ПОЛЁТА.', '#78e08f');
+  say(game.state, L('ВЫЛЕТ РАЗРЕШЁН. УДАЧНОГО ПОЛЁТА.'), '#78e08f');
   input.releaseAll();
 };
 
@@ -360,7 +361,7 @@ game.secure = () => {
   ship.control.lift = 0;
   audioCue(game.audio, 'gear', { out: false });
   audioReset(game.audio, ship);
-  say(game.state, 'КОРАБЛЬ ЗАФИКСИРОВАН. ДВИГАТЕЛИ ОТКЛЮЧЕНЫ.', '#78e08f');
+  say(game.state, L('КОРАБЛЬ ЗАФИКСИРОВАН. ДВИГАТЕЛИ ОТКЛЮЧЕНЫ.'), '#78e08f');
   save();
 };
 
@@ -371,7 +372,7 @@ game.takeoff = () => {
   game.state.mode = ST.FLIGHT;
   audioReset(game.audio, ship);
   audioCue(game.audio, 'takeoff');
-  say(game.state, 'ОТРЫВ. ШАССИ ВЫПУЩЕНО — УБРАТЬ КЛАВИШЕЙ G.', '#78e08f');
+  say(game.state, L('ОТРЫВ. ШАССИ ВЫПУЩЕНО — УБРАТЬ КЛАВИШЕЙ G.'), '#78e08f');
   input.releaseAll();
 };
 
@@ -441,7 +442,7 @@ game.restart = () => {
   if (away) selectTarget(away);
   try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* приватный режим */ }
   dockAt(home);                 // ставит режим, экран порта и пишет сейв
-  say(game.state, 'НОВАЯ ИГРА', '#78e08f', 3);
+  say(game.state, L('НОВАЯ ИГРА'), '#78e08f', 3);
 };
 
 // Куда возвращаться, закрывая карту или справку.
@@ -488,7 +489,7 @@ const _tpAim = v3();
 function teleportToTarget() {
   const st = game.state;
   const t = currentTarget(game.nav);
-  if (!t) { say(st, 'ЦЕЛЬ НЕ ВЫБРАНА', '#ff7a66'); return; }
+  if (!t) { say(st, L('ЦЕЛЬ НЕ ВЫБРАНА'), '#ff7a66'); return; }
 
   stopDockingComputer(ship);
   stopLanding(ship);
@@ -510,7 +511,7 @@ function teleportToTarget() {
       t.pos.y + t.basis.fwd.y * 6,
       t.pos.z + t.basis.fwd.z * 6), b);
     audioReset(game.audio, ship);
-    say(st, 'ТЕЛЕПОРТ: ' + t.name + ', 6 км до порта', '#78e08f');
+    say(st, L('ТЕЛЕПОРТ: ') + t.name + L(', 6 км до порта'), '#78e08f');
     return;
   }
 
@@ -559,7 +560,7 @@ function teleportToTarget() {
     _tpAim.x - _tpPos.x, _tpAim.y - _tpPos.y, _tpAim.z - _tpPos.z)), _tpDir);
   placeShip(ship, _tpPos, b);
   audioReset(game.audio, ship);
-  say(st, 'ТЕЛЕПОРТ: ' + t.name + ', высота ' + fmtDist(alt), '#78e08f');
+  say(st, L('ТЕЛЕПОРТ: ') + t.name + L(', высота ') + fmtDist(alt), '#78e08f');
 }
 
 /**
@@ -833,9 +834,9 @@ function applyNetEvent(ev) {
     }
     audioCue(game.audio, 'hit', { damage: Math.min(1, (ev.dmg || 1) / 12) });
     say(game.state, ev.absorbed > 0
-      ? 'ЩИТ ДЕРЖИТ · ' + Math.round(ship.shield)
-      : 'ПОПАДАНИЕ · КОРПУС ' + Math.round(ship.hull) + '%', '#ff7a66', 2);
-    if (ev.dead) killedInAction(ev.name || 'ПИЛОТ');
+      ? L('ЩИТ ДЕРЖИТ · ') + Math.round(ship.shield)
+      : L('ПОПАДАНИЕ · КОРПУС ') + Math.round(ship.hull) + '%', '#ff7a66', 2);
+    if (ev.dead) killedInAction(ev.name || L('ПИЛОТ'));
     return;
   }
   if (ev.t === 'hitok') {
@@ -848,11 +849,11 @@ function applyNetEvent(ev) {
     if (t && ev.absorbed > 0 && !hasShieldFlash(game.guns, ev.id, false)) {
       shieldFlash(game.guns, ev.id, false, ship.pos, t.pos, t.basis);
     }
-    if (ev.dead) say(game.state, 'ЦЕЛЬ УНИЧТОЖЕНА', '#78e08f', 4);
+    if (ev.dead) say(game.state, L('ЦЕЛЬ УНИЧТОЖЕНА'), '#78e08f', 4);
     return;
   }
   if (ev.t === 'boom') {
-    say(game.state, 'ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ', '#ffcc66', 3);
+    say(game.state, L('ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ'), '#ffcc66', 3);
   }
 }
 
@@ -867,14 +868,14 @@ function applyNetEvent(ev) {
 async function killedInAction(by) {
   game.guns.bolts.length = 0;
   audioCue(game.audio, 'crash');
-  say(game.state, 'КОРАБЛЬ УНИЧТОЖЕН · ' + by, '#ff7a66', 6);
+  say(game.state, L('КОРАБЛЬ УНИЧТОЖЕН · ') + by, '#ff7a66', 6);
   const st = await serverRefresh();
-  if (!st) { crash('Корабль уничтожен в бою.'); return; }
+  if (!st) { crash(L('Корабль уничтожен в бою.')); return; }
   applyState(serverToSave(st));
   applyServer(game.player, st);
   save();
   if (game.state.mode === ST.DOCKED) showDocked(game);
-  say(game.state, 'КОРАБЛЬ ВОССТАНОВЛЕН В ПОРТУ', '#ffcc66', 6);
+  say(game.state, L('КОРАБЛЬ ВОССТАНОВЛЕН В ПОРТУ'), '#ffcc66', 6);
 }
 
 // --- глобальные клавиши ------------------------------------------------------
@@ -893,12 +894,12 @@ function handleKeys(dt) {
       if (game.restartArmed > 0) game.restart();
       else {
         game.restartArmed = RESTART_CONFIRM;
-        say(st, 'SHIFT+N ЕЩЁ РАЗ — НАЧАТЬ ЗАНОВО', '#ff7a66', RESTART_CONFIRM);
+        say(st, L('SHIFT+N ЕЩЁ РАЗ — НАЧАТЬ ЗАНОВО'), '#ff7a66', RESTART_CONFIRM);
       }
     } else {
       game.audio.on = !game.audio.on;
       sound.setMuted(!game.audio.on);
-      say(st, game.audio.on ? 'ЗВУК ВКЛЮЧЁН' : 'ЗВУК ВЫКЛЮЧЕН');
+      say(st, game.audio.on ? L('ЗВУК ВКЛЮЧЁН') : L('ЗВУК ВЫКЛЮЧЕН'));
       save();
     }
   }
@@ -906,7 +907,7 @@ function handleKeys(dt) {
     const up = input.pressed('Equal', 'NumpadAdd');
     game.audio.vol = clamp(game.audio.vol + (up ? 0.1 : -0.1), 0, 1);
     sound.setVolume(game.audio.vol);
-    say(st, 'ГРОМКОСТЬ ' + Math.round(game.audio.vol * 100) + '%');
+    say(st, L('ГРОМКОСТЬ ') + Math.round(game.audio.vol * 100) + '%');
     save();
   }
 
@@ -997,15 +998,15 @@ function handleKeys(dt) {
   // худший способ выбрать то, что и так видно на экране.
   if (input.pressed('Tab')) {
     const t = pickTarget(game.nav, ship);
-    if (!t) { say(st, 'НАВЕДИ НОС НА ЦЕЛЬ', '#ffcc66'); return; }
-    say(st, 'ЦЕЛЬ: ' + targetLabel(t));
+    if (!t) { say(st, L('НАВЕДИ НОС НА ЦЕЛЬ'), '#ffcc66'); return; }
+    say(st, L('ЦЕЛЬ: ') + targetLabel(t));
     // Смена цели на калибровке — это выбор другого маршрута, а не отказ
     // от прыжка: привод просто начинает считать заново.
     const q = game.quantum;
     if (q.phase === 'calib') startCalibration(q, t);
     else if (q.phase === 'jump') {
       abortQuantum(q, ship);
-      say(st, 'ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА', '#ff7a66');
+      say(st, L('ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА'), '#ff7a66');
     }
   }
 
@@ -1019,8 +1020,8 @@ function handleKeys(dt) {
     const q = game.quantum;
     if (q.phase === 'jump') {
       abortQuantum(q, ship);
-      say(st, 'ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА', '#ff7a66');
-    } else if (q.phase === 'calib') { stopQuantum(q); say(st, 'ПРИВОД ОТКЛЮЧЁН'); }
+      say(st, L('ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА'), '#ff7a66');
+    } else if (q.phase === 'calib') { stopQuantum(q); say(st, L('ПРИВОД ОТКЛЮЧЁН')); }
     else {
       const t = currentTarget(game.nav);
       // Коридор проверяется и здесь, до калибровки: держать прицел три
@@ -1035,14 +1036,14 @@ function handleKeys(dt) {
           const hop = suggestHop(world, ship, t);
           if (hop) {
             selectTarget(hop);
-            say(st, 'ОБХОД ЧЕРЕЗ ' + hop.name + ' — B ЕЩЁ РАЗ', '#ffcc66', 4);
+            say(st, L('ОБХОД ЧЕРЕЗ ') + hop.name + L(' — B ЕЩЁ РАЗ'), '#ffcc66', 4);
           }
         }
       } else {
         stopDockingComputer(ship);
         stopLanding(ship);
         startCalibration(q, t);
-        say(st, 'ПРИВОД: КАЛИБРОВКА НА ' + t.name, '#78e08f');
+        say(st, L('ПРИВОД: КАЛИБРОВКА НА ') + t.name, '#78e08f');
       }
     }
   }
@@ -1054,10 +1055,10 @@ function handleKeys(dt) {
   if (input.pressed('KeyJ')) {
     const w = game.warp;
     if (w.phase === 'tunnel') {
-      say(st, 'ВАРП НЕ ПРЕРЫВАЕТСЯ', '#ffcc66');
+      say(st, L('ВАРП НЕ ПРЕРЫВАЕТСЯ'), '#ffcc66');
     } else if (w.phase === 'align') {
       stopWarp(w);
-      say(st, 'ВАРП ОТКЛЮЧЁН');
+      say(st, L('ВАРП ОТКЛЮЧЁН'));
     } else {
       const to = game.warpTarget;
       const res = canWarp(ship, sys, to);
@@ -1067,7 +1068,7 @@ function handleKeys(dt) {
         stopDockingComputer(ship);
         stopLanding(ship);
         startWarp(w, sys, to);
-        say(st, 'ВАРП: ЦЕНТРОВКА НА ' + to.name.toUpperCase(), '#9fd9ff', 4);
+        say(st, L('ВАРП: ЦЕНТРОВКА НА ') + to.name.toUpperCase(), '#9fd9ff', 4);
       }
     }
   }
@@ -1083,35 +1084,35 @@ function handleKeys(dt) {
   if (input.pressed('KeyG')) {
     const out = toggleGear(ship);
     audioCue(game.audio, 'gear', { out });
-    say(st, out ? 'ШАССИ: ВЫПУСК' : 'ШАССИ: УБОРКА',
+    say(st, out ? L('ШАССИ: ВЫПУСК') : L('ШАССИ: УБОРКА'),
       out ? '#78e08f' : null);
   }
 
   if (input.pressed('KeyL')) {
-    if (ship.landing) { stopLanding(ship); say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН'); }
+    if (ship.landing) { stopLanding(ship); say(st, L('ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН')); }
     else {
       // Цель — либо выбранное навигатором тело, либо то, над которым летим.
       const t = currentTarget(game.nav);
       const body = isLandable(t) ? t : (game.zone ? game.zone.body : null);
-      if (!body) say(st, 'РЯДОМ НЕТ ТЕЛА, НА КОТОРОЕ МОЖНО СЕСТЬ', '#ff7a66');
+      if (!body) say(st, L('РЯДОМ НЕТ ТЕЛА, НА КОТОРОЕ МОЖНО СЕСТЬ'), '#ff7a66');
       else {
         const res = startLanding(ship, body, ship.pos);
         if (!res.ok) say(st, res.reason, '#ff7a66');
-        else say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР: ' + body.name, '#78e08f');
+        else say(st, L('ПОСАДОЧНЫЙ КОМПЬЮТЕР: ') + body.name, '#78e08f');
       }
     }
   }
 
   if (input.pressed('KeyC')) {
-    if (ship.docking) { stopDockingComputer(ship); say(st, 'ДОКИНГ-КОМПЬЮТЕР ОТКЛЮЧЁН'); }
+    if (ship.docking) { stopDockingComputer(ship); say(st, L('ДОКИНГ-КОМПЬЮТЕР ОТКЛЮЧЁН')); }
     else {
       const t = currentTarget(game.nav);
       const station = t && t.isStation ? t : nearestStation();
-      if (!station) say(st, 'СТАНЦИЙ ПОБЛИЗОСТИ НЕТ', '#ff7a66');
+      if (!station) say(st, L('СТАНЦИЙ ПОБЛИЗОСТИ НЕТ'), '#ff7a66');
       else {
         const res = startDockingComputer(ship, station);
         if (!res.ok) say(st, res.reason, '#ff7a66');
-        else say(st, 'ДОКИНГ-КОМПЬЮТЕР: ' + station.name, '#78e08f');
+        else say(st, L('ДОКИНГ-КОМПЬЮТЕР: ') + station.name, '#78e08f');
       }
     }
   }
@@ -1125,7 +1126,7 @@ function handleKeys(dt) {
       input.isDown('KeyR', 'KeyF', 'Space') || input.pressed('KeyX', 'KeyZ')) {
       if (ship.docking) stopDockingComputer(ship);
       if (ship.landing) stopLanding(ship);
-      say(st, 'РУЧНОЕ УПРАВЛЕНИЕ');
+      say(st, L('РУЧНОЕ УПРАВЛЕНИЕ'));
     }
   }
 }
@@ -1227,12 +1228,12 @@ function step(dt) {
       enterSystem(w.to);
       placeAtStar(w, ship, world.star);
       game.nearest = nearestBody(world, ship.pos);
-      say(st, 'СИСТЕМА ' + w.to.name.toUpperCase(), '#9fd9ff', 3);
+      say(st, L('СИСТЕМА ') + w.to.name.toUpperCase(), '#9fd9ff', 3);
     } else if (ev === 'arrive') {
       finishWarp(w, ship);
       game.warpTarget = null;
       audioReset(game.audio, ship);
-      say(st, 'ПРИБЫТИЕ: ' + sys.name.toUpperCase(), '#78e08f', 4);
+      say(st, L('ПРИБЫТИЕ: ') + sys.name.toUpperCase(), '#78e08f', 4);
       save();
     }
     return;
@@ -1249,10 +1250,10 @@ function step(dt) {
     game.entry = null;
     game.zone = null;
     if (ev === 'arrive') {
-      say(st, 'ВЫХОД ИЗ ПРЫЖКА', '#78e08f');
+      say(st, L('ВЫХОД ИЗ ПРЫЖКА'), '#78e08f');
       audioReset(game.audio, ship);
     } else if (ev === 'stopped') {
-      say(st, 'ХОД ПОГАШЕН', '#78e08f');
+      say(st, L('ХОД ПОГАШЕН'), '#78e08f');
       audioReset(game.audio, ship);
     }
     return;
@@ -1274,8 +1275,8 @@ function step(dt) {
   // корабль слушается ручек, привод копит готовность, пока нос в допуске.
   if (w.phase === 'align') {
     const ev = updateWarp(w, ship, dt);
-    if (ev === 'abort') say(st, w.reason || 'ВАРП ОТМЕНЁН', '#ff7a66');
-    else if (ev === 'engage') say(st, 'ВАРП', '#9fd9ff', 1.5);
+    if (ev === 'abort') say(st, w.reason || L('ВАРП ОТМЕНЁН'), '#ff7a66');
+    else if (ev === 'engage') say(st, L('ВАРП'), '#9fd9ff', 1.5);
   } else {
     updateWarp(w, ship, dt);                // только затухание вспышки
   }
@@ -1284,8 +1285,8 @@ function step(dt) {
   // привод копит готовность. Событие 'engage' поймает следующий кадр.
   if (q.phase === 'calib') {
     const ev = updateQuantum(q, ship, world, dt);
-    if (ev === 'abort') say(st, q.reason || 'ПРЫЖОК ОТМЕНЁН', '#ff7a66');
-    else if (ev === 'engage') say(st, 'ПРЫЖОК', '#78e08f', 1.2);
+    if (ev === 'abort') say(st, q.reason || L('ПРЫЖОК ОТМЕНЁН'), '#ff7a66');
+    else if (ev === 'engage') say(st, L('ПРЫЖОК'), '#78e08f', 1.2);
   } else {
     updateQuantum(q, ship, world, dt);      // только затухание вспышки
   }
@@ -1307,7 +1308,7 @@ function step(dt) {
   // кратера.
   game.nearest = nearestBody(world, ship.pos);
   if (game.nearest.gap <= 0 && (!zone || zone.body !== game.nearest.body)) {
-    crash('Столкновение с ' + game.nearest.body.name + '.');
+    crash(L('Столкновение с ') + game.nearest.body.name + '.');
     return;
   }
 
@@ -1316,9 +1317,9 @@ function step(dt) {
     if (touch && touch.result === 'landed') {
       if (touch.damage) {
         ship.hull = Math.max(1, ship.hull - touch.damage);
-        say(st, 'ПОСАДКА БЕЗ ШАССИ · −' + Math.round(touch.damage) + '% КОРПУСА', '#ffcc66', 2);
+        say(st, L('ПОСАДКА БЕЗ ШАССИ · −') + Math.round(touch.damage) + L('% КОРПУСА'), '#ffcc66', 2);
       } else {
-        say(st, 'ПОСАДКА ВЫПОЛНЕНА: ' + zone.body.name, '#78e08f');
+        say(st, L('ПОСАДКА ВЫПОЛНЕНА: ') + zone.body.name, '#78e08f');
       }
       landAt(zone, !!touch.damage);
       return;
@@ -1335,12 +1336,12 @@ function step(dt) {
       game.stats.hits = (game.stats.hits || 0) + 1;
       if (ship.hull <= 0) {
         ship.hull = 0;
-        crash(touch.reason + ' Корпус разрушен.');
+        crash(touch.reason + L(' Корпус разрушен.'));
         return;
       }
-      say(st, `УДАР · −${Math.round(touch.damage)}% КОРПУСА`,
+      say(st, L('УДАР · −') + Math.round(touch.damage) + L('% КОРПУСА'),
         touch.damage > 15 ? '#ff7a66' : '#ffcc66', 1.6);
-      if (hadComputer) say(st, 'ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН', '#ffcc66', 1.6);
+      if (hadComputer) say(st, L('ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН'), '#ffcc66', 1.6);
     }
   }
 
@@ -1351,12 +1352,12 @@ function step(dt) {
     const res = checkStation(ship, s);
     if (res === 'docked') {
       game.stats.docks++;
-      say(st, 'СТЫКОВКА ВЫПОЛНЕНА', '#78e08f');
+      say(st, L('СТЫКОВКА ВЫПОЛНЕНА'), '#78e08f');
       dockAt(s);
       return;
     }
     if (res === 'crash') {
-      crash('Удар о конструкции станции ' + s.name + '.');
+      crash(L('Удар о конструкции станции ') + s.name + '.');
       return;
     }
   }
@@ -1715,12 +1716,12 @@ function render2d() {
   // любого вида: из кокпита зарево впереди как раз и есть главное.
   const en = game.entry;
   if (en) {
-    const L = shipMesh.length || 0.065;
+    const hullLen = shipMesh.length || 0.065;
     const c = en.color.map((v) => Math.round(Math.min(1, v) * 255));
     for (const [ahead, k] of [[0.75, 1], [0.1, 0.7], [-0.9, 0.45]]) {
-      _tmp.x = ship.pos.x + en.dir.x * L * ahead;
-      _tmp.y = ship.pos.y + en.dir.y * L * ahead;
-      _tmp.z = ship.pos.z + en.dir.z * L * ahead;
+      _tmp.x = ship.pos.x + en.dir.x * hullLen * ahead;
+      _tmp.y = ship.pos.y + en.dir.y * hullLen * ahead;
+      _tmp.z = ship.pos.z + en.dir.z * hullLen * ahead;
       renderer.drawGlow(_tmp, (14 + 70 * en.heat) * k, `rgb(${c[0]},${c[1]},${c[2]})`);
     }
   }
@@ -1853,7 +1854,7 @@ function frame(now) {
     if (qt && qt.isPeer && !game.peers.includes(qt)) {
       if (game.quantum.phase === 'jump') abortQuantum(game.quantum, ship);
       else stopQuantum(game.quantum);
-      say(game.state, 'ЦЕЛЬ ПРОПАЛА С ЛОКАТОРА · ПРЫЖОК СОРВАН', '#ff7a66', 5);
+      say(game.state, L('ЦЕЛЬ ПРОПАЛА С ЛОКАТОРА · ПРЫЖОК СОРВАН'), '#ff7a66', 5);
     }
     worldAim = clockTarget(worldClock, tNow);
     // Качество связи считается здесь же, а не в приборах: приборов два
@@ -1873,11 +1874,11 @@ function frame(now) {
   // догадываться по тому, что счёт перестал меняться.
   if (session.mode !== netMode) {
     if (netMode === 'online' && session.mode === 'offline') {
-      say(game.state, 'СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА · АВТОНОМНО', '#ffcc66', 5);
+      say(game.state, L('СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА · АВТОНОМНО'), '#ffcc66', 5);
     } else if (netMode === 'offline' && session.mode === 'online') {
-      say(game.state, 'СВЯЗЬ ВОССТАНОВЛЕНА', '#78e08f', 3);
+      say(game.state, L('СВЯЗЬ ВОССТАНОВЛЕНА'), '#78e08f', 3);
     } else if (session.mode === 'none' && netMode !== 'none') {
-      say(game.state, 'ВХОД ПРОСРОЧЕН · СОХРАНЕНИЕ ТОЛЬКО МЕСТНОЕ', '#ff7a66', 6);
+      say(game.state, L('ВХОД ПРОСРОЧЕН · СОХРАНЕНИЕ ТОЛЬКО МЕСТНОЕ'), '#ff7a66', 6);
     }
     netMode = session.mode;
   }
@@ -1992,6 +1993,9 @@ function resizeAll() {
 }
 
 async function boot() {
+  // Язык — первым делом: он нужен уже стартовому экрану, а дальше его
+  // спрашивают приборы на каждом кадре.
+  initLang();
   input.attach(window);
   input.attachMouse(window);
   attachTouch(window);
@@ -2068,7 +2072,7 @@ async function boot() {
       // Вход есть, а связи нет. Играем с местного кэша и продолжаем
       // попытки — накопленное уйдёт, как только сервер ответит.
       restored = load();
-      say(game.state, 'СЕРВЕР НЕ ОТВЕЧАЕТ · АВТОНОМНЫЙ РЕЖИМ', '#ffcc66', 6);
+      say(game.state, L('СЕРВЕР НЕ ОТВЕЧАЕТ · АВТОНОМНЫЙ РЕЖИМ'), '#ffcc66', 6);
     }
   } else if (!dev) {
     restored = load();
@@ -2092,9 +2096,9 @@ async function boot() {
   if (scene && scene.name) {
     const kind = gpuKind(scene.name);
     if (kind === 'software') {
-      say(game.state, 'ВИДЕОКАРТА НЕ ЗАДЕЙСТВОВАНА · ПРОГРАММНЫЙ РЕНДЕР', '#ff7a66', 12);
+      say(game.state, L('ВИДЕОКАРТА НЕ ЗАДЕЙСТВОВАНА · ПРОГРАММНЫЙ РЕНДЕР'), '#ff7a66', 12);
     } else if (kind === 'integrated') {
-      say(game.state, 'ИГРА ИДЁТ НА ВСТРОЕННОЙ ГРАФИКЕ · ' + shortGpu(scene.name),
+      say(game.state, L('ИГРА ИДЁТ НА ВСТРОЕННОЙ ГРАФИКЕ · ') + shortGpu(scene.name),
         '#ffcc66', 10);
     }
   }
@@ -2104,6 +2108,29 @@ async function boot() {
 
   const bootEl = document.getElementById('boot');
   const startBtn = document.getElementById('bootBtn');
+
+  // Стартовый экран собирается здесь, а не лежит в index.html: его надо
+  // переводить, а язык игрок выбирает прямо тут. Перевыбор пересобирает
+  // экран на месте — уходить и возвращаться ради этого не надо.
+  const paintBoot = () => {
+    const body = document.getElementById('bootBody');
+    if (body) body.innerHTML = bootHtml();
+    startBtn.textContent = BOOT_START();
+    const fs = document.getElementById('fsBtn');
+    if (fs) fs.textContent = BOOT_FULL();
+    for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
+      const btn = document.getElementById(id);
+      if (!btn) continue;
+      btn.classList.toggle('on', getLang() === code);
+    }
+    const tip = document.getElementById('touchHint');
+    if (tip && Q.touchUi) tip.style.display = '';
+  };
+  for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
+    const btn = document.getElementById(id);
+    if (btn) btn.addEventListener('click', () => { setLang(code); paintBoot(); });
+  }
+  paintBoot();
   // Полный экран — со стартового экрана: там есть настоящее нажатие,
   // которого требует браузер, и это единственный момент, когда игрок
   // заведомо смотрит на кнопку. На iPhone режима нет вовсе, поэтому
@@ -2113,16 +2140,14 @@ async function boot() {
     fsBtn.style.display = '';
     fsBtn.addEventListener('click', () => toggleFullscreen());
   }
-  const hint = document.getElementById('touchHint');
-  if (hint && Q.touchUi) hint.style.display = '';
   const start = () => {
     booted = true;
     wake();
     bootEl.classList.add('hidden');
     if (game.state.mode === ST.DOCKED) game.launch();
     else hideOverlay();
-    say(game.state, 'СИСТЕМА ' + world.name.toUpperCase() +
-      ' — ЦЕЛЬ: ' + (currentTarget(game.nav) ? currentTarget(game.nav).name : '—'));
+    say(game.state, L('СИСТЕМА ') + world.name.toUpperCase() +
+      L(' — ЦЕЛЬ: ') + (currentTarget(game.nav) ? currentTarget(game.nav).name : '—'));
   };
   startBtn.addEventListener('click', start);
 

@@ -16,6 +16,8 @@
 // достанет), но у страницы всё равно нет ничего секретнее самого токена,
 // а альтернатива — просить пароль при каждой загрузке.
 
+import { L } from '../core/lang.js';
+
 const TOKEN_KEY = 'solar_trader_token';
 
 /**
@@ -76,7 +78,7 @@ export async function call(route, data = {}, timeoutMs = 6000) {
   } catch (e) {
     // Сети нет вовсе — это не ошибка сервера, и различать их важно:
     // на одно игра предлагает повторить, на другое — нет.
-    const err = new Error('сервер недоступен');
+    const err = new Error(L('сервер недоступен'));
     err.code = 'offline';
     throw err;
   } finally {
@@ -87,13 +89,13 @@ export async function call(route, data = {}, timeoutMs = 6000) {
   try {
     body = await res.json();
   } catch (e) {
-    const err = new Error('сервер ответил не по-нашему (' + res.status + ')');
+    const err = new Error(L('сервер ответил не по-нашему (') + res.status + ')');
     err.code = 'protocol';
     throw err;
   }
 
   if (!body || body.ok !== true) {
-    const e = body && body.error ? body.error : { code: 'server', message: 'неизвестная ошибка' };
+    const e = body && body.error ? body.error : { code: 'server', message: L('неизвестная ошибка') };
     const err = new Error(e.message);
     err.code = e.code;
     err.extra = e;

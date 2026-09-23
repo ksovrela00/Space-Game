@@ -19,6 +19,7 @@ import { SHIP } from '../game/ship.js';
 import { fmtDist, fmtSpeed, fmtTime } from './hud.js';
 import { targetLabel } from '../game/nav.js';
 import { gearLabel } from '../game/landing.js';
+import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
 const MONO = 'Consolas, monospace';
@@ -96,12 +97,12 @@ const row = (ctx, x, y, label, value, color) => {
 export function engineScreen(ctx, w, h, game) {
   const ship = game.ship;
   const back = ship.throttle < -0.001;
-  const f = chrome(ctx, w, h, 'ДВИГАТЕЛЬ');
+  const f = chrome(ctx, w, h, L('ДВИГАТЕЛЬ'));
 
   ctx.font = `12px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('СКОРОСТЬ', f.x, f.y + 12);
+  ctx.fillText(L('СКОРОСТЬ'), f.x, f.y + 12);
   // Главное число на экране — крупное: его читают, не приглядываясь.
   ctx.font = `${Math.round(f.h * 0.26)}px ${MONO}`;
   ctx.fillStyle = INK;
@@ -111,11 +112,11 @@ export function engineScreen(ctx, w, h, game) {
   const gh = Math.max(8, Math.round(f.h * 0.09));
   ctx.font = `10px ${MONO}`;
   gauge(ctx, f.x, gy, f.w, gh, Math.abs(ship.throttle), back ? AMBER : CY,
-    back ? 'ТЯГА НАЗАД' : 'ТЯГА');
+    back ? L('ТЯГА НАЗАД') : L('ТЯГА'));
   gauge(ctx, f.x, gy + gh + 22, f.w, gh, ship.boost,
-    ship.boosting ? AMBER : (ship.boostLock ? RED : CY), 'ФОРСАЖ');
+    ship.boosting ? AMBER : (ship.boostLock ? RED : CY), L('ФОРСАЖ'));
   gauge(ctx, f.x, gy + (gh + 22) * 2, f.w, gh, ship.hull / SHIP.maxHull,
-    ship.hull > 40 ? GREEN : RED, 'КОРПУС');
+    ship.hull > 40 ? GREEN : RED, L('КОРПУС'));
 
   // Шасси — строкой внизу, там же, где о нём говорит любая приборка.
   ctx.font = `11px ${MONO}`;
@@ -129,7 +130,7 @@ export function engineScreen(ctx, w, h, game) {
 export function targetScreen(ctx, w, h, game, target) {
   const ship = game.ship;
   const q = game.quantum;
-  const f = chrome(ctx, w, h, 'ЦЕЛЬ');
+  const f = chrome(ctx, w, h, L('ЦЕЛЬ'));
   const cr = Math.min(f.h, f.w * 0.34) * 0.46;
   const cx = f.x + f.w - cr - 6, cy = f.y + f.h / 2;
 
@@ -151,13 +152,13 @@ export function targetScreen(ctx, w, h, game, target) {
     ly += 17;
   };
   if (game.info) {
-    put('ДИСТ', fmtDist(game.info.gap));
+    put(L('ДИСТ'), fmtDist(game.info.gap));
     put('ETA', fmtTime(game.info.eta));
   }
   if (q && q.phase === 'calib') {
-    put('ПРИВОД', q.aligned ? 'КАЛИБРОВКА' : 'НАВЕДИСЬ', q.aligned ? GREEN : AMBER);
+    put(L('ПРИВОД'), q.aligned ? L('КАЛИБРОВКА') : L('НАВЕДИСЬ'), q.aligned ? GREEN : AMBER);
   } else if (ship.docking) {
-    put('ДОКИНГ', 'ВЕДЁТ', GREEN);
+    put(L('ДОКИНГ'), L('ВЕДЁТ'), GREEN);
   }
 
   // Компас: куда смотреть, чтобы цель была по носу.
@@ -199,7 +200,7 @@ export function scopeScreen(ctx, w, h, game) {
   // Заголовок прибора говорит и о чужих кораблях: в кабине угловых
   // панелей нет, и другого места для этого числа тоже нет.
   const peers = game.peers ? game.peers.length : 0;
-  const f = chrome(ctx, w, h, peers > 0 ? 'ЛОКАТОР · ПИЛОТОВ РЯДОМ ' + peers : 'ЛОКАТОР');
+  const f = chrome(ctx, w, h, peers > 0 ? L('ЛОКАТОР · ПИЛОТОВ РЯДОМ ') + peers : L('ЛОКАТОР'));
   const cx = w / 2, cy = f.y + f.h / 2;
   const r = Math.min(f.w, f.h) / 2 - 4;
   const range = game.scannerRange;
@@ -248,12 +249,12 @@ export function scopeScreen(ctx, w, h, game) {
   ctx.font = `10px ${MONO}`;
   ctx.textAlign = 'center';
   ctx.fillStyle = CY_DIM;
-  ctx.fillText('ДАЛЬНОСТЬ ' + fmtDist(range), cx, f.y + f.h - 1);
+  ctx.fillText(L('ДАЛЬНОСТЬ ') + fmtDist(range), cx, f.y + f.h - 1);
 }
 
 /** Верхнее левое табло: лента сообщений. */
 export function commsScreen(ctx, w, h, game) {
-  const f = chrome(ctx, w, h, 'СВЯЗЬ');
+  const f = chrome(ctx, w, h, L('СВЯЗЬ'));
   ctx.font = `12px ${MONO}`;
   ctx.textAlign = 'left';
   let y = f.y + 12;
@@ -273,7 +274,7 @@ export function commsScreen(ctx, w, h, game) {
   }
   if (!list.length && !game.statusLine) {
     ctx.fillStyle = CY_DIM;
-    ctx.fillText('канал чист', f.x, y);
+    ctx.fillText(L('канал чист'), f.x, y);
   }
 }
 
@@ -281,7 +282,7 @@ export function commsScreen(ctx, w, h, game) {
 export function systemsScreen(ctx, w, h, game) {
   const ship = game.ship;
   const q = game.quantum;
-  const f = chrome(ctx, w, h, 'СИСТЕМЫ');
+  const f = chrome(ctx, w, h, L('СИСТЕМЫ'));
   ctx.font = `12px ${MONO}`;
   let y = f.y + 12;
   const put = (label, value, color) => {
@@ -294,15 +295,15 @@ export function systemsScreen(ctx, w, h, game) {
     y += 17;
   };
   const phase = q ? q.phase : 'idle';
-  const drive = phase === 'idle' ? 'ГОТОВ'
-    : (phase === 'calib' ? 'КАЛИБРОВКА' : (phase === 'brake' ? 'ГАШЕНИЕ' : 'ПРЫЖОК'));
-  put('ПРИВОД', drive, phase === 'idle' ? GREEN : AMBER);
-  put('ШАССИ', ship.gear.out ? (ship.gear.t >= 0.995 ? 'ВЫПУЩЕНО' : 'ВЫХОД') : 'УБРАНО',
+  const drive = phase === 'idle' ? L('ГОТОВ')
+    : (phase === 'calib' ? L('КАЛИБРОВКА') : (phase === 'brake' ? L('ГАШЕНИЕ') : L('ПРЫЖОК')));
+  put(L('ПРИВОД'), drive, phase === 'idle' ? GREEN : AMBER);
+  put(L('ШАССИ'), ship.gear.out ? (ship.gear.t >= 0.995 ? L('ВЫПУЩЕНО') : L('ВЫХОД')) : L('УБРАНО'),
     ship.gear.out && ship.gear.t >= 0.995 ? GREEN : (ship.gear.t > 0.005 ? AMBER : CY_DIM));
   if (ship.landing) {
-    put('ПОСАДКА', String(ship.landing.phase || '').toUpperCase().slice(0, 11), AMBER);
+    put(L('ПОСАДКА'), String(ship.landing.phase || '').toUpperCase().slice(0, 11), AMBER);
   } else {
-    put('РЕЖИМ', game.capture ? 'ЗАХВАТ' : 'СВОБОДНЫЙ', CY);
+    put(L('РЕЖИМ'), game.capture ? L('ЗАХВАТ') : L('СВОБОДНЫЙ'), CY);
   }
-  put('КОРПУС', Math.round(ship.hull) + '%', ship.hull > 40 ? GREEN : RED);
+  put(L('КОРПУС'), Math.round(ship.hull) + '%', ship.hull > 40 ? GREEN : RED);
 }
