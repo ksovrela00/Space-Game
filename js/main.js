@@ -49,7 +49,8 @@ import {
 } from './game/landing.js';
 import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
-import { drawHud, makeDockAssist, fmtDist, SCANNER_STEPS } from './ui/hud.js';
+import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
+import { SCANNER_STEPS } from './game/loadout.js';
 import {
   showDocked, showCrash, showHelp, hideOverlay,
 } from './ui/screens.js';

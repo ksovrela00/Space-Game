@@ -20,7 +20,8 @@ import { CY, CY_DIM, AMBER, GREEN, RED, INK } from './theme.js';
 import { SHIP } from '../game/ship.js';
 import { HULL_SIZE } from '../models/ships.js';
 import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.js';
-import { fmtTime, fmtSpeed, fmtDist, SCANNER_STEPS } from './hud.js';
+import { fmtTime, fmtSpeed } from './hud.js';
+import { modules } from '../game/loadout.js';
 
 const MONO = 'Consolas, monospace';
 
@@ -180,18 +181,9 @@ function drawShip(ctx, b, game, fs) {
     { t: 'row', a: 'ТОРМОЖЕНИЕ', b: SHIP.brake.toFixed(2) + ' км/с²' },
     { t: 'row', a: 'ПОПЕРЁК КУРСА', b: SHIP.lateral.toFixed(2) + ' км/с²' },
     { t: 'head', s: 'УСТАНОВЛЕННЫЕ МОДУЛИ' },
-    { t: 'row', a: 'МАРШЕВЫЙ ДВИГАТЕЛЬ', b: SHIP.maxSpeed.toFixed(2) + ' км/с' },
-    { t: 'row', a: 'МАНЕВРОВЫЕ', b: SHIP.lateral.toFixed(2) + ' км/с²' },
-    { t: 'row', a: 'ПОДЪЁМНЫЕ ДВИГАТЕЛИ', b: '×' + SHIP.liftTWR + ' к весу' },
-    { t: 'row', a: 'ФОРСАЖ', b: '×' + SHIP.boostMax + ', ' + SHIP.boostBurn + ' с' },
-    { t: 'row', a: 'КВАНТОВЫЙ ПРИВОД', b: fmtSpeed(SHIP.quantumSpeed) },
-    { t: 'row', a: 'ВАРП-ПРИВОД', b: 'МЕЖСИСТЕМНЫЙ' },
-    { t: 'row', a: 'ДОКИНГ-КОМПЬЮТЕР', b: 'ЕСТЬ' },
-    { t: 'row', a: 'ПОСАДОЧНЫЙ КОМПЬЮТЕР', b: 'ЕСТЬ' },
-    { t: 'row', a: 'СКАНЕР', b: fmtDist(SCANNER_STEPS[SCANNER_STEPS.length - 1]) },
-    { t: 'row', a: 'ШАССИ', b: SHIP.gearTime.toFixed(1) + ' с' },
-    { t: 'row', a: 'ТРЮМ', b: SHIP.hold + ' т' },
-    { t: 'row', a: 'ЩИТЫ', b: 'НЕТ', c: CY_DIM },
+    // Список общий с сервером (js/game/loadout.js): карточка в игре и
+    // каталог в базе обязаны говорить об одном и том же железе.
+    ...modules().map((m) => ({ t: 'row', a: m.name, b: m.value, c: m.installed ? INK : CY_DIM })),
   ];
 
   // Хватит ли ширины на две колонки, решает САМАЯ ДЛИННАЯ строка, а не

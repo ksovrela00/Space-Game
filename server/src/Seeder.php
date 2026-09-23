@@ -1,0 +1,206 @@
+<?php
+/**
+ * Заливка базы: каталог из выгрузки генератора + содержимое экономики.
+ *
+ * Заливка ИДЕМПОТЕНТНА: её можно гонять сколько угодно раз, и вторая
+ * заливка ничего не портит. Это не аккуратность ради аккуратности — тела
+ * в базе связаны с рынком и заданиями внешними ключами, и «снести и
+ * залить заново» уносило бы вместе с ними чужие склады и чьи-то взятые
+ * подряды. Поэтому строки обновляются на месте по устойчивому ключу
+ * (система + локальный номер тела).
+ */
+
+final class Seeder
+{
+    /** Товары, типы кораблей и модули. */
+    public static function content(array $catalog): array
+    {
+        $n = ['commodity' => 0, 'ship_type' => 0, 'equipment_type' => 0];
+
+        foreach (Content::COMMODITIES as $c) {
+            Db::run(
+                'INSERT INTO `commodity` (`code`,`name`,`category`,`base_price`,`spread`,`legal`)
+                 VALUES (?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `category`=VALUES(`category`),
+                   `base_price`=VALUES(`base_price`), `spread`=VALUES(`spread`), `legal`=VALUES(`legal`)',
+                [$c['code'], $c['name'], $c['category'], $c['base'], $c['spread'], $c['legal']]
+            );
+            $n['commodity']++;
+        }
+
+        foreach ($catalog['shipTypes'] ?? [] as $t) {
+            Db::run(
+                'INSERT INTO `ship_type`
+                   (`code`,`name`,`title`,`hull_max`,`shield_max`,`hold_t`,`fuel_t`,`max_speed`,
+                    `accel`,`brake`,`lateral`,`quantum_speed`,`boost_max`,`boost_burn`,
+                    `length_m`,`width_m`,`height_m`,`price`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
+                   `hull_max`=VALUES(`hull_max`), `shield_max`=VALUES(`shield_max`),
+                   `hold_t`=VALUES(`hold_t`), `fuel_t`=VALUES(`fuel_t`),
+                   `max_speed`=VALUES(`max_speed`), `accel`=VALUES(`accel`), `brake`=VALUES(`brake`),
+                   `lateral`=VALUES(`lateral`), `quantum_speed`=VALUES(`quantum_speed`),
+                   `boost_max`=VALUES(`boost_max`), `boost_burn`=VALUES(`boost_burn`),
+                   `length_m`=VALUES(`length_m`), `width_m`=VALUES(`width_m`),
+                   `height_m`=VALUES(`height_m`), `price`=VALUES(`price`)',
+                [
+                    $t['code'], $t['name'], $t['title'] ?? '', $t['hullMax'], $t['shieldMax'],
+                    $t['holdT'], $t['fuelT'], $t['maxSpeed'], $t['accel'], $t['brake'], $t['lateral'],
+                    $t['quantumSpeed'], $t['boostMax'], $t['boostBurn'],
+                    $t['lengthM'], $t['widthM'], $t['heightM'],
+                    Content::SHIP_PRICE[$t['code']] ?? 0,
+                ]
+            );
+            $n['ship_type']++;
+        }
+
+        foreach ($catalog['equipment'] ?? [] as $e) {
+            Db::run(
+                'INSERT INTO `equipment_type` (`code`,`name`,`slot`,`spec`,`price`,`stock`)
+                 VALUES (?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `slot`=VALUES(`slot`),
+                   `spec`=VALUES(`spec`), `price`=VALUES(`price`), `stock`=VALUES(`stock`)',
+                [
+                    $e['code'], $e['name'], $e['slot'],
+                    json_encode($e['spec'] ?? null, JSON_UNESCAPED_UNICODE),
+                    Content::EQUIPMENT_PRICE[$e['code']] ?? 0,
+                    // `stock` здесь значит «стоит на корабле с завода».
+                    !empty($e['installed']) ? 1 : 0,
+                ]
+            );
+            $n['equipment_type']++;
+        }
+
+        return $n;
+    }
+
+    /** Системы и тела. */
+    public static function catalog(array $catalog): array
+    {
+        $n = ['star_system' => 0, 'body' => 0];
+
+        foreach ($catalog['systems'] as $s) {
+            Db::run(
+                'INSERT INTO `star_system`
+                   (`id`,`seed`,`name`,`star_class`,`luminosity`,`star_radius_km`,`star_temp_k`,
+                    `habitable_km`,`is_home`,`pos_x`,`pos_y`,`pos_z`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON DUPLICATE KEY UPDATE `seed`=VALUES(`seed`), `name`=VALUES(`name`),
+                   `star_class`=VALUES(`star_class`), `luminosity`=VALUES(`luminosity`),
+                   `star_radius_km`=VALUES(`star_radius_km`), `star_temp_k`=VALUES(`star_temp_k`),
+                   `habitable_km`=VALUES(`habitable_km`), `is_home`=VALUES(`is_home`),
+                   `pos_x`=VALUES(`pos_x`), `pos_y`=VALUES(`pos_y`), `pos_z`=VALUES(`pos_z`)',
+                [
+                    $s['id'], $s['seed'], $s['name'], $s['starClass'], $s['luminosity'],
+                    $s['starRadiusKm'], $s['starTempK'], $s['habitableKm'], $s['home'] ? 1 : 0,
+                    $s['pos']['x'], $s['pos']['y'], $s['pos']['z'],
+                ]
+            );
+            $n['star_system']++;
+
+            foreach ($s['bodies'] as $b) {
+                Db::run(
+                    'INSERT INTO `body`
+                       (`system_id`,`local_id`,`parent_local_id`,`kind`,`type`,`name`,`radius_km`,
+                        `orbit_radius_km`,`orbit_period_s`,`orbit_phase`,`orbit_plane`,
+                        `spin_period_s`,`press_bar`,`has_rings`,`has_station`,`is_home_world`,`landable`)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON DUPLICATE KEY UPDATE `parent_local_id`=VALUES(`parent_local_id`),
+                       `kind`=VALUES(`kind`), `type`=VALUES(`type`), `name`=VALUES(`name`),
+                       `radius_km`=VALUES(`radius_km`), `orbit_radius_km`=VALUES(`orbit_radius_km`),
+                       `orbit_period_s`=VALUES(`orbit_period_s`), `orbit_phase`=VALUES(`orbit_phase`),
+                       `orbit_plane`=VALUES(`orbit_plane`), `spin_period_s`=VALUES(`spin_period_s`),
+                       `press_bar`=VALUES(`press_bar`), `has_rings`=VALUES(`has_rings`),
+                       `has_station`=VALUES(`has_station`), `is_home_world`=VALUES(`is_home_world`),
+                       `landable`=VALUES(`landable`)',
+                    [
+                        $s['id'], $b['localId'], $b['parentLocalId'], $b['kind'], $b['type'], $b['name'],
+                        $b['radiusKm'], $b['orbitRadiusKm'], $b['orbitPeriodS'], $b['orbitPhase'],
+                        $b['orbitPlane'] === null ? null : json_encode($b['orbitPlane']),
+                        $b['spinPeriodS'], $b['pressBar'],
+                        $b['hasRings'] ? 1 : 0, $b['hasStation'] ? 1 : 0,
+                        !empty($b['isHomeWorld']) ? 1 : 0, $b['landable'] ? 1 : 0,
+                    ]
+                );
+                $n['body']++;
+            }
+        }
+
+        Schema::setMeta('galaxy_seed', (string) $catalog['galaxySeed']);
+        Schema::setMeta('catalog_generated_at', (string) $catalog['generatedAt']);
+        Schema::setMeta('catalog_seeded_at', Db::now());
+        return $n;
+    }
+
+    /**
+     * Склады станций.
+     *
+     * Цена берётся от ВИДА МИРА, вокруг которого станция висит: это и
+     * делает перелёт осмысленным. Товар, который здесь производят, стоит
+     * дёшево и лежит на складе; тот, которого ждут, — дорог, и склад пуст.
+     */
+    public static function markets(bool $force = false): int
+    {
+        $stations = Db::all(
+            "SELECT s.`id`, s.`system_id`, COALESCE(p.`type`, 'station') AS `world`
+             FROM `body` s
+             LEFT JOIN `body` p ON p.`system_id` = s.`system_id` AND p.`local_id` = s.`parent_local_id`
+             WHERE s.`kind` = 'station'"
+        );
+        $goods = Db::all('SELECT `id`, `code` FROM `commodity`');
+        $byCode = [];
+        foreach (Content::COMMODITIES as $c) {
+            $byCode[$c['code']] = $c;
+        }
+
+        $rows = 0;
+        Db::tx(function () use ($stations, $goods, $byCode, $force, &$rows) {
+            $now = Db::now();
+            foreach ($stations as $st) {
+                foreach ($goods as $g) {
+                    $def = $byCode[$g['code']] ?? null;
+                    if ($def === null) {
+                        continue;
+                    }
+                    if (!Content::offeredAt($def, $st['world'], (int) $st['id'])) {
+                        Db::run(
+                            'DELETE FROM `market` WHERE `station_id`=? AND `commodity_id`=?',
+                            [$st['id'], $g['id']]
+                        );
+                        continue;
+                    }
+                    $p = Content::priceAt($def, $st['world'], (int) $st['id']);
+                    // Без --force склад не трогаем: игроки уже могли с него
+                    // скупить товар, и пересчёт вернул бы его из воздуха.
+                    $sql = $force
+                        ? 'INSERT INTO `market` (`station_id`,`commodity_id`,`price`,`stock`,`updated_at`)
+                           VALUES (?,?,?,?,?)
+                           ON DUPLICATE KEY UPDATE `price`=VALUES(`price`), `stock`=VALUES(`stock`),
+                             `updated_at`=VALUES(`updated_at`)'
+                        : 'INSERT INTO `market` (`station_id`,`commodity_id`,`price`,`stock`,`updated_at`)
+                           VALUES (?,?,?,?,?)
+                           ON DUPLICATE KEY UPDATE `price`=VALUES(`price`), `updated_at`=VALUES(`updated_at`)';
+                    Db::run($sql, [$st['id'], $g['id'], $p['price'], $p['stock'], $now]);
+                    $rows++;
+                }
+            }
+        });
+        return $rows;
+    }
+
+    /** Прочитать выгрузку генератора. */
+    public static function readCatalog(string $path): array
+    {
+        if (!is_file($path)) {
+            throw new RuntimeException(
+                "нет выгрузки каталога: $path\n" .
+                'сначала: node tools/export.mjs'
+            );
+        }
+        $data = json_decode((string) file_get_contents($path), true);
+        if (!is_array($data) || empty($data['systems'])) {
+            throw new RuntimeException("выгрузка каталога испорчена: $path");
+        }
+        return $data;
+    }
+}

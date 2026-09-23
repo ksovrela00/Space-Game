@@ -1,0 +1,3567 @@
+{
+ "version": 1,
+ "generatedAt": "2026-09-23T06:28:42.891Z",
+ "galaxySeed": 39985,
+ "shipTypes": [
+  {
+   "code": "challenger",
+   "name": "Challenger",
+   "title": "ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ",
+   "hullMax": 100,
+   "shieldMax": 0,
+   "holdT": 20,
+   "fuelT": 12,
+   "maxSpeed": 1.2,
+   "accel": 0.45,
+   "brake": 0.75,
+   "lateral": 0.5,
+   "quantumSpeed": 60000,
+   "boostMax": 3,
+   "boostBurn": 10,
+   "lengthM": 65,
+   "widthM": 67.1,
+   "heightM": 19.3
+  }
+ ],
+ "equipment": [
+  {
+   "code": "engine",
+   "name": "МАРШЕВЫЙ ДВИГАТЕЛЬ",
+   "slot": "engine",
+   "spec": {
+    "maxSpeed": 1.2,
+    "accel": 0.45,
+    "brake": 0.75
+   },
+   "installed": true
+  },
+  {
+   "code": "rcs",
+   "name": "МАНЕВРОВЫЕ",
+   "slot": "rcs",
+   "spec": {
+    "lateral": 0.5,
+    "pitch": 0.85,
+    "yaw": 0.55,
+    "roll": 1.6
+   },
+   "installed": true
+  },
+  {
+   "code": "lift",
+   "name": "ПОДЪЁМНЫЕ ДВИГАТЕЛИ",
+   "slot": "lift",
+   "spec": {
+    "twr": 3,
+    "min": 0.004
+   },
+   "installed": true
+  },
+  {
+   "code": "boost",
+   "name": "ФОРСАЖ",
+   "slot": "boost",
+   "spec": {
+    "mul": 3,
+    "burn": 10,
+    "fill": 7.5
+   },
+   "installed": true
+  },
+  {
+   "code": "quantum",
+   "name": "КВАНТОВЫЙ ПРИВОД",
+   "slot": "drive",
+   "spec": {
+    "speed": 60000
+   },
+   "installed": true
+  },
+  {
+   "code": "warp",
+   "name": "ВАРП-ПРИВОД",
+   "slot": "warp",
+   "spec": {
+    "interstellar": true
+   },
+   "installed": true
+  },
+  {
+   "code": "dock",
+   "name": "ДОКИНГ-КОМПЬЮТЕР",
+   "slot": "computer",
+   "spec": {
+    "range": 120
+   },
+   "installed": true
+  },
+  {
+   "code": "land",
+   "name": "ПОСАДОЧНЫЙ КОМПЬЮТЕР",
+   "slot": "computer",
+   "spec": {
+    "airless": true
+   },
+   "installed": true
+  },
+  {
+   "code": "scanner",
+   "name": "СКАНЕР",
+   "slot": "scanner",
+   "spec": {
+    "steps": [
+     5,
+     25,
+     120,
+     600,
+     3000,
+     20000
+    ]
+   },
+   "installed": true
+  },
+  {
+   "code": "gear",
+   "name": "ШАССИ",
+   "slot": "gear",
+   "spec": {
+    "time": 2.4,
+    "speed": 0.35
+   },
+   "installed": true
+  },
+  {
+   "code": "hold",
+   "name": "ТРЮМ",
+   "slot": "hold",
+   "spec": {
+    "tons": 20
+   },
+   "installed": true
+  },
+  {
+   "code": "shield",
+   "name": "ЩИТЫ",
+   "slot": "shield",
+   "spec": {
+    "max": 0
+   },
+   "installed": false
+  }
+ ],
+ "systems": [
+  {
+   "id": 0,
+   "seed": 6782,
+   "name": "Lave",
+   "home": true,
+   "starClass": "G",
+   "luminosity": 1,
+   "starRadiusKm": 62000,
+   "starTempK": 5600,
+   "habitableKm": 620000,
+   "pos": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Lave",
+     "radiusKm": 62000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "lava",
+     "name": "Lave I",
+     "radiusKm": 1900,
+     "orbitRadiusKm": 340000,
+     "orbitPeriodS": 1615216623.195,
+     "orbitPhase": 4.159655541,
+     "orbitPlane": {
+      "A": [
+       -0.199487944,
+       0,
+       0.979900281
+      ],
+      "B": [
+       0.979866382,
+       0.008317879,
+       0.199481043
+      ]
+     },
+     "spinPeriodS": 110062.068,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ocean",
+     "name": "Lave II",
+     "radiusKm": 4200,
+     "orbitRadiusKm": 620000,
+     "orbitPeriodS": 4486742676.902,
+     "orbitPhase": 2.688014245,
+     "orbitPlane": {
+      "A": [
+       -0.709789621,
+       0,
+       0.704413723
+      ],
+      "B": [
+       0.703313495,
+       0.055869247,
+       0.708680996
+      ]
+     },
+     "spinPeriodS": 130510.311,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 3,
+     "kind": "station",
+     "type": "station",
+     "name": "Riveis Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 6353.591,
+     "orbitPeriodS": 17159370.971,
+     "orbitPhase": 3.810467467,
+     "orbitPlane": {
+      "A": [
+       -0.931769469,
+       0,
+       0.363050489
+      ],
+      "B": [
+       0.362606543,
+       -0.049438306,
+       0.930630082
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Lave III",
+     "radiusKm": 3400,
+     "orbitRadiusKm": 1020000,
+     "orbitPeriodS": 8795228022.326,
+     "orbitPhase": 0.213561882,
+     "orbitPlane": {
+      "A": [
+       -0.407703662,
+       0,
+       0.913114299
+      ],
+      "B": [
+       0.913103755,
+       0.004805728,
+       0.407698954
+      ]
+     },
+     "spinPeriodS": 127338.141,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 5,
+     "kind": "station",
+     "type": "station",
+     "name": "Rior Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 5364.464,
+     "orbitPeriodS": 15322590.461,
+     "orbitPhase": 0.467210443,
+     "orbitPlane": {
+      "A": [
+       -0.698301336,
+       0,
+       0.715803915
+      ],
+      "B": [
+       0.715767075,
+       -0.010145391,
+       0.698265397
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Lave IV",
+     "radiusKm": 2600,
+     "orbitRadiusKm": 1580000,
+     "orbitPeriodS": 18914305087.619,
+     "orbitPhase": 3.727225377,
+     "orbitPlane": {
+      "A": [
+       -0.106179076,
+       0,
+       -0.994347024
+      ],
+      "B": [
+       -0.992849688,
+       -0.054858266,
+       0.106019186
+      ]
+     },
+     "spinPeriodS": 60796.751,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Lave V",
+     "radiusKm": 1700,
+     "orbitRadiusKm": 1950000,
+     "orbitPeriodS": 25097090174.382,
+     "orbitPhase": 4.804369722,
+     "orbitPlane": {
+      "A": [
+       -0.418497898,
+       0,
+       -0.908217765
+      ],
+      "B": [
+       -0.90776616,
+       0.031531563,
+       0.418289803
+      ]
+     },
+     "spinPeriodS": 96065.12,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Lave VI",
+     "radiusKm": 8200,
+     "orbitRadiusKm": 2420000,
+     "orbitPeriodS": 34481170713.878,
+     "orbitPhase": 5.539736854,
+     "orbitPlane": {
+      "A": [
+       -0.036709073,
+       0,
+       0.999325995
+      ],
+      "B": [
+       0.99930925,
+       -0.005788982,
+       0.036708458
+      ]
+     },
+     "spinPeriodS": 288499.371,
+     "pressBar": 1,
+     "hasRings": true,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIa",
+     "radiusKm": 1648.042,
+     "orbitRadiusKm": 33883.062,
+     "orbitPeriodS": 116480896.915,
+     "orbitPhase": 4.234407979,
+     "orbitPlane": {
+      "A": [
+       0.640564045,
+       0,
+       0.76790475
+      ],
+      "B": [
+       0.7672006,
+       0.042814824,
+       -0.639976664
+      ]
+     },
+     "spinPeriodS": 77350.404,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIb",
+     "radiusKm": 1791.051,
+     "orbitRadiusKm": 29503.507,
+     "orbitPeriodS": 90205194.27,
+     "orbitPhase": 0.06075373,
+     "orbitPlane": {
+      "A": [
+       0.729889134,
+       0,
+       -0.683565544
+      ],
+      "B": [
+       -0.682747098,
+       0.048920371,
+       -0.729015224
+      ]
+     },
+     "spinPeriodS": 129248.01,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 9,
+     "kind": "station",
+     "type": "station",
+     "name": "Riraan Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 12777.586,
+     "orbitPeriodS": 23289908.394,
+     "orbitPhase": 0.911152689,
+     "orbitPlane": {
+      "A": [
+       -0.837309869,
+       0,
+       0.546728619
+      ],
+      "B": [
+       0.546274369,
+       -0.040755543,
+       0.836614188
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Lave VII",
+     "radiusKm": 5600,
+     "orbitRadiusKm": 2950000,
+     "orbitPeriodS": 41293642853.382,
+     "orbitPhase": 2.473769712,
+     "orbitPlane": {
+      "A": [
+       0.983643194,
+       0,
+       -0.180127918
+      ],
+      "B": [
+       -0.180121664,
+       -0.008333251,
+       -0.98360904
+      ]
+     },
+     "spinPeriodS": 225657.052,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 13,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIIa",
+     "radiusKm": 1464.269,
+     "orbitRadiusKm": 26685.741,
+     "orbitPeriodS": 88946416.578,
+     "orbitPhase": 1.692032511,
+     "orbitPlane": {
+      "A": [
+       0.724028427,
+       0,
+       -0.689770133
+      ],
+      "B": [
+       -0.689488193,
+       0.02858888,
+       -0.723732484
+      ]
+     },
+     "spinPeriodS": 79890.652,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 13,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIIb",
+     "radiusKm": 1645.857,
+     "orbitRadiusKm": 25571.102,
+     "orbitPeriodS": 81296957.075,
+     "orbitPhase": 4.767611386,
+     "orbitPlane": {
+      "A": [
+       -0.276170593,
+       0,
+       0.961108633
+      ],
+      "B": [
+       0.961077984,
+       -0.007985996,
+       0.276161786
+      ]
+     },
+     "spinPeriodS": 105955.507,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 16,
+     "parentLocalId": 13,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIIc",
+     "radiusKm": 1176.652,
+     "orbitRadiusKm": 26476.283,
+     "orbitPeriodS": 68634315.748,
+     "orbitPhase": 4.528192961,
+     "orbitPlane": {
+      "A": [
+       0.936038275,
+       0,
+       0.351898206
+      ],
+      "B": [
+       0.351898117,
+       0.000712222,
+       -0.936038038
+      ]
+     },
+     "spinPeriodS": 35473.799,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 17,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Lave VIII",
+     "radiusKm": 3000,
+     "orbitRadiusKm": 3600000,
+     "orbitPeriodS": 58309824035.74,
+     "orbitPhase": 1.754497577,
+     "orbitPlane": {
+      "A": [
+       -0.760039444,
+       0,
+       0.649876944
+      ],
+      "B": [
+       0.649562814,
+       -0.031088653,
+       0.759672065
+      ]
+     },
+     "spinPeriodS": 142288.784,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 18,
+     "parentLocalId": 17,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave VIIIa",
+     "radiusKm": 680.771,
+     "orbitRadiusKm": 12798.47,
+     "orbitPeriodS": 115789180.51,
+     "orbitPhase": 2.074658169,
+     "orbitPlane": {
+      "A": [
+       0.416786735,
+       0,
+       -0.9090043
+      ],
+      "B": [
+       -0.908349295,
+       -0.037955608,
+       -0.416486409
+      ]
+     },
+     "spinPeriodS": 24377.173,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 19,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Lave IX",
+     "radiusKm": 2400,
+     "orbitRadiusKm": 4400000,
+     "orbitPeriodS": 81618567099.918,
+     "orbitPhase": 1.88969906,
+     "orbitPlane": {
+      "A": [
+       0.99998419,
+       0,
+       0.005623217
+      ],
+      "B": [
+       0.005616837,
+       -0.047622607,
+       -0.998849608
+      ]
+     },
+     "spinPeriodS": 136371.854,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 21,
+     "parentLocalId": 19,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Lave IXa",
+     "radiusKm": 550.053,
+     "orbitRadiusKm": 9641.215,
+     "orbitPeriodS": 76039079.265,
+     "orbitPhase": 1.246032879,
+     "orbitPlane": {
+      "A": [
+       -0.999972995,
+       0,
+       0.007349045
+      ],
+      "B": [
+       0.007346542,
+       0.026093897,
+       0.999632501
+      ]
+     },
+     "spinPeriodS": 36569.64,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 20,
+     "parentLocalId": 19,
+     "kind": "station",
+     "type": "station",
+     "name": "Taisei Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 3616.807,
+     "orbitPeriodS": 21616713.384,
+     "orbitPhase": 1.851878715,
+     "orbitPlane": {
+      "A": [
+       -0.608551741,
+       0,
+       0.793514195
+      ],
+      "B": [
+       0.793442661,
+       0.013427206,
+       0.608496881
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    }
+   ]
+  },
+  {
+   "id": 1,
+   "seed": 1197259103,
+   "name": "Beon",
+   "home": false,
+   "starClass": "K",
+   "luminosity": 0.4,
+   "starRadiusKm": 46000,
+   "starTempK": 4400,
+   "habitableKm": 392122.43,
+   "pos": {
+    "x": 5.5149,
+    "y": 2.4526,
+    "z": -2.9367
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Beon",
+     "radiusKm": 46000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Beon I",
+     "radiusKm": 2900,
+     "orbitRadiusKm": 310000,
+     "orbitPeriodS": 1527960693.119,
+     "orbitPhase": 5.684532589,
+     "orbitPlane": {
+      "A": [
+       0.760394511,
+       0,
+       0.64946146
+      ],
+      "B": [
+       0.649255765,
+       -0.025166065,
+       -0.760153682
+      ]
+     },
+     "spinPeriodS": 73927.582,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ocean",
+     "name": "Beon II",
+     "radiusKm": 4300,
+     "orbitRadiusKm": 430000,
+     "orbitPeriodS": 2532558614.574,
+     "orbitPhase": 5.593156178,
+     "orbitPlane": {
+      "A": [
+       -0.045948356,
+       0,
+       -0.998943817
+      ],
+      "B": [
+       -0.998303054,
+       -0.035811576,
+       0.045918883
+      ]
+     },
+     "spinPeriodS": 208634.405,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 3,
+     "kind": "station",
+     "type": "station",
+     "name": "Veth Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 7476.359,
+     "orbitPeriodS": 15018371.365,
+     "orbitPhase": 2.623655689,
+     "orbitPlane": {
+      "A": [
+       0.969935158,
+       0,
+       -0.243363492
+      ],
+      "B": [
+       -0.242980621,
+       -0.056071544,
+       -0.968409211
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Beon III",
+     "radiusKm": 4100,
+     "orbitRadiusKm": 596000,
+     "orbitPeriodS": 4012123623.506,
+     "orbitPhase": 1.316479804,
+     "orbitPlane": {
+      "A": [
+       0.765546518,
+       0,
+       0.643380547
+      ],
+      "B": [
+       0.643196551,
+       -0.023914107,
+       -0.765327585
+      ]
+     },
+     "spinPeriodS": 226893.866,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Beon IV",
+     "radiusKm": 1800,
+     "orbitRadiusKm": 775000,
+     "orbitPeriodS": 5685789649.526,
+     "orbitPhase": 2.863900924,
+     "orbitPlane": {
+      "A": [
+       0.686525806,
+       0,
+       -0.727105437
+      ],
+      "B": [
+       -0.726771556,
+       -0.030301391,
+       -0.686210559
+      ]
+     },
+     "spinPeriodS": 38256.83,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Beon V",
+     "radiusKm": 8200,
+     "orbitRadiusKm": 1110000,
+     "orbitPeriodS": 10230648298.046,
+     "orbitPhase": 0.027369783,
+     "orbitPlane": {
+      "A": [
+       -0.992936866,
+       0,
+       0.11864392
+      ],
+      "B": [
+       0.118611477,
+       0.023384209,
+       0.99266535
+      ]
+     },
+     "spinPeriodS": 240414.692,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 7,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Beon Va",
+     "radiusKm": 1694.932,
+     "orbitRadiusKm": 34779.093,
+     "orbitPeriodS": 77189425.472,
+     "orbitPhase": 4.685839196,
+     "orbitPlane": {
+      "A": [
+       0.911801489,
+       0,
+       0.410631275
+      ],
+      "B": [
+       0.41050648,
+       0.024652151,
+       -0.911524383
+      ]
+     },
+     "spinPeriodS": 115300.642,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Beon VI",
+     "radiusKm": 2700,
+     "orbitRadiusKm": 1620000,
+     "orbitPeriodS": 18981047632.431,
+     "orbitPhase": 5.930216927,
+     "orbitPlane": {
+      "A": [
+       -0.965759858,
+       0,
+       -0.259437654
+      ],
+      "B": [
+       -0.259384077,
+       -0.020322113,
+       0.965560414
+      ]
+     },
+     "spinPeriodS": 148392.406,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Beon VII",
+     "radiusKm": 5700,
+     "orbitRadiusKm": 2340000,
+     "orbitPeriodS": 32264092104.225,
+     "orbitPhase": 4.46882195,
+     "orbitPlane": {
+      "A": [
+       -0.502560288,
+       0,
+       0.864542166
+      ],
+      "B": [
+       0.86414951,
+       -0.030135536,
+       0.502332036
+      ]
+     },
+     "spinPeriodS": 179128.722,
+     "pressBar": 1,
+     "hasRings": true,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Beon VIIa",
+     "radiusKm": 1468.95,
+     "orbitRadiusKm": 21141.443,
+     "orbitPeriodS": 82607265.478,
+     "orbitPhase": 1.722664421,
+     "orbitPlane": {
+      "A": [
+       -0.203947993,
+       0,
+       -0.978981724
+      ],
+      "B": [
+       -0.978976036,
+       0.003408731,
+       0.203946808
+      ]
+     },
+     "spinPeriodS": 114566.761,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Beon VIII",
+     "radiusKm": 2000,
+     "orbitRadiusKm": 3235000,
+     "orbitPeriodS": 50626506832.814,
+     "orbitPhase": 3.198253845,
+     "orbitPlane": {
+      "A": [
+       -0.992101575,
+       0,
+       -0.125437095
+      ],
+      "B": [
+       -0.125329202,
+       0.041467264,
+       0.991248232
+      ]
+     },
+     "spinPeriodS": 92260.359,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Beon IX",
+     "radiusKm": 1600,
+     "orbitRadiusKm": 4291000,
+     "orbitPeriodS": 77164209121.376,
+     "orbitPhase": 2.727435551,
+     "orbitPlane": {
+      "A": [
+       -0.067674813,
+       0,
+       -0.997707432
+      ],
+      "B": [
+       -0.995967489,
+       -0.059032532,
+       0.067556792
+      ]
+     },
+     "spinPeriodS": 43150.992,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 13,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Beon IXa",
+     "radiusKm": 290.539,
+     "orbitRadiusKm": 7316.006,
+     "orbitPeriodS": 66226556.464,
+     "orbitPhase": 5.447576469,
+     "orbitPlane": {
+      "A": [
+       -0.893222112,
+       0,
+       -0.44961568
+      ],
+      "B": [
+       -0.449467955,
+       0.025632163,
+       0.892928636
+      ]
+     },
+     "spinPeriodS": 14831.903,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 13,
+     "kind": "station",
+     "type": "station",
+     "name": "Lakaes Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 2414.111,
+     "orbitPeriodS": 15815111.822,
+     "orbitPhase": 0.913028286,
+     "orbitPlane": {
+      "A": [
+       0.998052837,
+       0,
+       0.062374151
+      ],
+      "B": [
+       0.062362948,
+       -0.018952395,
+       -0.997873574
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "seed": 790695431,
+   "name": "Vesoar",
+   "home": false,
+   "starClass": "M",
+   "luminosity": 0.15,
+   "starRadiusKm": 30000,
+   "starTempK": 3200,
+   "habitableKm": 240124.967,
+   "pos": {
+    "x": -0.9661,
+    "y": 1.7921,
+    "z": 8.6085
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Vesoar",
+     "radiusKm": 30000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ocean",
+     "name": "Vesoar I",
+     "radiusKm": 5000,
+     "orbitRadiusKm": 310000,
+     "orbitPeriodS": 1583590188.547,
+     "orbitPhase": 4.86304699,
+     "orbitPlane": {
+      "A": [
+       0.999524467,
+       0,
+       0.030835704
+      ],
+      "B": [
+       0.030832852,
+       -0.013598365,
+       -0.999432049
+      ]
+     },
+     "spinPeriodS": 108080.258,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 2,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Vesoar Ia",
+     "radiusKm": 1136.727,
+     "orbitRadiusKm": 32844.098,
+     "orbitPeriodS": 86296300.124,
+     "orbitPhase": 5.058213651,
+     "orbitPlane": {
+      "A": [
+       0.661381806,
+       0,
+       0.750049402
+      ],
+      "B": [
+       0.748972289,
+       -0.053572848,
+       -0.660432025
+      ]
+     },
+     "spinPeriodS": 83966.331,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 2,
+     "kind": "station",
+     "type": "station",
+     "name": "Ceisis Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 7897.452,
+     "orbitPeriodS": 16714718.968,
+     "orbitPhase": 1.825439652,
+     "orbitPlane": {
+      "A": [
+       0.120976577,
+       0,
+       0.992655362
+      ],
+      "B": [
+       0.991136777,
+       0.055292875,
+       -0.120791505
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Vesoar II",
+     "radiusKm": 3300,
+     "orbitRadiusKm": 379000,
+     "orbitPeriodS": 1897815408.703,
+     "orbitPhase": 4.496288411,
+     "orbitPlane": {
+      "A": [
+       0.999975448,
+       0,
+       -0.007007385
+      ],
+      "B": [
+       -0.006998225,
+       -0.051114152,
+       -0.998668297
+      ]
+     },
+     "spinPeriodS": 173755.385,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 5,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Vesoar IIa",
+     "radiusKm": 972.227,
+     "orbitRadiusKm": 16068.08,
+     "orbitPeriodS": 112053016.294,
+     "orbitPhase": 4.650157365,
+     "orbitPlane": {
+      "A": [
+       0.659596743,
+       0,
+       -0.751619675
+      ],
+      "B": [
+       -0.750999056,
+       0.040629268,
+       -0.659052108
+      ]
+     },
+     "spinPeriodS": 64770.116,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Vesoar III",
+     "radiusKm": 3000,
+     "orbitRadiusKm": 503000,
+     "orbitPeriodS": 3399391698.974,
+     "orbitPhase": 3.44099935,
+     "orbitPlane": {
+      "A": [
+       0.86877072,
+       0,
+       -0.495214535
+      ],
+      "B": [
+       -0.495018293,
+       0.02814956,
+       -0.868426446
+      ]
+     },
+     "spinPeriodS": 135649.48,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 7,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Vesoar IIIa",
+     "radiusKm": 839.04,
+     "orbitRadiusKm": 18046.956,
+     "orbitPeriodS": 116921251.109,
+     "orbitPhase": 1.85869804,
+     "orbitPlane": {
+      "A": [
+       0.786672698,
+       0,
+       -0.617370283
+      ],
+      "B": [
+       -0.616884974,
+       0.039642937,
+       -0.786054302
+      ]
+     },
+     "spinPeriodS": 38101.599,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Vesoar IV",
+     "radiusKm": 3600,
+     "orbitRadiusKm": 643000,
+     "orbitPeriodS": 4528029168.249,
+     "orbitPhase": 4.969887351,
+     "orbitPlane": {
+      "A": [
+       0.784028894,
+       0,
+       0.620724329
+      ],
+      "B": [
+       0.620710446,
+       0.006688176,
+       -0.784011359
+      ]
+     },
+     "spinPeriodS": 90799.356,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Vesoar V",
+     "radiusKm": 3400,
+     "orbitRadiusKm": 822000,
+     "orbitPeriodS": 6764267252.049,
+     "orbitPhase": 4.080286452,
+     "orbitPlane": {
+      "A": [
+       0.727761791,
+       0,
+       -0.685829991
+      ],
+      "B": [
+       -0.6851807,
+       0.043503423,
+       -0.727072802
+      ]
+     },
+     "spinPeriodS": 178224.667,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Vesoar Va",
+     "radiusKm": 947.735,
+     "orbitRadiusKm": 21084.775,
+     "orbitPeriodS": 107380513.6,
+     "orbitPhase": 3.707093689,
+     "orbitPlane": {
+      "A": [
+       0.934018746,
+       0,
+       0.357223994
+      ],
+      "B": [
+       0.357105186,
+       0.025788748,
+       -0.933708106
+      ]
+     },
+     "spinPeriodS": 29413.038,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Vesoar VI",
+     "radiusKm": 1700,
+     "orbitRadiusKm": 986000,
+     "orbitPeriodS": 8990780840.826,
+     "orbitPhase": 3.537899304,
+     "orbitPlane": {
+      "A": [
+       0.563944749,
+       0,
+       0.825812521
+      ],
+      "B": [
+       0.824636158,
+       -0.053356865,
+       -0.563141414
+      ]
+     },
+     "spinPeriodS": 81170.516,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Vesoar VII",
+     "radiusKm": 2800,
+     "orbitRadiusKm": 1204000,
+     "orbitPeriodS": 13045617856.112,
+     "orbitPhase": 3.976225989,
+     "orbitPlane": {
+      "A": [
+       -0.208861727,
+       0,
+       0.977945182
+      ],
+      "B": [
+       0.97755595,
+       -0.028211037,
+       0.208778598
+      ]
+     },
+     "spinPeriodS": 129050.79,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Vesoar VIII",
+     "radiusKm": 2800,
+     "orbitRadiusKm": 1587000,
+     "orbitPeriodS": 18355092003.186,
+     "orbitPhase": 2.667253604,
+     "orbitPlane": {
+      "A": [
+       0.778389695,
+       0,
+       0.627781397
+      ],
+      "B": [
+       0.627142344,
+       0.045109569,
+       -0.777597329
+      ]
+     },
+     "spinPeriodS": 101602.478,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Vesoar IX",
+     "radiusKm": 1600,
+     "orbitRadiusKm": 1956000,
+     "orbitPeriodS": 24194046765.754,
+     "orbitPhase": 2.29037518,
+     "orbitPlane": {
+      "A": [
+       -0.557217452,
+       0,
+       -0.830366613
+      ],
+      "B": [
+       -0.829057932,
+       -0.056121031,
+       0.556339262
+      ]
+     },
+     "spinPeriodS": 69089.021,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 16,
+     "parentLocalId": 15,
+     "kind": "station",
+     "type": "station",
+     "name": "Tith Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 2619.269,
+     "orbitPeriodS": 23523489.91,
+     "orbitPhase": 0.585297022,
+     "orbitPlane": {
+      "A": [
+       -0.250044483,
+       0,
+       -0.96823435
+      ],
+      "B": [
+       -0.968098395,
+       0.016757404,
+       0.250009373
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "seed": 402104271,
+   "name": "Orceia",
+   "home": false,
+   "starClass": "F",
+   "luminosity": 2.2,
+   "starRadiusKm": 76000,
+   "starTempK": 6800,
+   "habitableKm": 919608.612,
+   "pos": {
+    "x": 3.5265,
+    "y": 1.4273,
+    "z": -13.8187
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Orceia",
+     "radiusKm": 76000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "lava",
+     "name": "Orceia I",
+     "radiusKm": 1600,
+     "orbitRadiusKm": 365000,
+     "orbitPeriodS": 1937404511.618,
+     "orbitPhase": 5.598054913,
+     "orbitPlane": {
+      "A": [
+       -0.51023336,
+       0,
+       0.860035998
+      ],
+      "B": [
+       0.859854374,
+       0.020550379,
+       0.510125609
+      ]
+     },
+     "spinPeriodS": 34267.676,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Orceia II",
+     "radiusKm": 1900,
+     "orbitRadiusKm": 543000,
+     "orbitPeriodS": 3749397390.504,
+     "orbitPhase": 1.125295957,
+     "orbitPlane": {
+      "A": [
+       -0.826944294,
+       0,
+       0.562283856
+      ],
+      "B": [
+       0.561515867,
+       -0.052247595,
+       0.825814822
+      ]
+     },
+     "spinPeriodS": 86054.962,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 3,
+     "kind": "station",
+     "type": "station",
+     "name": "Lasoum Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 3127.088,
+     "orbitPeriodS": 16245312.812,
+     "orbitPhase": 0.341528944,
+     "orbitPlane": {
+      "A": [
+       -0.690482026,
+       0,
+       0.72334955
+      ],
+      "B": [
+       0.722310294,
+       -0.053585364,
+       0.689489991
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Orceia III",
+     "radiusKm": 2400,
+     "orbitRadiusKm": 802000,
+     "orbitPeriodS": 6233039273.39,
+     "orbitPhase": 0.361176648,
+     "orbitPlane": {
+      "A": [
+       0.699621735,
+       0,
+       -0.71451342
+      ],
+      "B": [
+       -0.71432271,
+       0.023102966,
+       -0.699435
+      ]
+     },
+     "spinPeriodS": 60615.748,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 5,
+     "kind": "station",
+     "type": "station",
+     "name": "Tior Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 4166.443,
+     "orbitPeriodS": 23896441.306,
+     "orbitPhase": 3.609212602,
+     "orbitPlane": {
+      "A": [
+       -0.89191403,
+       0,
+       0.452205002
+      ],
+      "B": [
+       0.452041441,
+       -0.026893502,
+       0.891591428
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Orceia IV",
+     "radiusKm": 3400,
+     "orbitRadiusKm": 1220000,
+     "orbitPeriodS": 12729279321.666,
+     "orbitPhase": 5.667792822,
+     "orbitPlane": {
+      "A": [
+       -0.999393148,
+       0,
+       -0.034832962
+      ],
+      "B": [
+       -0.034829573,
+       0.013949226,
+       0.999295912
+      ]
+     },
+     "spinPeriodS": 194663.392,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 7,
+     "kind": "station",
+     "type": "station",
+     "name": "Zaka Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 5776.893,
+     "orbitPeriodS": 17740638.771,
+     "orbitPhase": 0.723272145,
+     "orbitPlane": {
+      "A": [
+       -0.897758315,
+       0,
+       0.440488374
+      ],
+      "B": [
+       0.440450587,
+       0.013098166,
+       0.897681301
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Orceia V",
+     "radiusKm": 5600,
+     "orbitRadiusKm": 1815000,
+     "orbitPeriodS": 23637462873.585,
+     "orbitPhase": 1.08857135,
+     "orbitPlane": {
+      "A": [
+       0.998763968,
+       0,
+       -0.049704493
+      ],
+      "B": [
+       -0.049704482,
+       -0.000668149,
+       -0.998763745
+      ]
+     },
+     "spinPeriodS": 198258.403,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Orceia Va",
+     "radiusKm": 1595.998,
+     "orbitRadiusKm": 30163.39,
+     "orbitPeriodS": 81189504.666,
+     "orbitPhase": 2.41687915,
+     "orbitPlane": {
+      "A": [
+       -0.708557112,
+       0,
+       -0.70565347
+      ],
+      "B": [
+       -0.70565288,
+       -0.001292494,
+       0.70855652
+      ]
+     },
+     "spinPeriodS": 85462.498,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Orceia Vb",
+     "radiusKm": 957.219,
+     "orbitRadiusKm": 31907.491,
+     "orbitPeriodS": 68501013.648,
+     "orbitPhase": 1.660493327,
+     "orbitPlane": {
+      "A": [
+       -0.174699256,
+       0,
+       -0.984621841
+      ],
+      "B": [
+       -0.984591627,
+       -0.007834003,
+       0.174693895
+      ]
+     },
+     "spinPeriodS": 43103.916,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Orceia Vc",
+     "radiusKm": 1211.607,
+     "orbitRadiusKm": 23487.784,
+     "orbitPeriodS": 63984079.063,
+     "orbitPhase": 1.209968808,
+     "orbitPlane": {
+      "A": [
+       -0.782778613,
+       0,
+       -0.622300283
+      ],
+      "B": [
+       -0.622215143,
+       0.016541238,
+       0.782671517
+      ]
+     },
+     "spinPeriodS": 77094.245,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 9,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Orceia Vd",
+     "radiusKm": 945.663,
+     "orbitRadiusKm": 24280.891,
+     "orbitPeriodS": 96330172.615,
+     "orbitPhase": 6.191469992,
+     "orbitPlane": {
+      "A": [
+       0.944598843,
+       0,
+       -0.328227094
+      ],
+      "B": [
+       -0.328224192,
+       -0.004205004,
+       -0.944590492
+      ]
+     },
+     "spinPeriodS": 64727.634,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Orceia VI",
+     "radiusKm": 2500,
+     "orbitRadiusKm": 2590000,
+     "orbitPeriodS": 33944324724.417,
+     "orbitPhase": 1.23494531,
+     "orbitPlane": {
+      "A": [
+       0.56185214,
+       0,
+       0.827237676
+      ],
+      "B": [
+       0.826552226,
+       -0.040700311,
+       -0.561386589
+      ]
+     },
+     "spinPeriodS": 63670.123,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Orceia VII",
+     "radiusKm": 2800,
+     "orbitRadiusKm": 3830000,
+     "orbitPeriodS": 63145704291.97,
+     "orbitPhase": 2.913227664,
+     "orbitPlane": {
+      "A": [
+       -0.986210899,
+       0,
+       -0.165493393
+      ],
+      "B": [
+       -0.165456783,
+       0.021032871,
+       0.985992734
+      ]
+     },
+     "spinPeriodS": 118429.582,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "seed": -2471801,
+   "name": "Ried",
+   "home": false,
+   "starClass": "M",
+   "luminosity": 0.15,
+   "starRadiusKm": 30000,
+   "starTempK": 3200,
+   "habitableKm": 240124.967,
+   "pos": {
+    "x": -1.4052,
+    "y": 1.248,
+    "z": 16.6661
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Ried",
+     "radiusKm": 30000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Ried I",
+     "radiusKm": 4100,
+     "orbitRadiusKm": 310000,
+     "orbitPeriodS": 1413121482.492,
+     "orbitPhase": 2.335932514,
+     "orbitPlane": {
+      "A": [
+       -0.598822212,
+       0,
+       0.800881988
+      ],
+      "B": [
+       0.79965072,
+       -0.055429371,
+       0.597901589
+      ]
+     },
+     "spinPeriodS": 160139.949,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 2,
+     "kind": "station",
+     "type": "station",
+     "name": "Veni Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 6605.648,
+     "orbitPeriodS": 23077128.639,
+     "orbitPhase": 4.802330973,
+     "orbitPlane": {
+      "A": [
+       0.823484406,
+       0,
+       -0.567338905
+      ],
+      "B": [
+       -0.567303582,
+       0.011158684,
+       -0.823433136
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Ried II",
+     "radiusKm": 10100,
+     "orbitRadiusKm": 385000,
+     "orbitPeriodS": 2344206686.36,
+     "orbitPhase": 0.816421199,
+     "orbitPlane": {
+      "A": [
+       -0.68232566,
+       0,
+       -0.731048352
+      ],
+      "B": [
+       -0.731021761,
+       -0.008529153,
+       0.682300841
+      ]
+     },
+     "spinPeriodS": 425859.462,
+     "pressBar": 1,
+     "hasRings": true,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 4,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried IIa",
+     "radiusKm": 1883.279,
+     "orbitRadiusKm": 55572.246,
+     "orbitPeriodS": 89738043.929,
+     "orbitPhase": 5.505871884,
+     "orbitPlane": {
+      "A": [
+       0.511822229,
+       0,
+       0.859091384
+      ],
+      "B": [
+       0.858217714,
+       0.045087742,
+       -0.511301721
+      ]
+     },
+     "spinPeriodS": 48843.769,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 4,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried IIb",
+     "radiusKm": 1880.104,
+     "orbitRadiusKm": 35738.263,
+     "orbitPeriodS": 87102127.41,
+     "orbitPhase": 4.45650096,
+     "orbitPlane": {
+      "A": [
+       -0.965454853,
+       0,
+       0.260570387
+      ],
+      "B": [
+       0.260553393,
+       0.011420715,
+       0.965391888
+      ]
+     },
+     "spinPeriodS": 149136.659,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Ried III",
+     "radiusKm": 2200,
+     "orbitRadiusKm": 488000,
+     "orbitPeriodS": 3027190124.313,
+     "orbitPhase": 5.911286789,
+     "orbitPlane": {
+      "A": [
+       -0.917889405,
+       0,
+       -0.396836289
+      ],
+      "B": [
+       -0.396820762,
+       0.008846145,
+       0.91785349
+      ]
+     },
+     "spinPeriodS": 122070.377,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 7,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried IIIa",
+     "radiusKm": 636.909,
+     "orbitRadiusKm": 7845.572,
+     "orbitPeriodS": 72814865.448,
+     "orbitPhase": 4.19638281,
+     "orbitPlane": {
+      "A": [
+       -0.455307918,
+       0,
+       -0.890334038
+      ],
+      "B": [
+       -0.890332487,
+       0.001866459,
+       0.455307125
+      ]
+     },
+     "spinPeriodS": 41817.39,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Ried IV",
+     "radiusKm": 3800,
+     "orbitRadiusKm": 614000,
+     "orbitPeriodS": 4481177086.619,
+     "orbitPhase": 2.720277483,
+     "orbitPlane": {
+      "A": [
+       0.998445359,
+       0,
+       0.055739253
+      ],
+      "B": [
+       0.055717169,
+       0.028146875,
+       -0.998049774
+      ]
+     },
+     "spinPeriodS": 106182.578,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 9,
+     "kind": "station",
+     "type": "station",
+     "name": "Inan Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 5628.266,
+     "orbitPeriodS": 17912120.207,
+     "orbitPhase": 0.952835653,
+     "orbitPlane": {
+      "A": [
+       0.07763984,
+       0,
+       -0.996981472
+      ],
+      "B": [
+       -0.996066427,
+       -0.042834417,
+       -0.077568581
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Ried V",
+     "radiusKm": 2400,
+     "orbitRadiusKm": 777000,
+     "orbitPeriodS": 6212714568.587,
+     "orbitPhase": 0.469159177,
+     "orbitPlane": {
+      "A": [
+       -0.992490099,
+       0,
+       0.122324994
+      ],
+      "B": [
+       0.122297661,
+       0.02113871,
+       0.992268329
+      ]
+     },
+     "spinPeriodS": 55550.929,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Ried VI",
+     "radiusKm": 2400,
+     "orbitRadiusKm": 975000,
+     "orbitPeriodS": 8028468134.603,
+     "orbitPhase": 4.482279398,
+     "orbitPlane": {
+      "A": [
+       0.838890921,
+       0,
+       -0.544299571
+      ],
+      "B": [
+       -0.543928073,
+       0.036940262,
+       -0.838318357
+      ]
+     },
+     "spinPeriodS": 70133.092,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Ried VII",
+     "radiusKm": 2200,
+     "orbitRadiusKm": 1250000,
+     "orbitPeriodS": 13454785620.117,
+     "orbitPhase": 2.332838952,
+     "orbitPlane": {
+      "A": [
+       -0.999863358,
+       0,
+       0.016530727
+      ],
+      "B": [
+       0.016529287,
+       -0.013201593,
+       0.999776225
+      ]
+     },
+     "spinPeriodS": 59750.946,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Ried VIII",
+     "radiusKm": 6600,
+     "orbitRadiusKm": 1543000,
+     "orbitPeriodS": 16546801575.296,
+     "orbitPhase": 0.73712542,
+     "orbitPlane": {
+      "A": [
+       0.893536004,
+       0,
+       -0.448991546
+      ],
+      "B": [
+       -0.448942134,
+       0.014835447,
+       -0.89343767
+      ]
+     },
+     "spinPeriodS": 174624.139,
+     "pressBar": 1,
+     "hasRings": true,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 14,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried VIIIa",
+     "radiusKm": 1455.489,
+     "orbitRadiusKm": 28253.293,
+     "orbitPeriodS": 102832228.323,
+     "orbitPhase": 2.974547223,
+     "orbitPlane": {
+      "A": [
+       0.975338517,
+       0,
+       0.220714245
+      ],
+      "B": [
+       0.220707047,
+       0.008075781,
+       -0.975306711
+      ]
+     },
+     "spinPeriodS": 102484.363,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 16,
+     "parentLocalId": 14,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried VIIIb",
+     "radiusKm": 1876.816,
+     "orbitRadiusKm": 37426.82,
+     "orbitPeriodS": 106722055.301,
+     "orbitPhase": 1.95231493,
+     "orbitPlane": {
+      "A": [
+       -0.117763075,
+       0,
+       0.99304172
+      ],
+      "B": [
+       0.99235206,
+       -0.037262634,
+       0.117681289
+      ]
+     },
+     "spinPeriodS": 103785.431,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 17,
+     "parentLocalId": 14,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Ried VIIIc",
+     "radiusKm": 1210.92,
+     "orbitRadiusKm": 31182.064,
+     "orbitPeriodS": 76310628.746,
+     "orbitPhase": 3.217303113,
+     "orbitPlane": {
+      "A": [
+       -0.649867784,
+       0,
+       0.760047277
+      ],
+      "B": [
+       0.759891414,
+       0.020250917,
+       0.649734515
+      ]
+     },
+     "spinPeriodS": 62301.685,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "seed": -1482490369,
+   "name": "Soed",
+   "home": false,
+   "starClass": "A",
+   "luminosity": 5,
+   "starRadiusKm": 92000,
+   "starTempK": 9000,
+   "habitableKm": 1386362.146,
+   "pos": {
+    "x": 5.8653,
+    "y": 3.5609,
+    "z": -18.426
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Soed",
+     "radiusKm": 92000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "lava",
+     "name": "Soed I",
+     "radiusKm": 1500,
+     "orbitRadiusKm": 488000,
+     "orbitPeriodS": 3115636231.302,
+     "orbitPhase": 3.826140118,
+     "orbitPlane": {
+      "A": [
+       0.924553108,
+       0,
+       -0.381053213
+      ],
+      "B": [
+       -0.381053015,
+       -0.001019231,
+       -0.924552627
+      ]
+     },
+     "spinPeriodS": 73390.858,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 2,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Soed Ia",
+     "radiusKm": 448.76,
+     "orbitRadiusKm": 5406.878,
+     "orbitPeriodS": 114107435.723,
+     "orbitPhase": 2.256217712,
+     "orbitPlane": {
+      "A": [
+       -0.142167555,
+       0,
+       0.989842607
+      ],
+      "B": [
+       0.988918917,
+       -0.04319103,
+       0.142034889
+      ]
+     },
+     "spinPeriodS": 22532.198,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Soed II",
+     "radiusKm": 2300,
+     "orbitRadiusKm": 617000,
+     "orbitPeriodS": 4320559225.582,
+     "orbitPhase": 0.860285278,
+     "orbitPlane": {
+      "A": [
+       0.919556193,
+       0,
+       -0.392958532
+      ],
+      "B": [
+       -0.392706116,
+       -0.035836841,
+       -0.91896552
+      ]
+     },
+     "spinPeriodS": 86415.823,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "desert",
+     "name": "Soed III",
+     "radiusKm": 2800,
+     "orbitRadiusKm": 837000,
+     "orbitPeriodS": 7310634089.874,
+     "orbitPhase": 3.448388306,
+     "orbitPlane": {
+      "A": [
+       -0.002673485,
+       0,
+       -0.999996426
+      ],
+      "B": [
+       -0.99918118,
+       0.040371203,
+       0.002671306
+      ]
+     },
+     "spinPeriodS": 59467.17,
+     "pressBar": 0.7,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 5,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Soed IIIa",
+     "radiusKm": 666.404,
+     "orbitRadiusKm": 15980.343,
+     "orbitPeriodS": 60585164.088,
+     "orbitPhase": 1.699465916,
+     "orbitPlane": {
+      "A": [
+       -0.249756069,
+       0,
+       0.968308786
+      ],
+      "B": [
+       0.967730772,
+       0.034547169,
+       0.249606982
+      ]
+     },
+     "spinPeriodS": 17218.208,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "lava",
+     "name": "Soed IV",
+     "radiusKm": 2600,
+     "orbitRadiusKm": 1098000,
+     "orbitPeriodS": 10034642786.583,
+     "orbitPhase": 4.897851385,
+     "orbitPlane": {
+      "A": [
+       -0.722463869,
+       0,
+       -0.691408677
+      ],
+      "B": [
+       -0.69139535,
+       -0.006208804,
+       0.722449944
+      ]
+     },
+     "spinPeriodS": 61476.475,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ocean",
+     "name": "Soed V",
+     "radiusKm": 3800,
+     "orbitRadiusKm": 1524000,
+     "orbitPeriodS": 18024857738.499,
+     "orbitPhase": 0.045048804,
+     "orbitPlane": {
+      "A": [
+       -0.564737922,
+       0,
+       0.825270307
+      ],
+      "B": [
+       0.825041178,
+       0.023562759,
+       0.564581128
+      ]
+     },
+     "spinPeriodS": 178341.534,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 8,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Soed Va",
+     "radiusKm": 1134.757,
+     "orbitRadiusKm": 24716.103,
+     "orbitPeriodS": 88355242.652,
+     "orbitPhase": 0.345069916,
+     "orbitPlane": {
+      "A": [
+       -0.023000891,
+       0,
+       0.999735445
+      ],
+      "B": [
+       0.999589046,
+       0.017112946,
+       0.022997523
+      ]
+     },
+     "spinPeriodS": 87462.512,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 8,
+     "kind": "station",
+     "type": "station",
+     "name": "Ined Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 5746.436,
+     "orbitPeriodS": 16640663.329,
+     "orbitPhase": 0.349498534,
+     "orbitPlane": {
+      "A": [
+       -0.875388295,
+       0,
+       -0.483420452
+      ],
+      "B": [
+       -0.483167029,
+       -0.032375619,
+       0.874929392
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Soed VI",
+     "radiusKm": 2400,
+     "orbitRadiusKm": 1924000,
+     "orbitPeriodS": 23813051131.685,
+     "orbitPhase": 3.050638882,
+     "orbitPlane": {
+      "A": [
+       -0.89063722,
+       0,
+       0.454714571
+      ],
+      "B": [
+       0.454606205,
+       0.021830664,
+       0.890424966
+      ]
+     },
+     "spinPeriodS": 143501.826,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Soed VII",
+     "radiusKm": 2300,
+     "orbitRadiusKm": 2662000,
+     "orbitPeriodS": 41448711819.826,
+     "orbitPhase": 2.674688003,
+     "orbitPlane": {
+      "A": [
+       0.979851794,
+       0,
+       0.199725966
+      ],
+      "B": [
+       0.199557851,
+       -0.041021224,
+       -0.979027029
+      ]
+     },
+     "spinPeriodS": 96464.012,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Soed VIII",
+     "radiusKm": 8800,
+     "orbitRadiusKm": 3706000,
+     "orbitPeriodS": 64886058646.192,
+     "orbitPhase": 0.315118669,
+     "orbitPlane": {
+      "A": [
+       0.969060927,
+       0,
+       -0.246821636
+      ],
+      "B": [
+       -0.246722279,
+       -0.028371269,
+       -0.968670836
+      ]
+     },
+     "spinPeriodS": 243010.119,
+     "pressBar": 1,
+     "hasRings": true,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 13,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Soed VIIIa",
+     "radiusKm": 1500.528,
+     "orbitRadiusKm": 34523.471,
+     "orbitPeriodS": 85686877.398,
+     "orbitPhase": 2.784826136,
+     "orbitPlane": {
+      "A": [
+       0.547326369,
+       0,
+       0.836919259
+      ],
+      "B": [
+       0.836916722,
+       0.002462512,
+       -0.547324709
+      ]
+     },
+     "spinPeriodS": 81255.944,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 13,
+     "kind": "station",
+     "type": "station",
+     "name": "Quoris Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 12977.799,
+     "orbitPeriodS": 15964008.896,
+     "orbitPhase": 1.404932969,
+     "orbitPlane": {
+      "A": [
+       -0.997387789,
+       0,
+       0.072232939
+      ],
+      "B": [
+       0.072206361,
+       0.027124646,
+       0.99702081
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 16,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Soed IX",
+     "radiusKm": 1600,
+     "orbitRadiusKm": 5000000,
+     "orbitPeriodS": 108275491610.288,
+     "orbitPhase": 2.51051189,
+     "orbitPlane": {
+      "A": [
+       0.998395618,
+       0,
+       0.05662323
+      ],
+      "B": [
+       0.056620202,
+       -0.010341961,
+       -0.998342224
+      ]
+     },
+     "spinPeriodS": 80794.908,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 17,
+     "parentLocalId": 16,
+     "kind": "station",
+     "type": "station",
+     "name": "Laleum Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 2469.256,
+     "orbitPeriodS": 16125693.673,
+     "orbitPhase": 2.470540386,
+     "orbitPlane": {
+      "A": [
+       0.484711259,
+       0,
+       0.874674222
+      ],
+      "B": [
+       0.874674034,
+       0.000655858,
+       -0.484711155
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "seed": -1904774393,
+   "name": "Laleor",
+   "home": false,
+   "starClass": "G",
+   "luminosity": 1,
+   "starRadiusKm": 62000,
+   "starTempK": 5600,
+   "habitableKm": 620000,
+   "pos": {
+    "x": -19.5173,
+    "y": -0.2037,
+    "z": 15.2198
+   },
+   "bodies": [
+    {
+     "localId": 1,
+     "parentLocalId": null,
+     "kind": "star",
+     "type": "star",
+     "name": "Laleor",
+     "radiusKm": 62000,
+     "orbitRadiusKm": null,
+     "orbitPeriodS": null,
+     "orbitPhase": null,
+     "orbitPlane": null,
+     "spinPeriodS": 1000000,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 2,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "lava",
+     "name": "Laleor I",
+     "radiusKm": 2200,
+     "orbitRadiusKm": 355000,
+     "orbitPeriodS": 1800747887.034,
+     "orbitPhase": 5.935797872,
+     "orbitPlane": {
+      "A": [
+       -0.431408963,
+       0,
+       0.902156476
+      ],
+      "B": [
+       0.902156204,
+       -0.000775711,
+       0.431408833
+      ]
+     },
+     "spinPeriodS": 70851.061,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 3,
+     "parentLocalId": 2,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor Ia",
+     "radiusKm": 542.252,
+     "orbitRadiusKm": 13662.815,
+     "orbitPeriodS": 74771880.652,
+     "orbitPhase": 1.592535085,
+     "orbitPlane": {
+      "A": [
+       -0.116696395,
+       0,
+       -0.993167635
+      ],
+      "B": [
+       -0.992985392,
+       0.019156188,
+       0.116674982
+      ]
+     },
+     "spinPeriodS": 27976.528,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 4,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ocean",
+     "name": "Laleor II",
+     "radiusKm": 4400,
+     "orbitRadiusKm": 616000,
+     "orbitPeriodS": 4744819275.501,
+     "orbitPhase": 5.084839813,
+     "orbitPlane": {
+      "A": [
+       -0.293024181,
+       0,
+       -0.95610503
+      ],
+      "B": [
+       -0.956075073,
+       0.007916074,
+       0.293015
+      ]
+     },
+     "spinPeriodS": 192312.648,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": true,
+     "landable": false
+    },
+    {
+     "localId": 5,
+     "parentLocalId": 4,
+     "kind": "station",
+     "type": "station",
+     "name": "Soleum Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 6934.998,
+     "orbitPeriodS": 16013899.695,
+     "orbitPhase": 1.697551401,
+     "orbitPlane": {
+      "A": [
+       -0.923083815,
+       0,
+       0.384598843
+      ],
+      "B": [
+       0.384589551,
+       -0.006951306,
+       0.923061513
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 6,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "ice",
+     "name": "Laleor III",
+     "radiusKm": 2000,
+     "orbitRadiusKm": 1084000,
+     "orbitPeriodS": 9524297393.246,
+     "orbitPhase": 2.10528776,
+     "orbitPlane": {
+      "A": [
+       0.875700268,
+       0,
+       0.482855092
+      ],
+      "B": [
+       0.482427157,
+       -0.042091993,
+       -0.87492417
+      ]
+     },
+     "spinPeriodS": 62621.59,
+     "pressBar": 0.35,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 7,
+     "parentLocalId": 6,
+     "kind": "station",
+     "type": "station",
+     "name": "Xesoan Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 3398.48,
+     "orbitPeriodS": 18230813.299,
+     "orbitPhase": 4.559244425,
+     "orbitPlane": {
+      "A": [
+       -0.837321662,
+       0,
+       -0.546710558
+      ],
+      "B": [
+       -0.546556184,
+       -0.023762542,
+       0.837085228
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 8,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "rock",
+     "name": "Laleor IV",
+     "radiusKm": 2900,
+     "orbitRadiusKm": 1953000,
+     "orbitPeriodS": 24342239687.119,
+     "orbitPhase": 1.009988647,
+     "orbitPlane": {
+      "A": [
+       -0.577488602,
+       0,
+       0.816398747
+      ],
+      "B": [
+       0.81635425,
+       0.010440513,
+       0.577457127
+      ]
+     },
+     "spinPeriodS": 108156.076,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 9,
+     "parentLocalId": 8,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor IVa",
+     "radiusKm": 477.559,
+     "orbitRadiusKm": 12126.807,
+     "orbitPeriodS": 101346670.892,
+     "orbitPhase": 0.305090423,
+     "orbitPlane": {
+      "A": [
+       -0.794802449,
+       0,
+       -0.606868245
+      ],
+      "B": [
+       -0.606770412,
+       -0.017955377,
+       0.794674318
+      ]
+     },
+     "spinPeriodS": 31569.768,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 10,
+     "parentLocalId": 1,
+     "kind": "planet",
+     "type": "gas",
+     "name": "Laleor V",
+     "radiusKm": 8700,
+     "orbitRadiusKm": 3431000,
+     "orbitPeriodS": 52739754222.51,
+     "orbitPhase": 1.275724182,
+     "orbitPlane": {
+      "A": [
+       0.919233393,
+       0,
+       -0.393713053
+      ],
+      "B": [
+       -0.393612535,
+       0.022595451,
+       -0.918998704
+      ]
+     },
+     "spinPeriodS": 450172.582,
+     "pressBar": 1,
+     "hasRings": false,
+     "hasStation": true,
+     "isHomeWorld": false,
+     "landable": false
+    },
+    {
+     "localId": 12,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor Va",
+     "radiusKm": 1501.078,
+     "orbitRadiusKm": 30491.972,
+     "orbitPeriodS": 73034029.123,
+     "orbitPhase": 1.133126153,
+     "orbitPlane": {
+      "A": [
+       0.549652187,
+       0,
+       -0.835393604
+      ],
+      "B": [
+       -0.834816061,
+       -0.037178041,
+       -0.549272189
+      ]
+     },
+     "spinPeriodS": 44208.896,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 13,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor Vb",
+     "radiusKm": 1968.679,
+     "orbitRadiusKm": 31027.092,
+     "orbitPeriodS": 118867832.38,
+     "orbitPhase": 2.78265099,
+     "orbitPlane": {
+      "A": [
+       -0.942105197,
+       0,
+       -0.335317459
+      ],
+      "B": [
+       -0.335265839,
+       0.017546041,
+       0.941960166
+      ]
+     },
+     "spinPeriodS": 92976.217,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 14,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor Vc",
+     "radiusKm": 1466.338,
+     "orbitRadiusKm": 35474.563,
+     "orbitPeriodS": 92405678.029,
+     "orbitPhase": 0.042818538,
+     "orbitPlane": {
+      "A": [
+       0.999611263,
+       0,
+       0.027880501
+      ],
+      "B": [
+       0.027880138,
+       -0.005100742,
+       -0.999598259
+      ]
+     },
+     "spinPeriodS": 66022.814,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 15,
+     "parentLocalId": 10,
+     "kind": "moon",
+     "type": "moon",
+     "name": "Laleor Vd",
+     "radiusKm": 1653.256,
+     "orbitRadiusKm": 41977.614,
+     "orbitPeriodS": 72348572.128,
+     "orbitPhase": 5.570290964,
+     "orbitPlane": {
+      "A": [
+       0.36630077,
+       0,
+       0.930496505
+      ],
+      "B": [
+       0.929003259,
+       0.056630319,
+       -0.365712937
+      ]
+     },
+     "spinPeriodS": 123221.871,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": true
+    },
+    {
+     "localId": 11,
+     "parentLocalId": 10,
+     "kind": "station",
+     "type": "station",
+     "name": "Xeuses Station",
+     "radiusKm": 0.5,
+     "orbitRadiusKm": 14793.362,
+     "orbitPeriodS": 19442493.813,
+     "orbitPhase": 0.710849289,
+     "orbitPlane": {
+      "A": [
+       -0.818812487,
+       0,
+       0.57406107
+      ],
+      "B": [
+       0.573941826,
+       0.020381269,
+       0.818642403
+      ]
+     },
+     "spinPeriodS": null,
+     "pressBar": 0,
+     "hasRings": false,
+     "hasStation": false,
+     "isHomeWorld": false,
+     "landable": false
+    }
+   ]
+  }
+ ]
+}
