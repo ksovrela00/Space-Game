@@ -154,14 +154,25 @@ const key = (code, shift = false) => {
  * поэтому мок устроен так же — иначе проверка проверяла бы не то, что
  * приходит игре на самом деле.
  */
-const touch = (type, points) => {
+/**
+ * Касание. У события ОБЯЗАТЕЛЬНА цель: игра берёт только те касания, что
+ * легли на холст, а по разметке (стартовый экран, порт, карта) их обязан
+ * обрабатывать браузер — иначе кнопки на телефоне не нажимаются вовсе.
+ *
+ * Возвращает, погасила ли игра событие: по этому и видно, своё оно или
+ * чужое.
+ */
+const touch = (type, points, target = nodes.hud) => {
+  let stopped = false;
   const ev = {
     type,
+    target,
     changedTouches: points.map((p) => ({ identifier: p.id, clientX: p.x, clientY: p.y })),
     cancelable: true,
-    preventDefault() {},
+    preventDefault() { stopped = true; },
   };
   for (const fn of winListeners[type] || []) fn(ev);
+  return stopped;
 };
 
 const mouse = (type, opts = {}) => {
@@ -388,6 +399,30 @@ await step('осмотр камерой правой кнопкой из-за с
     throw new Error('камера не вернулась: ' + game.camOrbit.yaw.toFixed(3));
   }
   if (game.state.view !== view0) { key('KeyV'); frames(2); }
+});
+
+await step('касание по панели остаётся браузеру', async () => {
+  // Тот самый случай, из-за которого на телефоне нельзя было взлететь:
+  // слушатель висел на окне и гасил preventDefault'ом всё подряд, включая
+  // касания по стартовому экрану. Отменённое касание не порождает клика —
+  // кнопка «ВЗЛЁТ» не нажималась, панель оставалась, а звук просыпался от
+  // самого касания, и выходило, что корабль слышно, а играть нельзя.
+  const ship = game.ship;
+  const panel = nodes.boot || { id: 'boot' };
+
+  // По холсту — наше: игра его гасит и ведёт.
+  const mine = touch('touchstart', [{ id: 11, x: 120, y: 500 }], nodes.hud);
+  touch('touchend', [{ id: 11, x: 120, y: 500 }], nodes.hud);
+  if (!mine) throw new Error('касание по холсту игра не взяла');
+
+  // По панели — чужое: не гасим, значит браузер сделает из него нажатие.
+  const theirs = touch('touchstart', [{ id: 12, x: 400, y: 200 }], panel);
+  frames(2);
+  const moved = Math.abs(ship.control.pitch) + Math.abs(ship.control.yaw);
+  touch('touchend', [{ id: 12, x: 400, y: 200 }], panel);
+  frames(2);
+  if (theirs) throw new Error('касание по панели погашено — кнопка не нажмётся');
+  if (moved > 1e-9) throw new Error('касание по панели повело корабль: ' + moved);
 });
 
 await step('сенсорное управление: джойстик, тяга, кнопки', async () => {

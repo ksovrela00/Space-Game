@@ -2020,15 +2020,49 @@ function relayoutTouch() {
   game.fsButton = fullscreenAvailable() ? fullscreenButton(w, safeInsets()) : null;
 }
 
+/**
+ * Касания: только те, что по ХОЛСТУ.
+ *
+ * Стартовый экран, порт, карта, помощь и кнопки в них — это обычная
+ * разметка поверх холста, и касание по ней принадлежит браузеру, а не
+ * игре. Он обязан превратить его в нажатие кнопки.
+ *
+ * Раньше слушатель висел на окне и гасил preventDefault'ом ВСЁ подряд.
+ * На телефоне это означало, что «ВЗЛЁТ» не нажимается вовсе: отменённое
+ * касание не порождает клика, обработчик кнопки не зовётся, и панель
+ * остаётся висеть. Со звуком выходило особенно обидно — он просыпается
+ * от любого касания, поэтому корабль было слышно, а играть нельзя.
+ *
+ * Правило поэтому такое: касание, начавшееся на холсте, ведём до конца
+ * (палец может уехать куда угодно — важно, где он лёг); касание,
+ * начавшееся на разметке, не трогаем вовсе.
+ */
 function attachTouch(target = window) {
+  const onCanvas = (el) => el === hudCanvas || el === screenCanvas;
   const take = (e) => {
+    const start = e.type === 'touchstart';
+    let mine = false;
     for (const t of e.changedTouches || []) {
-      if (e.type === 'touchend' || e.type === 'touchcancel') touchPoints.delete(t.identifier);
-      else touchPoints.set(t.identifier, { id: t.identifier, x: t.clientX, y: t.clientY });
+      if (start) {
+        // Новый палец берём, только если он лёг на холст.
+        if (!onCanvas(e.target)) continue;
+        touchPoints.set(t.identifier, { id: t.identifier, x: t.clientX, y: t.clientY });
+        mine = true;
+        continue;
+      }
+      if (!touchPoints.has(t.identifier)) continue;   // не наш палец
+      mine = true;
+      if (e.type === 'touchend' || e.type === 'touchcancel') {
+        touchPoints.delete(t.identifier);
+      } else {
+        touchPoints.set(t.identifier, { id: t.identifier, x: t.clientX, y: t.clientY });
+      }
     }
     // Прокрутка, зум двумя пальцами и «потяни, чтобы обновить» на
-    // странице, которая целиком занята игрой, — только помеха.
-    if (e.cancelable) e.preventDefault();
+    // странице, которая целиком занята игрой, — только помеха. Но гасим
+    // их лишь для СВОИХ касаний: чужие нужны браузеру, чтобы нажать
+    // кнопку.
+    if (mine && e.cancelable) e.preventDefault();
   };
   for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
     target.addEventListener(type, take, { passive: false });
