@@ -1,6 +1,8 @@
 // Отладочный оверлей (клавиша ~): fps, полигоны, координаты, состояние.
 
 import { audioLine } from '../game/audio.js';
+import { session } from '../net/session.js';
+import { net } from '../net/socket.js';
 
 export function makeDebug() {
   return { on: false, fps: 60, acc: 0, frames: 0 };
@@ -14,6 +16,32 @@ export function tickDebug(dbg, dt) {
     dbg.acc = 0;
     dbg.frames = 0;
   }
+}
+
+/**
+ * Строка о связи: сервер, сокет, сколько пилотов рядом.
+ *
+ * Состояния названы словами, а не значками: «сокет: не подключён» и
+ * «сокет: живой, рядом никого» — разные вещи, и по пустому сканеру их не
+ * отличить.
+ */
+function netLine() {
+  const api = session.mode === 'online' ? 'сервер: есть'
+    : session.mode === 'offline' ? 'сервер: НЕ ОТВЕЧАЕТ'
+      : 'сервер: входа нет';
+
+  const sock = {
+    off: 'сокет: не подключался',
+    connecting: 'сокет: соединяется…',
+    live: 'сокет: живой',
+    down: 'сокет: ОБОРВАН',
+  }[net.state] || ('сокет: ' + net.state);
+
+  const who = net.state === 'live'
+    ? `, пилотов рядом ${net.peers.length}, пакетов ${net.sent}/${net.got}`
+    : (net.error ? ` (${net.error})` : '');
+
+  return api + '   ' + sock + who;
 }
 
 export function drawDebug(r, game, dbg) {
@@ -61,6 +89,10 @@ export function drawDebug(r, game, dbg) {
         `уклон ${(game.zone.slope * 57.3).toFixed(0)}°, шасси ${s.gear.t.toFixed(2)}`
       : '',
     game.nearest ? `ближайшее ${game.nearest.body.name} зазор ${game.nearest.gap.toFixed(1)} км` : '',
+    // Связь. Отдельной строкой и всегда, даже когда всё хорошо: «сокет не
+    // запущен» и «сокет запущен, но никого нет» выглядят в игре
+    // одинаково — пусто, — и различить их иначе нечем.
+    netLine(),
     rs.rocks
       ? `камни: ${rs.rocks.count} в поле, нарисовано ${rs.rocks.drawn}, ` +
         `сборок ${rs.rocks.builds}   пыль: ${rs.dust} частиц`

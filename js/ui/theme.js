@@ -9,3 +9,6 @@ export const AMBER = '#ffcc66';
 export const GREEN = '#78e08f';
 export const RED = '#ff7a66';
 export const INK = '#d8f2ff';
+// Чужие пилоты — оранжевым. Цвет один на все приборы намеренно: отметку
+// на сканере и квадрат в кадре глаз связывает именно по нему.
+export const PEER = '#ff9f6b';

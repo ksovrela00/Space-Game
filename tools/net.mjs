@@ -117,12 +117,19 @@ const TOKEN = 'a'.repeat(64);
 // Состояние, заведомо ОТЛИЧНОЕ от местного кэша: только так видно, чьё
 // именно состояние взяла игра.
 const SERVER_STATE = {
+  // Время мира — общее для всех и приходит только с сервера. Число взято
+  // заведомо не равным ни налёту пилота, ни нулю: ошибка, из-за которой
+  // сюда попадал playTimeS, иначе не видна (см. serverToSave).
+  world: { time: 98765 },
   player: {
     id: 1, login: 'pilot', name: 'ПИЛОТ', balance: 12345, playTimeS: 4200,
     stats: { flownKm: 77, docks: 3, landings: 1, crashes: 0 },
   },
   position: {
-    systemId: 0, pos: { x: 1234567, y: 4321, z: -7654 }, basis: null,
+    // Не родная система намеренно: при входе в неё мир собирается заново,
+    // и время мира проходит через другой путь. Пока здесь стоял ноль,
+    // этот путь не проверялся вовсе.
+    systemId: 4, pos: { x: 1234567, y: 4321, z: -7654 }, basis: null,
     dockedBody: null, landedBody: null, landedPose: null, landedSecured: false,
     targetBody: null, warpTo: null, lastStation: null, view: 'chase',
   },
@@ -225,6 +232,25 @@ if (CASE === 'server') {
   ok(game.player.missions.length === 1 && game.player.missions[0].left === 780,
     'подряд с сервера, срок ' + game.player.missions[0].left + ' с');
   ok(game.player.server === true, 'стартовый набор затёрт серверными данными');
+  // Орбиты планет и станций считаются от времени мира. Разойдись оно у
+  // двоих — и они, стоя рядом, увидят станцию в разных местах; ровно это
+  // и было, пока сюда подставлялся налёт пилота (4200 с).
+  ok(Math.abs(game.world.time - SERVER_STATE.world.time) < 60,
+    'время мира взято с сервера: ' + Math.round(game.world.time)
+    + ' с (налёт пилота — ' + SERVER_STATE.player.playTimeS + ' с)');
+
+  // Вкладка в фоне не получает кадров, и её часы отстают от общих на всё
+  // это время. Вернувшись к игре, пилот обязан увидеть мир там же, где
+  // его видят остальные, а не на пять минут назад.
+  {
+    const before = game.world.time;
+    nowMs += 300000;                // пять минут вкладка была в фоне
+    frames(30);
+    const behind = SERVER_STATE.world.time + 300 - game.world.time;
+    ok(game.world.time - before > 200 && Math.abs(behind) < 5,
+      'после спящей вкладки часы догоняют общие: отставание '
+      + behind.toFixed(1) + ' с');
+  }
 
   // Кэш браузера приведён к серверному состоянию: следующий запуск без
   // сети должен поднять игру там же, где сервер её оставил.

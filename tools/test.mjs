@@ -43,6 +43,12 @@ import {
   makePlayer, ledgerAdd, ledgerTotals, cargoTons, loadCargo, dropCargo,
   addMission, updatePlayer, missionExpired, savePlayer, loadPlayer, LEDGER_MAX,
 } from '../js/game/player.js';
+import {
+  makePeers, ingestPeers, peerPoses, dropPeer, PEER_DELAY, PEER_AHEAD, PEER_TTL,
+} from '../js/game/peers.js';
+import {
+  makeClock, clockFromServer, clockTarget, clockStep, CLOCK_SNAP, CLOCK_RATE,
+} from '../js/game/clock.js';
 import { makeFlow, updateFlow, FLOW } from '../js/game/flow.js';
 import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
@@ -4267,6 +4273,148 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   ok(junk.balance === 0 && junk.time === 0 && junk.ledger.length === 1 &&
      junk.cargo.length === 1 && junk.missions.length === 1 && junk.missions[0].left === 0,
     'кривой сейв даёт пустоту, а не исключение');
+}
+
+// --- чужие корабли: снимки в движение ---------------------------------------
+//
+// Сервер шлёт положение пять раз в секунду, а кадров шестьдесят. Весь этот
+// модуль существует ради того, чтобы чужой корабль не дёргался, и
+// проверяется он целиком здесь: ни сети, ни браузера ему не нужно.
+{
+  console.log('\n== чужие корабли ==');
+
+  const st = makePeers();
+  const snap = (x, t, extra = {}) => ingestPeers(st, [Object.assign({
+    id: 7, name: 'БЕТА', x, y: 0, z: 0, v: 0.4, mode: 'flight',
+    fx: 0, fy: 0, fz: 1, ux: 0, uy: 1, uz: 0,
+  }, extra)], t);
+
+  // Один-единственный снимок: истории нет, и честнее показать пилота там,
+  // где он есть, чем не показать вовсе.
+  snap(0, 10);
+  let p = peerPoses(st, 10)[0];
+  ok(p && Math.abs(p.pos.x) < 1e-9 && p.name === 'БЕТА', 'первый снимок показан сразу');
+
+  // Два снимка в 0.2 с друг от друга: на середине отрезка — середина пути.
+  // Именно эта строка отличает полёт от пяти скачков в секунду.
+  snap(100, 10.2);
+  p = peerPoses(st, 10.1 + PEER_DELAY)[0];
+  ok(p && Math.abs(p.pos.x - 50) < 1e-6,
+    'между снимками корабль идёт плавно: x = ' + (p ? p.pos.x.toFixed(3) : '—'));
+
+  // Картинка ОТСТАЁТ на PEER_DELAY — иначе интерполировать не по чему.
+  p = peerPoses(st, 10.2 + PEER_DELAY)[0];
+  ok(p && Math.abs(p.pos.x - 100) < 1e-6, 'в момент снимка корабль ровно на снимке');
+
+  // Снимок опоздал: идём дальше по последней скорости, но не бесконечно.
+  // Число забираем СРАЗУ: ответ живёт в одном объекте на пилота и
+  // переписывается следующим вызовом (иначе это ловушка — на ней и
+  // попалась первая версия этой проверки).
+  const at = (t) => { const r = peerPoses(st, t)[0]; return r ? r.pos.x : NaN; };
+  const ahead = at(10.2 + PEER_DELAY + 0.2);
+  const far = at(10.2 + PEER_TTL - 0.1);
+  const cap = 100 + 100 * (PEER_AHEAD / 0.2);
+  ok(Math.abs(ahead - 200) < 1e-6,
+    'после пропавшего снимка корабль продолжает идти: x = ' + ahead.toFixed(1));
+  ok(Math.abs(far - cap) < 1e-6,
+    'досчёт ограничен ' + PEER_AHEAD + ' с: x = ' + far.toFixed(1) + ', а не бесконечность');
+
+  // Снимки перестали приходить вовсе — это обрыв связи, и чужой корабль
+  // обязан погаснуть, а не висеть в космосе навсегда.
+  ok(peerPoses(st, 10.2 + PEER_TTL + 0.01).length === 0,
+    'без снимков дольше ' + PEER_TTL + ' с пилот пропадает');
+
+  // Ушедшего убираем сразу, не дожидаясь срока.
+  snap(100, 20);
+  dropPeer(st, 7);
+  ok(peerPoses(st, 20).length === 0, 'по сообщению об уходе пилот пропадает сразу');
+
+  // Ориентация: оси остаются единичными и перпендикулярными даже на
+  // полпути между двумя разными поворотами. Кривой базис в матрице — это
+  // растянутый или вывернутый наизнанку корабль.
+  const st2 = makePeers();
+  const turn = (t, f, u) => ingestPeers(st2, [{
+    id: 9, name: 'ГАММА', x: 0, y: 0, z: 0, v: 0,
+    fx: f[0], fy: f[1], fz: f[2], ux: u[0], uy: u[1], uz: u[2],
+  }], t);
+  turn(0, [0, 0, 1], [0, 1, 0]);
+  turn(0.2, [1, 0, 0], [0, 1, 0]);
+  const b = peerPoses(st2, 0.1 + PEER_DELAY)[0].basis;
+  const unit = (v) => Math.abs(Math.hypot(v.x, v.y, v.z) - 1) < 1e-6;
+  const perp = (a, c) => Math.abs(a.x * c.x + a.y * c.y + a.z * c.z) < 1e-6;
+  ok(unit(b.fwd) && unit(b.up) && unit(b.right), 'оси чужого корабля единичные');
+  ok(perp(b.fwd, b.up) && perp(b.fwd, b.right) && perp(b.up, b.right),
+    'оси чужого корабля перпендикулярны');
+  ok(Math.abs(b.fwd.x - Math.SQRT1_2) < 1e-6 && Math.abs(b.fwd.z - Math.SQRT1_2) < 1e-6,
+    'на полпути между снимками нос повёрнут на 45°');
+
+  // Мусор из сети не должен доходить до матрицы: один NaN гасит корабль
+  // целиком, а искать его потом в шейдере — худший способ провести вечер.
+  const st3 = makePeers();
+  ingestPeers(st3, [
+    { id: 1, x: NaN, y: 0, z: 0 },
+    { id: 2, x: 0, y: 0, z: 'близко' },
+    null,
+    { id: 3, name: 'ДЕЛЬТА', x: 5, y: 0, z: 0, fx: 0, fy: 0, fz: 0, ux: 0, uy: 0, uz: 0 },
+  ], 1);
+  const list = peerPoses(st3, 1);
+  const only = list.length === 1 && list[0].id === 3;
+  const nums = only ? [
+    list[0].pos.x, list[0].pos.y, list[0].pos.z,
+    list[0].basis.fwd.x, list[0].basis.fwd.y, list[0].basis.fwd.z,
+    list[0].basis.up.x, list[0].basis.up.y, list[0].basis.up.z,
+    list[0].basis.right.x, list[0].basis.right.y, list[0].basis.right.z,
+  ] : [NaN];
+  ok(only && nums.every(Number.isFinite),
+    'битые снимки отброшены, нулевой поворот заменён своим: ни одного NaN');
+}
+
+// --- часы мира --------------------------------------------------------------
+//
+// От времени мира считаются орбиты. Ошибка здесь не видна глазами вовсе:
+// картинка остаётся правдоподобной, просто у двух пилотов она разная —
+// именно так станция и оказалась видна только одному из двоих.
+{
+  console.log('\n== часы мира ==');
+
+  const dt = 1 / 60;
+  ok(clockStep(100, null, dt) === dt, 'без сервера часы идут как шли');
+
+  const c = makeClock();
+  ok(clockTarget(c, 5) === null, 'пока сервер не ответил, цели нет');
+  clockFromServer(c, 1000, 5);
+  ok(Math.abs(clockTarget(c, 7) - 1002) < 1e-9,
+    'между снимками время досчитывается само: ' + clockTarget(c, 7));
+  clockFromServer(c, NaN, 9);
+  ok(Math.abs(clockTarget(c, 7) - 1002) < 1e-9, 'мусор вместо времени игнорируется');
+
+  // Отставание выбирается ходом, а не рывком: рывок на стыковке увёл бы
+  // станцию из-под носа.
+  const slow = clockStep(100, 101, dt);
+  ok(slow > dt && slow <= dt * (1 + CLOCK_RATE) + 1e-12,
+    'отставание подтягивается ускорением хода, но не больше чем на '
+    + CLOCK_RATE * 100 + '%');
+  const fast = clockStep(100, 99.9, dt);
+  ok(fast > 0 && fast < dt, 'спешащие часы замедляются, но назад не идут');
+
+  // Сходимость: секунда расхождения выбирается за считанные секунды и не
+  // перелетает через ноль.
+  let local = 100, target = 101, over = 0;
+  for (let i = 0; i < 60 * 30; i++) {
+    local += clockStep(local, target, dt);
+    target += dt;
+    if (local - target > 1e-6) over++;
+  }
+  ok(Math.abs(local - target) < 1e-3 && over === 0,
+    'секунда расхождения выбирается без перелёта: осталось '
+    + Math.abs(local - target).toFixed(6) + ' с');
+
+  // Большое расхождение — рывком: так бывает после варпа, где мир
+  // собирается заново с нуля, и после спящей вкладки.
+  ok(Math.abs(clockStep(0, 3600, dt) - (dt + 3600)) < 1e-9,
+    'расхождение больше ' + CLOCK_SNAP + ' с подводится сразу');
+  ok(clockStep(100, 100 + CLOCK_SNAP - 1, dt) < dt * 2,
+    'а расхождение меньше порога рывком не подводится');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

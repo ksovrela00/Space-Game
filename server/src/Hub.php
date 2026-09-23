@@ -15,12 +15,18 @@
  *
  *   клиент -> сервер
  *     {"t":"hello","token":"..."}            вход по тому же токену, что и API
- *     {"t":"pos","sys":0,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight"}
+ *     {"t":"pos","sys":0,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight",
+ *      "fx":..,"fy":..,"fz":..,"ux":..,"uy":..,"uz":..}   куда смотрит и где верх
  *     {"t":"ping"}
  *
  *   сервер -> клиент
- *     {"t":"welcome","you":{...},"peers":[...]}
- *     {"t":"peers","list":[...]}             раз в тик, только своя система
+ *     {"t":"welcome","you":{...},"peers":[...],"wt":123.4}
+ *     {"t":"peers","list":[...],"wt":123.4}  раз в тик, только своя система
+ *
+ * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
+ * Оно идёт в каждом снимке, а не только при входе: вкладка в фоне
+ * перестаёт получать кадры, её часы отстают, и без поправки пилот,
+ * вернувшийся к игре, увидит станцию не там, где остальные.
  *     {"t":"leave","id":7}
  *     {"t":"error","code":"auth","message":"..."}
  *
@@ -79,6 +85,11 @@ final class Hub
             'name' => '',
             'sys' => null,
             'x' => 0.0, 'y' => 0.0, 'z' => 0.0, 'v' => 0.0,
+            // Осанка корабля. По умолчанию — «смотрит по оси Z, верх по
+            // Y»: пока пилот не прислал свою, показать его надо хоть
+            // как-то, а не боком.
+            'fx' => 0.0, 'fy' => 0.0, 'fz' => 1.0,
+            'ux' => 0.0, 'uy' => 1.0, 'uz' => 0.0,
             'mode' => 'flight',
             'since' => $now,
             'seen' => $now,
@@ -139,6 +150,14 @@ final class Hub
                 $peer['y'] = self::num($msg['y'] ?? 0);
                 $peer['z'] = self::num($msg['z'] ?? 0);
                 $peer['v'] = self::num($msg['v'] ?? 0);
+                // Ориентацию только ПЕРЕСЫЛАЕМ: своей физики у сервера
+                // нет, проверять её нечем, а нормирует вектор тот, кто
+                // рисует (js/game/peers.js).
+                foreach (['fx', 'fy', 'fz', 'ux', 'uy', 'uz'] as $k) {
+                    if (isset($msg[$k])) {
+                        $peer[$k] = self::num($msg[$k]);
+                    }
+                }
                 $mode = (string) ($msg['mode'] ?? 'flight');
                 $peer['mode'] = in_array($mode, ['flight', 'docked', 'landed', 'warp'], true)
                     ? $mode : 'flight';
@@ -191,6 +210,7 @@ final class Hub
             't' => 'welcome',
             'you' => ['id' => $playerId, 'name' => $peer['name'], 'sys' => $peer['sys']],
             'tick' => self::TICK,
+            'wt' => Clock::worldTime(),
             'peers' => $this->peersOf($peer['sys'], $playerId),
         ]);
         $this->say('вошёл ' . $peer['name'] . ' (система ' . ($peer['sys'] ?? '—') . ')');
@@ -206,6 +226,9 @@ final class Hub
     public function tick(float $now): int
     {
         $sent = 0;
+        // Время мира спрашиваем РАЗ на тик, а не на каждого: это обращение
+        // к базе, а снимок у всех всё равно один и тот же.
+        $wt = Clock::worldTime();
         foreach ($this->peers as $key => $peer) {
             if ($peer['player'] === null) {
                 // Молчит и не представился — закрываем: это либо сканер
@@ -220,7 +243,7 @@ final class Hub
                 continue;
             }
             $list = $this->peersOf($peer['sys'], $peer['player']);
-            $this->send($peer['conn'], ['t' => 'peers', 'list' => $list]);
+            $this->send($peer['conn'], ['t' => 'peers', 'list' => $list, 'wt' => $wt]);
             $sent++;
         }
         return $sent;
@@ -244,6 +267,8 @@ final class Hub
                 'name' => $p['name'],
                 'x' => $p['x'], 'y' => $p['y'], 'z' => $p['z'],
                 'v' => $p['v'],
+                'fx' => $p['fx'], 'fy' => $p['fy'], 'fz' => $p['fz'],
+                'ux' => $p['ux'], 'uy' => $p['uy'], 'uz' => $p['uz'],
                 'mode' => $p['mode'],
             ];
         }

@@ -1296,6 +1296,30 @@ export class GlScene {
       this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
       this.drawGear(prog, game, sunPos);
     }
+
+    // Чужие пилоты — тем же корпусом, что и свой: других моделей пока
+    // нет, а пустое место там, где по приборам кто-то есть, ощущается
+    // как поломка игры (так и было: два пилота стояли в восьмистах
+    // метрах и не видели друг друга).
+    //
+    // Положение берётся сглаженное (js/game/peers.js), иначе корабль
+    // поедет пятью скачками в секунду — по числу снимков от сервера.
+    const peers = game.peers;
+    if (peers && peers.length && game.shipMesh) {
+      const mesh = this.glMeshFor(game.shipMesh);
+      // Дальше этого корпус не занимает и пикселя: длина, делённая на
+      // расстояние и умноженная на фокус, — это и есть размер в точках.
+      // Рисовать его там незачем, за это отвечает метка в HUD.
+      const far = (game.shipMesh.length || 0.065) * this.camera.focal;
+      for (const p of peers) {
+        const d = Math.hypot(
+          p.pos.x - this.camera.pos.x,
+          p.pos.y - this.camera.pos.y,
+          p.pos.z - this.camera.pos.z);
+        if (d > far) continue;
+        this.drawObject(prog, mesh, p.pos, p.basis, 1, sunPos);
+      }
+    }
   }
 
   /**

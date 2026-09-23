@@ -50,6 +50,7 @@ import {
 import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
+import { PEER } from './ui/theme.js';
 import { SCANNER_STEPS } from './game/loadout.js';
 import {
   showDocked, showCrash, showHelp, hideOverlay,
@@ -62,6 +63,8 @@ import {
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
 } from './net/session.js';
 import { net, connect as netConnect } from './net/socket.js';
+import { makePeers, ingestPeers, peerPoses, dropPeer } from './game/peers.js';
+import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 
 const STEP = 1 / 60;
@@ -232,6 +235,10 @@ function enterSystem(target) {
   starfield = new Starfield(Q.stars, target.seed);
   if (scene) scene.setStarfield(starfield);
   resetMap(game.map, world);
+  // Мир собран заново и его часы стоят на нуле. Если общее время известно,
+  // ставим его немедленно: иначе первый кадр после прыжка покажет орбиты
+  // на момент рождения вселенной.
+  if (worldAim !== null) updateWorld(world, worldAim);
   return world;
 }
 
@@ -637,6 +644,10 @@ function applyState(s) {
   if (saved && saved.seed !== sys.seed) enterSystem(saved);
   game.warpTarget = s.warpTo === null || s.warpTo === undefined ? null : systemById(s.warpTo);
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
+  // Время мира СТАВИТСЯ, а не прибавляется: система могла быть собрана
+  // чуть выше (enterSystem), и её часы уже стоят на общем времени —
+  // прибавка дала бы удвоенное время и орбиты, где их никто не увидит.
+  world.time = 0;
   updateWorld(world, s.time || 0);
   game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
   if (s.player) loadPlayer(game.player, s.player);
@@ -709,7 +720,10 @@ function serverToSave(st) {
       : null,
     gear: !!sh.gearOut,
     stats: st.player ? st.player.stats : null,
-    time: st.player ? st.player.playTimeS : 0,
+    // ВРЕМЯ МИРА, а не налёт пилота. Здесь стоял playTimeS, и это была
+    // ровно та ошибка, из-за которой у двоих в одном месте станция была
+    // в разных: у каждого свой налёт — значит, своя фаза орбит.
+    time: st.world && typeof st.world.time === 'number' ? st.world.time : 0,
     // Звук — настройка браузера, а не игрока: он остаётся местным.
     audio: null,
   };
@@ -976,7 +990,9 @@ function nearestStation() {
 
 function step(dt) {
   const st = game.state;
-  updateWorld(world, dt);
+  // Время мира подводится к серверному прямо в ходе, а не рывком: рывок
+  // на стыковке увёл бы станцию из-под носа (js/game/clock.js).
+  updateWorld(world, clockStep(world.time, worldAim, dt));
   // Часы пилота идут в любом режиме: срок задания не останавливается
   // оттого, что корабль стоит в порту.
   updatePlayer(game.player, dt);
@@ -1191,10 +1207,11 @@ function prepareHud() {
   }
   // Чужие корабли на сканере. Дальность из-за них НЕ растягиваем: пилот
   // в другом конце системы не должен уводить масштаб кольца, на котором
-  // игрок читает подход к станции.
-  game.peers = net.peers;
-  for (const p of net.peers) {
-    game.scanBlips.push({ pos: p, color: '#ff9f6b', peer: true });
+  // игрок читает подход к станции. Берём СГЛАЖЕННОЕ положение, то же
+  // самое, по которому корабль рисуется в кадре: иначе отметка на
+  // сканере и квадрат в кадре разъедутся на четверть секунды.
+  for (const p of game.peers) {
+    game.scanBlips.push({ pos: p.pos, color: PEER, peer: true });
   }
   game.scannerRange = SCANNER_STEPS.find((r) => r > nearestDist * 1.25) || SCANNER_STEPS[SCANNER_STEPS.length - 1];
 
@@ -1583,6 +1600,15 @@ function render() {
 
 // Режим связи с прошлого кадра: по смене показываем сообщение.
 let netMode = 'none';
+// Снимки чужих кораблей и номер последнего принятого: сглаживание считает
+// временем снимка время его прихода, и принять один список дважды значит
+// сказать, что корабль полтика простоял (js/game/peers.js).
+const peerStore = makePeers();
+let peerRev = -1;
+// Часы мира. Пока сервера нет, цель null и время идёт как шло — в
+// одиночной игре подводить его не по чему и незачем.
+const worldClock = makeClock();
+let worldAim = null;
 let last = performance.now();
 let acc = 0;
 let saveTimer = 0;
@@ -1615,6 +1641,22 @@ function frame(now) {
     steps++;
   }
   if (acc > STEP) acc = 0;
+
+  // Чужие корабли: снимок принимаем только НОВЫЙ, а положение считаем
+  // каждый кадр — между снимками картинка идёт сама. Делается это вне
+  // prepareHud намеренно: тот работает только в полёте, а чужие корабли
+  // никуда не деваются и когда мы пристыкованы.
+  {
+    const tNow = now / 1000;
+    if (net.left !== null) { dropPeer(peerStore, net.left); net.left = null; }
+    if (net.rev !== peerRev) {
+      peerRev = net.rev;
+      ingestPeers(peerStore, net.peers, tNow);
+      clockFromServer(worldClock, net.wt, tNow);
+    }
+    game.peers = peerPoses(peerStore, tNow, game.peers);
+    worldAim = clockTarget(worldClock, tNow);
+  }
 
   // Связь пропала или вернулась — игрок обязан это увидеть, а не
   // догадываться по тому, что счёт перестал меняться.
@@ -1790,6 +1832,9 @@ async function boot() {
       return;
     }
     if (mode === 'online') {
+      clockFromServer(worldClock, session.player.world ? session.player.world.time : null,
+        performance.now() / 1000);
+      worldAim = clockTarget(worldClock, performance.now() / 1000);
       restored = applyState(serverToSave(session.player));
       applyServer(game.player, session.player);
       // Местный кэш сразу приводим к серверному состоянию: если в
@@ -1801,6 +1846,9 @@ async function boot() {
         sys: sys.id,
         x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
         v: ship.speed,
+        // Осанка корабля, а не только след: без неё чужой корабль нечем
+        // развернуть, и на месте он смотрел бы в никуда.
+        fwd: ship.basis.fwd, up: ship.basis.up,
         mode: game.state.mode === ST.DOCKED ? 'docked'
           : game.state.mode === ST.LANDED ? 'landed'
             : game.warp.phase === 'tunnel' ? 'warp' : 'flight',

@@ -12,7 +12,7 @@ import { targetLabel } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
 import { dirToWorld } from '../core/basis.js';
-import { CY, CY_DIM, AMBER, GREEN, RED } from './theme.js';
+import { CY, CY_DIM, AMBER, GREEN, RED, PEER } from './theme.js';
 import { Q } from '../core/quality.js';
 import {
   engineScreen, targetScreen, scopeScreen, commsScreen, systemsScreen,
@@ -35,6 +35,7 @@ const _mkAlt = { dir: { x: 0, y: 0, z: 0 } };
 const VMARK_MIN = 0.002;      // км/с
 const _vm = { x: 0, y: 0 };
 const _pt = { x: 0, y: 0 };
+const _pp = { x: 0, y: 0 };
 // Точки под приборы на доске кабины: та же экономия, что и везде —
 // вектор на кадр это мусор в куче шестьдесят раз в секунду.
 const _pw = { x: 0, y: 0, z: 0 };
@@ -142,6 +143,7 @@ export function drawHud(r, game) {
   // видно, куда наводиться. Выбранная рисуется поверх остальных своей
   // рамкой.
   drawTargetList(ctx, cam, game, target);
+  drawPeerMarks(ctx, cam, game);
   drawAimedLabel(ctx, cam, game, target);
   if (target) drawTargetMarker(ctx, cam, target);
 
@@ -1026,6 +1028,56 @@ function drawTargetList(ctx, cam, game, target) {
       ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(p.x, p.y, r + 5, 0, TAU); ctx.stroke();
     }
+  }
+  ctx.restore();
+}
+
+/**
+ * Чужие пилоты в кадре: квадрат и расстояние до него.
+ *
+ * Метка рисуется НЕЗАВИСИМО от того, виден ли сам корабль: корпус в
+ * 67 метров перестаёт быть различим уже за сотню километров, а знать,
+ * что рядом кто-то есть, нужно куда раньше. Без метки чужой корабль в
+ * космосе просто не находится глазами — проверено: пилоты стояли в
+ * восьмистах метрах друг от друга и не видели друг друга вовсе.
+ *
+ * Квадрат — как у станций, оранжевый — как отметки на сканере: это одна
+ * и та же вещь, показанная в двух приборах, и цвет тут связка.
+ */
+function drawPeerMarks(ctx, cam, game) {
+  const peers = game.peers;
+  if (!peers || !peers.length) return;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.font = '11px Consolas, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  for (const p of peers) {
+    const c = cam.toCamera(p.pos);
+    if (c.z <= cam.near) continue;             // за спиной
+    const s = cam.project(c, _pp);
+    if (s.x < 8 || s.x > cam.w - 8 || s.y < 8 || s.y > cam.h - 8) continue;
+    const r = 6;
+    const box = () => {
+      ctx.beginPath();
+      ctx.rect(s.x - r, s.y - r, r * 2, r * 2);
+      ctx.stroke();
+    };
+    // Подложка, как у остальных значков: метка тонкая и стоит на фоне
+    // звёзд и подсвеченного края планеты.
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.lineWidth = 3.5;
+    box();
+    ctx.strokeStyle = PEER;
+    ctx.lineWidth = 1.4;
+    box();
+
+    const label = (p.name || 'ПИЛОТ') + '  ' + fmtDist(dist3(cam.pos, p.pos));
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeText(label, s.x + r + 6, s.y);
+    ctx.fillStyle = PEER;
+    ctx.fillText(label, s.x + r + 6, s.y);
   }
   ctx.restore();
 }

@@ -27,7 +27,18 @@ const BACKOFF = [1000, 2000, 5000, 10000, 20000];
 export const net = {
   // 'off' — не подключались; 'connecting'; 'live'; 'down' — оборвалось.
   state: 'off',
-  peers: [],          // [{id, name, x, y, z, v, mode}] — только своя система
+  peers: [],          // [{id, name, x, y, z, v, mode, fx..uz}] — своя система
+  // Номер снимка. По нему игра отличает НОВЫЙ список от того же самого:
+  // сглаживание чужого движения считает временем снимка время его
+  // прихода, и принять один список дважды значит сказать, что корабль
+  // полтика простоял на месте.
+  rev: 0,
+  // id пилота, о чьём уходе только что сообщили; игра забирает его и
+  // ставит обратно null.
+  left: null,
+  // Время мира из последнего снимка (server/src/Clock.php). По нему игра
+  // держит орбиты в одной фазе со всеми — иначе станция у каждого своя.
+  wt: null,
   you: null,
   error: null,
   sent: 0,
@@ -100,11 +111,17 @@ function open() {
       net.state = 'live';
       net.you = msg.you;
       net.peers = msg.peers || [];
+      if (typeof msg.wt === 'number') net.wt = msg.wt;
+      net.rev++;
       net.error = null;
     } else if (msg.t === 'peers') {
       net.peers = msg.list || [];
+      if (typeof msg.wt === 'number') net.wt = msg.wt;
+      net.rev++;
     } else if (msg.t === 'leave') {
       net.peers = net.peers.filter((p) => p.id !== msg.id);
+      net.rev++;
+      net.left = msg.id;
     } else if (msg.t === 'error') {
       net.error = msg.message || msg.code;
       // 'replaced' — игрок открыл игру в другом окне. Это не сбой связи,
@@ -146,6 +163,12 @@ function pushPose() {
     // прибор, а трафик они удваивают.
     x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
     v: +p.v.toFixed(3), mode: p.mode,
+    // Куда смотрит нос и где у корабля верх. Без этого чужой корабль
+    // нечем развернуть: по положению видно только путь, а не осанку, и
+    // на месте он вообще смотрел бы в никуда. Четырёх знаков хватает —
+    // это сотые доли градуса.
+    fx: +p.fwd.x.toFixed(4), fy: +p.fwd.y.toFixed(4), fz: +p.fwd.z.toFixed(4),
+    ux: +p.up.x.toFixed(4), uy: +p.up.y.toFixed(4), uz: +p.up.z.toFixed(4),
   });
 }
 

@@ -228,9 +228,17 @@ globalThis.window = {
   innerWidth: W, innerHeight: H, devicePixelRatio: 1,
   addEventListener(t, fn) { (winL[t] ||= []).push(fn); }, removeEventListener() {},
 };
-// Явно просим Canvas-2D-рендер: WebGL здесь не подменить, его путь
-// проверяется отдельно в tools/gl.mjs через мок GL-контекста.
-globalThis.location = { search: '?renderer=2d' };
+// Снимок делается в АВТОНОМНОЙ игре: с появлением входа по токену игра
+// без него уходит на login.html, и картинке взяться неоткуда. Заодно
+// просим Canvas-2D-рендер: WebGL здесь не подменить, его путь проверяется
+// отдельно в tools/gl.mjs через мок GL-контекста.
+globalThis.location = {
+  search: '?renderer=2d&offline=1',
+  // Если игра всё же соберётся уйти со страницы — пусть скажет об этом
+  // вслух. Молчаливый уход выглядел как «cb is not a function» в цикле
+  // кадров, и искать причину пришлось в другом конце проекта.
+  replace(url) { throw new Error('игра ушла со страницы на ' + url); },
+};
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 let rafCb = null, nowMs = 0;
 globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };

@@ -72,39 +72,99 @@ if (!listening[80]) console.log('       запустить Apache в панел�
 if (!listening[3893]) console.log('       запустить: npm run ws');
 
 // --- брандмауэр ---------------------------------------------------------------
+//
+// Правило может быть не только «на порт», но и «на программу» — именно так
+// XAMPP заводит Apache, разрешая httpd.exe любые порты. Проверка, которая
+// ищет только номер порта, объявляет закрытым то, что открыто, и сбивает
+// с толку ровно тогда, когда на неё смотрят. Один такой ложный диагноз
+// здесь уже был.
 
 console.log('');
+
+/** Кто слушает порт: имя программы по её PID. */
+const listenerOf = (port) => {
+  try {
+    const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'latin1' });
+    const line = out.split(/\r?\n/).find((l) =>
+      /LISTENING/i.test(l) && new RegExp(':' + port + '\\s').test(l));
+    if (!line) return null;
+    const pid = line.trim().split(/\s+/).pop();
+    const tl = execFileSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'],
+      { encoding: 'latin1' });
+    const m = tl.match(/^"([^"]+)"/);
+    return m ? m[1].toLowerCase() : null;
+  } catch (e) {
+    return null;
+  }
+};
+
+/** Профиль сети, по которому сейчас живут правила. */
+const profileNow = () => {
+  try {
+    const out = execFileSync('netsh', ['advfirewall', 'show', 'currentprofile'],
+      { encoding: 'latin1' });
+    const head = out.split(/\r?\n/).find((l) => /Profile Settings|Профиль/i.test(l)) || '';
+    if (/Domain|Домен/i.test(head)) return 'Domain';
+    if (/Private|Частн/i.test(head)) return 'Private';
+    if (/Public|Общ/i.test(head)) return 'Public';
+  } catch (e) { /* без прав сюда всё равно пускают, но мало ли */ }
+  return null;
+};
+
 let rules = '';
 try {
   // netsh читается без прав администратора — менять правила ими нельзя,
   // а смотреть можно.
-  rules = execFileSync('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=all', 'dir=in'],
-    { encoding: 'latin1', maxBuffer: 32 * 1024 * 1024 });
+  rules = execFileSync('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=all',
+    'dir=in', 'verbose'], { encoding: 'latin1', maxBuffer: 64 * 1024 * 1024 });
 } catch (e) {
   console.log(bad('не удалось спросить брандмауэр: ' + e.message));
 }
 
-/** Есть ли ВКЛЮЧЁННОЕ разрешающее правило на этот порт. */
-const allowed = (port) => {
-  // Правила идут блоками, разделёнными пустой строкой; нас интересует
-  // блок, где сошлись три условия: включено, разрешает, тот самый порт.
+const profile = profileNow();
+if (profile) console.log('  сеть сейчас в профиле: ' + profile);
+
+/**
+ * Что именно пропускает порт: правило на порт, правило на программу или
+ * ничего. Возвращает описание или null.
+ */
+const allows = (port, program) => {
+  // Правила идут блоками, разделёнными пустой строкой; в блоке должны
+  // сойтись: включено, разрешает, наш профиль и наш порт или наша
+  // программа.
   for (const block of rules.split(/\r?\n\r?\n/)) {
-    if (!new RegExp('(?:LocalPort|Локальный порт):\\s*' + port + '\\s*$', 'm').test(block)) continue;
-    const on = /(?:Enabled|Включено):\s*(Yes|Да)/i.test(block);
-    const allow = /(?:Action|Действие):\s*(Allow|Разрешить)/i.test(block);
-    if (on && allow) return true;
+    if (!/(?:Enabled|Включено):\s*(Yes|Да)/i.test(block)) continue;
+    if (!/(?:Action|Действие):\s*(Allow|Разрешить)/i.test(block)) continue;
+    const prof = (block.match(/(?:Profiles|Профили):\s*(.+)/i) || [])[1] || '';
+    if (profile && !new RegExp(profile, 'i').test(prof)
+        && !/Any|Все|Domain,Private,Public/i.test(prof)) continue;
+    if (new RegExp('(?:LocalPort|Локальный порт):\\s*' + port + '\\s*$', 'm').test(block)) {
+      return 'по порту';
+    }
+    if (program) {
+      const prog = (block.match(/(?:Program|Программа):\s*(.+)/i) || [])[1] || '';
+      if (prog.trim().toLowerCase().endsWith('\\' + program)) {
+        // Правило на программу разрешает ей ЛЮБЫЕ порты, поэтому годится
+        // только если и порт слушает именно она.
+        if (/(?:LocalPort|Локальный порт):\s*(Any|Все)/i.test(block)) {
+          return 'по программе ' + program;
+        }
+      }
+    }
   }
-  return false;
+  return null;
 };
 
 const closed = [];
 for (const p of PORTS) {
-  const good = rules ? allowed(p.port) : null;
-  if (good === null) continue;
-  console.log(good
-    ? ok(`брандмауэр пропускает порт ${p.port}`)
-    : bad(`брандмауэр НЕ пропускает порт ${p.port}`));
-  if (!good) closed.push(p);
+  const program = listenerOf(p.port);
+  const how = rules ? allows(p.port, program) : null;
+  if (!rules) continue;
+  console.log(how
+    ? ok(`брандмауэр пропускает порт ${p.port} (${how})`)
+    : bad(`брандмауэр НЕ пропускает порт ${p.port}`
+        + (program ? ` — его слушает ${program}, а правила на неё нет` : '')));
+  if (!how) closed.push(p);
 }
 
 if (closed.length) {
@@ -115,6 +175,14 @@ if (closed.length) {
     console.log(`      -Direction Inbound -Protocol TCP -LocalPort ${p.port} \``);
     console.log('      -Action Allow -Profile Domain,Private');
   }
+  console.log('');
+  // Правила групповой политики домена отсюда не видны без прав
+  // администратора, и «нет правила» не значит «не пройдёт». Проверка,
+  // которая утверждает больше, чем знает, обманывает ровно тогда, когда
+  // на неё смотрят: так и вышло — порт 80 объявлялся закрытым, хотя по
+  // нему играли.
+  console.log('  Если с другой машины при этом ВСЁ РАВНО подключается —');
+  console.log('  значит, пропускает правило групповой политики: его отсюда не видно.');
   console.log('');
   console.log('  Убрать потом:');
   console.log('    Remove-NetFirewallRule -DisplayName "Solar Trader *"');
