@@ -253,6 +253,10 @@ const frames = (n) => {
   for (let i = 0; i < n; i++) { nowMs += 16.7; const cb = rafCb; rafCb = null; cb(nowMs); }
 };
 
+// Характеристики корабля — до игры, как в браузере (js/boot.js).
+const { loadSpecsFromDisk } = await import('./specs.mjs');
+loadSpecsFromDisk();
+
 await import('../js/main.js');
 const game = globalThis.window.GAME;
 for (const fn of nodes.bootBtn.listeners.click || []) fn();

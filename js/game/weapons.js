@@ -26,58 +26,67 @@
 import { v3, set, dot, normalize } from '../core/vec3.js';
 import { toWorld, toLocal, dirToWorld } from '../core/basis.js';
 import { SHIELD_AXES } from '../models/ships.js';
+import { SHIP } from './ship.js';
 
 const DEG = Math.PI / 180;
 
 /**
- * Каталог оружия.
+ * Каталог оружия. ПУСТ ДО ЗАГРУЗКИ.
  *
  * Видов три — лазер, ракеты, турель, — и каждый бывает неподвижным или
- * на кардане. Сделан пока один: лазер на кардане. Остальные заведены
- * здесь же, а не «когда дойдут руки», чтобы карточка корабля и сервер
- * знали о гнёздах с самого начала — пустое гнездо это тоже сведение.
+ * на кардане. Сделан пока один: лазер на кардане. Остальные заведены в
+ * бэкенде с самого начала, а не «когда дойдут руки», чтобы карточка
+ * корабля и сервер знали о гнёздах сразу — пустое гнездо это тоже
+ * сведение.
+ *
+ * Сами числа лежат в server/data/specs.php и приезжают оттуда (см.
+ * js/game/specs.js). Здесь их нет намеренно: урон пушки — ровно то, во
+ * что клиенту верить нельзя, и сервер считает попадания по СВОИМ
+ * числам (server/src/Combat.php). Пока числа стояли в этом файле, они
+ * были у сервера слепком, снятым с клиента.
  */
-export const WEAPONS = {
-  laser_g: {
-    code: 'laser_g', kind: 'laser', mount: 'gimbal',
-    name: 'ЛАЗЕРНАЯ ПУШКА', mountName: 'КАРДАН',
-    damage: 3,        // корпуса за попадание
-    rate: 3,          // выстрелов в секунду на ствол
-    speed: 3,         // км/с
-    range: 2.5,       // км
-    cone: 15 * DEG,   // предел доворота ствола
-    boltLen: 0.05,    // длина болта, км — он короткий, а не сплошной луч
-    color: [1.0, 0.32, 0.22],
-    ready: true,
-  },
-  laser_f: {
-    code: 'laser_f', kind: 'laser', mount: 'fixed',
-    name: 'ЛАЗЕРНАЯ ПУШКА', mountName: 'НЕПОДВИЖНАЯ',
-    damage: 4, rate: 3, speed: 3, range: 2.5, cone: 0,
-    boltLen: 0.05, color: [1.0, 0.32, 0.22], ready: false,
-  },
-  missile: {
-    code: 'missile', kind: 'missile', mount: 'fixed',
-    name: 'РАКЕТНАЯ УСТАНОВКА', mountName: 'НЕПОДВИЖНАЯ',
-    damage: 25, rate: 0.3, speed: 1.2, range: 12, cone: 0,
-    boltLen: 0.02, color: [1.0, 0.8, 0.5], ready: false,
-  },
-  turret: {
-    code: 'turret', kind: 'turret', mount: 'gimbal',
-    name: 'ТУРЕЛЬ', mountName: 'КРУГОВАЯ',
-    damage: 2, rate: 5, speed: 2.4, range: 1.8, cone: 120 * DEG,
-    boltLen: 0.04, color: [0.6, 0.9, 1.0], ready: false,
-  },
-};
+export const WEAPONS = {};
 
-/** Что стоит на корабле игрока сейчас. */
-export const INSTALLED = ['laser_g'];
+/** Что стоит на корабле игрока сейчас. Тоже из бэкенда. */
+export const INSTALLED = [];
 
-/** Радиус корабля для попаданий, км. Корпус длиной 67 м, считаем по нему. */
-export const HIT_RADIUS = 0.035;
+/**
+ * Общие числа боя: сколько живёт вспышка, сколько видно щит и какого он
+ * цвета. Объект заполняется вместе с оружием.
+ */
+export const COMBAT = {};
 
-/** Сколько живёт вспышка попадания, с. */
-export const BLAST_LIFE = 0.35;
+/**
+ * Принять оружие от бэкенда.
+ *
+ * Конус доворота приходит в ГРАДУСАХ и здесь же переводится в радианы:
+ * градусы — то, что подкручивает человек, радианы — то, чем считает
+ * тригонометрия. Держать в бэкенде 0.2618 значило бы предлагать правщику
+ * вводить радианы руками.
+ */
+export function applyWeaponSpecs(list, combat) {
+  for (const key of Object.keys(WEAPONS)) delete WEAPONS[key];
+  INSTALLED.length = 0;
+  for (const w of list || []) {
+    WEAPONS[w.code] = Object.assign({}, w, { cone: (w.coneDeg || 0) * DEG });
+    if (w.ready) INSTALLED.push(w.code);
+  }
+  Object.assign(COMBAT, combat || {});
+  return WEAPONS;
+}
+
+/**
+ * Радиус корабля для попаданий, км.
+ *
+ * У чужого берётся его собственный (он приезжает вместе с ним: корпуса
+ * будут разные), у своего — из лётной модели. Число это гейплейное, а не
+ * рисовальное: по нему болт гаснет об обшивку, и по нему же сервер
+ * проверяет, что попадание вообще было возможно.
+ */
+const hitRadius = (t) => (typeof t.radius === 'number' ? t.radius : SHIP.hitRadius);
+
+/** Приехало ли оружие. */
+export const weaponsReady = () => INSTALLED.length > 0;
 
 export function makeGuns(code = INSTALLED[0]) {
   const spec = WEAPONS[code] || WEAPONS.laser_g;
@@ -245,7 +254,7 @@ export function updateGuns(guns, dt, ships, hits = []) {
         if (!t || !t.pos) continue;
         // В свой же корабль болт не попадает: он из него вылетел.
         if (b.mine ? t.own : b.by === t.id) continue;
-        if (!segmentHit(b, t.pos, HIT_RADIUS)) continue;
+        if (!segmentHit(b, t.pos, hitRadius(t))) continue;
         if (b.mine && !t.own) {
           hits.push({ id: t.id, damage: b.damage, x: b.x, y: b.y, z: b.z });
           guns.hits++;
@@ -268,11 +277,11 @@ export function updateGuns(guns, dt, ships, hits = []) {
 /**
  * Вспышка попадания.
  *
- * @param color цвет: у щита он свой (см. SHIELD_COLOR) — по нему сразу
+ * @param color цвет: у щита он свой (shieldColor) — по нему сразу
  *        видно, приняла ли оболочка удар на себя.
  */
 export function blast(guns, x, y, z, color, size = 1) {
-  const b = { x, y, z, age: 0, life: BLAST_LIFE, color: color || [1, 0.5, 0.2], size };
+  const b = { x, y, z, age: 0, life: COMBAT.blastLife, color: color || [1, 0.5, 0.2], size };
   guns.blasts.push(b);
   // Вспышек больше десятка одновременно не бывает даже в свалке; если
   // вдруг случилось — старые всё равно уже погасли.
@@ -280,11 +289,11 @@ export function blast(guns, x, y, z, color, size = 1) {
   return b;
 }
 
-/** Цвет вспышки, когда удар принял щит: холодный, чтобы отличать сразу. */
-export const SHIELD_COLOR = [0.45, 0.75, 1.0];
-
-/** Сколько видна оболочка щита после попадания, с. */
-export const SHIELD_LIFE = 0.45;
+/**
+ * Цвет вспышки, когда удар принял щит: холодный, чтобы отличать сразу.
+ * Как и всё остальное, приезжает из бэкенда (COMBAT.shieldColor).
+ */
+export const shieldColor = () => COMBAT.shieldColor;
 
 const _hit = v3();
 
@@ -305,7 +314,7 @@ export function shieldFlash(guns, id, own, point, center, basis) {
   const z = _hit.z / SHIELD_AXES[2];
   const l = Math.hypot(x, y, z) || 1;
   guns.shields.push({
-    id, own, age: 0, life: SHIELD_LIFE,
+    id, own, age: 0, life: COMBAT.shieldLife,
     dx: x / l, dy: y / l, dz: z / l,
   });
   if (guns.shields.length > 16) guns.shields.shift();

@@ -40,6 +40,12 @@ import { makeGalaxy } from '../js/game/galaxy.js';
 import { makeWarp, startWarp, updateWarp, warpPower } from '../js/game/warp.js';
 import { pendingBuilds } from '../js/gl/planetmesh.js';
 
+import { loadSpecsFromDisk } from './specs.mjs';
+
+// Числа корабля приходят из бэкенда; здесь берём их слепок с диска (см.
+// tools/specs.mjs). Без этого SHIP пуст и в матрицы едет NaN.
+loadSpecsFromDisk();
+
 let fails = 0;
 const ok = (cond, msg) => {
   if (!cond) fails++;

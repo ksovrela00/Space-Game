@@ -544,4 +544,10 @@ export const EN = {
   'ВИД': 'VIEW',
   'КАРТА': 'MAP',
   'ПОСАД': 'LAND',
+  // Загрузчик: характеристики корабля приходят из бэкенда (js/boot.js).
+  'ХАРАКТЕРИСТИКИ КОРАБЛЯ НЕ ЗАГРУЖЕНЫ: ': 'SHIP SPECIFICATIONS NOT LOADED: ',
+  'Поднимите сервер или соберите слепок: ': 'Start the server or build the snapshot: ',
+  'характеристики взяты из слепка: ': 'specifications taken from the snapshot: ',
+  'характеристики пусты: нечем собрать корабль': 'specifications are empty: nothing to build a ship from',
+  'слепок характеристик не читается: ': 'specification snapshot unreadable: ',
 };

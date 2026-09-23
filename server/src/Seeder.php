@@ -46,36 +46,46 @@ final class Seeder
             $n['commodity']++;
         }
 
+        // Числа корабля, оружия и модулей приходят из server/data/specs.php:
+        // это бэкенд, и он им хозяин. Из выгрузки генератора берутся только
+        // ГАБАРИТЫ — их диктует сам меш корпуса (js/models/ships.js), и
+        // вписывать их руками значило бы завести второй ответ на вопрос,
+        // какой корабль длины.
+        $specs = Specs::source();
+        $size = [];
         foreach ($catalog['shipTypes'] ?? [] as $t) {
+            $size[$t['code']] = $t;
+        }
+
+        foreach ($specs['shipTypes'] as $t) {
+            $spec = $t['spec'];
+            $dim = $size[$t['code']] ?? [];
             Db::run(
                 'INSERT INTO `ship_type`
                    (`code`,`name`,`title`,`hull_max`,`shield_max`,`shield_regen`,`shield_delay`,
-                    `hold_t`,`fuel_t`,`max_speed`,
-                    `accel`,`brake`,`lateral`,`quantum_speed`,`boost_max`,`boost_burn`,
-                    `length_m`,`width_m`,`height_m`,`price`)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    `hold_t`,`fuel_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
                    `hull_max`=VALUES(`hull_max`), `shield_max`=VALUES(`shield_max`),
                    `shield_regen`=VALUES(`shield_regen`), `shield_delay`=VALUES(`shield_delay`),
                    `hold_t`=VALUES(`hold_t`), `fuel_t`=VALUES(`fuel_t`),
-                   `max_speed`=VALUES(`max_speed`), `accel`=VALUES(`accel`), `brake`=VALUES(`brake`),
-                   `lateral`=VALUES(`lateral`), `quantum_speed`=VALUES(`quantum_speed`),
-                   `boost_max`=VALUES(`boost_max`), `boost_burn`=VALUES(`boost_burn`),
                    `length_m`=VALUES(`length_m`), `width_m`=VALUES(`width_m`),
-                   `height_m`=VALUES(`height_m`), `price`=VALUES(`price`)',
+                   `height_m`=VALUES(`height_m`), `price`=VALUES(`price`), `spec`=VALUES(`spec`)',
                 [
-                    $t['code'], $t['name'], $t['title'] ?? '', $t['hullMax'], $t['shieldMax'],
-                    $t['shieldRegen'] ?? 0, $t['shieldDelay'] ?? 0,
-                    $t['holdT'], $t['fuelT'], $t['maxSpeed'], $t['accel'], $t['brake'], $t['lateral'],
-                    $t['quantumSpeed'], $t['boostMax'], $t['boostBurn'],
-                    $t['lengthM'], $t['widthM'], $t['heightM'],
-                    Content::SHIP_PRICE[$t['code']] ?? 0,
+                    $t['code'], $t['name'], $t['title'] ?? '',
+                    $spec['maxHull'], $spec['maxShield'], $spec['shieldRegen'], $spec['shieldDelay'],
+                    $spec['hold'], $spec['fuelMax'],
+                    $dim['lengthM'] ?? 0, $dim['widthM'] ?? 0, $dim['heightM'] ?? 0,
+                    (int) ($t['price'] ?? 0),
+                    // В `spec` едет лётная модель БЕЗ тех шести чисел, что
+                    // легли столбцами: одно число — одно место.
+                    json_encode(Specs::specRest($spec), JSON_UNESCAPED_UNICODE),
                 ]
             );
             $n['ship_type']++;
         }
 
-        foreach ($catalog['equipment'] ?? [] as $e) {
+        foreach (Specs::equipmentRows($specs) as $e) {
             Db::run(
                 'INSERT INTO `equipment_type` (`code`,`name`,`slot`,`spec`,`price`,`stock`)
                  VALUES (?,?,?,?,?,?)
@@ -83,14 +93,18 @@ final class Seeder
                    `spec`=VALUES(`spec`), `price`=VALUES(`price`), `stock`=VALUES(`stock`)',
                 [
                     $e['code'], $e['name'], $e['slot'],
-                    json_encode($e['spec'] ?? null, JSON_UNESCAPED_UNICODE),
-                    Content::EQUIPMENT_PRICE[$e['code']] ?? 0,
+                    json_encode($e['spec'], JSON_UNESCAPED_UNICODE),
+                    $e['price'],
                     // `stock` здесь значит «стоит на корабле с завода».
-                    !empty($e['installed']) ? 1 : 0,
+                    $e['stock'] ? 1 : 0,
                 ]
             );
             $n['equipment_type']++;
         }
+
+        // Общие числа боя своей таблицы не стоят: их три, и таблица ради
+        // трёх чисел — это лишняя связь, а не порядок.
+        Schema::setMeta(Specs::META_KEY, json_encode($specs['combat'] ?? [], JSON_UNESCAPED_UNICODE));
 
         return $n;
     }

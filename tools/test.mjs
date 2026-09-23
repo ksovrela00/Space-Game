@@ -12,7 +12,7 @@ import {
   handoverAt, placeAtStar, finishWarp, WARP,
 } from '../js/game/warp.js';
 import { HOME_LAYOUT } from '../js/game/world.js';
-import { makeShip, updateShip, placeShip, clearControls, SHIP } from '../js/game/ship.js';
+import { makeShip, updateShip, placeShip, clearControls, SHIP, applyShipSpec } from '../js/game/ship.js';
 import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
 } from '../js/game/nav.js';
@@ -55,7 +55,7 @@ import {
 } from '../js/net/quality.js';
 import {
   WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit,
-  BLAST_LIFE, shieldFlash, hasShieldFlash,
+  COMBAT, INSTALLED, shieldFlash, hasShieldFlash,
 } from '../js/game/weapons.js';
 import { SHIELD_AXES, HULL_SIZE } from '../js/models/ships.js';
 import { makeFlow, updateFlow, FLOW } from '../js/game/flow.js';
@@ -88,6 +88,16 @@ import { copy } from '../js/core/vec3.js';
 import { lookAlong } from '../js/core/basis.js';
 import { box, prismZ, loft } from '../js/models/geometry.js';
 import { L, setLang, getLang, hasEn, LANGS } from '../js/core/lang.js';
+import { loadSpecsFromDisk } from './specs.mjs';
+import { applySpecs } from '../js/game/specs.js';
+import { modules, applyModuleSpecs, SCANNER_STEPS } from '../js/game/loadout.js';
+
+// Характеристики корабля и оружия приходят из бэкенда, и в игре их нет
+// ни одного. Проверкам сервер не нужен — они берут тот же слепок, что и
+// автономный режим. Без этой строки SHIP пуст, и падает всё подряд:
+// именно так и должно быть, пустой объект честнее значений «по
+// умолчанию» (см. js/game/ship.js).
+loadSpecsFromDisk();
 
 const STEP = 1 / 60;
 // Проверки сверяют РУССКИЕ надписи — как и весь остальной набор
@@ -4655,8 +4665,8 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   ok(g7.blasts.length === 1, 'на месте попадания зажигается вспышка');
 
   // Вспышка живёт недолго и гаснет сама.
-  updateGuns(g7, BLAST_LIFE + 0.01, []);
-  ok(g7.blasts.length === 0, 'вспышка гаснет через ' + BLAST_LIFE + ' с');
+  updateGuns(g7, COMBAT.blastLife + 0.01, []);
+  ok(g7.blasts.length === 0, 'вспышка гаснет через ' + COMBAT.blastLife + ' с');
 
   // В своего стрелка болт не попадает: он из него вылетел.
   const g8 = makeGuns('laser_g');
@@ -4812,6 +4822,187 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     'за пилотом, ушедшим в прыжок, не улетаем: ' + vFast.x + ' км/с');
 }
 
+// --- характеристики из бэкенда ----------------------------------------------
+//
+// В игре не осталось ни одного числа корабля, оружия и модулей: все они
+// лежат в server/data/specs.php, заливаются в базу и приходят оттуда. Эта
+// проверка стережёт ровно это свойство — и стережёт по ИСХОДНИКАМ, а не по
+// поведению. Поведение при вписанной обратно константе не изменится
+// ничем: корабль полетит, просто числа снова будут клиентские, и заметить
+// это станет нечем.
+{
+  console.log('\n== характеристики из бэкенда ==');
+
+  const { readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+
+  const doc = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const spec = doc.shipTypes[0].spec;
+
+  // 1. Числа не вписаны в игру заново.
+  //
+  // Два правила, и оба нужны. Имена вроде `accel` и `hold` слишком общие,
+  // чтобы запрещать их всюду: у звука есть своё ускорение, у посадки своя
+  // высота зависания. Поэтому:
+  //
+  //   в ФАЙЛАХ МОДЕЛИ (корабль, оружие, снаряжение) запрещено любое
+  //   `имя: число` из лётной модели — именно туда константу и впишут,
+  //   «чтобы не было NaN»;
+  //
+  //   во всей игре запрещено `имя: ровно то самое число` — так ловится
+  //   копия, снятая с бэкенда и разложенная где угодно ещё.
+  {
+    const files = [];
+    const walkJs = (dir) => {
+      for (const nm of readdirSync(dir)) {
+        const p = join(dir, nm).split('\\').join('/');
+        if (statSync(p).isDirectory()) walkJs(p);
+        else if (p.endsWith('.js')) files.push(p);
+      }
+    };
+    walkJs('js');
+    // Комментарии не в счёт: в них числа как раз и объясняются.
+    const strip = (src) => src
+      .replace(new RegExp('/\\*[\\s\\S]*?\\*/', 'g'), '')
+      .replace(new RegExp('^\\s*//.*$', 'gm'), '');
+    const MODEL = ['js/game/ship.js', 'js/game/weapons.js', 'js/game/loadout.js'];
+    const baked = [];
+    for (const f of files) {
+      const src = strip(readFileSync(f, 'utf8'));
+      for (const [key, value] of Object.entries(spec)) {
+        // Ключ ОБЪЕКТА, а не свойство после точки: `SHIP.reverse : 1` —
+        // это тернарный оператор, а не вписанное число.
+        const at = '(?<![.\\w])' + key + '\\s*:\\s*';
+        if (MODEL.includes(f) && new RegExp(at + '-?\\d').test(src)) baked.push(f + ': ' + key);
+        else if (new RegExp(at + value + '\\b').test(src)) baked.push(f + ': ' + key + ' = ' + value);
+      }
+    }
+    ok(baked.length === 0,
+      'ни одно число корабля не вписано в игру'
+      + (baked.length ? ': ' + baked.length + ', первое — ' + baked[0] : ''));
+  }
+
+  // 2. Всё, что прислал бэкенд, доехало до лётной модели.
+  const missed = Object.keys(spec).filter((k) => SHIP[k] !== spec[k]);
+  ok(missed.length === 0,
+    'лётная модель принята целиком, ' + Object.keys(spec).length + ' чисел'
+    + (missed.length ? ': не доехало ' + missed.join(', ') : ''));
+
+  // 3. Выводимое считается ПОСЛЕ приёма, а не один раз при загрузке
+  //    модуля. Это та же ловушка, что была с переводом: вычисление на
+  //    уровне модуля застывает на том, что было в момент импорта, — а в
+  //    тот момент лётной модели ещё нет вовсе.
+  const wasAccel = SHIP.boostAccel;
+  const wasRoll = SHIP.rollAccel;
+  applyShipSpec(Object.assign({}, spec, { boostMax: spec.boostMax * 2, rotRamp: spec.rotRamp / 2 }));
+  ok(SHIP.boostAccel > wasAccel * 1.5 && SHIP.rollAccel > wasRoll * 1.5,
+    'форсаж и момент пересчитались под новую модель: '
+    + SHIP.boostAccel.toFixed(2) + ' и ' + SHIP.rollAccel.toFixed(2));
+  applyShipSpec(spec);
+  ok(Math.abs(SHIP.boostAccel - wasAccel) < 1e-9, 'и вернулись, когда модель вернули');
+
+  // 4. Угловые ускорения выводятся из ГЕОМЕТРИИ корпуса, а не приходят
+  //    числами: рыскание у этого корабля тяжелее крена, и так и должно
+  //    быть — он широкий и плоский.
+  ok(SHIP.yawAccel < SHIP.rollAccel && Number.isFinite(SHIP.pitchAccel),
+    'рыскание тяжелее крена: ' + SHIP.yawAccel.toFixed(2) + ' против ' + SHIP.rollAccel.toFixed(2));
+
+  // 5. Просветы шасси — из модели, а не из бэкенда: это следствие
+  //    геометрии, и в specs.php их нет намеренно.
+  ok(SHIP.gearClear > SHIP.hullClear && spec.gearClear === undefined,
+    'просветы взяты из корпуса, а не из настроек');
+
+  // 6. Оружие: конус приходит в градусах, а в игре нужен в радианах.
+  const laser = doc.weapons.find((w) => w.code === 'laser_g');
+  ok(Math.abs(WEAPONS.laser_g.cone - (laser.coneDeg * Math.PI) / 180) < 1e-12,
+    'конус доворота переведён в радианы: ' + laser.coneDeg + '°');
+  ok(WEAPONS.laser_g.damage === laser.damage && WEAPONS.turret.range === 1.8,
+    'урон и дальность взяты у бэкенда, а не у игры');
+  ok(INSTALLED.length === doc.weapons.filter((w) => w.ready).length && INSTALLED[0] === 'laser_g',
+    'на борту то оружие, которое бэкенд отметил готовым');
+  ok(COMBAT.blastLife === doc.combat.blastLife && COMBAT.shieldLife === doc.combat.shieldLife,
+    'общие числа боя тоже оттуда');
+
+  // 7. Карточка корабля показывает числа ЛЁТНОЙ МОДЕЛИ, а не свою копию.
+  //    Если модуль когда-нибудь начнёт хранить значения у себя, эта
+  //    проверка упадёт: она двигает число корабля и ждёт, что строка в
+  //    карточке поедет следом.
+  const engineRow = () => modules().find((m) => m.code === 'engine').value;
+  const before = engineRow();
+  SHIP.maxSpeed = 9.99;
+  const after = engineRow();
+  SHIP.maxSpeed = spec.maxSpeed;
+  ok(before !== after && after.indexOf('9.99') === 0,
+    'строка двигателя идёт за лётной моделью: «' + before + '» -> «' + after + '»');
+  ok(SCANNER_STEPS.length === 6 && SCANNER_STEPS[5] === 20000,
+    'ступени сканера приехали с модулем сканера: ' + SCANNER_STEPS.length);
+
+  // 8. Гнездо, о котором карточка ничего не знает, всё равно показывается:
+  //    модуль, заведённый на сервере, попадает в игру без её правки.
+  applyModuleSpecs([{ code: 'cloak', slot: 'hull', name: 'МАСКИРОВКА',
+    installed: true, spec: { seconds: 12 } }]);
+  const unknown = modules().find((m) => m.code === 'cloak');
+  ok(unknown && unknown.value.indexOf('12') >= 0,
+    'незнакомый модуль показан общим видом: ' + (unknown ? unknown.value : 'нет строки'));
+  applyModuleSpecs(doc.modules);
+
+  // 9. Названия из бэкенда тоже переводятся: они приходят по-русски и
+  //    проходят через L() при показе — как названия товаров.
+  const noEn = [...doc.modules.map((m) => m.name), ...doc.weapons.map((w) => w.name),
+    ...doc.weapons.map((w) => w.mountName)].filter((n) => !hasEn(n));
+  ok(noEn.length === 0,
+    'у названий модулей и оружия есть английский'
+    + (noEn.length ? ': нет у ' + noEn.join(', ') : ''));
+
+  // 10. Слепок не отстал от источника.
+  //
+  //     Точную сверку делает серверный набор (он умеет прочитать
+  //     specs.php), но ждать её нельзя: правят числа чаще, чем гоняют
+  //     PHP. Здесь сравниваются ВРЕМЕНА ПРАВКИ — этого хватает, чтобы
+  //     поймать обычный случай «поправил источник, забыл пересобрать».
+  {
+    const srcAt = statSync('server/data/specs.php').mtimeMs;
+    const jsonAt = statSync('server/data/specs.json').mtimeMs;
+    ok(jsonAt >= srcAt,
+      'слепок собран после последней правки источника'
+      + (jsonAt < srcAt ? ' — соберите: node tools/php.mjs server/cli/specs.php' : ''));
+  }
+
+  // 12. Квантовый привод — такое же снаряжение, и числа у него оттуда же.
+  //     Здесь та же пара правил, что и для корпуса: в самом файле привода
+  //     не должно остаться ни одного его числа, а то, что пришло, обязано
+  //     доехать.
+  {
+    const drive = doc.modules.find((m) => m.code === 'quantum');
+    const src = readFileSync('js/game/quantum.js', 'utf8')
+      .replace(new RegExp('/\\*[\\s\\S]*?\\*/', 'g'), '')
+      .replace(new RegExp('^\\s*//.*$', 'gm'), '');
+    const bakedDrive = Object.keys(drive.spec)
+      .filter((k) => new RegExp('(?<![.\\w])' + k + '\\s*:\\s*-?\\d').test(src));
+    ok(bakedDrive.length === 0,
+      'числа привода не вписаны в игру'
+      + (bakedDrive.length ? ': ' + bakedDrive.join(', ') : ''));
+    ok(QUANTUM.exitPeer === drive.spec.exitPeer && QUANTUM.spool === drive.spec.spool,
+      'выход у чужого корабля за ' + QUANTUM.exitPeer + ' км — число из бэкенда');
+    ok(Math.abs(QUANTUM.align - (drive.spec.alignDeg * Math.PI) / 180) < 1e-12,
+      'допуск по прицелу переведён в радианы: ' + drive.spec.alignDeg + '°');
+    // Скорость прыжка принадлежит КОРПУСУ, а не приводу: у привода её нет
+    // вовсе, он берёт её из лётной модели.
+    ok(QUANTUM.speed === SHIP.quantumSpeed && drive.spec.quantumSpeed === undefined,
+      'скорость прыжка взята у корпуса: ' + QUANTUM.speed + ' км/с');
+    // Алгоритмические числа остались в коде, и это не упущение: резка
+    // трассы на куски — приём расчёта, а не свойство привода.
+    ok(QUANTUM.segs === 12 && QUANTUM.relief === 0.02,
+      'параметры расчёта коридора остались в коде: ' + QUANTUM.segs + ' кусков');
+  }
+
+  // 11. Пустой набор — это отказ, а не «полетим на умолчаниях».
+  let refused = false;
+  try { applySpecs({ shipTypes: [] }); } catch (e) { refused = true; }
+  ok(refused, 'без характеристик игра не собирается');
+  applySpecs(doc);
+}
+
 // --- перевод ----------------------------------------------------------------
 //
 // Перевод разъезжается с игрой за неделю, если за ним не следить. Следит
@@ -4875,7 +5066,7 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // оружие, стартовый набор пилота и раскладка сенсорных кнопок (она
   // считается один раз, поэтому подпись переводится при отрисовке).
   const DATA = ['js/game/bodyinfo.js', 'js/game/galaxy.js', 'js/game/player.js',
-    'js/game/weapons.js', 'js/ui/touch.js'];
+    'js/ui/touch.js'];
   const files = walk('js');
   const loose = [];
   const noTranslation = [];

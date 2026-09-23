@@ -18,10 +18,7 @@ import { dirname } from 'node:path';
 import { galaxy } from '../js/game/galaxy.js';
 import { makeSystem } from '../js/game/world.js';
 import { isLandable } from '../js/game/surface.js';
-import { SHIP } from '../js/game/ship.js';
-import { modules } from '../js/game/loadout.js';
 import { HULL_SIZE } from '../js/models/ships.js';
-import { HULL_NAME } from '../js/models/hull.data.js';
 
 const out = process.argv[2] || 'server/data/catalog.json';
 
@@ -92,31 +89,17 @@ const catalog = {
   version: 1,
   generatedAt: new Date().toISOString(),
   galaxySeed: g.seed,
+  // ГАБАРИТЫ корпуса, и только они: остальные числа корабля — урон,
+  // скорость, щит, цена — живут в бэкенде (server/data/specs.php) и
+  // выгружать их отсюда нечего. Габариты же диктует сам меш: сменили
+  // модель — поменялись сами, и вписать их руками значило бы завести
+  // второй ответ на вопрос, какой корабль длины.
   shipTypes: [{
     code: 'challenger',
-    name: HULL_NAME,
-    title: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ',
-    hullMax: SHIP.maxHull,
-    shieldMax: SHIP.maxShield,
-    holdT: SHIP.hold,
-    fuelT: SHIP.fuelMax,
-    maxSpeed: SHIP.maxSpeed,
-    accel: SHIP.accel,
-    brake: SHIP.brake,
-    lateral: SHIP.lateral,
-    quantumSpeed: SHIP.quantumSpeed,
-    boostMax: SHIP.boostMax,
-    boostBurn: SHIP.boostBurn,
-    shieldRegen: SHIP.shieldRegen,
-    shieldDelay: SHIP.shieldDelay,
-    // Габариты — из самой модели корпуса, метры.
     lengthM: num(HULL_SIZE.z * 1000, 1),
     widthM: num(HULL_SIZE.x * 1000, 1),
     heightM: num(HULL_SIZE.y * 1000, 1),
   }],
-  equipment: modules().map((m) => ({
-    code: m.code, name: m.name, slot: m.slot, spec: m.spec, installed: m.installed,
-  })),
   systems,
 };
 
@@ -127,4 +110,4 @@ const bodies = systems.reduce((a, s) => a + s.bodies.length, 0);
 const stations = systems.reduce((a, s) => a + s.bodies.filter((b) => b.kind === 'station').length, 0);
 console.log(`каталог выгружен: ${out}`);
 console.log(`  систем ${systems.length}, тел ${bodies} (станций ${stations}),`
-  + ` типов кораблей ${catalog.shipTypes.length}, модулей ${catalog.equipment.length}`);
+  + ` габаритов корпусов ${catalog.shipTypes.length}`);

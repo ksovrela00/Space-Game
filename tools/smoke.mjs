@@ -200,6 +200,12 @@ const step = async (label, fn) => {
 
 console.log('\n== smoke: отрисовка и режимы ==');
 
+// Характеристики корабля — до игры: main.js собирает корабль прямо при
+// разборе своего модуля, а числа для этого приходят из бэкенда. В
+// браузере тем же занят js/boot.js, здесь — слепок с диска.
+const { loadSpecsFromDisk } = await import('./specs.mjs');
+loadSpecsFromDisk();
+
 const mod = await import('../js/main.js');
 const game = globalThis.window.GAME;   // main.js пишет в window, а не в globalThis
 const { lookAlong } = await import('../js/core/basis.js');

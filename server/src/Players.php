@@ -101,8 +101,7 @@ final class Players
             'SELECT sh.*, t.`code` AS `type_code`, t.`name` AS `type_name`, t.`title` AS `type_title`,
                     t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`,
                     t.`hold_t`, t.`fuel_t` AS `fuel_max`,
-                    t.`max_speed`, t.`accel`, t.`brake`, t.`lateral`, t.`quantum_speed`,
-                    t.`boost_max`, t.`boost_burn`, t.`length_m`, t.`width_m`, t.`height_m`
+                    t.`length_m`, t.`width_m`, t.`height_m`
              FROM `ship` sh JOIN `ship_type` t ON t.`id` = sh.`type_id`
              WHERE sh.`owner_id`=? ORDER BY sh.`id` LIMIT 1',
             [$playerId]
@@ -196,23 +195,16 @@ final class Players
                 'shield' => Combat::shieldNow($ship),
                 'fuelT' => (float) $ship['fuel_t'],
                 'gearOut' => (bool) $ship['gear_out'],
+                // Тип, а не его характеристики: за ними игра ходит в
+                // `catalog.specs` — там они одни на всех и берутся из тех
+                // же таблиц. Слать их ещё и здесь значило бы завести
+                // второй путь к тем же числам, который однажды разойдётся
+                // с первым. Габариты — исключение: они про ЭТОТ корпус и
+                // нужны приборам подхода.
                 'type' => [
                     'code' => $ship['type_code'],
                     'name' => $ship['type_name'],
                     'title' => $ship['type_title'],
-                    'hullMax' => (float) $ship['hull_max'],
-                    'shieldMax' => (float) $ship['shield_max'],
-                    'shieldRegen' => (float) $ship['shield_regen'],
-                    'shieldDelay' => (float) $ship['shield_delay'],
-                    'holdT' => (float) $ship['hold_t'],
-                    'fuelMaxT' => (float) $ship['fuel_max'],
-                    'maxSpeed' => (float) $ship['max_speed'],
-                    'accel' => (float) $ship['accel'],
-                    'brake' => (float) $ship['brake'],
-                    'lateral' => (float) $ship['lateral'],
-                    'quantumSpeed' => (float) $ship['quantum_speed'],
-                    'boostMax' => (float) $ship['boost_max'],
-                    'boostBurn' => (float) $ship['boost_burn'],
                     'lengthM' => (float) $ship['length_m'],
                     'widthM' => (float) $ship['width_m'],
                     'heightM' => (float) $ship['height_m'],

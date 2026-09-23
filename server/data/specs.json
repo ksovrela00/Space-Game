@@ -1,0 +1,304 @@
+{
+    "version": 1,
+    "shipTypes": [
+        {
+            "code": "challenger",
+            "name": "Challenger",
+            "title": "ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ",
+            "price": 78000,
+            "spec": {
+                "maxSpeed": 1.2,
+                "reverse": 0.15,
+                "zeroDwell": 0.45,
+                "accel": 0.45,
+                "brake": 0.75,
+                "boostMax": 3,
+                "boostRamp": 1.5,
+                "boostBurn": 10,
+                "boostFill": 7.5,
+                "boostArm": 0.25,
+                "quantumSpeed": 60000,
+                "lateral": 0.5,
+                "stunMin": 0.35,
+                "stunMax": 1.4,
+                "tumbleDamp": 0.6,
+                "pitchRate": 0.85,
+                "yawRate": 0.55,
+                "rollRate": 1.6,
+                "rotRamp": 0.7,
+                "throttleRate": 0.7,
+                "maxHull": 100,
+                "maxShield": 40,
+                "shieldRegen": 4,
+                "shieldDelay": 5,
+                "hold": 20,
+                "fuelMax": 12,
+                "gearTime": 2.4,
+                "gearSpeed": 0.35,
+                "liftTWR": 3,
+                "liftMin": 0.004,
+                "hitRadius": 0.035
+            }
+        }
+    ],
+    "weapons": [
+        {
+            "kind": "laser",
+            "mount": "gimbal",
+            "mountName": "КАРДАН",
+            "damage": 3,
+            "rate": 3,
+            "speed": 3,
+            "range": 2.5,
+            "coneDeg": 15,
+            "boltLen": 0.05,
+            "color": [
+                1,
+                0.32,
+                0.22
+            ],
+            "ready": true,
+            "code": "laser_g",
+            "name": "ЛАЗЕРНАЯ ПУШКА",
+            "price": 11000
+        },
+        {
+            "kind": "laser",
+            "mount": "fixed",
+            "mountName": "НЕПОДВИЖНАЯ",
+            "damage": 4,
+            "rate": 3,
+            "speed": 3,
+            "range": 2.5,
+            "coneDeg": 0,
+            "boltLen": 0.05,
+            "color": [
+                1,
+                0.32,
+                0.22
+            ],
+            "ready": false,
+            "code": "laser_f",
+            "name": "ЛАЗЕРНАЯ ПУШКА",
+            "price": 8000
+        },
+        {
+            "kind": "missile",
+            "mount": "fixed",
+            "mountName": "НЕПОДВИЖНАЯ",
+            "damage": 25,
+            "rate": 0.3,
+            "speed": 1.2,
+            "range": 12,
+            "coneDeg": 0,
+            "boltLen": 0.02,
+            "color": [
+                1,
+                0.8,
+                0.5
+            ],
+            "ready": false,
+            "code": "missile",
+            "name": "РАКЕТНАЯ УСТАНОВКА",
+            "price": 22000
+        },
+        {
+            "kind": "turret",
+            "mount": "gimbal",
+            "mountName": "КРУГОВАЯ",
+            "damage": 2,
+            "rate": 5,
+            "speed": 2.4,
+            "range": 1.8,
+            "coneDeg": 120,
+            "boltLen": 0.04,
+            "color": [
+                0.6,
+                0.9,
+                1
+            ],
+            "ready": false,
+            "code": "turret",
+            "name": "ТУРЕЛЬ",
+            "price": 19000
+        }
+    ],
+    "modules": [
+        {
+            "code": "engine",
+            "name": "МАРШЕВЫЙ ДВИГАТЕЛЬ",
+            "slot": "engine",
+            "spec": {
+                "reads": [
+                    "maxSpeed",
+                    "accel",
+                    "brake"
+                ]
+            },
+            "price": 12000,
+            "installed": true
+        },
+        {
+            "code": "rcs",
+            "name": "МАНЕВРОВЫЕ",
+            "slot": "rcs",
+            "spec": {
+                "reads": [
+                    "lateral",
+                    "pitchRate",
+                    "yawRate",
+                    "rollRate"
+                ]
+            },
+            "price": 6000,
+            "installed": true
+        },
+        {
+            "code": "lift",
+            "name": "ПОДЪЁМНЫЕ ДВИГАТЕЛИ",
+            "slot": "lift",
+            "spec": {
+                "reads": [
+                    "liftTWR",
+                    "liftMin"
+                ]
+            },
+            "price": 5000,
+            "installed": true
+        },
+        {
+            "code": "boost",
+            "name": "ФОРСАЖ",
+            "slot": "boost",
+            "spec": {
+                "reads": [
+                    "boostMax",
+                    "boostBurn",
+                    "boostFill"
+                ]
+            },
+            "price": 9000,
+            "installed": true
+        },
+        {
+            "code": "quantum",
+            "name": "КВАНТОВЫЙ ПРИВОД",
+            "slot": "drive",
+            "spec": {
+                "rampIn": 2,
+                "rampOut": 5,
+                "spool": 3,
+                "alignDeg": 3,
+                "fade": 0.5,
+                "exitAlt": 250,
+                "exitFrac": 0.05,
+                "exitStation": 40,
+                "exitPeer": 20,
+                "peerMatch": 2,
+                "exitMin": 2,
+                "clearPad": 10,
+                "minSpeed": 1.2,
+                "reads": [
+                    "quantumSpeed"
+                ]
+            },
+            "price": 26000,
+            "installed": true
+        },
+        {
+            "code": "warp",
+            "name": "ВАРП-ПРИВОД",
+            "slot": "warp",
+            "spec": {
+                "interstellar": true
+            },
+            "price": 48000,
+            "installed": true
+        },
+        {
+            "code": "dock",
+            "name": "ДОКИНГ-КОМПЬЮТЕР",
+            "slot": "computer",
+            "spec": {
+                "range": 120
+            },
+            "price": 3500,
+            "installed": true
+        },
+        {
+            "code": "land",
+            "name": "ПОСАДОЧНЫЙ КОМПЬЮТЕР",
+            "slot": "computer",
+            "spec": {
+                "airless": true
+            },
+            "price": 3000,
+            "installed": true
+        },
+        {
+            "code": "scanner",
+            "name": "СКАНЕР",
+            "slot": "scanner",
+            "spec": {
+                "steps": [
+                    5,
+                    25,
+                    120,
+                    600,
+                    3000,
+                    20000
+                ]
+            },
+            "price": 4200,
+            "installed": true
+        },
+        {
+            "code": "gear",
+            "name": "ШАССИ",
+            "slot": "gear",
+            "spec": {
+                "reads": [
+                    "gearTime",
+                    "gearSpeed"
+                ]
+            },
+            "price": 1800,
+            "installed": true
+        },
+        {
+            "code": "hold",
+            "name": "ТРЮМ",
+            "slot": "hold",
+            "spec": {
+                "reads": [
+                    "hold"
+                ]
+            },
+            "price": 7000,
+            "installed": true
+        },
+        {
+            "code": "shield",
+            "name": "ЩИТЫ",
+            "slot": "shield",
+            "spec": {
+                "reads": [
+                    "maxShield",
+                    "shieldRegen",
+                    "shieldDelay"
+                ]
+            },
+            "price": 15000,
+            "installed": true
+        }
+    ],
+    "combat": {
+        "blastLife": 0.35,
+        "shieldLife": 0.45,
+        "shieldColor": [
+            0.45,
+            0.75,
+            1
+        ]
+    }
+}

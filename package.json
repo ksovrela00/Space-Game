@@ -17,10 +17,11 @@
     "api:export": "node tools/export.mjs",
     "api:setup": "node tools/export.mjs && node tools/php.mjs server/cli/setup.php",
     "api:status": "node tools/php.mjs server/cli/setup.php --status",
-    "api:test": "node tools/export.mjs && node tools/php.mjs server/tests/run.php",
+    "api:test": "node tools/export.mjs && node tools/php.mjs server/cli/specs.php && node tools/php.mjs server/tests/run.php",
     "ws": "node tools/php.mjs server/ws/server.php",
     "ws:test": "node tools/php.mjs server/tests/hub.php",
     "ws:live": "node tools/wslive.mjs",
-    "lan": "node tools/lan.mjs"
+    "lan": "node tools/lan.mjs",
+    "specs": "node tools/php.mjs server/cli/specs.php"
   }
 }

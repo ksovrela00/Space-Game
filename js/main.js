@@ -53,6 +53,8 @@ import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } fr
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import { PEER } from './ui/theme.js';
 import { SCANNER_STEPS } from './game/loadout.js';
+import { devMode, soloMode } from './core/mode.js';
+import { useShipType } from './game/specs.js';
 import {
   showDocked, showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
@@ -719,6 +721,10 @@ function applyState(s) {
 function serverToSave(st) {
   const pos = st.position || {};
   const sh = st.ship || {};
+  // На чём летит этот пилот, знает сервер. Пока корпус один, вызов ничего
+  // не меняет; когда их станет несколько, корабль соберётся по тому, что
+  // записано в базе, а не по первому из списка.
+  if (sh.type && sh.type.code) useShipType(sh.type.code);
   return {
     system: pos.systemId === null || pos.systemId === undefined ? 0 : pos.systemId,
     warpTo: pos.warpTo === undefined ? null : pos.warpTo,
@@ -2028,11 +2034,12 @@ async function boot() {
 
   ship.mesh = shipMesh;
 
-  const q = new URLSearchParams(location.search);
-  const dev = q.get('dev') === '1';
+  const dev = devMode();
   // Автономный режим: игра без сервера, на одном localStorage. Нужен и
-  // для разработки, и как честный ответ на «сервер не поднят».
-  const solo = q.get('offline') === '1' || dev;
+  // для разработки, и как честный ответ на «сервер не поднят». Правило
+  // лежит в js/core/mode.js — по нему же загрузчик решает, идти ли за
+  // характеристиками на сервер, и разойтись им нельзя.
+  const solo = soloMode();
 
   // Вход спрашивается ДО всего: состояние с сервера главнее местного, и
   // применять сначала кэш, а потом поверх серверное — значит на секунду

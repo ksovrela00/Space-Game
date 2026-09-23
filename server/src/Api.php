@@ -30,6 +30,11 @@ final class Api
             'station.repair' => [[self::class, 'stationRepair'], true],
             'catalog.commodities' => [[self::class, 'commodities'], false],
             'catalog.ships' => [[self::class, 'shipTypes'], false],
+            // Характеристики корабля, оружия и модулей. Без токена
+            // намеренно: игра спрашивает их ДО входа — без них ей
+            // нечем даже собрать корабль, а показывать экран входа
+            // ради чисел, которые одинаковы для всех, незачем.
+            'catalog.specs' => [[self::class, 'specs'], false],
             'player.state' => [[self::class, 'playerState'], true],
             'player.save' => [[self::class, 'playerSave'], true],
             'market.prices' => [[self::class, 'marketPrices'], true],
@@ -190,6 +195,11 @@ final class Api
             'shipTypes' => Db::all('SELECT * FROM `ship_type` ORDER BY `id`'),
             'equipment' => Db::all('SELECT `code`,`name`,`slot`,`price`,`stock` FROM `equipment_type` ORDER BY `id`'),
         ];
+    }
+
+    public static function specs(array $in, ?int $playerId): array
+    {
+        return Specs::forGame();
     }
 
     public static function playerState(array $in, ?int $playerId): array

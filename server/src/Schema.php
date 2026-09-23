@@ -31,7 +31,7 @@
 final class Schema
 {
     /** Версия схемы. Растёт при каждом изменении таблиц. */
-    public const VERSION = 4;
+    public const VERSION = 5;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -145,26 +145,36 @@ final class Schema
                 `code` VARCHAR(32) NOT NULL,
                 `name` VARCHAR(64) NOT NULL,
                 `title` VARCHAR(96) NOT NULL DEFAULT '',
+                -- Столбцами лежит то, по чему СЧИТАЕТ САМ СЕРВЕР: урон и
+                -- гибель (Combat), свободный тоннаж при покупке (Market),
+                -- бак нового корабля (Players). По ним ходит SQL, им нужны
+                -- типы и они обязаны быть видны в таблице.
                 `hull_max` DOUBLE NOT NULL,
                 `shield_max` DOUBLE NOT NULL DEFAULT 0,
                 -- Щит восстанавливается сам: скорость и пауза после
-                -- попадания. Числа те же, что в игре (js/game/ship.js).
+                -- попадания. Сервер считает его по этим числам лениво, без
+                -- фоновой работы (Combat::shieldNow).
                 `shield_regen` DOUBLE NOT NULL DEFAULT 0,
                 `shield_delay` DOUBLE NOT NULL DEFAULT 0,
                 `hold_t` DECIMAL(10,3) NOT NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
-                `max_speed` DOUBLE NOT NULL,
-                `accel` DOUBLE NOT NULL,
-                `brake` DOUBLE NOT NULL,
-                `lateral` DOUBLE NOT NULL,
-                `quantum_speed` DOUBLE NOT NULL,
-                `boost_max` DOUBLE NOT NULL,
-                `boost_burn` DOUBLE NOT NULL,
                 -- Габариты из самой модели корпуса, метры.
                 `length_m` DOUBLE NOT NULL,
                 `width_m` DOUBLE NOT NULL,
                 `height_m` DOUBLE NOT NULL,
                 `price` BIGINT NOT NULL DEFAULT 0,
+                -- Остальная лётная модель: разгон, торможение, угловые
+                -- скорости, форсаж, шасси — два десятка чисел, которые
+                -- нужны ТОЛЬКО кораблю на экране. Текстом, а не столбцами,
+                -- потому что SQL по ним не ходит, а заводить столбец под
+                -- каждую ручку настройки значит менять схему при каждой
+                -- подкрутке.
+                --
+                -- Числа из столбцов выше здесь НЕ ПОВТОРЯЮТСЯ: одно число —
+                -- одно место. Собирая ответ игре, сервер кладёт их сюда
+                -- обратно (Specs::forGame), и поправленный в таблице
+                -- hull_max доходит до корабля, а не спорит с копией.
+                `spec` TEXT NULL,
                 UNIQUE KEY `code` (`code`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
@@ -384,10 +394,28 @@ final class Schema
             'ship_type' => [
                 'shield_regen' => 'DOUBLE NOT NULL DEFAULT 0',
                 'shield_delay' => 'DOUBLE NOT NULL DEFAULT 0',
+                'spec' => 'TEXT NULL',
             ],
             'ship' => [
                 'hit_at' => 'DATETIME NULL',
             ],
+        ];
+    }
+
+    /**
+     * Столбцы, которых больше быть не должно.
+     *
+     * Снос нужен затем же, зачем и досоздание: база на второй машине
+     * живёт с игроками, и «снеси и залей заново» унесло бы их вместе с
+     * лишним столбцом. Здесь лежат числа лётной модели, которые переехали
+     * в `ship_type.spec` (версия 5): держать их и столбцом, и в слепке
+     * значило бы спрашивать, какая из двух копий настоящая.
+     */
+    public static function dropped(): array
+    {
+        return [
+            'ship_type' => ['max_speed', 'accel', 'brake', 'lateral',
+                'quantum_speed', 'boost_max', 'boost_burn'],
         ];
     }
 
@@ -419,6 +447,22 @@ final class Schema
                 }
                 Db::run('ALTER TABLE `' . $table . '` ADD COLUMN `' . $col . '` ' . $ddl);
                 $made[] = $table . '.' . $col;
+            }
+        }
+        foreach (self::dropped() as $table => $cols) {
+            if (!isset($have[strtolower($table)])) {
+                continue;
+            }
+            $existing = [];
+            foreach (Db::all('SHOW COLUMNS FROM `' . $table . '`') as $c) {
+                $existing[strtolower($c['Field'])] = true;
+            }
+            foreach ($cols as $col) {
+                if (!isset($existing[strtolower($col)])) {
+                    continue;
+                }
+                Db::run('ALTER TABLE `' . $table . '` DROP COLUMN `' . $col . '`');
+                $made[] = '-' . $table . '.' . $col;
             }
         }
         self::setMeta('schema_version', (string) self::VERSION);

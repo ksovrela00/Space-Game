@@ -157,6 +157,14 @@ export const systems = () => call('galaxy.systems');
 export const system = (id) => call('galaxy.system', { id });
 export const commodities = () => call('catalog.commodities');
 
+/**
+ * Характеристики корабля, оружия и модулей.
+ *
+ * Спрашивается ДО входа и без токена: без этих чисел нечем даже собрать
+ * корабль, а одинаковы они для всех.
+ */
+export const specs = () => call('catalog.specs');
+
 export const prices = (where = {}) => call('market.prices', where);
 export const buy = (code, tons) => call('market.buy', { code, tons });
 export const sell = (code, tons) => call('market.sell', { code, tons });

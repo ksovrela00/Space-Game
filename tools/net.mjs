@@ -14,6 +14,7 @@
 // себя при каждом из трёх ответов.
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const arg = process.argv.find((a) => a.startsWith('--case='));
 const CASE = arg ? arg.slice(7) : null;
@@ -154,6 +155,18 @@ const SERVER_STATE = {
     balance_after: 12345, ref: 'start' }],
 };
 
+// --- характеристики: с сервера или из слепка -----------------------------------
+//
+// Числа корабля игра берёт у бэкенда, и здесь проверяется, у КАКОГО
+// именно. Поддельный сервер отдаёт заведомо другой предел скорости, чем
+// лежит в слепке: совпади они — и проверка не смогла бы отличить «взяли
+// с сервера» от «взяли с диска», а это и есть весь её смысл.
+
+const SNAPSHOT = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+const SERVER_TOP_SPEED = 2.5;
+const SERVER_SPECS = JSON.parse(JSON.stringify(SNAPSHOT));
+SERVER_SPECS.shipTypes[0].spec.maxSpeed = SERVER_TOP_SPEED;
+
 const calls = [];
 let saved = null;
 
@@ -163,6 +176,11 @@ globalThis.fetch = async (url, opts = {}) => {
   // разбираем по адресу: первая версия проверки считала обращением к
   // серверу загрузку каждого сэмпла.
   calls.push(href);
+  // Слепок характеристик лежит обычным файлом рядом с игрой: им живёт
+  // автономный режим, и путь к нему проверяется здесь же.
+  if (href.indexOf('server/data/specs.json') >= 0) {
+    return { ok: true, status: 200, json: async () => SNAPSHOT };
+  }
   if (href.indexOf('api.php') < 0) {
     return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0),
       json: async () => ({}) };
@@ -176,6 +194,9 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   const reply = (data) => ({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
 
+  if (route === 'catalog.specs') {
+    return reply(SERVER_SPECS);
+  }
   if (route === 'player.state') {
     if (!opts.headers || opts.headers['X-Auth-Token'] !== TOKEN) {
       return { ok: false, status: 401, json: async () => ({ ok: false,
@@ -209,6 +230,12 @@ if (CASE !== 'notoken') store['solar_trader_token'] = TOKEN;
 
 // --- поехали ------------------------------------------------------------------
 
+// Запуск идёт ЧЕРЕЗ ЗАГРУЗЧИК, как в браузере: он получает
+// характеристики корабля и только потом поднимает игру. Звать main.js
+// напрямую значило бы проверять порядок, которого в игре нет.
+await import('../js/boot.js');
+const { specsSource } = await import('../js/game/specs.js');
+
 const mod = await import('../js/main.js');
 // Запуск игры асинхронный: ждём, пока он доберётся до конца.
 await new Promise((r) => setTimeout(r, 50));
@@ -218,12 +245,27 @@ const { session } = await import('../js/net/session.js');
 if (CASE === 'notoken') {
   ok(location.replaced === 'login.html', 'без входа игра уходит на страницу входа');
   ok(!game || !rafCb, 'кадры при этом не запускаются');
+  // За ЛИЧНЫМ к серверу не ходим: без входа спрашивать нечего, и
+  // показывать чужое состояние на секунду тоже незачем. Характеристики
+  // корабля — исключение и единственное: они общие для всех, лежат на
+  // открытом маршруте и нужны ещё до того, как выяснится, есть ли вход
+  // (js/boot.js собирает корабль раньше).
   const apiCalls = calls.filter((u) => u.indexOf('api.php') >= 0);
-  ok(apiCalls.length === 0, 'к серверу не ходим вовсе: спрашивать нечего');
+  const personal = apiCalls.filter((u) => u.indexOf('catalog.specs') < 0);
+  ok(personal.length === 0, 'за личным к серверу не ходим: спрашивать нечего');
+  ok(apiCalls.length === 1, 'спросили только общедоступные характеристики');
 }
 
 if (CASE === 'server') {
   ok(session.mode === 'online', 'режим связи: ' + session.mode);
+  // Числа корабля пришли С СЕРВЕРА, а не с диска: предел хода у
+  // поддельного сервера свой.
+  const { SHIP } = await import('../js/game/ship.js');
+  ok(specsSource() === 'server' && SHIP.maxSpeed === SERVER_TOP_SPEED,
+    'предел хода взят у сервера: ' + SHIP.maxSpeed + ' км/с (в слепке '
+    + SNAPSHOT.shipTypes[0].spec.maxSpeed + ')');
+  ok(calls.some((u) => u.indexOf('catalog.specs') >= 0),
+    'за характеристиками игра сходила к серверу');
   ok(!!game, 'игра поднялась');
   ok(Math.abs(game.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6,
     'место взято С СЕРВЕРА, а не из кэша браузера: x = ' + game.ship.pos.x);
@@ -280,6 +322,12 @@ if (CASE === 'server') {
 
 if (CASE === 'offline') {
   ok(session.mode === 'offline', 'режим связи: ' + session.mode);
+  // Сервера нет — числа взяты из слепка, и игра всё равно поднялась.
+  // Это и есть смысл слепка: без него автономного режима не было бы
+  // вовсе, потому что числа корабля теперь живут на сервере.
+  const { SHIP } = await import('../js/game/ship.js');
+  ok(specsSource() === 'snapshot' && SHIP.maxSpeed === SNAPSHOT.shipTypes[0].spec.maxSpeed,
+    'без сервера характеристики взяты из слепка: ' + SHIP.maxSpeed + ' км/с');
   ok(!!game, 'игра поднялась и без сервера');
   ok(Math.abs(game.ship.pos.x - LOCAL_X) < 1e-6,
     'место взято из кэша браузера: x = ' + game.ship.pos.x);

@@ -172,7 +172,7 @@ $unguarded = [];
 foreach (Api::routes() as $name => [$fn, $needsAuth]) {
     $isPublic = in_array($name, ['ping', 'auth.register', 'auth.login',
         'galaxy.systems', 'galaxy.system', 'galaxy.stations', 'station.info',
-        'catalog.commodities', 'catalog.ships'], true);
+        'catalog.commodities', 'catalog.ships', 'catalog.specs'], true);
     if (!$isPublic && !$needsAuth) {
         $unguarded[] = $name;
     }
@@ -193,13 +193,19 @@ ok(Db::one('SELECT `token` FROM `session` WHERE `token`=?', [$stale]) === null,
 
 section('новый пилот');
 
+// Характеристики корабля проверки спрашивают там же, где их спрашивает
+// игра, — маршрутом `catalog.specs`. В состоянии игрока их больше нет, и
+// это намеренно: один путь к числу вместо двух.
+$specs = Api::call('catalog.specs');
+$shipSpec = $specs['shipTypes'][0]['spec'];
+
 $state = Api::call('player.state', [], $token);
 ok($state['player']['balance'] === Content::START_BALANCE,
     'стартовый капитал ' . $state['player']['balance'] . ' кр');
 ok(count($state['ledger']) === 1 && $state['ledger'][0]['amount'] === Content::START_BALANCE,
     'капитал пришёл строкой в ленте, а не присвоением баланса');
 ok($state['ship']['type']['code'] === 'challenger'
-    && $state['ship']['hull'] === $state['ship']['type']['hullMax']
+    && $state['ship']['hull'] === $shipSpec['maxHull']
     && count($state['ship']['equipment']) === 13,
     'корабль с завода: ' . $state['ship']['type']['name'] . ', модулей '
     . count($state['ship']['equipment']));
@@ -209,10 +215,10 @@ $guns = array_values(array_filter($state['ship']['equipment'],
     static fn($e) => $e['slot'] === 'gun'));
 // Щит — такой же модуль, как и остальные, и он тоже с завода: бой без
 // щита это бой, в котором первая же очередь снимает корпус.
-ok($state['ship']['type']['shieldMax'] > 0
-    && abs($state['ship']['shield'] - $state['ship']['type']['shieldMax']) < 1e-9,
+ok($shipSpec['maxShield'] > 0
+    && abs($state['ship']['shield'] - $shipSpec['maxShield']) < 1e-9,
     'щит с завода целый: ' . $state['ship']['shield'] . ' из '
-    . $state['ship']['type']['shieldMax']);
+    . $shipSpec['maxShield']);
 ok(count($guns) === 1 && $guns[0]['code'] === 'laser_g'
     && (float) $guns[0]['spec']['damage'] > 0,
     'на корабле с завода стоит ' . ($guns[0]['name'] ?? '—'));
@@ -231,13 +237,11 @@ $again = Api::call('player.state', [], $token);
 ok($again['world']['time'] >= $state['world']['time'],
     'часы мира идут вперёд, а не начинаются заново при каждом запросе');
 
-// Числа корабля в базе — те же, что в игре: карточка корабля и сервер
-// обязаны говорить об одном и том же железе.
-$shipType = $catalog['shipTypes'][0];
-ok(abs($state['ship']['type']['maxSpeed'] - $shipType['maxSpeed']) < 1e-9
-    && abs($state['ship']['type']['holdT'] - $shipType['holdT']) < 1e-9
-    && abs($state['ship']['type']['lengthM'] - $shipType['lengthM']) < 1e-6,
-    'характеристики корабля совпадают с выгрузкой из игры');
+// Габариты корпуса приходят из выгрузки генератора: их диктует меш, а не
+// настройка. Остальные числа корабля — из server/data/specs.php, и
+// проверяются они отдельным разделом ниже.
+ok(abs($state['ship']['type']['lengthM'] - $catalog['shipTypes'][0]['lengthM']) < 1e-6,
+    'габариты корпуса совпадают с выгрузкой модели');
 
 // --- сохранение полёта -------------------------------------------------------
 
@@ -260,8 +264,8 @@ denies('bad_request', fn() => Api::call('player.save', ['system' => 0, 'docked' 
 // Корпус выше заводского — первое, что подделывают.
 Api::call('player.save', ['hull' => 100000], $token);
 $after = Api::call('player.state', [], $token);
-ok($after['ship']['hull'] === $after['ship']['type']['hullMax'],
-    'корпус выше заводского обрезается до ' . $after['ship']['type']['hullMax']);
+ok($after['ship']['hull'] === $shipSpec['maxHull'],
+    'корпус выше заводского обрезается до ' . $shipSpec['maxHull']);
 
 // --- торговля ----------------------------------------------------------------
 
@@ -320,7 +324,7 @@ Db::update('market', ['stock' => 999], '`station_id`=? AND `commodity_id`=?', [$
 // Берём ровно СВОБОДНЫЙ тоннаж, а не всю ёмкость: в трюме уже лежит
 // купленное выше, и на полной ёмкости отказ снова пришёл бы по месту.
 $st = Api::call('player.state', [], $token);
-$free = $st['ship']['type']['holdT'] - $st['holdUsedT'];
+$free = $shipSpec['hold'] - $st['holdUsedT'];
 ok($rich['price'] * $free > Content::START_BALANCE,
     'свободный трюм «' . $rich['name'] . '» дороже стартового капитала: '
     . (int) ($rich['price'] * $free) . ' кр за ' . $free . ' т');
@@ -507,6 +511,81 @@ denies('not_found', fn() => Api::call('ping.unknown'), 'несуществующ
 $ping = Api::call('ping');
 ok($ping['systems'] === $systems && $ping['schema'] === Schema::VERSION,
     'ping отдаёт версию схемы ' . $ping['schema'] . ' и размер каталога');
+
+// --- характеристики: бэкенд им хозяин ----------------------------------------
+
+section('характеристики корабля');
+
+// 1. Слепок для автономного режима не отстал от источника. Отстанет —
+//    игра без сервера полетит по другим числам, чем с сервером, и
+//    заметить это будет нечем.
+ok(!Specs::snapshotStale(),
+    'слепок server/data/specs.json собран из нынешнего specs.php'
+    . (Specs::snapshotStale() ? ' — соберите: php server/cli/specs.php' : ''));
+
+// 2. Слепок и ответ сервера — одно и то же, включая форму. Игра разбирает
+//    их ОДНИМ кодом, и разойдись они, автономный режим сломался бы молча.
+$fromFile = json_decode(Specs::snapshot(), true);
+$fromApi = $specs;
+ok(array_keys($fromFile) === array_keys($fromApi)
+    && count($fromFile['modules']) === count($fromApi['modules'])
+    && count($fromFile['weapons']) === count($fromApi['weapons']),
+    'слепок и сервер отвечают одинаково: ' . count($fromApi['modules']) . ' модулей, '
+    . count($fromApi['weapons']) . ' стволов');
+$diff = [];
+foreach ($fromFile['shipTypes'][0]['spec'] as $k => $v) {
+    if (abs((float) $v - (float) ($fromApi['shipTypes'][0]['spec'][$k] ?? INF)) > 1e-9) {
+        $diff[] = $k;
+    }
+}
+ok($diff === [], 'лётная модель в слепке и в базе совпадает'
+    . ($diff ? ': разошлись ' . implode(', ', $diff) : ''));
+
+// 3. Одно число — одно место. То, что лежит столбцом, НЕ повторяется в
+//    `spec`: иначе рано или поздно придётся выяснять, какая из копий
+//    настоящая, и выяснять это будет игрок в бою.
+$stored = json_decode((string) Db::one('SELECT `spec` FROM `ship_type` LIMIT 1'), true);
+$dupes = array_values(array_intersect(array_keys($stored), array_keys(Specs::COLUMNS)));
+ok($dupes === [], 'числа из столбцов не продублированы в spec'
+    . ($dupes ? ': ' . implode(', ', $dupes) : ''));
+ok(isset($stored['maxSpeed'], $stored['rollRate'], $stored['hitRadius'])
+    && !isset($stored['maxHull']),
+    'в spec лежит лётная модель, в столбцах — то, по чему считает сервер');
+
+// 4. Модули НЕ хранят копию чисел корабля: у них записаны имена, а
+//    значения берутся из лётной модели при показе. Копия разъехалась бы
+//    с первой же правкой, и карточка стала бы врать про свой же корабль.
+$engine = null;
+foreach ($fromApi['modules'] as $m) {
+    if ($m['code'] === 'engine') {
+        $engine = $m;
+    }
+}
+ok($engine !== null && ($engine['spec']['reads'] ?? null) === ['maxSpeed', 'accel', 'brake']
+    && !isset($engine['spec']['maxSpeed']),
+    'двигатель ссылается на числа корпуса, а не копирует их');
+
+// 5. Пушка — наоборот: её числа СВОИ, и лежат они при ней. По ним сервер
+//    и считает попадания (Combat::weapon).
+$gun = Combat::weapon('laser_g');
+ok($gun !== null && $gun['damage'] > 0 && $gun['range'] > 0,
+    'урон пушки сервер берёт у себя: ' . $gun['damage'] . ' × ' . $gun['range'] . ' км');
+
+// 6. Главное свойство всей переделки: ПРАВКА В БАЗЕ ДОХОДИТ ДО ИГРЫ.
+//    Раньше числа жили в коде клиента, и подкрутить их без правки игры
+//    было нельзя вовсе.
+$was = (float) Db::one('SELECT `hull_max` FROM `ship_type` WHERE `code`=?', ['challenger']);
+Db::update('ship_type', ['hull_max' => 137.0], '`code`=?', ['challenger']);
+$after = Api::call('catalog.specs');
+ok(abs($after['shipTypes'][0]['spec']['maxHull'] - 137.0) < 1e-9,
+    'поправленный в базе корпус доехал до игры: '
+    . $after['shipTypes'][0]['spec']['maxHull']);
+Db::update('ship_type', ['hull_max' => $was], '`code`=?', ['challenger']);
+
+// 7. Цена корабля и модулей — такая же его характеристика, и живёт там же.
+ok($fromApi['shipTypes'][0]['price'] > 0 && $engine['price'] > 0,
+    'цены приехали вместе с предметами: корабль '
+    . $fromApi['shipTypes'][0]['price'] . ' кр, двигатель ' . $engine['price'] . ' кр');
 
 // --- итог --------------------------------------------------------------------
 

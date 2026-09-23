@@ -1,15 +1,16 @@
 // Что стоит на корабле: список модулей и их числа.
 //
 // Заведён отдельно, потому что читателей у него два и они в разных
-// слоях: карточка корабля в меню (js/ui/menu.js) и выгрузка каталога в
-// базу (tools/export.mjs -> server). Две копии этого списка разъехались
-// бы при первой же перенастройке двигателя, причём молча: в игре одно
-// число, в магазине сервера другое.
+// слоях: карточка корабля в меню (js/ui/menu.js) и сама игра (ступени
+// сканера). Список ПУСТ ДО ЗАГРУЗКИ — гнёзда, их названия, цены и
+// содержимое приходят из бэкенда (server/data/specs.php -> база ->
+// `catalog.specs`).
 //
-// Числа сюда не переписаны, а взяты из SHIP — тех самых констант, по
-// которым корабль летает. Строка `value` — то, как модуль подписан в
-// карточке; формат простой намеренно, чтобы не тащить в игровой слой
-// приборные форматтеры.
+// Числа модуль не хранит, а ЧИТАЕТ ИЗ ЛЁТНОЙ МОДЕЛИ: в бэкенде у него
+// записано `reads: ['maxSpeed','accel','brake']`, то есть «покажи вот
+// эти числа корабля». Копия была бы удобнее на один вечер и разъехалась
+// бы на второй: в карточке одно, в полёте другое, и виноват всегда
+// список.
 
 import { SHIP } from './ship.js';
 import { WEAPONS } from './weapons.js';
@@ -18,12 +19,84 @@ import { L, numLocale } from '../core/lang.js';
 /**
  * Ступени дальности сканера, км.
  *
- * Живут здесь, а не в приборе: это свойство ЖЕЛЕЗА. Прибор лишь выбирает
- * ближайшую ступень, в которую помещается всё вокруг (js/main.js), и
- * поэтому game.scannerRange — текущий масштаб кольца, а не дальность
- * сканера. В карточке корабля стоит последняя ступень — предел железа.
+ * Это свойство ЖЕЛЕЗА, поэтому приезжает вместе с модулем сканера.
+ * Прибор лишь выбирает ближайшую ступень, в которую помещается всё
+ * вокруг (js/main.js), и поэтому game.scannerRange — текущий масштаб
+ * кольца, а не дальность сканера. В карточке корабля стоит последняя
+ * ступень — предел железа.
+ *
+ * Массив тот же самый, а не заменяется новым: его держит у себя main.js.
  */
-export const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
+export const SCANNER_STEPS = [];
+
+/** Гнёзда и их содержимое, как их прислал бэкенд. */
+export const MODULES = [];
+
+/** Принять список модулей. */
+export function applyModuleSpecs(list) {
+  MODULES.length = 0;
+  for (const m of list || []) MODULES.push(m);
+  const scanner = MODULES.find((m) => m.code === 'scanner');
+  SCANNER_STEPS.length = 0;
+  for (const step of (scanner && scanner.spec && scanner.spec.steps) || []) SCANNER_STEPS.push(step);
+  return MODULES;
+}
+
+/** Приехали ли модули. */
+export const modulesReady = () => MODULES.length > 0;
+
+/**
+ * Числа модуля: свои плюс те, что он показывает из лётной модели.
+ *
+ * `reads` — имена, а не значения, поэтому карточка всегда показывает то,
+ * по чему корабль летит ПРЯМО СЕЙЧАС. Поправили maxSpeed в базе — строка
+ * в карточке поменялась вместе с полётом, без пересборки чего бы то ни
+ * было.
+ */
+export function moduleSpec(m) {
+  const spec = {};
+  for (const [k, v] of Object.entries(m.spec || {})) {
+    if (k !== 'reads') spec[k] = v;
+  }
+  for (const key of (m.spec && m.spec.reads) || []) spec[key] = SHIP[key];
+  return spec;
+}
+
+/**
+ * Как модуль подписан в карточке.
+ *
+ * Здесь остаётся только ФОРМА строки — «×3, 10 с», — а все числа в ней
+ * из бэкенда. Формат держать в базе смысла нет: это оформление, оно
+ * зависит от языка и от ширины панели, и его место в слое, который
+ * рисует.
+ *
+ * Модуля, которого здесь нет, это не ломает: он покажется общим видом
+ * «ключ: значение». Так новое гнездо, заведённое на сервере, попадает в
+ * карточку вообще без правки игры.
+ */
+const CARD = {
+  engine: (s) => s.maxSpeed.toFixed(2) + L(' км/с'),
+  rcs: (s) => s.lateral.toFixed(2) + L(' км/с²'),
+  lift: (s) => '×' + s.liftTWR + L(' к весу'),
+  boost: (s) => '×' + s.boostMax + ', ' + s.boostBurn + L(' с'),
+  quantum: (s) => (s.quantumSpeed / 1000).toFixed(0) + L(' тыс. км/с'),
+  warp: () => L('МЕЖСИСТЕМНЫЙ'),
+  dock: () => L('ЕСТЬ'),
+  land: () => L('ЕСТЬ'),
+  scanner: (s) => (s.steps && s.steps.length
+    ? s.steps[s.steps.length - 1].toLocaleString(numLocale()) + L(' км')
+    : L('НЕТ')),
+  gear: (s) => s.gearTime.toFixed(1) + L(' с'),
+  hold: (s) => s.hold + L(' т'),
+  shield: (s) => (s.maxShield > 0
+    ? s.maxShield + L(' ед., +') + s.shieldRegen + L('/с через ') + s.shieldDelay + L(' с')
+    : L('НЕТ')),
+};
+
+/** Общий вид для модуля, о котором карточка ничего не знает. */
+const plain = (spec) => Object.entries(spec)
+  .map(([k, v]) => k + ': ' + (Array.isArray(v) ? v.join('/') : v))
+  .join(', ');
 
 /**
  * Строка оружия в карточке.
@@ -32,13 +105,13 @@ export const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
  * карточке, где написано «3 урона», и в выстреле, который снимает четыре,
  * виноват всегда второй список.
  */
-function gun(w, installed) {
+function gun(w) {
   return {
     code: w.code, slot: 'gun', name: L(w.name) + ' · ' + L(w.mountName),
-    value: installed
+    value: w.ready
       ? w.damage + ' × ' + w.rate + L('/с, до ') + w.range + L(' км')
       : L('ГНЕЗДО СВОБОДНО'),
-    installed,
+    installed: !!w.ready,
     spec: {
       kind: w.kind, mount: w.mount, damage: w.damage, rate: w.rate,
       speed: w.speed, range: w.range, cone: w.cone,
@@ -47,81 +120,25 @@ function gun(w, installed) {
 }
 
 /**
- * Модули корабля.
+ * Модули корабля для карточки.
  *
- * `spec` — то, что модуль делает в числах: его читает сервер, и он же
- * станет основой уровней и апгрейдов. `installed: false` означает, что
- * гнездо есть, а модуля нет, — и это важно показывать: пустая строка в
- * карточке читается как поломка прибора.
+ * Оружие идёт последним и одной группой: в бэкенде это отдельный список
+ * (у пушки свои поля — урон, темп, конус), и вклинивать его в середину
+ * значило бы задавать порядок дважды.
  */
 export function modules() {
-  return [
-    {
-      code: 'engine', slot: 'engine', name: L('МАРШЕВЫЙ ДВИГАТЕЛЬ'),
-      value: SHIP.maxSpeed.toFixed(2) + L(' км/с'), installed: true,
-      spec: { maxSpeed: SHIP.maxSpeed, accel: SHIP.accel, brake: SHIP.brake },
-    },
-    {
-      code: 'rcs', slot: 'rcs', name: L('МАНЕВРОВЫЕ'),
-      value: SHIP.lateral.toFixed(2) + L(' км/с²'), installed: true,
-      spec: { lateral: SHIP.lateral, pitch: SHIP.pitchRate, yaw: SHIP.yawRate, roll: SHIP.rollRate },
-    },
-    {
-      code: 'lift', slot: 'lift', name: L('ПОДЪЁМНЫЕ ДВИГАТЕЛИ'),
-      value: '×' + SHIP.liftTWR + L(' к весу'), installed: true,
-      spec: { twr: SHIP.liftTWR, min: SHIP.liftMin },
-    },
-    {
-      code: 'boost', slot: 'boost', name: L('ФОРСАЖ'),
-      value: '×' + SHIP.boostMax + ', ' + SHIP.boostBurn + L(' с'), installed: true,
-      spec: { mul: SHIP.boostMax, burn: SHIP.boostBurn, fill: SHIP.boostFill },
-    },
-    {
-      code: 'quantum', slot: 'drive', name: L('КВАНТОВЫЙ ПРИВОД'),
-      value: (SHIP.quantumSpeed / 1000).toFixed(0) + L(' тыс. км/с'), installed: true,
-      spec: { speed: SHIP.quantumSpeed },
-    },
-    {
-      code: 'warp', slot: 'warp', name: L('ВАРП-ПРИВОД'),
-      value: L('МЕЖСИСТЕМНЫЙ'), installed: true,
-      spec: { interstellar: true },
-    },
-    {
-      code: 'dock', slot: 'computer', name: L('ДОКИНГ-КОМПЬЮТЕР'),
-      value: L('ЕСТЬ'), installed: true,
-      spec: { range: 120 },
-    },
-    {
-      code: 'land', slot: 'computer', name: L('ПОСАДОЧНЫЙ КОМПЬЮТЕР'),
-      value: L('ЕСТЬ'), installed: true,
-      spec: { airless: true },
-    },
-    {
-      code: 'scanner', slot: 'scanner', name: L('СКАНЕР'),
-      value: SCANNER_STEPS[SCANNER_STEPS.length - 1].toLocaleString(numLocale()) + L(' км'),
-      installed: true,
-      spec: { steps: SCANNER_STEPS },
-    },
-    gun(WEAPONS.laser_g, true),
-    gun(WEAPONS.missile, false),
-    gun(WEAPONS.turret, false),
-    {
-      code: 'gear', slot: 'gear', name: L('ШАССИ'),
-      value: SHIP.gearTime.toFixed(1) + L(' с'), installed: true,
-      spec: { time: SHIP.gearTime, speed: SHIP.gearSpeed },
-    },
-    {
-      code: 'hold', slot: 'hold', name: L('ТРЮМ'),
-      value: SHIP.hold + L(' т'), installed: true,
-      spec: { tons: SHIP.hold },
-    },
-    {
-      code: 'shield', slot: 'shield', name: L('ЩИТЫ'),
-      value: SHIP.maxShield > 0
-        ? SHIP.maxShield + L(' ед., +') + SHIP.shieldRegen + L('/с через ') + SHIP.shieldDelay + L(' с')
-        : L('НЕТ'),
-      installed: SHIP.maxShield > 0,
-      spec: { max: SHIP.maxShield, regen: SHIP.shieldRegen, delay: SHIP.shieldDelay },
-    },
-  ];
+  const rows = MODULES.map((m) => {
+    const spec = moduleSpec(m);
+    const fmt = CARD[m.code];
+    return {
+      code: m.code,
+      slot: m.slot,
+      name: L(m.name),
+      value: m.installed ? (fmt ? fmt(spec) : plain(spec)) : L('ГНЕЗДО СВОБОДНО'),
+      installed: !!m.installed,
+      spec,
+    };
+  });
+  for (const w of Object.values(WEAPONS)) rows.push(gun(w));
+  return rows;
 }

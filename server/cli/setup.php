@@ -10,6 +10,9 @@
  *
  * Перед первым запуском каталог надо выгрузить из генератора:
  *   node tools/export.mjs
+ *
+ * Числа корабля, оружия и модулей берутся из server/data/specs.php — их
+ * выгружать неоткуда, они и есть источник.
  */
 
 require_once __DIR__ . '/../boot.php';
@@ -104,6 +107,15 @@ try {
     $catalogPath = __DIR__ . '/../data/catalog.json';
     $catalog = Seeder::readCatalog($catalogPath);
     $say('выгрузка каталога от ' . $catalog['generatedAt']);
+
+    // Слепок характеристик пересобирается вместе с заливкой: он нужен
+    // игре без сервера, и отстав, он тихо развёл бы автономный режим с
+    // сетевым. Отдельная команда для него тоже есть (server/cli/specs.php),
+    // но заставлять помнить о ней — значит однажды не вспомнить.
+    if (Specs::snapshotStale()) {
+        file_put_contents(Specs::jsonPath(), Specs::snapshot());
+        $say('слепок характеристик пересобран: server/data/specs.json');
+    }
 
     $n = Seeder::all($catalog, $has('--market') || $has('--reset'));
     $say(sprintf('содержимое: товаров %d, типов кораблей %d, модулей %d',
