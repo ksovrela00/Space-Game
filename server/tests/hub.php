@@ -208,10 +208,10 @@ $hullOf = static function (int $playerId): float {
     return (float) Db::one('SELECT `hull` FROM `ship` WHERE `owner_id`=?', [$playerId]);
 };
 $shieldOf = static function (int $playerId): float {
-    $row = Db::row('SELECT s.`shield`, s.`hit_at`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`
-                    FROM `ship` s JOIN `ship_type` t ON t.`id`=s.`type_id` WHERE s.`owner_id`=?',
-        [$playerId]);
-    return Combat::shieldNow($row);
+    // Числа щита — у МОДУЛЯ, стоящего на этом корабле, а не у типа
+    // корпуса: у двоих на одинаковых корпусах щиты бывают разные.
+    $row = Db::row('SELECT `id`, `shield`, `hit_at` FROM `ship` WHERE `owner_id`=?', [$playerId]);
+    return Combat::shieldNow($row + Loadout::shield((int) $row['id']));
 };
 $before = $hullOf($b['player_id']);
 
@@ -252,6 +252,37 @@ ok($shieldOf($b['player_id']) < 1e-9, 'а сразу после попадани
 $mid = $hullOf($b['player_id']);
 $hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
 ok(abs($hullOf($b['player_id']) - $mid) < 1e-9, 'попадания чаще оружейного темпа не принимаются');
+
+// УДАР О ГРУНТ идёт тем же путём, что и бой, — сообщением в сокет. И по
+// той же причине: корпус это счёт, а счёт ведёт сервер. Игра сообщает
+// ИЗМЕРЕНИЕ (с какой скоростью коснулись, на шасси ли), а не урон и тем
+// более не корпус.
+Db::update('ship', ['hull' => 100], '`owner_id`=?', [$b['player_id']]);
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'impact',
+    'norm' => 0.050, 'slide' => 0, 'gear' => true, 'pose' => true]), $t);
+$hitBack = $cb->last('impact');
+$hullNow = $hullOf($b['player_id']);
+ok($hitBack !== null && $hitBack['dmg'] > 5 && $hitBack['dmg'] < 20
+    && abs($hullNow - (100 - $hitBack['dmg'])) < 1e-9,
+    'удар о грунт списал корпус сервером: −' . round($hitBack['dmg'] ?? 0, 1)
+    . '%, стало ' . round($hullNow, 1));
+
+// Частить нельзя: подряд стучать по грунту чаще четырёх раз в секунду —
+// это уже не посадка, а попытка залить хаб пакетами.
+$hullBefore = $hullNow;
+$hub->message($cb, json_encode(['t' => 'impact',
+    'norm' => 0.050, 'slide' => 0, 'gear' => true, 'pose' => true]), $t);
+ok(abs($hullOf($b['player_id']) - $hullBefore) < 1e-9,
+    'второй удар в тот же миг отброшен: корпус ' . round($hullOf($b['player_id']), 1));
+
+// Разбился — корабль восстановлен в порту, соседи видят вспышку.
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'impact', 'fatal' => true]), $t);
+$boom = $ca->last('boom');
+ok(abs($hullOf($b['player_id']) - 100) < 1e-9 && $boom !== null
+    && $boom['id'] === $b['player_id'],
+    'смертельный удар: корабль восстановлен в порту, соседи оповещены');
 
 // Дальность: за её пределом попадания нет вовсе.
 $t += 1;
@@ -333,3 +364,4 @@ echo PHP_EOL . ($fails === 0
     ? "ХАБ: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ($checks)"
     : "$fails ПРОВЕРОК УПАЛО из $checks") . PHP_EOL;
 exit($fails ? 1 : 0);
+

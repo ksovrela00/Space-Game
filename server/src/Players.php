@@ -41,7 +41,10 @@ final class Players
                 'owner_id' => $playerId,
                 'name' => '',
                 'hull' => $type['hull_max'],
-                'shield' => $type['shield_max'],
+                // Щит ставится НИЖЕ, после комплектации: его ёмкость знает
+                // модуль щита, а модулей на только что заведённом корабле
+                // ещё нет — ship_equipment ссылается на его id.
+                'shield' => 0,
                 'fuel_t' => $type['fuel_t'],
                 'created_at' => $now,
             ]);
@@ -50,6 +53,9 @@ final class Players
             foreach (Db::all('SELECT `id` FROM `equipment_type` WHERE `stock`=1') as $e) {
                 Db::insert('ship_equipment', ['ship_id' => $shipId, 'equipment_id' => $e['id']]);
             }
+            Loadout::forget($shipId);
+            Db::update('ship', ['shield' => Loadout::shield($shipId)['shield_max']],
+                '`id`=?', [$shipId]);
 
             $start = self::startPoint();
             Db::update('player', [
@@ -99,8 +105,7 @@ final class Players
     {
         $row = Db::row(
             'SELECT sh.*, t.`code` AS `type_code`, t.`name` AS `type_name`, t.`title` AS `type_title`,
-                    t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`,
-                    t.`hold_t`, t.`fuel_t` AS `fuel_max`,
+                    t.`hull_max`, t.`fuel_t` AS `fuel_max`,
                     t.`length_m`, t.`width_m`, t.`height_m`
              FROM `ship` sh JOIN `ship_type` t ON t.`id` = sh.`type_id`
              WHERE sh.`owner_id`=? ORDER BY sh.`id` LIMIT 1',
@@ -109,6 +114,14 @@ final class Players
         if ($row === null) {
             throw ApiError::notFound('у игрока нет корабля');
         }
+        // Щит и трюм принадлежат МОДУЛЯМ, а не типу корпуса. Кладём их в
+        // ту же строку под теми же именами, под какими они приезжали
+        // столбцами: читателям (Market, Missions, Combat) знать об этой
+        // перемене незачем — им нужен тоннаж, а не его происхождение.
+        $shipId = (int) $row['id'];
+        $flight = Loadout::flight($shipId);
+        $row['hold_t'] = (float) ($flight['hold'] ?? 0);
+        $row += Loadout::shield($shipId);
         return $row;
     }
 
@@ -120,18 +133,58 @@ final class Players
      * корабли заведены раньше. Без этого у старых пилотов не оказалось бы
      * пушек вовсе, и «почему у меня не стреляет» выяснялось бы в бою.
      * Вызов идемпотентный: ставит только недостающее.
+     *
+     * ЗАНЯТОЕ ГНЕЗДО НЕ ТРОГАЕТ. Это не мелочь: в гнезде бывает несколько
+     * видов одного прибора (два двигателя), и поставили пилоту другой —
+     * заводского там больше нет. Проверяй мы наличие по коду предмета, а
+     * не по занятости гнезда, доукомплектование возвращало бы заводской
+     * обратно, и в гнезде оказывались бы два двигателя разом. Лететь
+     * корабль стал бы по тому из них, у кого больше id, — то есть по
+     * случайности.
+     *
+     * Вместимость гнезда берётся из самой комплектации: сколько приборов
+     * этого гнезда помечено заводскими, столько их и помещается. Так
+     * «компьютеров два» (докинг и посадочный) остаётся правдой, не
+     * заведя отдельной таблицы гнёзд, которую пришлось бы помнить
+     * править.
      */
     public static function ensureStock(int $shipId): void
     {
+        $cap = [];
+        foreach (Db::all('SELECT `slot`, COUNT(*) AS `n` FROM `equipment_type`
+                          WHERE `stock`=1 GROUP BY `slot`') as $r) {
+            $cap[$r['slot']] = (int) $r['n'];
+        }
+
+        $busy = [];
+        foreach (Db::all(
+            'SELECT e.`slot`, COUNT(*) AS `n`
+             FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+             WHERE se.`ship_id`=? GROUP BY e.`slot`',
+            [$shipId]
+        ) as $r) {
+            $busy[$r['slot']] = (int) $r['n'];
+        }
+
         $missing = Db::all(
-            'SELECT e.`id` FROM `equipment_type` e
+            'SELECT e.`id`, e.`slot` FROM `equipment_type` e
              WHERE e.`stock`=1 AND e.`id` NOT IN (
                  SELECT se.`equipment_id` FROM `ship_equipment` se WHERE se.`ship_id`=?
-             )',
+             ) ORDER BY e.`id`',
             [$shipId]
         );
+        $put = false;
         foreach ($missing as $e) {
+            $slot = (string) $e['slot'];
+            if (($busy[$slot] ?? 0) >= ($cap[$slot] ?? 1)) {
+                continue;               // гнездо занято — это выбор пилота
+            }
             Db::insert('ship_equipment', ['ship_id' => $shipId, 'equipment_id' => (int) $e['id']]);
+            $busy[$slot] = ($busy[$slot] ?? 0) + 1;
+            $put = true;
+        }
+        if ($put) {
+            Loadout::forget($shipId);
         }
     }
 
@@ -330,11 +383,20 @@ final class Players
         // Состояние корабля живёт в своей таблице: корпус и бак принадлежат
         // КОРАБЛЮ, а не пилоту, и при смене корпуса останутся со старым.
         $shipSet = [];
-        if (isset($in['hull'])) {
-            // Больше заводского корпус быть не может — это первое, что
-            // подделывают, и стоит это одной строки.
-            $shipSet['hull'] = max(0.0, min((float) $ship['hull_max'], $num($in['hull'])));
-        }
+        // КОРПУС ИЗ СОХРАНЕНИЯ НЕ ПИШЕТСЯ ВОВСЕ — ни в какую сторону.
+        //
+        // Сохранение приходит от игры, а игра живёт на чужой машине: что в
+        // ней написано, решает тот, кто за ней сидит. Поэтому всё, что
+        // имеет цену, считает сервер и только он:
+        //
+        //   попадание в бою   -> Combat::damage   (по своим числам оружия)
+        //   удар о грунт      -> Combat::impact   (игра шлёт измерение)
+        //   ремонт            -> Stations::repair (за деньги, в порту)
+        //   гибель            -> Combat::respawn
+        //
+        // Игре остаётся то, что она одна и знает: где корабль, куда
+        // повёрнут, у какого тела стоит. Эти числа ничего не стоят — на
+        // них нельзя выиграть бой и нельзя не заплатить за ремонт.
         if (isset($in['fuel'])) {
             $shipSet['fuel_t'] = max(0.0, min((float) $ship['fuel_max'], $num($in['fuel'])));
         }

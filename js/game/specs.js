@@ -24,7 +24,7 @@ import * as api from '../net/api.js';
 import { L } from '../core/lang.js';
 import { SHIP, applyShipSpec } from './ship.js';
 import { applyWeaponSpecs } from './weapons.js';
-import { applyModuleSpecs, moduleSpec } from './loadout.js';
+import { applyModuleSpecs, applyShipEquipment, flightModel, installedIn, moduleSpec } from './loadout.js';
 import { applyQuantumSpec } from './quantum.js';
 
 /** Последний полученный набор — из него берут корпуса и цены. */
@@ -60,16 +60,45 @@ export function applySpecs(data, code = null) {
   }
   doc = data;
   const type = (code && data.shipTypes.find((t) => t.code === code)) || data.shipTypes[0];
-  applyShipSpec(type.spec);
-  SHIP.code = type.code;
   applyWeaponSpecs(data.weapons, data.combat);
+  // Снаряжение — ДО лётной модели, а не после: скорость, манёвренность,
+  // щит и трюм принадлежат модулям, и без них у корпуса их нет вовсе.
   applyModuleSpecs(data.modules);
-  // Привод берёт свои числа из своего же модуля. Отдельным вызовом, а не
-  // внутри loadout.js: снаряжение — это список для карточки, а привод —
-  // работающая часть игры, и знать друг о друге им незачем.
-  const drive = (data.modules || []).find((m) => m.code === 'quantum');
-  if (drive) applyQuantumSpec(moduleSpec(drive));
+  refit(type);
   return type.code;
+}
+
+/**
+ * Собрать корабль: корпус плюс то, что стоит в гнёздах.
+ *
+ * Одно место на все случаи — первая загрузка, пересадка на другой корпус,
+ * приход состояния пилота с его снаряжением. Собирать модель в трёх
+ * местах значило бы три разных корабля из одних и тех же чисел.
+ */
+function refit(type) {
+  applyShipSpec(flightModel(type.spec));
+  SHIP.code = type.code;
+  // Привод берёт свои числа из своего же модуля — того, который стоит на
+  // корабле. Отдельным вызовом, а не внутри loadout.js: снаряжение — это
+  // список для карточки, а привод — работающая часть игры, и знать друг о
+  // друге им незачем.
+  const drive = installedIn('drive');
+  if (drive) applyQuantumSpec(moduleSpec(drive));
+}
+
+/**
+ * Принять снаряжение КОНКРЕТНОГО корабля (`ship.equipment` из состояния).
+ *
+ * До входа корабль собран по заводской комплектации из каталога — иначе в
+ * автономном режиме он остался бы без двигателя. Сервер говорит, что
+ * стоит на этом корабле на самом деле, и модель пересобирается.
+ */
+export function useShipEquipment(list) {
+  if (!doc || !Array.isArray(list) || !list.length) return null;
+  applyShipEquipment(list);
+  const type = doc.shipTypes.find((t) => t.code === SHIP.code) || doc.shipTypes[0];
+  refit(type);
+  return list.length;
 }
 
 /**
@@ -84,8 +113,7 @@ export function useShipType(code) {
   if (!doc || !code) return null;
   const type = doc.shipTypes.find((t) => t.code === code);
   if (!type || type.code === SHIP.code) return null;
-  applyShipSpec(type.spec);
-  SHIP.code = type.code;
+  refit(type);
   return type.code;
 }
 

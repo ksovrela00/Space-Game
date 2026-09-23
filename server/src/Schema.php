@@ -145,18 +145,15 @@ final class Schema
                 `code` VARCHAR(32) NOT NULL,
                 `name` VARCHAR(64) NOT NULL,
                 `title` VARCHAR(96) NOT NULL DEFAULT '',
-                -- Столбцами лежит то, по чему СЧИТАЕТ САМ СЕРВЕР: урон и
-                -- гибель (Combat), свободный тоннаж при покупке (Market),
-                -- бак нового корабля (Players). По ним ходит SQL, им нужны
-                -- типы и они обязаны быть видны в таблице.
+                -- Столбцами лежит то, по чему СЧИТАЕТ САМ СЕРВЕР и что
+                -- принадлежит самому корпусу: прочность при попадании
+                -- (Combat) и бак нового корабля (Players). По ним ходит
+                -- SQL, им нужны типы и они обязаны быть видны в таблице.
+                --
+                -- Щита и трюма здесь НЕТ: они принадлежат модулям, стоящим
+                -- в гнёздах (ship_equipment), и у двух кораблей одного
+                -- типа бывают разными. Берутся они через Loadout.
                 `hull_max` DOUBLE NOT NULL,
-                `shield_max` DOUBLE NOT NULL DEFAULT 0,
-                -- Щит восстанавливается сам: скорость и пауза после
-                -- попадания. Сервер считает его по этим числам лениво, без
-                -- фоновой работы (Combat::shieldNow).
-                `shield_regen` DOUBLE NOT NULL DEFAULT 0,
-                `shield_delay` DOUBLE NOT NULL DEFAULT 0,
-                `hold_t` DECIMAL(10,3) NOT NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
                 -- Габариты из самой модели корпуса, метры.
                 `length_m` DOUBLE NOT NULL,
@@ -392,8 +389,6 @@ final class Schema
     {
         return [
             'ship_type' => [
-                'shield_regen' => 'DOUBLE NOT NULL DEFAULT 0',
-                'shield_delay' => 'DOUBLE NOT NULL DEFAULT 0',
                 'spec' => 'TEXT NULL',
             ],
             'ship' => [
@@ -415,7 +410,11 @@ final class Schema
     {
         return [
             'ship_type' => ['max_speed', 'accel', 'brake', 'lateral',
-                'quantum_speed', 'boost_max', 'boost_burn'],
+                'quantum_speed', 'boost_max', 'boost_burn',
+                // Версия 6: щит и трюм переехали к модулям, которым они и
+                // принадлежат. Столбец остался бы вторым ответом на вопрос,
+                // какой у корабля щит, — и отвечал бы за все корабли сразу.
+                'shield_max', 'shield_regen', 'shield_delay', 'hold_t'],
         ];
     }
 

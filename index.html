@@ -15,7 +15,12 @@
 <meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark">
 <title>ELITE :: Solar Trader</title>
-<link rel="stylesheet" href="css/style.css">
+<!-- Свежий код на каждой перезагрузке: метка загрузки приписывается к
+     адресам всех модулей, иначе браузер продолжает брать их из кеша и
+     помогает только Ctrl+F5. Почему так — в cache.js.
+     document.write здесь не архаизм, а единственный синхронный способ:
+     таблица импортов обязана встать раньше первого модуля. -->
+<script>document.write('<scr' + 'ipt src="cache.js?v=' + (window.__srcStamp = Date.now().toString(36)) + '"></scr' + 'ipt>');</script>
 </head>
 <body>
 <!-- 3D-сцена: WebGL2, а при его отсутствии — Canvas 2D -->
@@ -46,7 +51,16 @@
 </div>
 
 <!-- Точка входа — загрузчик, а не сама игра: характеристики корабля
-     приходят из бэкенда, и игра стартует после них (js/boot.js). -->
-<script type="module" src="js/boot.js"></script>
+     приходят из бэкенда, и игра стартует после них (js/boot.js).
+     Адрес ставится скриптом: таблица импортов переписывает импорты
+     ВНУТРИ модулей, а адрес тега script — нет. -->
+<script id="srcEntry">
+(function () {
+  var s = document.createElement('script');
+  s.type = 'module';
+  s.src = 'js/boot.js' + (window.__srcStamp ? '?v=' + window.__srcStamp : '');
+  document.body.appendChild(s);
+})();
+</script>
 </body>
 </html>

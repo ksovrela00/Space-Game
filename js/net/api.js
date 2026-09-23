@@ -151,6 +151,15 @@ export function saveBeacon(payload) {
 
 export const dock = (system, station) => call('station.dock', { system, station });
 export const repair = () => call('station.repair');
+
+/**
+ * Удар о грунт, когда сокета нет.
+ *
+ * Обычно об ударе докладывают в сокет (js/net/socket.js) — там же, где
+ * идёт бой. Но играть можно и без хаба, с одним лишь API, и тогда урон
+ * всё равно обязан считать сервер, а не игра.
+ */
+export const impact = (m) => call('ship.impact', m);
 export const stations = (system) => call('galaxy.stations', { system });
 
 export const systems = () => call('galaxy.systems');

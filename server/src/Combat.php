@@ -40,7 +40,10 @@ final class Combat
      * тот момент, когда его спросили. Для невидимой оболочки, которая
      * только копится, этого достаточно, а фонового процесса не нужно.
      *
-     * @param array $ship строка корабля с полями типа (shield_max и т.д.)
+     * Числа щита (shield_max и т.д.) в строке — не из ship_type: они
+     * принадлежат МОДУЛЮ щита и подставляются из Loadout::shield().
+     *
+     * @param array $ship строка корабля с числами щита
      * @param int|null $now unix-время, для проверок
      */
     public static function shieldNow(array $ship, ?int $now = null): float
@@ -61,6 +64,71 @@ final class Combat
             return $have;
         }
         return min($max, $have + (float) ($ship['shield_regen'] ?? 0) * ($idle - $delay));
+    }
+
+    /**
+     * Урон от удара о грунт.
+     *
+     * Формула здесь, а не в игре, потому что корпус — это счёт, а счёт
+     * ведёт сервер. Игра сообщает ИЗМЕРЕНИЕ: с какой скоростью коснулись
+     * грунта, стояли ли шасси, была ли поза правильной. Сколько это
+     * стоит — решают числа из каталога (specs.php -> meta), и подменить
+     * их на своей стороне бессмысленно: считают не там.
+     *
+     * Та же формула есть в игре (js/game/landing.js) — ею она показывает
+     * удар сразу, не дожидаясь ответа, и ею же живёт автономный режим.
+     * Что две стороны считают одинаково, стережёт проверка.
+     *
+     * @param float $norm  нормальная составляющая скорости, км/с
+     * @param float $slide боковая, км/с
+     */
+    public static function impactDamage(float $norm, float $slide, bool $gear, bool $poseOk): float
+    {
+        $c = Specs::forGame()['combat'];
+        $hit = sqrt($norm * $norm + ($slide * (float) $c['scrapeK']) ** 2);
+        $soft = (float) ($gear ? $c['hitSoft'] : $c['bareSoft']);
+        $t = max(0.0, ($hit - $soft) / ((float) $c['hitKill'] - $soft));
+        $dmg = 100.0 * $t * $t * ($gear ? 1.0 : (float) $c['bareMul']);
+        if (!$gear) {
+            $dmg = max($dmg, (float) $c['belly']);
+        }
+        if (!$poseOk) {
+            $dmg = max($dmg, (float) $c['poseFloor']) * (float) $c['poseMul'];
+        }
+        return $dmg;
+    }
+
+    /**
+     * Удар о грунт: посчитать и списать с корпуса.
+     *
+     * Единственный путь, которым корпус убывает от полёта. Сохранение
+     * корпус НЕ ПИШЕТ вовсе (Players::save) — иначе игрок отвечал бы на
+     * вопрос о своём корпусе сам, а значит, никогда бы не разбивался.
+     */
+    public static function impact(int $playerId, float $norm, float $slide,
+                                  bool $gear, bool $poseOk, bool $fatal = false): array
+    {
+        $dmg = $fatal ? INF : self::impactDamage($norm, $slide, $gear, $poseOk);
+
+        return Db::tx(function () use ($playerId, $dmg) {
+            $row = Db::row(
+                'SELECT s.`id`, s.`hull`, t.`hull_max`
+                 FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
+                 WHERE s.`owner_id`=? FOR UPDATE',
+                [$playerId]
+            );
+            if ($row === null) {
+                throw new ApiError('no_ship', 'у пилота нет корабля');
+            }
+            $hull = max(0.0, (float) $row['hull'] - $dmg);
+            Db::update('ship', ['hull' => $hull], '`id`=?', [(int) $row['id']]);
+            return [
+                'hull' => $hull,
+                'max' => (float) $row['hull_max'],
+                'damage' => min($dmg, (float) $row['hull']),
+                'dead' => $hull <= 0.0,
+            ];
+        });
     }
 
     /** Числа оружия — из того же каталога, что и в игре. */
@@ -107,8 +175,7 @@ final class Combat
             // Читаем ПОД ЗАМКОМ: два попадания в один миг — обычное дело,
             // и без него второе посчиталось бы от старых чисел.
             $row = Db::row(
-                'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`,
-                        t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`
+                'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
                  FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
                  WHERE s.`owner_id`=? FOR UPDATE',
                 [$victimId]
@@ -116,6 +183,9 @@ final class Combat
             if ($row === null) {
                 throw new ApiError('no_ship', 'у пилота нет корабля');
             }
+            // Щит — свойство МОДУЛЯ, стоящего на этом корабле, а не типа
+            // корпуса: сняли щит — и попадание идёт прямо в обшивку.
+            $row += Loadout::shield((int) $row['id']);
 
             $dmg = max(0.0, $dmg);
             $shield = self::shieldNow($row);

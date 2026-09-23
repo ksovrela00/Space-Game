@@ -81,7 +81,7 @@ import {
   makeTouch, touchLayout, touchUpdate, touchApply, touchDrag, TOUCH,
 } from '../js/ui/touch.js';
 import { input } from '../js/core/input.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { Renderer } from '../js/render/renderer.js';
 import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
@@ -90,7 +90,8 @@ import { box, prismZ, loft } from '../js/models/geometry.js';
 import { L, setLang, getLang, hasEn, LANGS } from '../js/core/lang.js';
 import { loadSpecsFromDisk } from './specs.mjs';
 import { applySpecs } from '../js/game/specs.js';
-import { modules, applyModuleSpecs, SCANNER_STEPS } from '../js/game/loadout.js';
+import { modules, applyModuleSpecs, applyShipEquipment, flightModel, SCANNER_STEPS }
+  from '../js/game/loadout.js';
 
 // Характеристики корабля и оружия приходят из бэкенда, и в игре их нет
 // ни одного. Проверкам сервер не нужен — они берут тот же слепок, что и
@@ -2727,7 +2728,7 @@ console.log('\n== инерция и удар ==');
   const g1 = hurt(1, true), g25 = hurt(25, true), g50 = hurt(50, true), g95 = hurt(95, true);
   const b1 = hurt(1, false), b10 = hurt(10, false), b30 = hurt(30, false);
   ok(g1 === 0 && g25 === 0 && g50 > 5 && g50 < 40 && g95 >= SHIP.maxHull &&
-     b1 <= LAND.belly && b10 >= b1 && b30 > b10 && b30 < SHIP.maxHull,
+     b1 <= COMBAT.belly && b10 >= b1 && b30 > b10 && b30 < SHIP.maxHull,
     `на шасси: 1 м/с — ${g1}%, 25 — ${g25}%, 50 — ${g50.toFixed(0)}%, ` +
     `95 — ${g95.toFixed(0)}%; брюхом: 1 — ${b1.toFixed(0)}%, 10 — ${b10.toFixed(0)}%, ` +
     `30 — ${b30.toFixed(0)}%`);
@@ -4042,6 +4043,127 @@ console.log('\n== телефон: профиль, джойстик, полный
 }
 
 
+// --- 17.5. Свежий код на каждой перезагрузке ---------------------------------
+console.log('\n== свежий код: адреса модулей ==');
+{
+  const root = new URL('../', import.meta.url);
+  const html = readFileSync(new URL('index.html', root), 'utf8');
+  const login = readFileSync(new URL('login.html', root), 'utf8');
+  const loader = readFileSync(new URL('cache.js', root), 'utf8');
+
+  // Загрузчик достаём из страницы и ЗАПУСКАЕМ на поддельном документе:
+  // проверять его текстом бессмысленно — важно не то, что в нём написано,
+  // а какие адреса он в итоге выдаёт браузеру.
+  const part = (src, re, what) => {
+    const m = re.exec(src);
+    if (!m) throw new Error('не найдено: ' + what);
+    return m[1];
+  };
+  const stampLine = part(html, /<script>([^]*?)<\/script>/, 'строка с меткой в index.html');
+  const entry = part(html, /<script id="srcEntry">([^]*?)<\/script>/, 'точка входа в index.html');
+
+  const run = (importmap, now) => {
+    const head = [], body = [], asked = [], written = [];
+    const doc = {
+      write: (s) => written.push(s),
+      createElement: (tag) => ({ tag, type: '', rel: '', href: '', src: '', textContent: '' }),
+      head: { appendChild: (e) => head.push(e) },
+      body: { appendChild: (e) => body.push(e) },
+    };
+    const win = {};
+    // Браузер без таблицы импортов: сам класс есть, метода supports нет.
+    const HSE = importmap ? { supports: (f) => f === 'importmap' } : {};
+    const fetchFn = (u, o) => { asked.push([u, o && o.cache]); return Promise.resolve(); };
+    new Function('document', 'window', 'Date', stampLine)(doc, win, { now: () => now });
+    new Function('document', 'window', 'HTMLScriptElement', 'fetch', loader)(doc, win, HSE, fetchFn);
+    new Function('document', 'window', entry)(doc, win);
+    const map = head.find((e) => e.type === 'importmap');
+    return {
+      imports: map ? JSON.parse(map.textContent).imports : null,
+      css: head.find((e) => e.tag === 'link'),
+      entry: body[0],
+      loader: written.join(''),
+      asked,
+      stamp: win.__srcStamp,
+      fresh: win.__srcFresh,
+    };
+  };
+
+  const a = run(true, 1e9);
+
+  {
+    // Главное: в списке должны быть ВСЕ файлы игры. Забытый файл — это не
+    // «чуть хуже», а смесь нового и старого кода в одном запуске.
+    const disk = [];
+    (function walk(dir) {
+      for (const e of readdirSync(new URL(dir, root), { withFileTypes: true })) {
+        if (e.isDirectory()) walk(dir + e.name + '/');
+        else if (e.name.endsWith('.js')) disk.push(dir + e.name);
+      }
+    })('js/');
+    const keys = Object.keys(a.imports).map((k) => k.slice(2)).sort();
+    ok(keys.length === disk.length && keys.join() === disk.sort().join(),
+      `в списке загрузчика все ${disk.length} файлов игры — ни один не остался на старом адресе`);
+  }
+
+  ok(!!a.stamp && a.loader.indexOf('cache.js?v=' + a.stamp) > 0 &&
+     Object.entries(a.imports).every(([k, v]) => v === k + '?v=' + a.stamp),
+    `каждый модуль получает метку загрузки: ${a.imports['./js/main.js']}`);
+
+  ok(a.entry.type === 'module' && a.entry.src === 'js/boot.js?v=' + a.stamp &&
+     a.css.rel === 'stylesheet' && a.css.href === 'css/style.css?v=' + a.stamp,
+    'точка входа и стиль идут с той же меткой — их адрес таблица импортов не трогает');
+
+  {
+    // Каждая перезагрузка — новые адреса, иначе браузеру нечего заново
+    // спрашивать.
+    const b = run(true, 1e9 + 60000);
+    ok(b.stamp !== a.stamp && b.imports['./js/main.js'] !== a.imports['./js/main.js'],
+      `следующее открытие страницы даёт другие адреса: ${a.stamp} -> ${b.stamp}`);
+  }
+
+  {
+    // Поток сборки плиток читает свои файлы сам, и таблица импортов на
+    // него не действует вовсе. Список его файлов сверяем с настоящими
+    // импортами js/gl/tileworker.js: разойдись он с кодом — поток тихо
+    // остался бы на старом рельефе, пока весь остальной код новый.
+    const closure = (start) => {
+      const seen = new Set(), stack = [start];
+      while (stack.length) {
+        const f = stack.pop();
+        if (seen.has(f)) continue;
+        seen.add(f);
+        const src = readFileSync(new URL(f, root), 'utf8');
+        for (const m of src.matchAll(/from '([^']+)'/g)) {
+          if (!m[1].startsWith('.')) continue;
+          stack.push(new URL(m[1], new URL(f, root)).href.slice(root.href.length));
+        }
+      }
+      return [...seen].sort();
+    };
+    const need = closure('js/gl/tileworker.js');
+    const got = a.asked.map(([u]) => u).sort();
+    ok(got.join() === need.join() && a.asked.every(([, c]) => c === 'reload') && !!a.fresh,
+      `файлы потока сборки берутся мимо кеша (cache: reload), все ${need.length}: ` +
+      need.map((f) => f.slice(6)).join(', '));
+  }
+
+  {
+    // Браузер без таблицы импортов: метки не ставим вовсе. Свежей была бы
+    // одна точка входа, а остальное пришло бы из кеша — получилась бы
+    // версия, которой никогда не существовало.
+    const c = run(false, 1e9);
+    ok(c.imports === null && c.entry.src === 'js/boot.js' &&
+       c.css.href === 'css/style.css' && c.fresh === null,
+      'без поддержки таблицы импортов игра грузится по-старому, а не наполовину свежей');
+  }
+
+  ok(/cache\.js\?v=/.test(login) && !/<link[^>]+stylesheet/.test(login) &&
+     !/<script[^>]+src=/.test(html) && !/<link[^>]+stylesheet/.test(html),
+    'обе страницы, игра и вход, грузятся через загрузчик: постоянных адресов в разметке не осталось');
+}
+
+
 // --- 18. Галактика и варп-привод --------------------------------------------
 console.log('\n== галактика ==');
 {
@@ -4837,7 +4959,11 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   const { join } = await import('node:path');
 
   const doc = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
-  const spec = doc.shipTypes[0].spec;
+  // Лётная модель СОБИРАЕТСЯ: корпус, а поверх него числа модулей,
+  // стоящих в гнёздах. Проверять по одному корпусу значило бы проверять
+  // половину корабля — ни скорости, ни щита у него своих нет.
+  applyModuleSpecs(doc.modules);
+  const spec = flightModel(doc.shipTypes[0].spec);
 
   // 1. Числа не вписаны в игру заново.
   //
@@ -4923,17 +5049,56 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   ok(COMBAT.blastLife === doc.combat.blastLife && COMBAT.shieldLife === doc.combat.shieldLife,
     'общие числа боя тоже оттуда');
 
-  // 7. Карточка корабля показывает числа ЛЁТНОЙ МОДЕЛИ, а не свою копию.
-  //    Если модуль когда-нибудь начнёт хранить значения у себя, эта
-  //    проверка упадёт: она двигает число корабля и ждёт, что строка в
-  //    карточке поедет следом.
-  const engineRow = () => modules().find((m) => m.code === 'engine').value;
-  const before = engineRow();
-  SHIP.maxSpeed = 9.99;
-  const after = engineRow();
-  SHIP.maxSpeed = spec.maxSpeed;
-  ok(before !== after && after.indexOf('9.99') === 0,
-    'строка двигателя идёт за лётной моделью: «' + before + '» -> «' + after + '»');
+  // 7. Числа принадлежат МОДУЛЮ, и меняется всё разом: поставили в
+  //    гнездо другой двигатель — поехала и строка в карточке, и скорость,
+  //    по которой корабль летит. Раньше модуль ссылался на числа корпуса,
+  //    и это была ровно та развилка, из-за которой другой двигатель
+  //    завести было нельзя.
+  const engineRow = () => modules().find((m) => m.slot === 'engine').value;
+  const stockRow = engineRow();
+  const fast = doc.modules.find((m) => m.code === 'engine_x');
+  applyShipEquipment(doc.modules
+    .filter((m) => m.installed && m.slot !== 'engine')
+    .concat([fast]));
+  applyShipSpec(flightModel(doc.shipTypes[0].spec));
+  const fastRow = engineRow();
+  const fastSpeed = SHIP.maxSpeed;
+  // Возвращаем заводскую комплектацию: следующие проверки летят на ней.
+  applyModuleSpecs(doc.modules);
+  applyShipSpec(flightModel(doc.shipTypes[0].spec));
+  ok(fastSpeed > spec.maxSpeed && fastRow !== stockRow
+     && SHIP.maxSpeed === spec.maxSpeed,
+    'сменили двигатель — поехали обе стороны: «' + stockRow + '» -> «' + fastRow
+    + '», корабль ' + spec.maxSpeed + ' -> ' + fastSpeed + ' км/с');
+
+  // 8а. Числа правят руками в базе, и одной опечатки в JSON хватает,
+  //     чтобы у модуля их не стало. Карточка обязана сказать об этом
+  //     строкой, а не упасть целиком: рядом десяток исправных приборов.
+  applyShipEquipment(doc.modules
+    .filter((m) => m.installed && m.slot !== 'engine')
+    .concat([{ code: 'engine', name: 'МАРШЕВЫЙ ДВИГАТЕЛЬ', slot: 'engine', spec: {} }]));
+  let broke = null;
+  try {
+    broke = modules().find((m) => m.slot === 'engine').value;
+  } catch (e) {
+    broke = null;
+  }
+  applyModuleSpecs(doc.modules);
+  applyShipSpec(flightModel(doc.shipTypes[0].spec));
+  ok(typeof broke === 'string' && broke.length > 0 && modules().length > 5,
+    'модуль без чисел не уносит карточку: «' + broke + '»');
+
+  // 8. Пустое гнездо не даёт кораблю ничего, и это не недосмотр: без
+  //    двигателя не летают. Показать это важнее, чем подставить ноль
+  //    молча, — «ГНЕЗДО СВОБОДНО» читается, а тихий ноль нет.
+  applyShipEquipment(doc.modules.filter((m) => m.installed && m.slot !== 'shield'));
+  const naked = flightModel(doc.shipTypes[0].spec);
+  const shieldRow = modules().find((m) => m.slot === 'shield');
+  applyModuleSpecs(doc.modules);
+  applyShipSpec(flightModel(doc.shipTypes[0].spec));
+  ok(naked.maxShield === undefined && !shieldRow.installed
+     && SHIP.maxShield === spec.maxShield,
+    'сняли щит — гнездо свободно и чисел щита у корабля нет: «' + shieldRow.value + '»');
   ok(SCANNER_STEPS.length === 6 && SCANNER_STEPS[5] === 20000,
     'ступени сканера приехали с модулем сканера: ' + SCANNER_STEPS.length);
 

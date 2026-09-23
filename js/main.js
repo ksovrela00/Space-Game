@@ -54,7 +54,7 @@ import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
 import { PEER } from './ui/theme.js';
 import { SCANNER_STEPS } from './game/loadout.js';
 import { devMode, soloMode } from './core/mode.js';
-import { useShipType } from './game/specs.js';
+import { useShipType, useShipEquipment } from './game/specs.js';
 import {
   showDocked, showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
@@ -65,7 +65,9 @@ import {
   session, start as sessionStart, queueSave, flushOnExit,
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
 } from './net/session.js';
-import { net, connect as netConnect, shoot, reportHit } from './net/socket.js';
+import { net, connect as netConnect, shoot, reportHit, reportImpact }
+  from './net/socket.js';
+import { impact as apiImpact } from './net/api.js';
 import { linkState } from './net/quality.js';
 import { makePeers, ingestPeers, peerPoses, dropPeer } from './game/peers.js';
 import {
@@ -460,6 +462,10 @@ function crash(reason) {
   game.entry = null;
   game.crashReason = reason;
   game.stats.crashes++;
+  // Корабля больше нет, и знать об этом должен сервер: корпус в базе
+  // пишет только он. Вред себе, а не другому, — поэтому доклад так и
+  // называется и ничем не проверяется.
+  tellImpact(null, true);
   ship.hull = 0;
   ship.speed = 0;
   ship.throttle = 0;
@@ -725,6 +731,10 @@ function serverToSave(st) {
   // не меняет; когда их станет несколько, корабль соберётся по тому, что
   // записано в базе, а не по первому из списка.
   if (sh.type && sh.type.code) useShipType(sh.type.code);
+  // ...и на чём именно: числа двигателя, щита и трюма принадлежат
+  // модулям, а какие из них стоят в гнёздах, знает база (ship_equipment).
+  // До этого момента корабль собран по заводской комплектации каталога.
+  if (sh.equipment) useShipEquipment(sh.equipment);
   return {
     system: pos.systemId === null || pos.systemId === undefined ? 0 : pos.systemId,
     warpTo: pos.warpTo === undefined ? null : pos.warpTo,
@@ -814,6 +824,32 @@ function fireNow() {
   }
 }
 
+/**
+ * Доложить серверу об ударе о грунт.
+ *
+ * Уходит ИЗМЕРЕНИЕ — скорость касания, шасси, поза, — а не урон и тем
+ * более не корпус: во сколько это обошлось, считает сервер. Местный
+ * расчёт остаётся ПРЕДСКАЗАНИЕМ, чтобы полоса корпуса дрогнула в тот же
+ * кадр, а ответ его поправляет.
+ *
+ * Дорога первая — сокет, рядом с боем: соединение уже открыто, и гибель
+ * надо тут же показать соседям. Если сокета нет (играем с одним API),
+ * тот же расчёт делает обычный запрос. Считает в обоих случаях один и
+ * тот же Combat::impact.
+ */
+function tellImpact(m, fatal = false) {
+  if (!isOnline()) return;
+  const msg = {
+    norm: (m && m.norm) || 0, slide: (m && m.slide) || 0,
+    gear: !!(m && m.gear), pose: !!(m && m.pose), fatal,
+  };
+  if (reportImpact(msg)) return;          // ушло в сокет, ответ придёт событием
+  apiImpact(msg).then((r) => {
+    if (r && typeof r.hull === 'number') ship.hull = r.hull;
+    if (r && r.dead) killedInAction(L('ГРУНТ'));
+  }).catch(() => { /* сеть моргнула: корпус поправится следующим состоянием */ });
+}
+
 /** Что пришло по сокету из боя. */
 function applyNetEvent(ev) {
   if (ev.t === 'shot') {
@@ -856,6 +892,12 @@ function applyNetEvent(ev) {
       shieldFlash(game.guns, ev.id, false, ship.pos, t.pos, t.basis);
     }
     if (ev.dead) say(game.state, L('ЦЕЛЬ УНИЧТОЖЕНА'), '#78e08f', 4);
+    return;
+  }
+  if (ev.t === 'impact') {
+    // Корпус берём СЕРВЕРНЫЙ: свой был предсказанием, а счёт ведёт он.
+    if (typeof ev.hull === 'number') ship.hull = ev.hull;
+    if (ev.dead) killedInAction(L('ГРУНТ'));
     return;
   }
   if (ev.t === 'boom') {
@@ -1323,6 +1365,7 @@ function step(dt) {
     if (touch && touch.result === 'landed') {
       if (touch.damage) {
         ship.hull = Math.max(1, ship.hull - touch.damage);
+        tellImpact(touch.impact);
         say(st, L('ПОСАДКА БЕЗ ШАССИ · −') + Math.round(touch.damage) + L('% КОРПУСА'), '#ffcc66', 2);
       } else {
         say(st, L('ПОСАДКА ВЫПОЛНЕНА: ') + zone.body.name, '#78e08f');
@@ -1339,6 +1382,7 @@ function step(dt) {
       bounceOff(ship, zone);
       audioCue(game.audio, 'hit', { damage: touch.damage });
       ship.hull -= touch.damage;
+      tellImpact(touch.impact);
       game.stats.hits = (game.stats.hits || 0) + 1;
       if (ship.hull <= 0) {
         ship.hull = 0;

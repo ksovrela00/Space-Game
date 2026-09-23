@@ -165,7 +165,13 @@ const SERVER_STATE = {
 const SNAPSHOT = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
 const SERVER_TOP_SPEED = 2.5;
 const SERVER_SPECS = JSON.parse(JSON.stringify(SNAPSHOT));
-SERVER_SPECS.shipTypes[0].spec.maxSpeed = SERVER_TOP_SPEED;
+// Скорость принадлежит ДВИГАТЕЛЮ, а не корпусу: подменяем её там же,
+// где её берёт игра, иначе проверка проверяла бы несуществующий путь.
+/** Предел хода в слепке: он у двигателя, который стоит в гнезде. */
+const snapshotTopSpeed = () => SNAPSHOT.modules
+  .find((m) => m.slot === 'engine' && m.installed).spec.flight.maxSpeed;
+
+SERVER_SPECS.modules.find((m) => m.slot === 'engine').spec.flight.maxSpeed = SERVER_TOP_SPEED;
 
 const calls = [];
 let saved = null;
@@ -263,7 +269,7 @@ if (CASE === 'server') {
   const { SHIP } = await import('../js/game/ship.js');
   ok(specsSource() === 'server' && SHIP.maxSpeed === SERVER_TOP_SPEED,
     'предел хода взят у сервера: ' + SHIP.maxSpeed + ' км/с (в слепке '
-    + SNAPSHOT.shipTypes[0].spec.maxSpeed + ')');
+    + snapshotTopSpeed() + ')');
   ok(calls.some((u) => u.indexOf('catalog.specs') >= 0),
     'за характеристиками игра сходила к серверу');
   ok(!!game, 'игра поднялась');
@@ -326,7 +332,7 @@ if (CASE === 'offline') {
   // Это и есть смысл слепка: без него автономного режима не было бы
   // вовсе, потому что числа корабля теперь живут на сервере.
   const { SHIP } = await import('../js/game/ship.js');
-  ok(specsSource() === 'snapshot' && SHIP.maxSpeed === SNAPSHOT.shipTypes[0].spec.maxSpeed,
+  ok(specsSource() === 'snapshot' && SHIP.maxSpeed === snapshotTopSpeed(),
     'без сервера характеристики взяты из слепка: ' + SHIP.maxSpeed + ' км/с');
   ok(!!game, 'игра поднялась и без сервера');
   ok(Math.abs(game.ship.pos.x - LOCAL_X) < 1e-6,

@@ -160,7 +160,7 @@ function open() {
       net.rev++;
       net.left = msg.id;
     } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
-               || msg.t === 'boom') {
+               || msg.t === 'boom' || msg.t === 'impact') {
       // Очередь не копим бесконечно: если игра почему-то перестала её
       // разбирать, сотня событий в памяти полезнее тысячи, а тысяча
       // ничем не лучше сотни.
@@ -257,6 +257,29 @@ export function shoot(weapon, from, dir) {
 /** Доложить о попадании. Урон посчитает и применит сервер. */
 export function reportHit(playerId, weapon) {
   send({ t: 'hit', id: playerId | 0, w: weapon });
+}
+
+/**
+ * Доложить об ударе о грунт.
+ *
+ * Шлём ИЗМЕРЕНИЕ, а не урон и тем более не корпус: во сколько обошёлся
+ * удар, считает сервер (server/src/Combat.php). Тем же путём, что и
+ * попадание в бою, и по той же причине — корпус это счёт, а счёт ведёт
+ * не тот, кому он выставлен.
+ *
+ * @returns дошло ли (сокета может не быть — тогда зовут запрос)
+ */
+export function reportImpact(m) {
+  if (!ws || ws.readyState !== 1) return false;
+  send({
+    t: 'impact',
+    norm: +(m.norm || 0).toFixed(5),
+    slide: +(m.slide || 0).toFixed(5),
+    gear: !!m.gear,
+    pose: !!m.pose,
+    fatal: !!m.fatal,
+  });
+  return true;
 }
 
 function send(msg) {

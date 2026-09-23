@@ -7,36 +7,11 @@
             "title": "ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ",
             "price": 78000,
             "spec": {
-                "maxSpeed": 1.2,
-                "reverse": 0.15,
-                "zeroDwell": 0.45,
-                "accel": 0.45,
-                "brake": 0.75,
-                "boostMax": 3,
-                "boostRamp": 1.5,
-                "boostBurn": 10,
-                "boostFill": 7.5,
-                "boostArm": 0.25,
-                "quantumSpeed": 60000,
-                "lateral": 0.5,
                 "stunMin": 0.35,
                 "stunMax": 1.4,
                 "tumbleDamp": 0.6,
-                "pitchRate": 0.85,
-                "yawRate": 0.55,
-                "rollRate": 1.6,
-                "rotRamp": 0.7,
-                "throttleRate": 0.7,
                 "maxHull": 100,
-                "maxShield": 40,
-                "shieldRegen": 4,
-                "shieldDelay": 5,
-                "hold": 20,
                 "fuelMax": 12,
-                "gearTime": 2.4,
-                "gearSpeed": 0.35,
-                "liftTWR": 3,
-                "liftMin": 0.004,
                 "hitRadius": 0.035
             }
         }
@@ -129,26 +104,47 @@
             "name": "МАРШЕВЫЙ ДВИГАТЕЛЬ",
             "slot": "engine",
             "spec": {
-                "reads": [
-                    "maxSpeed",
-                    "accel",
-                    "brake"
-                ]
+                "flight": {
+                    "maxSpeed": 1.2,
+                    "accel": 0.45,
+                    "brake": 0.75,
+                    "reverse": 0.15,
+                    "zeroDwell": 0.45,
+                    "throttleRate": 0.7
+                }
             },
             "price": 12000,
             "installed": true
+        },
+        {
+            "code": "engine_x",
+            "name": "ФОРСИРОВАННЫЙ ДВИГАТЕЛЬ",
+            "slot": "engine",
+            "spec": {
+                "flight": {
+                    "maxSpeed": 1.8,
+                    "accel": 0.62,
+                    "brake": 0.95,
+                    "reverse": 0.18,
+                    "zeroDwell": 0.45,
+                    "throttleRate": 0.85
+                }
+            },
+            "price": 31000,
+            "installed": false
         },
         {
             "code": "rcs",
             "name": "МАНЕВРОВЫЕ",
             "slot": "rcs",
             "spec": {
-                "reads": [
-                    "lateral",
-                    "pitchRate",
-                    "yawRate",
-                    "rollRate"
-                ]
+                "flight": {
+                    "lateral": 0.5,
+                    "pitchRate": 0.85,
+                    "yawRate": 0.55,
+                    "rollRate": 1.6,
+                    "rotRamp": 0.7
+                }
             },
             "price": 6000,
             "installed": true
@@ -158,10 +154,10 @@
             "name": "ПОДЪЁМНЫЕ ДВИГАТЕЛИ",
             "slot": "lift",
             "spec": {
-                "reads": [
-                    "liftTWR",
-                    "liftMin"
-                ]
+                "flight": {
+                    "liftTWR": 3,
+                    "liftMin": 0.004
+                }
             },
             "price": 5000,
             "installed": true
@@ -171,11 +167,13 @@
             "name": "ФОРСАЖ",
             "slot": "boost",
             "spec": {
-                "reads": [
-                    "boostMax",
-                    "boostBurn",
-                    "boostFill"
-                ]
+                "flight": {
+                    "boostMax": 3,
+                    "boostRamp": 1.5,
+                    "boostBurn": 10,
+                    "boostFill": 7.5,
+                    "boostArm": 0.25
+                }
             },
             "price": 9000,
             "installed": true
@@ -198,9 +196,9 @@
                 "exitMin": 2,
                 "clearPad": 10,
                 "minSpeed": 1.2,
-                "reads": [
-                    "quantumSpeed"
-                ]
+                "flight": {
+                    "quantumSpeed": 60000
+                }
             },
             "price": 26000,
             "installed": true
@@ -257,10 +255,10 @@
             "name": "ШАССИ",
             "slot": "gear",
             "spec": {
-                "reads": [
-                    "gearTime",
-                    "gearSpeed"
-                ]
+                "flight": {
+                    "gearTime": 2.4,
+                    "gearSpeed": 0.35
+                }
             },
             "price": 1800,
             "installed": true
@@ -270,9 +268,9 @@
             "name": "ТРЮМ",
             "slot": "hold",
             "spec": {
-                "reads": [
-                    "hold"
-                ]
+                "flight": {
+                    "hold": 20
+                }
             },
             "price": 7000,
             "installed": true
@@ -282,11 +280,11 @@
             "name": "ЩИТЫ",
             "slot": "shield",
             "spec": {
-                "reads": [
-                    "maxShield",
-                    "shieldRegen",
-                    "shieldDelay"
-                ]
+                "flight": {
+                    "maxShield": 40,
+                    "shieldRegen": 4,
+                    "shieldDelay": 5
+                }
             },
             "price": 15000,
             "installed": true
@@ -299,6 +297,14 @@
             0.45,
             0.75,
             1
-        ]
+        ],
+        "hitSoft": 0.03,
+        "hitKill": 0.09,
+        "bareSoft": 0.001,
+        "bareMul": 4,
+        "belly": 5,
+        "scrapeK": 0.6,
+        "poseFloor": 4,
+        "poseMul": 1.6
     }
 }

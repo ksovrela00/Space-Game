@@ -62,23 +62,20 @@ final class Seeder
             $dim = $size[$t['code']] ?? [];
             Db::run(
                 'INSERT INTO `ship_type`
-                   (`code`,`name`,`title`,`hull_max`,`shield_max`,`shield_regen`,`shield_delay`,
-                    `hold_t`,`fuel_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   (`code`,`name`,`title`,`hull_max`,
+                    `fuel_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
-                   `hull_max`=VALUES(`hull_max`), `shield_max`=VALUES(`shield_max`),
-                   `shield_regen`=VALUES(`shield_regen`), `shield_delay`=VALUES(`shield_delay`),
-                   `hold_t`=VALUES(`hold_t`), `fuel_t`=VALUES(`fuel_t`),
+                   `hull_max`=VALUES(`hull_max`), `fuel_t`=VALUES(`fuel_t`),
                    `length_m`=VALUES(`length_m`), `width_m`=VALUES(`width_m`),
                    `height_m`=VALUES(`height_m`), `price`=VALUES(`price`), `spec`=VALUES(`spec`)',
                 [
                     $t['code'], $t['name'], $t['title'] ?? '',
-                    $spec['maxHull'], $spec['maxShield'], $spec['shieldRegen'], $spec['shieldDelay'],
-                    $spec['hold'], $spec['fuelMax'],
+                    $spec['maxHull'], $spec['fuelMax'],
                     $dim['lengthM'] ?? 0, $dim['widthM'] ?? 0, $dim['heightM'] ?? 0,
                     (int) ($t['price'] ?? 0),
-                    // В `spec` едет лётная модель БЕЗ тех шести чисел, что
-                    // легли столбцами: одно число — одно место.
+                    // В `spec` едет лётная модель БЕЗ тех чисел, что легли
+                    // столбцами: одно число — одно место.
                     json_encode(Specs::specRest($spec), JSON_UNESCAPED_UNICODE),
                 ]
             );

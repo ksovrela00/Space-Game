@@ -37,6 +37,7 @@ final class Api
             'catalog.specs' => [[self::class, 'specs'], false],
             'player.state' => [[self::class, 'playerState'], true],
             'player.save' => [[self::class, 'playerSave'], true],
+            'ship.impact' => [[self::class, 'shipImpact'], true],
             'market.prices' => [[self::class, 'marketPrices'], true],
             'market.buy' => [[self::class, 'marketBuy'], true],
             'market.sell' => [[self::class, 'marketSell'], true],
@@ -210,6 +211,39 @@ final class Api
     public static function playerSave(array $in, ?int $playerId): array
     {
         return Players::save($playerId, is_array($in['save'] ?? null) ? $in['save'] : $in);
+    }
+
+    /**
+     * Удар о грунт.
+     *
+     * Игра сообщает ИЗМЕРЕНИЕ, а не урон и тем более не корпус: с какой
+     * скоростью коснулись, на шасси ли, в правильной ли позе. Сколько это
+     * стоит корпусу, считает сервер своими числами (Combat::impact).
+     *
+     * `fatal` — столкновение, после которого корабля нет (влетели в тело,
+     * в станцию). Проверять его нечем и незачем: это вред себе, а не
+     * другому, и подделать его значит разбить свой же корабль.
+     */
+    public static function shipImpact(array $in, ?int $playerId): array
+    {
+        $num = static function ($v): float {
+            $f = is_numeric($v) ? (float) $v : 0.0;
+            return is_finite($f) ? max(0.0, $f) : 0.0;
+        };
+        $r = Combat::impact(
+            (int) $playerId,
+            $num($in['norm'] ?? 0),
+            $num($in['slide'] ?? 0),
+            !empty($in['gear']),
+            !empty($in['pose']),
+            !empty($in['fatal'])
+        );
+        if ($r['dead']) {
+            // Корабля больше нет — возвращаем пилота в порт тем же путём,
+            // что и после боя: ждать, пока он сам попросит, нельзя.
+            Combat::respawn((int) $playerId);
+        }
+        return $r;
     }
 
     public static function marketPrices(array $in, ?int $playerId): array

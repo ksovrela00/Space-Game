@@ -36,6 +36,7 @@ export class TilePool {
     this.done = [];                // готовое, ждёт загрузки в GL
     this.failed = [];              // задания, которые поток не осилил
     this.ok = false;
+    this.dead = false;             // закрыт ли пул, пока ждал файлов
     if (typeof Worker === 'undefined') return;
 
     let n = 2;
@@ -44,6 +45,21 @@ export class TilePool {
       n = Math.max(1, Math.min(max, cores - 1));
     } catch (e) { /* нет navigator — берём двоих */ }
 
+    // Потоки поднимаются не раньше, чем обновятся их файлы. Страница
+    // освежает код тем, что подставляет модулям новые адреса (index.html),
+    // но в рабочих потоках эта таблица не действует вовсе — поток читает
+    // свои файлы по обычным адресам и взял бы их из кеша. Поэтому
+    // index.html перезапрашивает их мимо кеша и кладёт обещание в
+    // __srcFresh, а мы его дожидаемся. Пока потоков нет, TileSet считает
+    // плитки прямо в кадре — это его обычный запасной путь.
+    const fresh = typeof window !== 'undefined' ? window.__srcFresh : null;
+    if (fresh && typeof fresh.then === 'function') fresh.then(() => this.spawn(n));
+    else this.spawn(n);
+  }
+
+  /** Поднять n потоков. Отдельно от конструктора — ждёт свежих файлов. */
+  spawn(n) {
+    if (this.dead) return;          // пул успели закрыть, пока мы ждали
     for (let i = 0; i < n; i++) {
       try {
         const w = new Worker(WORKER_URL, { type: 'module' });
@@ -93,6 +109,7 @@ export class TilePool {
   }
 
   dispose() {
+    this.dead = true;
     for (const w of this.workers) { try { w.terminate(); } catch (e) { /* уже мёртв */ } }
     this.workers.length = 0;
     this.idle.length = 0;

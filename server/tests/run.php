@@ -197,7 +197,10 @@ section('новый пилот');
 // игра, — маршрутом `catalog.specs`. В состоянии игрока их больше нет, и
 // это намеренно: один путь к числу вместо двух.
 $specs = Api::call('catalog.specs');
-$shipSpec = $specs['shipTypes'][0]['spec'];
+// Лётная модель корабля СОБИРАЕТСЯ: корпус, а поверх него числа
+// установленных модулей. Проверять по одному корпусу значило бы
+// проверять половину корабля — скорости и щита у него своих нет.
+$shipSpec = Specs::mergeFlight($specs['shipTypes'][0]['spec'], $specs['modules']);
 
 $state = Api::call('player.state', [], $token);
 ok($state['player']['balance'] === Content::START_BALANCE,
@@ -248,31 +251,87 @@ ok(abs($state['ship']['type']['lengthM'] - $catalog['shipTypes'][0]['lengthM']) 
 section('сохранение полёта');
 
 $home = $state['position'];
+// Корпуса в сохранении нет и быть не может: игра сохраняет только то,
+// что знает одна она, — где корабль, куда повёрнут, сколько налетал.
+$hullWas = $state['ship']['hull'];
 Api::call('player.save', ['system' => 0, 'pos' => ['x' => 1000, 'y' => 20, 'z' => -3],
-    'basis' => ['fwd' => [0, 0, 1]], 'docked' => null, 'hull' => 61.5,
+    'basis' => ['fwd' => [0, 0, 1]], 'docked' => null,
     'stats' => ['flownKm' => 123.5, 'docks' => 2]], $token);
 $after = Api::call('player.state', [], $token);
 ok(abs($after['position']['pos']['x'] - 1000) < 1e-9 && $after['position']['dockedBody'] === null
-    && abs($after['ship']['hull'] - 61.5) < 1e-9 && $after['player']['stats']['docks'] === 2,
-    'полёт сохранён: место, корпус, статистика');
+    && $after['ship']['hull'] === $hullWas && $after['player']['stats']['docks'] === 2,
+    'полёт сохранён: место и статистика, корпус не тронут');
 
 denies('bad_request', fn() => Api::call('player.save', ['system' => 999], $token),
     'система не из каталога отвергается');
 denies('bad_request', fn() => Api::call('player.save', ['system' => 0, 'docked' => 9999], $token),
     'порт не из этой системы отвергается');
 
-// Корпус выше заводского — первое, что подделывают.
+// КОРПУС ИЗ СОХРАНЕНИЯ НЕ ПИШЕТСЯ ВОВСЕ — ни в какую сторону.
+//
+// Сохранение приходит от игры, а игра живёт на чужой машине. Всё, что
+// имеет цену, считает сервер: попадание (Combat::damage), удар о грунт
+// (Combat::impact), ремонт за деньги (Stations::repair), гибель
+// (Combat::respawn). Прими сервер корпус из сохранения — и бой не стоил
+// бы ничего: снял очередь, сохранился, корпус целый.
+$damaged = $after['ship']['hull'];
 Api::call('player.save', ['hull' => 100000], $token);
 $after = Api::call('player.state', [], $token);
-ok($after['ship']['hull'] === $shipSpec['maxHull'],
-    'корпус выше заводского обрезается до ' . $shipSpec['maxHull']);
+ok($after['ship']['hull'] === $damaged,
+    'корпус из сохранения не растёт: как был ' . $damaged . ', так и остался '
+    . $after['ship']['hull']);
+
+Api::call('player.save', ['hull' => 1], $token);
+$after = Api::call('player.state', [], $token);
+ok($after['ship']['hull'] === $damaged,
+    'и не убывает: сохранение корпуса не касается вовсе (' . $after['ship']['hull'] . ')');
+
+// УДАР О ГРУНТ. Игра шлёт ИЗМЕРЕНИЕ, урон считает сервер своими числами.
+$was = $after['ship']['hull'];
+$hit = Api::call('ship.impact',
+    ['norm' => 0.050, 'slide' => 0, 'gear' => true, 'pose' => true], $token);
+$after = Api::call('player.state', [], $token);
+ok($hit['damage'] > 5 && $hit['damage'] < 20
+    && abs($after['ship']['hull'] - ($was - $hit['damage'])) < 1e-9,
+    'удар о грунт списал корпус сервером: −' . round($hit['damage'], 1) . '%, стало '
+    . round($after['ship']['hull'], 1));
+
+// Касание в допуске не стоит ничего — на то и амортизаторы.
+$soft = Api::call('ship.impact',
+    ['norm' => 0.010, 'slide' => 0, 'gear' => true, 'pose' => true], $token);
+ok($soft['damage'] === 0.0, 'мягкое касание на шасси не стоит ничего');
+
+// Формула одна и та же на обеих сторонах (js/game/landing.js). Сверяем в
+// опорных точках: разойдись они, игра показывала бы один урон, а сервер
+// списывал другой — и виноват всегда был бы сервер, потому что он прав.
+$grid = [
+    [0.050, 0.0, true, true, 11.11],
+    [0.095, 0.0, true, true, 117.36],
+    [0.001, 0.0, false, true, 5.0],
+];
+$bad = [];
+foreach ($grid as [$norm, $slide, $gear, $pose, $want]) {
+    $got = Combat::impactDamage($norm, $slide, $gear, $pose);
+    if (abs($got - $want) > 0.05) {
+        $bad[] = $norm . ' -> ' . round($got, 2) . ' вместо ' . $want;
+    }
+}
+ok($bad === [], 'урон от удара считается по числам каталога, опорные точки сходятся'
+    . ($bad ? ': ' . implode('; ', $bad) : ''));
+
+// Возвращаем как было: следующие проверки считают деньги за ремонт от
+// этого корпуса.
+Db::update('ship', ['hull' => $damaged], '`owner_id`=?', [$pid]);
 
 // --- торговля ----------------------------------------------------------------
 
 section('торговля');
 
-// Возвращаем пилота в порт.
-Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody'], 'hull' => 100], $token);
+// Возвращаем пилота в порт. Корпус при этом чиним НЕ сохранением: из
+// него он больше не растёт, и это правило проверяется выше. В игре целый
+// корпус получают за деньги в порту, а проверке нужна лишь позиция.
+Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+Db::update('ship', ['hull' => 100], '`owner_id`=?', [$pid]);
 $prices = Api::call('market.prices', [], $token);
 ok(count($prices['goods']) > 3, 'прайс порта: позиций ' . count($prices['goods'])
     . ' у «' . $prices['station']['name'] . '» (' . $prices['station']['world'] . ')');
@@ -461,7 +520,9 @@ ok($twice['charged'] === false && $twice['fee'] === 0,
 // было цены, и разбить его было не страшно.
 denies('no_damage', fn() => Api::call('station.repair', [], $token), 'целый корпус чинить нечего');
 
-Api::call('player.save', ['hull' => 55], $token);
+// Корпус сохранением не правится: ставим состояние прямо, как и всюду в
+// этих проверках, где нужна исходная позиция.
+Db::update('ship', ['hull' => 55], '`owner_id`=?', [$pid]);
 $before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
 $fix = Api::call('station.repair', [], $token);
 ok($fix['hull'] === 100.0 && $fix['cost'] > 0 && $fix['balance'] === $before - $fix['cost'],
@@ -473,10 +534,12 @@ $poor = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
                  WHERE st.`has_repair`=0 LIMIT 1");
 if ($poor) {
     Api::call('player.save', ['system' => (int) $poor['system_id'],
-        'docked' => (int) $poor['local_id'], 'hull' => 40], $token);
+        'docked' => (int) $poor['local_id']], $token);
+    Db::update('ship', ['hull' => 40], '`owner_id`=?', [$pid]);
     denies('no_service', fn() => Api::call('station.repair', [], $token),
         'на порту без мастерской («' . $poor['name'] . '») не чинят');
-    Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody'], 'hull' => 100], $token);
+    Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+    Db::update('ship', ['hull' => 100], '`owner_id`=?', [$pid]);
 } else {
     ok(false, 'не нашлось порта без мастерской — проверять отказ не на чем');
 }
@@ -548,22 +611,96 @@ $stored = json_decode((string) Db::one('SELECT `spec` FROM `ship_type` LIMIT 1')
 $dupes = array_values(array_intersect(array_keys($stored), array_keys(Specs::COLUMNS)));
 ok($dupes === [], 'числа из столбцов не продублированы в spec'
     . ($dupes ? ': ' . implode(', ', $dupes) : ''));
-ok(isset($stored['maxSpeed'], $stored['rollRate'], $stored['hitRadius'])
-    && !isset($stored['maxHull']),
-    'в spec лежит лётная модель, в столбцах — то, по чему считает сервер');
+ok(isset($stored['stunMin'], $stored['tumbleDamp'], $stored['hitRadius'])
+    && !isset($stored['maxHull'], $stored['maxSpeed'], $stored['maxShield'], $stored['hold']),
+    'в spec корпуса — только его собственное: скорость, щит и трюм принадлежат модулям');
 
-// 4. Модули НЕ хранят копию чисел корабля: у них записаны имена, а
-//    значения берутся из лётной модели при показе. Копия разъехалась бы
-//    с первой же правкой, и карточка стала бы врать про свой же корабль.
-$engine = null;
+// 4. У КАЖДОГО МОДУЛЯ СВОИ ЧИСЛА. Двигатель знает свою скорость, щит —
+//    свою ёмкость, трюм — тоннаж. Это и есть суть устройства: модуль —
+//    предмет, а не ярлык, и у другого двигателя числа другие.
+$byCode = [];
 foreach ($fromApi['modules'] as $m) {
-    if ($m['code'] === 'engine') {
-        $engine = $m;
-    }
+    $byCode[$m['code']] = $m;
 }
-ok($engine !== null && ($engine['spec']['reads'] ?? null) === ['maxSpeed', 'accel', 'brake']
-    && !isset($engine['spec']['maxSpeed']),
-    'двигатель ссылается на числа корпуса, а не копирует их');
+$engine = $byCode['engine'] ?? null;
+ok($engine !== null
+    && ($engine['spec']['flight']['maxSpeed'] ?? 0) > 0
+    && ($engine['spec']['flight']['accel'] ?? 0) > 0,
+    'двигатель хранит свои числа: ' . ($engine['spec']['flight']['maxSpeed'] ?? 0) . ' км/с');
+ok(($byCode['shield']['spec']['flight']['maxShield'] ?? 0) > 0
+    && ($byCode['hold']['spec']['flight']['hold'] ?? 0) > 0
+    && ($byCode['gear']['spec']['flight']['gearTime'] ?? 0) > 0,
+    'щит, трюм и шасси — тоже: ёмкость, тоннаж и время выпуска лежат у них');
+
+//    Ни одно число при переезде не потерялось: собранная модель обязана
+//    содержать всё, по чему корабль летит. Пропажа даёт NaN на первом же
+//    кадре, причём молча.
+$assembled = Specs::mergeFlight($fromApi['shipTypes'][0]['spec'], $fromApi['modules']);
+$needKeys = ['maxSpeed', 'accel', 'brake', 'lateral', 'pitchRate', 'rollRate', 'rotRamp',
+    'boostMax', 'boostBurn', 'liftTWR', 'gearTime', 'hold', 'maxShield', 'maxHull',
+    'quantumSpeed', 'hitRadius'];
+$lost = array_values(array_diff($needKeys, array_keys($assembled)));
+ok($lost === [], 'собранная модель полна: корпус плюс гнёзда дают все числа'
+    . ($lost ? ', потеряны: ' . implode(', ', $lost) : ''));
+
+//    И ГЛАВНОЕ, ради чего всё затевалось: другой двигатель — другой
+//    корабль. Ставим в гнездо форсированный и смотрим на скорость самого
+//    корабля, а не каталога.
+$shipId = (int) $state['ship']['id'];
+$slow = Loadout::flight($shipId)['maxSpeed'] ?? 0;
+$stockEngine = (int) Db::one('SELECT `id` FROM `equipment_type` WHERE `code`=?', ['engine']);
+$fastEngine = (int) Db::one('SELECT `id` FROM `equipment_type` WHERE `code`=?', ['engine_x']);
+Db::update('ship_equipment', ['equipment_id' => $fastEngine],
+    '`ship_id`=? AND `equipment_id`=?', [$shipId, $stockEngine]);
+Loadout::forget($shipId);
+$fast = Loadout::flight($shipId)['maxSpeed'] ?? 0;
+Db::update('ship_equipment', ['equipment_id' => $stockEngine],
+    '`ship_id`=? AND `equipment_id`=?', [$shipId, $fastEngine]);
+Loadout::forget($shipId);
+$back = Loadout::flight($shipId)['maxSpeed'] ?? 0;
+ok($fast > $slow && abs($back - $slow) < 1e-9,
+    'сменили двигатель — сменилась скорость корабля: ' . $slow . ' -> ' . $fast
+    . ' и обратно ' . $back . ' км/с');
+
+//    Ручная замена модуля обязана ВЫЖИВАТЬ. Доукомплектование заводским
+//    набором (ensureStock) не имеет права вернуть снятый двигатель
+//    обратно: в гнезде оказались бы два, и корабль полетел бы по тому из
+//    них, у кого больше id, — то есть по случайности. Случай не
+//    выдуманный: числа для того в базе и лежат, чтобы их правили руками.
+$inSlot = static function (string $slot) use ($shipId): array {
+    return array_column(Db::all(
+        'SELECT e.`code` FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+         WHERE se.`ship_id`=? AND e.`slot`=? ORDER BY se.`id`', [$shipId, $slot]), 'code');
+};
+Db::update('ship_equipment', ['equipment_id' => $fastEngine],
+    '`ship_id`=? AND `equipment_id`=?', [$shipId, $stockEngine]);
+Loadout::forget($shipId);
+Players::ensureStock($shipId);
+Loadout::forget($shipId);
+$afterStock = $inSlot('engine');
+$keptSpeed = Loadout::flight($shipId)['maxSpeed'] ?? 0;
+Db::update('ship_equipment', ['equipment_id' => $stockEngine],
+    '`ship_id`=? AND `equipment_id`=?', [$shipId, $fastEngine]);
+Loadout::forget($shipId);
+ok($afterStock === ['engine_x'] && $keptSpeed > $slow,
+    'поставленный руками двигатель остаётся один в гнезде: ' . implode(', ', $afterStock)
+    . ', ' . $keptSpeed . ' км/с');
+
+//    И наоборот: ПУСТОЕ гнездо доукомплектование заполняет — ради этого
+//    оно и заведено (каталог пополняется, а корабли заведены раньше).
+//    Щит заодно показывает, что он принадлежит кораблю через модуль, а не
+//    типу корпуса: сняли — попадание идёт прямо в обшивку.
+$shieldId = (int) Db::one('SELECT `id` FROM `equipment_type` WHERE `code`=?', ['shield']);
+$withShield = Loadout::shield($shipId)['shield_max'];
+Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=? AND `equipment_id`=?', [$shipId, $shieldId]);
+Loadout::forget($shipId);
+$without = Loadout::shield($shipId)['shield_max'];
+Players::ensureStock($shipId);
+Loadout::forget($shipId);
+$backShield = Loadout::shield($shipId)['shield_max'];
+ok($withShield > 0 && $without === 0.0 && $backShield === $withShield,
+    'сняли щит — его нет (' . $withShield . ' -> ' . $without
+    . '), пустое гнездо доукомплектовано обратно (' . $backShield . ')');
 
 // 5. Пушка — наоборот: её числа СВОИ, и лежат они при ней. По ним сервер
 //    и считает попадания (Combat::weapon).

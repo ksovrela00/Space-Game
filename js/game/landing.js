@@ -18,6 +18,7 @@
 // движение тела, и его вращение (см. gravity.js).
 
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
+import { COMBAT } from './weapons.js';
 import { SHIP } from './ship.js';
 import { alignBasis, aimAt, levelRoll, horizontal } from './pilot.js';
 import {
@@ -38,23 +39,16 @@ export const LAND = {
   range: 3,         // в радиусах тела: дальше посадочный компьютер не берётся
   hold: 2.5,        // км — высота, на которую компьютер выводит перед спуском
   // --- Удар о грунт.
-  // Урон растёт как КВАДРАТ скорости: это энергия, и так оно и есть на
-  // самом деле. Ниже hitSoft удар безвреден — на то и амортизаторы; на
-  // hitKill корпус кончается за один раз. Между ними вся шкала, и
-  // полоса корпуса наконец что-то значит.
-  // Шкала урона начинается ровно там, где кончается допуск на касание:
-  // сел в допуске — цел, чуть быстрее — первые проценты, и дальше по
-  // квадрату. Иначе на границе была бы ступенька в десяток процентов.
-  hitSoft: 0.030,   // км/с — совпадает с vspeed
-  hitKill: 0.090,   // км/с — 90 м/с разносят корабль целиком
-  bareSoft: 0.001,  // км/с — без шасси прощается только касание
-  bareMul: 4,       // во столько раз больнее брюхом, чем на шасси
-  scrapeK: 0.6,     // с каким весом в удар идёт боковая скорость
+  //
+  // ЧИСЕЛ УРОНА ЗДЕСЬ НЕТ. Они в бэкенде (server/data/specs.php, раздел
+  // combat) и приезжают вместе с остальными — COMBAT.hitSoft и прочие.
+  // Так и должно быть: урон считает сервер (Combat::impact), а здесь он
+  // считается ещё раз только затем, чтобы полоса корпуса дрогнула в тот
+  // же кадр, не дожидаясь ответа, и чтобы в автономной игре удар вообще
+  // чего-то стоил. Что обе стороны считают одинаково, стережёт проверка.
   restitution: 0.3, // упругость отскока
   friction: 0.55,   // сколько касательной скорости съедает грунт
   settle: 0.004,    // км/с — ниже этого корабль считается остановившимся
-  belly: 5,         // % корпуса за посадку на брюхо, без шасси — и он же
-                    // нижняя граница урона для любого касания без шасси
   tumble: 9,        // рад/с на км/с касательной — сила кувырка от удара
   closeSpeed: 0.09, // км/с — предел скорости, с которой доводится снос
   // Снос доводится тягой вдоль носа, а разворот идёт с конечной угловой
@@ -450,18 +444,20 @@ export function checkTouchdown(ship, zone) {
   // Всё остальное — удар. Его сила считается по энергии: нормальная
   // составляющая целиком, касательная с меньшим весом (по грунту
   // корабль скорее чиркает, чем бьётся).
+  // Измерение удара. Его — и только его — игра докладывает серверу
+  // (js/main.js -> reportImpact): урон считает он, по своим числам.
   const norm = Math.max(0, -vUp);
-  const hit = Math.hypot(norm, hSpeed * LAND.scrapeK);
-  const soft = gear ? LAND.hitSoft : LAND.bareSoft;
-  const t = Math.max(0, (hit - soft) / (LAND.hitKill - soft));
-  let damage = 100 * t * t * (gear ? 1 : LAND.bareMul);
+  const hit = Math.hypot(norm, hSpeed * COMBAT.scrapeK);
+  const soft = gear ? COMBAT.hitSoft : COMBAT.bareSoft;
+  const t = Math.max(0, (hit - soft) / (COMBAT.hitKill - soft));
+  let damage = 100 * t * t * (gear ? 1 : COMBAT.bareMul);
   // Без шасси удар не бывает бесплатным: корпус не для того, чтобы им
   // касались грунта. Заодно шкала остаётся монотонной — иначе мягкое
   // касание брюхом стоило бы дороже быстрого.
-  if (!gear) damage = Math.max(damage, LAND.belly);
+  if (!gear) damage = Math.max(damage, COMBAT.belly);
   // Неудачная поза бьёт по корпусу сильнее: удар приходится не в
   // амортизаторы, а в край корпуса.
-  if (!poseOk) damage = Math.max(damage, 4) * 1.6;
+  if (!poseOk) damage = Math.max(damage, COMBAT.poseFloor) * COMBAT.poseMul;
 
   // Остановился в плохой позе — это уже не удар, а опрокидывание: ждать
   // нечего, корабль так и останется лежать.
@@ -470,7 +466,10 @@ export function checkTouchdown(ship, zone) {
     // Разрушать за это нельзя — с этого и началась правка: касание на
     // метре в секунду не должно стоить корабля.
     if (!gear && poseOk) {
-      return { result: 'landed', damage: LAND.belly, reason: L('Посадка без шасси.') };
+      return {
+        result: 'landed', damage: COMBAT.belly, reason: L('Посадка без шасси.'),
+        impact: { norm, slide: hSpeed, gear, pose: poseOk },
+      };
     }
     if (!gear) {
       return { result: 'crash', reason: L('Касание поверхности без шасси, с перекосом.') };
@@ -489,6 +488,7 @@ export function checkTouchdown(ship, zone) {
     result: 'bounce',
     damage,
     hit,
+    impact: { norm, slide: hSpeed, gear, pose: poseOk },
     reason: gear
       ? L('Жёсткое касание: ') + (hit * 1000).toFixed(0) + L(' м/с.')
       : L('Удар корпусом: ') + (hit * 1000).toFixed(0) + L(' м/с.'),

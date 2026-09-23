@@ -11,7 +11,7 @@
 require_once __DIR__ . '/config.php';
 
 foreach ([
-    'ApiError', 'Db', 'Schema', 'Clock', 'Content', 'Specs', 'Seeder',
+    'ApiError', 'Db', 'Schema', 'Clock', 'Content', 'Specs', 'Loadout', 'Seeder',
     'Galaxy', 'Stations', 'Combat', 'Hub', 'Ledger', 'Cargo', 'Market', 'Missions', 'Players', 'Auth', 'Api',
 ] as $class) {
     require_once __DIR__ . '/src/' . $class . '.php';

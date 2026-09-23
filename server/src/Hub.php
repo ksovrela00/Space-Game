@@ -56,6 +56,15 @@ final class Hub
     /** Не чаще стольких выстрелов в секунду от одного клиента. */
     public const SHOT_RATE = 10;
 
+    /**
+     * Сколько ударов о грунт в секунду слушаем с одного корабля.
+     *
+     * Четырёх хватает с запасом: отскок длится доли секунды, а подряд
+     * стучать по грунту чаще — это уже не посадка, а попытка залить хаб
+     * пакетами.
+     */
+    public const IMPACT_RATE = 4;
+
     /** Как часто перечитываем корпус и щит пилота из базы, с. */
     public const STAT_EVERY = 10;
 
@@ -109,6 +118,7 @@ final class Hub
             'posAt' => 0.0,
             'shotAt' => 0.0,
             'hitAt' => 0.0,
+            'impactAt' => 0.0,
             // Что стоит на корабле — спрашиваем у базы один раз на
             // соединение: оружие в полёте не меняется, а запрос на
             // каждое попадание превратил бы бой в поток запросов.
@@ -217,6 +227,10 @@ final class Hub
 
             case 'hit':
                 $this->hit($conn, $peer, $msg, $now);
+                return;
+
+            case 'impact':
+                $this->impact($conn, $peer, $msg, $now);
                 return;
 
             case 'ping':
@@ -371,6 +385,64 @@ final class Hub
     }
 
     /**
+     * Удар о грунт: считает СЕРВЕР.
+     *
+     * Игра сообщает ИЗМЕРЕНИЕ — с какой скоростью коснулись, на шасси ли,
+     * в правильной ли позе, — а во сколько это обошлось корпусу, решает
+     * Combat::impact по числам из каталога. Ни урона, ни тем более
+     * корпуса игра не присылает: иначе «сколько у меня осталось» отвечал
+     * бы тот, кому это выгодно.
+     *
+     * Здесь, в сокете, а не отдельным запросом, потому что это живое
+     * событие полёта — рядом с выстрелом и попаданием: соединение уже
+     * открыто, а гибель надо тут же показать соседям.
+     */
+    private function impact($conn, array &$peer, array $msg, float $now): void
+    {
+        if ($peer['player'] === null) {
+            return;
+        }
+        if ($now - $peer['impactAt'] < 1.0 / self::IMPACT_RATE) {
+            return;
+        }
+        $peer['impactAt'] = $now;
+
+        $res = Combat::impact(
+            (int) $peer['player'],
+            self::num($msg['norm'] ?? 0),
+            self::num($msg['slide'] ?? 0),
+            !empty($msg['gear']),
+            !empty($msg['pose']),
+            !empty($msg['fatal'])
+        );
+
+        // Корпус в кэше — тот, что видят соседи у метки: ждать
+        // перечитывания из базы там нечего.
+        foreach ($this->peers as $k => $p) {
+            if ($p['player'] === $peer['player']) {
+                $this->peers[$k]['hull'] = $res['hull'];
+                $this->peers[$k]['hullMax'] = $res['max'];
+            }
+        }
+
+        $this->send($conn, [
+            't' => 'impact', 'hull' => $res['hull'], 'max' => $res['max'],
+            'dmg' => $res['damage'], 'dead' => $res['dead'],
+        ]);
+
+        if ($res['dead']) {
+            Combat::respawn((int) $peer['player']);
+            foreach ($this->peers as $k => $p) {
+                if ($p['player'] === $peer['player']) {
+                    $this->loadStats($this->peers[$k], $now);
+                }
+            }
+            $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $peer['player']], $peer['player']);
+            $this->say('разбился ' . $peer['name']);
+        }
+    }
+
+    /**
      * Тик: каждому — снимок тех, кто в его системе.
      *
      * Рассылка идёт по тику, а не по каждому входящему сообщению: при
@@ -418,8 +490,7 @@ final class Hub
     {
         $peer['statAt'] = $now;
         $row = Db::row(
-            'SELECT s.`hull`, s.`shield`, s.`hit_at`,
-                    t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`
+            'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
              FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
              WHERE s.`owner_id`=? LIMIT 1',
             [$peer['player']]
@@ -427,6 +498,9 @@ final class Hub
         if ($row === null) {
             return;
         }
+        // Щит соседа — с его модуля: у двоих на одинаковых корпусах щиты
+        // могут быть разные, и в приборах это должно быть видно.
+        $row += Loadout::shield((int) $row['id']);
         $peer['hull'] = (float) $row['hull'];
         $peer['hullMax'] = (float) $row['hull_max'];
         $peer['shieldMax'] = (float) $row['shield_max'];
