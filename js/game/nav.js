@@ -28,8 +28,11 @@ export function makeNav(world) {
 /**
  * Пересобрать список целей.
  * @param ship нужен, чтобы понять, чьи маркеры показывать (null — ничьи)
+ * @param peers чужие корабли: их выбирают тем же Tab, что и станции —
+ *        отдельная клавиша «взять в прицел пилота» означала бы, что в бою
+ *        надо помнить, какой из двух способов сейчас нужен
  */
-export function refreshNav(nav, world, ship) {
+export function refreshNav(nav, world, ship, peers = null) {
   const prev = nav.list[nav.index] || null;
   const local = ship ? nearestBody(world, ship.pos).body : null;
   nav.list.length = 0;
@@ -38,6 +41,10 @@ export function refreshNav(nav, world, ship) {
     if (b === local && b.markers) for (const m of b.markers) nav.list.push(m);
     if (b.station) nav.list.push(b.station);
   }
+  // Чужие корабли идут в конец списка, но в aimTargets порядок не значит
+  // ничего: там сортируют по зазору до прицела, и корабль под носом
+  // выберется раньше планеты во полнеба.
+  if (peers) for (const p of peers) nav.list.push(p);
   let i = nav.list.indexOf(prev);
   // Цель могла выпасть из списка: улетели от планеты, и её маркеры
   // скрылись. Тогда держимся за само тело, а не сбрасываем выбор.
@@ -89,8 +96,15 @@ export function aimTargets(nav, ship, cone = AIM_CONE, out = _aim) {
     if (gap > cone) continue;
     out.push({ t, gap, ang, dist });
   }
-  // Ближе к прицелу — раньше; при равном зазоре раньше тот, кто ближе.
-  out.sort((a, b) => a.gap - b.gap || a.dist - b.dist);
+  // Чужие корабли — ПЕРВЫМИ, и это не любезность к бою, а следствие самой
+  // меры. Зазор считается до КРАЯ объекта, поэтому планета во полнеба
+  // всегда «ближе к прицелу», чем корабль перед носом: её край накрывает
+  // прицел со всех сторон. Без этого правила пилота нельзя было выбрать
+  // вовсе, пока за ним видно планету, — то есть почти никогда.
+  // Планета при этом не теряется: второе нажатие Tab перебирает то, что
+  // под прицелом, и доходит до неё.
+  out.sort((a, b) =>
+    (a.t.isPeer ? 0 : 1) - (b.t.isPeer ? 0 : 1) || a.gap - b.gap || a.dist - b.dist);
   return out;
 }
 
@@ -132,6 +146,7 @@ export function targetById(world, id) {
 
 export function targetLabel(t) {
   if (!t) return '—';
+  if (t.isPeer) return t.name || 'ПИЛОТ';
   if (t.isStation) return t.name;
   if (t.isMarker) return t.name;
   if (t.kind === 'star') return t.name + ' (звезда)';

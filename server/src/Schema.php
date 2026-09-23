@@ -31,7 +31,7 @@
 final class Schema
 {
     /** Версия схемы. Растёт при каждом изменении таблиц. */
-    public const VERSION = 3;
+    public const VERSION = 4;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -147,6 +147,10 @@ final class Schema
                 `title` VARCHAR(96) NOT NULL DEFAULT '',
                 `hull_max` DOUBLE NOT NULL,
                 `shield_max` DOUBLE NOT NULL DEFAULT 0,
+                -- Щит восстанавливается сам: скорость и пауза после
+                -- попадания. Числа те же, что в игре (js/game/ship.js).
+                `shield_regen` DOUBLE NOT NULL DEFAULT 0,
+                `shield_delay` DOUBLE NOT NULL DEFAULT 0,
                 `hold_t` DECIMAL(10,3) NOT NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
                 `max_speed` DOUBLE NOT NULL,
@@ -241,6 +245,10 @@ final class Schema
                 `name` VARCHAR(64) NOT NULL DEFAULT '',
                 `hull` DOUBLE NOT NULL,
                 `shield` DOUBLE NOT NULL DEFAULT 0,
+                -- Когда по кораблю попали в последний раз. Щит не
+                -- пересчитывается по таймеру — он считается от этого
+                -- времени в тот момент, когда его спросили (см. Combat).
+                `hit_at` DATETIME NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
                 `gear_out` TINYINT(1) NOT NULL DEFAULT 0,
                 `created_at` DATETIME NOT NULL,
@@ -363,6 +371,26 @@ final class Schema
     }
 
     /** Создать недостающие таблицы. Существующие не трогает. */
+    /**
+     * Столбцы, появившиеся позже своих таблиц.
+     *
+     * Полноценных миграций тут нет и пока не нужно, но и сносить базу
+     * ради одного столбца нельзя: в ней живой пилот с деньгами и
+     * грузом. Поэтому список недостающих столбцов — и догон по нему.
+     */
+    public static function columns(): array
+    {
+        return [
+            'ship_type' => [
+                'shield_regen' => 'DOUBLE NOT NULL DEFAULT 0',
+                'shield_delay' => 'DOUBLE NOT NULL DEFAULT 0',
+            ],
+            'ship' => [
+                'hit_at' => 'DATETIME NULL',
+            ],
+        ];
+    }
+
     public static function migrate(): array
     {
         $made = [];
@@ -374,6 +402,23 @@ final class Schema
             if (!isset($have[strtolower($name)])) {
                 Db::run($ddl);
                 $made[] = $name;
+                $have[strtolower($name)] = true;
+            }
+        }
+        foreach (self::columns() as $table => $cols) {
+            if (!isset($have[strtolower($table)])) {
+                continue;                       // таблица только что создана целиком
+            }
+            $existing = [];
+            foreach (Db::all('SHOW COLUMNS FROM `' . $table . '`') as $c) {
+                $existing[strtolower($c['Field'])] = true;
+            }
+            foreach ($cols as $col => $ddl) {
+                if (isset($existing[strtolower($col)])) {
+                    continue;
+                }
+                Db::run('ALTER TABLE `' . $table . '` ADD COLUMN `' . $col . '` ' . $ddl);
+                $made[] = $table . '.' . $col;
             }
         }
         self::setMeta('schema_version', (string) self::VERSION);

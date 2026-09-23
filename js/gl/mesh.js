@@ -358,6 +358,58 @@ export function buildDynamicMesh(gl, loc, maxVerts) {
 }
 
 /** Квадрат [-1..1]^2 для экранных ореолов. */
+/**
+ * Буфер болтов: переписывается каждый кадр целиком.
+ *
+ * Отдельная вещь, потому что живёт иначе, чем всё остальное в сцене: у
+ * планет и кораблей геометрия постоянна и заливается один раз, а у болтов
+ * её нет вовсе — есть отрезок, который каждый кадр разворачивается к
+ * камере заново. Место под них выделяется сразу на предел: перезаливка
+ * буфера того же размера драйверу привычна, а рост буфера в кадре — нет.
+ */
+export function buildBoltBuffer(gl, locs, maxBolts = 96) {
+  const verts = maxBolts * 6;                 // два треугольника на болт
+  const pos = new Float32Array(verts * 3);
+  const uv = new Float32Array(verts * 2);
+  const col = new Float32Array(verts * 3);
+
+  const dyn = (data) => {
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+    return b;
+  };
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const bPos = dyn(pos), bUv = dyn(uv), bCol = dyn(col);
+  attrib(gl, locs.aPos, bPos, 3);
+  attrib(gl, locs.aUv, bUv, 2);
+  attrib(gl, locs.aColor, bCol, 3);
+  gl.bindVertexArray(null);
+
+  return {
+    max: maxBolts, pos, uv, col, count: 0,
+    upload(n) {
+      this.count = n;
+      if (n <= 0) return;
+      const v = n * 6;
+      gl.bindBuffer(gl.ARRAY_BUFFER, bPos);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos, 0, v * 3);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bUv);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, uv, 0, v * 2);
+      gl.bindBuffer(gl.ARRAY_BUFFER, bCol);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, col, 0, v * 3);
+    },
+    draw() {
+      if (this.count <= 0) return 0;
+      gl.bindVertexArray(vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.count * 6);
+      gl.bindVertexArray(null);
+      return this.count * 2;
+    },
+  };
+}
+
 export function buildQuad(gl, loc) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);

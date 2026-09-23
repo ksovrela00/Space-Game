@@ -161,7 +161,10 @@ function drawShip(ctx, b, game, fs) {
   ];
   if (SHIP.maxShield > 0) {
     const sf = ship.shield / SHIP.maxShield;
-    left.push({ t: 'row', a: 'ЩИТЫ', b: Math.round(ship.shield) + ' %', c: hullColor(sf) });
+    // Щит меряется ЕДИНИЦАМИ, а не процентами: процент от сорока — это
+    // число, из которого не понять, выдержит ли он ещё одно попадание.
+    left.push({ t: 'row', a: 'ЩИТЫ',
+      b: Math.round(ship.shield) + ' / ' + SHIP.maxShield, c: hullColor(sf) });
     left.push({ t: 'bar', frac: sf, c: CY });
   } else {
     // Пустая строка читалась бы как поломка прибора, поэтому «нет щитов»

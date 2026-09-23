@@ -68,6 +68,12 @@ if (Db::one("SELECT COUNT(*) FROM information_schema.tables
     Schema::reset();
     Seeder::all(Seeder::readCatalog(__DIR__ . '/../data/catalog.json'), true);
 }
+// Каталог в проверочной базе может быть старше кода: оружие завелось
+// позже самой базы, и без него проверять бой нечем.
+if ((int) Db::one("SELECT COUNT(*) FROM `equipment_type` WHERE `slot`='gun'") === 0) {
+    Seeder::all(Seeder::readCatalog(__DIR__ . '/../data/catalog.json'), true);
+}
+
 Db::run('DELETE FROM `player`');
 
 $a = Auth::register('alfa', 'secret', 'АЛЬФА');
@@ -176,6 +182,118 @@ $hub->tick($t + 0.002);
 $listA = $ca->last('peers')['list'] ?? [];
 ok(count($listA) === 1 && abs($listA[0]['x'] - 10) < 1e-9,
     'слишком частые обновления отбрасываются: x = ' . ($listA[0]['x'] ?? '—'));
+
+// --- бой ----------------------------------------------------------------------
+//
+// Что сервер может проверить, а что нет, расписано в Combat. Здесь
+// проверяется ровно то, что он взялся проверять: оружие на борту,
+// дальность, темп и сам урон. Физики болта на сервере нет, и делать вид,
+// что она есть, эти проверки не пытаются.
+
+// Ставим обоих рядом: в километре друг от друга и в одной системе.
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 0, 'y' => 0, 'z' => 0]), $t);
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0]), $t);
+$hub->tick($t);
+
+// Выстрел — это картинка: он доходит до соседа как есть.
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'shot', 'w' => 'laser_g',
+    'x' => 0, 'y' => 0, 'z' => 0, 'dx' => 1, 'dy' => 0, 'dz' => 0]), $t);
+$shot = $cb->last('shot');
+ok($shot !== null && $shot['by'] === $a['player_id'] && abs($shot['dx'] - 1) < 1e-9,
+    'выстрел виден соседу: от кого и куда');
+
+$hullOf = static function (int $playerId): float {
+    return (float) Db::one('SELECT `hull` FROM `ship` WHERE `owner_id`=?', [$playerId]);
+};
+$shieldOf = static function (int $playerId): float {
+    $row = Db::row('SELECT s.`shield`, s.`hit_at`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`
+                    FROM `ship` s JOIN `ship_type` t ON t.`id`=s.`type_id` WHERE s.`owner_id`=?',
+        [$playerId]);
+    return Combat::shieldNow($row);
+};
+$before = $hullOf($b['player_id']);
+
+// Первым принимает ЩИТ, и корпус при этом цел. В этом весь его смысл:
+// щит отрастает сам, а корпус чинят за деньги.
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hurt = $cb->last('hurt');
+$okShot = $ca->last('hitok');
+ok(abs($hullOf($b['player_id']) - $before) < 1e-9 && $shieldOf($b['player_id']) < 40,
+    'первым урон принимает щит, корпус цел: щит ' . $shieldOf($b['player_id']));
+ok($hurt !== null && $hurt['by'] === $a['player_id'] && $hurt['absorbed'] > 0,
+    'жертва знает, сколько принял щит: ' . ($hurt['absorbed'] ?? '—'));
+ok($okShot !== null && $okShot['id'] === $b['player_id']
+    && abs($okShot['shield'] - $hurt['shield']) < 1e-9,
+    'обе стороны видят одно и то же число щита');
+
+// Щит пробит — дальше идёт корпус.
+Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$after = $hullOf($b['player_id']);
+ok($after < $before, 'по пробитому щиту попадание снимает корпус: '
+    . $before . ' -> ' . $after);
+ok(abs(($cb->last('hurt')['hull'] ?? -1) - $after) < 1e-9,
+    'жертва узнаёт свой корпус от сервера, а не считает его сама');
+
+// Щит отрастает сам — без всякого фонового пересчёта: он считается от
+// времени последнего попадания в тот момент, когда его спросили.
+Db::update('ship', ['shield' => 0, 'hit_at' => Db::at(-600)], '`owner_id`=?', [$b['player_id']]);
+ok(abs($shieldOf($b['player_id']) - 40) < 1e-9,
+    'через десять минут тишины щит полон: ' . $shieldOf($b['player_id']));
+Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
+ok($shieldOf($b['player_id']) < 1e-9, 'а сразу после попадания — нет');
+
+// Темп: второе попадание в тот же миг не проходит. Иначе клиент с
+// подкрученным циклом снимал бы корпус пачками.
+$mid = $hullOf($b['player_id']);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+ok(abs($hullOf($b['player_id']) - $mid) < 1e-9, 'попадания чаще оружейного темпа не принимаются');
+
+// Дальность: за её пределом попадания нет вовсе.
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 50, 'y' => 0, 'z' => 0]), $t);
+$hub->tick($t);
+$far = $hullOf($b['player_id']);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+ok(abs($hullOf($b['player_id']) - $far) < 1e-9, 'за 50 км лазером не достать');
+
+// Оружия нет на борту — попадание отвергается словами, а не молча.
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0]), $t);
+$hub->tick($t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'missile']), $t);
+ok(($ca->last('error')['code'] ?? '') === 'no_gun', 'оружием, которого нет на борту, не попасть');
+
+// Гибель: корпус в ноль, и пилот сразу возвращается в строй — в порт, из
+// которого уходил. Экрана гибели у сервера нет и быть не может.
+Db::update('ship', ['hull' => 2, 'shield' => 0, 'hit_at' => Db::now()],
+    '`owner_id`=?', [$b['player_id']]);
+Db::update('player', ['last_station' => 4, 'docked_body' => null], '`id`=?', [$b['player_id']]);
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$dead = $cb->last('hurt');
+$row = Db::row('SELECT p.`docked_body`, s.`hull`, t.`hull_max`, p.`crashes`
+                FROM `player` p JOIN `ship` s ON s.`owner_id`=p.`id`
+                JOIN `ship_type` t ON t.`id`=s.`type_id` WHERE p.`id`=?', [$b['player_id']]);
+ok($dead !== null && $dead['dead'] === true, 'о гибели сказано прямо');
+ok((int) $row['docked_body'] === 4 && abs((float) $row['hull'] - (float) $row['hull_max']) < 1e-9,
+    'после гибели корабль целый и стоит в своём порту');
+ok((int) $row['crashes'] > 0, 'гибель посчитана в статистике пилота');
+ok(abs($shieldOf($b['player_id']) - 40) < 1e-9, 'и щит после гибели тоже целый');
+
+// Корпус и щит соседа идут в каждом снимке: у его метки они и рисуются.
+$t += 1;
+$hub->tick($t);
+$seenPeer = ($ca->last('peers')['list'] ?? [])[0] ?? [];
+ok(isset($seenPeer['hull'], $seenPeer['hmax'], $seenPeer['sh'], $seenPeer['smax'])
+    && $seenPeer['hmax'] > 0 && $seenPeer['smax'] > 0,
+    'в снимке у соседа есть корпус и щит: '
+    . ($seenPeer['hull'] ?? '—') . '/' . ($seenPeer['hmax'] ?? '—') . ' и '
+    . ($seenPeer['sh'] ?? '—') . '/' . ($seenPeer['smax'] ?? '—'));
 
 // --- уход ---------------------------------------------------------------------
 

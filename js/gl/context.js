@@ -56,6 +56,34 @@ export function createContext(canvas, aa = wantAa()) {
   return gl;
 }
 
+/**
+ * Что это за видеокарта на самом деле.
+ *
+ * Контекст создаётся с powerPreference: 'high-performance', но это
+ * ПРОСЬБА, а не приказ: выбирает всё равно система. На машине с двумя
+ * картами браузер спокойно уходит на встроенную, и игра идёт вдвое
+ * медленнее без единой ошибки в консоли — «просто тормозит». Разобрать
+ * это по одному названию карты нельзя никак иначе, поэтому названия
+ * разбираются здесь, а игра говорит о находке вслух.
+ *
+ * @returns 'discrete' | 'integrated' | 'software' | 'unknown'
+ */
+export function gpuKind(name) {
+  const s = String(name || '').toLowerCase();
+  if (!s || s === 'неизвестно') return 'unknown';
+  // Программный рендер: карты нет вовсе, кадры считает процессор.
+  if (/swiftshader|llvmpipe|softpipe|basic render|microsoft basic|software/.test(s)) {
+    return 'software';
+  }
+  // Apple — встроенная, но быстрая: предупреждать не о чем.
+  if (/apple (m|gpu)/.test(s)) return 'discrete';
+  if (/geforce|rtx|gtx|quadro|radeon (rx|pro)|arc a\d|nvidia/.test(s)) return 'discrete';
+  if (/intel|uhd|hd graphics|iris|vega|radeon\(tm\) graphics|radeon graphics/.test(s)) {
+    return 'integrated';
+  }
+  return 'unknown';
+}
+
 // Название видеокарты — полезно, когда fps окажется неожиданным.
 export function rendererName(gl) {
   try {

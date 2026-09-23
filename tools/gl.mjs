@@ -1974,9 +1974,9 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 14,
+  ok(state.programs === 16,
     `собрано программ: ${state.programs} (меш, звёзды, небо, запекание неба, полосы, тоннель, варп-тоннель, ` +
-    'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности)');
+    'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности, болты, щит)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -2044,6 +2044,52 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(withFar === base, `пилот за 5000 км не рисуется вовсе: ${withFar} вызовов`);
 
     game.peers = [];
+
+    // Болт в кадре: своя программа, свой вызов. Ставим его в стороне от
+    // оси взгляда намеренно — болт, летящий точно на камеру, вырождается
+    // в точку, и разворачивать его не по чему (см. drawBolts).
+    const f = ship.basis.fwd, r = ship.basis.right;
+    const boltBase = settle();
+    game.guns = {
+      bolts: [{
+        x: ship.pos.x + f.x + r.x * 0.3,
+        y: ship.pos.y + f.y + r.y * 0.3,
+        z: ship.pos.z + f.z + r.z * 0.3,
+        dx: f.x, dy: f.y, dz: f.z, len: 0.05, color: [1, 0.3, 0.2],
+      }],
+    };
+    const withBolt = frame();
+    ok(withBolt === boltBase + 1,
+      `болт лазера рисуется: ${boltBase} вызовов без него, ${withBolt} с ним`);
+
+    // Вспышка попадания — ореолом, тем же, что корона звезды и факелы.
+    game.guns = {
+      bolts: [],
+      blasts: [{
+        x: ship.pos.x + f.x, y: ship.pos.y + f.y, z: ship.pos.z + f.z,
+        age: 0, life: 0.35, color: [1, 0.5, 0.2], size: 1,
+      }],
+    };
+    const withBlast = frame();
+    ok(withBlast === boltBase + 1,
+      `вспышка попадания рисуется: ${withBlast} вызовов против ${boltBase}`);
+
+    // Оболочка щита: появляется в момент удара и гаснет сама. Пока она
+    // горит — лишний вызов, когда погасла — ни одного.
+    game.guns = {
+      bolts: [], blasts: [],
+      shields: [{ id: 0, own: true, age: 0, life: 0.45, dx: 0, dy: 0, dz: 1 }],
+    };
+    const withShield = frame();
+    game.guns.shields[0].age = 0.44;          // почти погасла
+    const fading = frame();
+    game.guns.shields = [];
+    const noShield = frame();
+    ok(withShield === boltBase + 1 && noShield === boltBase,
+      `оболочка щита рисуется, пока горит: ${withShield} против ${noShield}`);
+    ok(fading === boltBase,
+      'почти погасшая оболочка вызовов уже не тратит');
+    game.guns = null;
   }
 
   // Небо (js/gl/nebula.js): шесть граней кубической карты, по одной за

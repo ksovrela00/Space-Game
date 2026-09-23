@@ -4,6 +4,7 @@
 
 const calls = {};
 let texts = null;        // включается на время проверки вёрстки
+let rects = null;        // то же для полосок: у них нет текста
 // Выравнивание и шрифт на момент вызова. Без них координата fillText
 // бессмысленна: при textAlign='right' это ПРАВЫЙ край строки, и проверка
 // вёрстки считала бы, что надпись уехала вправо на свою длину.
@@ -41,6 +42,12 @@ const ctx = new Proxy({}, {
         // приборов (см. проверку панели подхода).
         if (prop === 'fillText' && texts) {
           texts.push({ s: String(a[0]), x: a[1], y: a[2], align: style.align, font: style.font });
+        }
+        // Прямоугольники — тем же способом и по той же причине: полоски
+        // корпуса и щита никакого текста не рисуют, и проверить их можно
+        // только по координатам.
+        if (prop === 'fillRect' && rects) {
+          rects.push({ x: a[0], y: a[1], w: a[2], h: a[3], fill: style.fill });
         }
         count(prop);
       };
@@ -750,7 +757,10 @@ await step('меню пилота (I): разделы, живой мир, мёр
   // 1. КОРАБЛЬ: имя из модели, габариты из модели, щиты и бак.
   const shipTab = seen();
   need(shipTab, 'МЕНЮ ПИЛОТА', 'CHALLENGER', 'ГАБАРИТЫ', 'ДЛИНА', '65.0 м',
-    'УСТАНОВЛЕННЫЕ МОДУЛИ', 'КВАНТОВЫЙ ПРИВОД', 'НЕ УСТАНОВЛЕНЫ', 'ТОПЛИВО',
+    // «ГНЕЗДО СВОБОДНО» — на месте невыставленного оружия. Проверка та
+    // же, что и раньше: пустых строк в карточке не бывает, отсутствие
+    // модуля написано словами.
+    'УСТАНОВЛЕННЫЕ МОДУЛИ', 'КВАНТОВЫЙ ПРИВОД', 'ГНЕЗДО СВОБОДНО', 'ЩИТЫ', 'ТОПЛИВО',
     'КОРАБЛЬ В ПОЛЁТЕ');
   if (has(shipTab, 'ЗАНЯТО') || has(shipTab, 'НАЧАЛЬНЫЙ КАПИТАЛ')) {
     throw new Error('на вкладке корабля видно чужой раздел');
@@ -922,6 +932,231 @@ await step('чужие пилоты: число, отметка и метка с
 
   net.peers = [];
   net.rev++;
+  frames(2);
+});
+
+// Связь в углу. Прибор нужен именно тогда, когда всё плохо, — а значит,
+// проверять его надо во всех состояниях, включая те, до которых в игре
+// руками не дойдёшь: оборванный сокет и потери пакетов.
+await step('связь: пинг и качество в углу — всегда', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+
+  const seen = (view) => {
+    if (game.state.view !== view) { key('KeyV'); frames(2); }
+    texts = [];
+    frames(2);
+    const list = texts.map((t) => t.s);
+    texts = null;
+    return list;
+  };
+
+  // Живая связь: полоски и пинг.
+  const live = () => {
+    const t = performance.now() / 1000;
+    net.state = 'live';
+    net.ping = 42;
+    net.tick = 0.2;
+    net.beats = [];
+    for (let i = 0; i < 20; i++) net.beats.push(t - 4 + i * 0.2);
+  };
+
+  live();
+  const chase = seen('chase');
+  if (!chase.some((s) => s.indexOf('42 мс') >= 0)) {
+    throw new Error('от третьего лица пинга в углу нет');
+  }
+  live();
+  const cockpit = seen('cockpit');
+  if (!cockpit.some((s) => s.indexOf('42 мс') >= 0)) {
+    throw new Error('в кабине пинга в углу нет');
+  }
+
+  // Потери: их показывают только когда они есть — постоянный «0%» глаз
+  // перестаёт читать через минуту.
+  if (chase.some((s) => s.indexOf('ПОТЕРИ') >= 0)) {
+    throw new Error('на чистой связи показаны потери');
+  }
+  const t = performance.now() / 1000;
+  net.beats = [];
+  for (let i = 0; i < 10; i++) net.beats.push(t - 4 + i * 0.4);   // половина
+  const lossy = seen('chase');
+  if (!lossy.some((s) => s.indexOf('ПОТЕРИ') >= 0)) {
+    throw new Error('потери снимков в углу не показаны');
+  }
+
+  // Оборвалось: прибор обязан сказать об этом словами, а не молча
+  // погасить полоски. Ради этого он и висит постоянно.
+  net.state = 'down';
+  net.ping = null;
+  net.beats = [];
+  const down = seen('chase');
+  if (!down.some((s) => s.indexOf('ОБОРВАНА') >= 0)) {
+    throw new Error('об оборванной связи в углу не сказано');
+  }
+  if (down.some((s) => s.indexOf('42 мс') >= 0)) {
+    throw new Error('после обрыва показан старый пинг');
+  }
+
+  net.state = 'off';
+  net.rev++;
+  frames(2);
+});
+
+// Бой: выбор чужого корабля целью и огонь левой кнопкой. Проверяется
+// связка, которой нет ни в одном другом наборе: список целей, ввод,
+// кардан и болты собираются вместе только здесь.
+await step('цель по Tab и огонь левой кнопкой', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+
+  // Чужой корабль — в километре прямо по курсу.
+  const put = (side = 0, d = 1) => {
+    const p = game.ship.pos, f = game.ship.basis.fwd, r = game.ship.basis.right;
+    const u = game.ship.basis.up;
+    net.peers = [{
+      id: 42, name: 'МИШЕНЬ', v: 0, mode: 'flight',
+      x: p.x + f.x * d + r.x * side, y: p.y + f.y * d + r.y * side,
+      z: p.z + f.z * d + r.z * side,
+      fx: f.x, fy: f.y, fz: f.z, ux: u.x, uy: u.y, uz: u.z,
+      hull: 100, hmax: 100, sh: 40, smax: 40,
+    }];
+    net.rev++;
+  };
+  put();
+  frames(2);
+
+  // Tab берёт пилота целью — той же клавишей, что и станции.
+  key('Tab');
+  frames(2);
+  const target = game.nav.list[game.nav.index];
+  if (!target || !target.isPeer) {
+    throw new Error('Tab не выбрал чужой корабль: ' + (target ? target.name : '—'));
+  }
+
+  // Левая кнопка — огонь. Удержание: очередь задаёт перезарядка.
+  game.guns.bolts.length = 0;
+  mouse('mousedown', { button: 0 });
+  frames(3);
+  if (!game.guns.bolts.length) throw new Error('левая кнопка не стреляет');
+  const one = game.guns.bolts.length;
+  frames(3);
+  if (game.guns.bolts.length > one + 1) {
+    throw new Error('очередь идёт чаще перезарядки: ' + game.guns.bolts.length);
+  }
+  mouse('mouseup', { button: 0 });
+
+  // Кардан ведёт ствол к цели, а не по носу: ставим её сбоку и смотрим,
+  // куда уходит болт.
+  put(0.12);                                  // ~7° в сторону
+  frames(2);
+  game.guns.bolts.length = 0;
+  mouse('mousedown', { button: 0 });
+  // Ждём перезарядку целиком: на трёх выстрелах в секунду это два десятка
+  // кадров, и без них проверка ловила бы не кардан, а пустую пушку.
+  frames(30);
+  mouse('mouseup', { button: 0 });
+  const b = game.guns.bolts[0];
+  if (!b) throw new Error('по цели сбоку не выстрелили');
+  const f = game.ship.basis.fwd;
+  const along = b.dx * f.x + b.dy * f.y + b.dz * f.z;
+  if (!(along < 0.9999)) throw new Error('кардан не довернул: болт ушёл строго по носу');
+  if (!(along > 0.9)) throw new Error('кардан развернуло слишком сильно: ' + along.toFixed(4));
+
+  // Болт долетает и гаснет о корпус, а щит на миг проявляется. Цель
+  // ставим близко намеренно: на километре полёт занимает треть секунды,
+  // и эти лишние кадры сдвигают весь дальнейший сценарий — на этом
+  // падали посадочные шаги.
+  put(0, 0.25);
+  frames(2);
+  game.guns.bolts.length = 0;
+  game.guns.shields.length = 0;
+  const hits0 = game.guns.hits;
+  mouse('mousedown', { button: 0 });
+  frames(10);
+  mouse('mouseup', { button: 0 });
+  if (game.guns.hits <= hits0) throw new Error('болт не долетел до цели в 250 метрах');
+  if (!game.guns.shields.length) throw new Error('щит цели не проявился от попадания');
+  if (!game.guns.blasts.length) throw new Error('вспышки в точке попадания нет');
+
+  // Корпус и щит соседа — полосками над его квадратом. Ни одной буквы
+  // они не рисуют, поэтому ищем их по координатам: две узкие плашки над
+  // меткой, одна под другой.
+  put();
+  net.peers[0].hull = 60;
+  net.peers[0].sh = 20;
+  net.rev++;
+  texts = [];
+  rects = [];
+  frames(2);
+  const label = texts.find((t) => t.s.indexOf('МИШЕНЬ') >= 0);
+  // Ширину требуем близкой к полоске: отметки сканера — тоже мелкие
+  // прямоугольники, и без этого они проходили бы за полоски корпуса.
+  const bars = rects.filter((r) => r.w >= 20 && r.w <= 34 && r.h > 0 && r.h <= 6
+    && label && Math.abs(r.x + r.w / 2 - label.x) < 60 && r.y < label.y);
+  texts = null;
+  rects = null;
+  if (!label) throw new Error('метки пилота нет вовсе');
+  // Две полоски и две подложки под ними.
+  if (bars.length < 4) {
+    throw new Error('над меткой нет полосок корпуса и щита: ' + bars.length);
+  }
+
+  net.peers = [];
+  net.rev++;
+  game.guns.bolts.length = 0;
+  frames(2);
+});
+
+// Прыжок к чужому кораблю: пилот — такая же точка назначения, как
+// станция. И такая же ненадёжная: он может уйти из системы посреди
+// калибровки, и привод обязан это заметить.
+await step('квантовый прыжок к пилоту и срыв, когда тот пропал', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+
+  // Ставим пилота далеко — прыжок имеет смысл только на дистанции.
+  const p = game.ship.pos, f = game.ship.basis.fwd, u = game.ship.basis.up;
+  const put = () => {
+    net.peers = [{
+      id: 77, name: 'ДАЛЬНИЙ', v: 0, mode: 'flight',
+      x: p.x + f.x * 4000, y: p.y + f.y * 4000, z: p.z + f.z * 4000,
+      fx: f.x, fy: f.y, fz: f.z, ux: u.x, uy: u.y, uz: u.z,
+      hull: 100, hmax: 100, sh: 40, smax: 40,
+    }];
+    net.rev++;
+  };
+  put();
+  frames(2);
+
+  key('Tab'); frames(2);
+  const t = game.nav.list[game.nav.index];
+  if (!t || !t.isPeer) throw new Error('пилот не выбран целью: ' + (t ? t.name : '—'));
+
+  // Выход считается за двадцать километров от него — не в упор.
+  const ex = exitPoint(t, game.ship.pos);
+  const gap = Math.hypot(ex.x - t.pos.x, ex.y - t.pos.y, ex.z - t.pos.z);
+  if (Math.abs(gap - 20) > 0.01) throw new Error('выход не в 20 км, а в ' + gap.toFixed(1));
+
+  aimAt(t);
+  key('KeyB'); frames(4);
+  if (game.quantum.phase === 'idle') {
+    throw new Error('привод не взял пилота целью: ' + (game.quantum.reason || '—'));
+  }
+  if (!game.quantum.target || !game.quantum.target.isPeer) {
+    throw new Error('привод целится не в пилота');
+  }
+
+  // Пилот вышел из игры — прыжок обязан сорваться, а не идти к призраку.
+  // Сообщение об уходе приходит отдельно от снимка (так делает сокет), и
+  // именно по нему пилот пропадает сразу: пустого снимка мало, его можно
+  // и не дождаться при потере пакета.
+  net.peers = [];
+  net.left = 77;
+  net.rev++;
+  frames(3);
+  if (game.quantum.phase !== 'idle') {
+    throw new Error('цель пропала, а привод продолжает: ' + game.quantum.phase);
+  }
+
   frames(2);
 });
 

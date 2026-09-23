@@ -107,6 +107,8 @@ const catalog = {
     quantumSpeed: SHIP.quantumSpeed,
     boostMax: SHIP.boostMax,
     boostBurn: SHIP.boostBurn,
+    shieldRegen: SHIP.shieldRegen,
+    shieldDelay: SHIP.shieldDelay,
     // Габариты — из самой модели корпуса, метры.
     lengthM: num(HULL_SIZE.z * 1000, 1),
     widthM: num(HULL_SIZE.x * 1000, 1),

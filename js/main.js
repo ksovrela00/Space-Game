@@ -10,7 +10,7 @@ import { Camera } from './render/camera.js';
 import { Starfield } from './render/starfield.js';
 import { drawBody } from './render/planetview.js';
 import { GlScene } from './gl/scene.js';
-import { buildCobra, buildGear } from './models/ships.js';
+import { buildCobra, buildGear, GUN_PORTS } from './models/ships.js';
 import { buildStation, STATION_D } from './models/station.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { homeSystem, systemById } from './game/galaxy.js';
@@ -20,6 +20,7 @@ import {
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
 import {
   makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById,
+  targetLabel,
 } from './game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum,
@@ -62,10 +63,15 @@ import {
   session, start as sessionStart, queueSave, flushOnExit,
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
 } from './net/session.js';
-import { net, connect as netConnect } from './net/socket.js';
+import { net, connect as netConnect, shoot, reportHit } from './net/socket.js';
+import { linkState } from './net/quality.js';
 import { makePeers, ingestPeers, peerPoses, dropPeer } from './game/peers.js';
+import {
+  makeGuns, updateGuns, fireGuns, addForeignBolt, aimDir, shieldFlash, hasShieldFlash,
+} from './game/weapons.js';
 import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
+import { gpuKind } from './gl/context.js';
 
 const STEP = 1 / 60;
 // v2 — после того, как в систему добавили три планеты. Сохранение хранит
@@ -166,6 +172,9 @@ const game = {
   lastStation: null,
   port: null,             // свойства порта с сервера: сбор, услуги, ставка ремонта
   peers: [],              // чужие корабли в этой системе (сокет)
+  guns: makeGuns(),       // стволы, болты и перезарядка (js/game/weapons.js)
+  targetHull: null,       // корпус цели: приходит от сервера при попадании
+  hurt: 0,                // сколько ещё мигать после попадания В НАС, с
   landHold: 0,           // сколько уже держат клавишу взлёта на грунте
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
   restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
@@ -562,7 +571,7 @@ game.selectTarget = (t) => selectTarget(t);
 
 function selectTarget(t) {
   if (!t) return;
-  refreshNav(game.nav, world, ship);
+  refreshNav(game.nav, world, ship, game.peers);
   let i = game.nav.list.indexOf(t);
   if (i < 0 && t.isMarker) i = game.nav.list.indexOf(t.body);
   if (i >= 0) game.nav.index = i;
@@ -588,10 +597,14 @@ function savePayload() {
     pos: ship.pos,
     basis: ship.basis,
     hull: ship.hull,
+    shield: ship.shield,
     // Цель хранится идентификатором, а не номером в списке: список
     // теперь меняется на ходу (у ближнего тела появляются маркеры), и
     // номер после загрузки указывал бы в произвольное место.
-    target: currentTarget(game.nav) ? currentTarget(game.nav).id : null,
+    // Пилот целью НЕ сохраняется: его id — это номер игрока, а в сейве
+    // тем же полем хранится номер тела. Записав одно вместо другого, при
+    // следующем входе получим цель «планета номер семь».
+    target: savedTargetId(),
     view: game.state.view,
     docked: ship.dockedAt ? ship.dockedAt.id : null,
     last: game.lastStation ? game.lastStation.id : null,
@@ -654,6 +667,7 @@ function applyState(s) {
   selectTarget(targetById(world, s.target));
   game.state.view = s.view || 'cockpit';
   ship.hull = s.hull || SHIP.maxHull;
+  ship.shield = typeof s.shield === 'number' ? s.shield : SHIP.maxShield;
   game.lastStation = findStation(s.last);
   ship.gear.out = !!s.gear;
   ship.gear.t = s.gear ? 1 : 0;
@@ -710,6 +724,7 @@ function serverToSave(st) {
     pos: pos.pos,
     basis: pos.basis,
     hull: sh.hull,
+    shield: sh.shield,
     fuel: sh.fuelT,
     target: pos.targetBody === undefined ? null : pos.targetBody,
     view: pos.view,
@@ -727,6 +742,139 @@ function serverToSave(st) {
     // Звук — настройка браузера, а не игрока: он остаётся местным.
     audio: null,
   };
+}
+
+/**
+ * Название карты в человеческий вид.
+ *
+ * Браузер отдаёт его строкой вроде «ANGLE (Intel, Intel(R) UHD Graphics
+ * 630 Direct3D11 vs_5_0 ps_5_0, D3D11)» — в сообщении посреди полёта от
+ * неё нужен только сам чип.
+ */
+function shortGpu(name) {
+  const m = String(name).match(/\(([^,()]+),\s*([^,()]+)/);
+  const s = (m ? m[2] : String(name)).replace(/direct3d.*$/i, '').replace(/\(r\)|\(tm\)/gi, '');
+  return s.trim().slice(0, 40).toUpperCase();
+}
+
+/** Что из выбранного вообще можно записать в сейв. */
+function savedTargetId() {
+  const t = currentTarget(game.nav);
+  return t && !t.isPeer && typeof t.id === 'number' ? t.id : null;
+}
+
+// --- бой ---------------------------------------------------------------------
+
+const _fired = [];
+const _ships = [];
+
+/**
+ * Кто в этой системе может остановить болт.
+ *
+ * Свой корабль в списке ОБЯЗАТЕЛЬНО: чужие болты должны гаснуть о нашу
+ * обшивку, а не пролетать сквозь неё. Урон от них при этом всё равно
+ * считает сервер — здесь только картинка.
+ */
+function combatShips() {
+  _ships.length = 0;
+  _ships.push({ id: net.you ? net.you.id : 0, pos: ship.pos, own: true });
+  for (const p of game.peers) _ships.push(p);
+  return _ships;
+}
+
+/**
+ * Кого ведёт кардан.
+ *
+ * Сначала выбранная цель, потом то, на что наведён нос: в бою цель
+ * теряется чаще, чем успеваешь нажать Tab, и требовать выбора ради
+ * каждого выстрела значит требовать лишнего.
+ */
+function gunTarget() {
+  const cur = currentTarget(game.nav);
+  if (cur && cur.isPeer) return cur;
+  if (game.aimed && game.aimed.isPeer) return game.aimed;
+  return null;
+}
+
+function fireNow() {
+  const fired = fireGuns(game.guns, ship, gunTarget(), GUN_PORTS, _fired);
+  if (!fired.length) return;
+  const b = fired[0];
+  // Чужие увидят выстрел только если мы о нём скажем: сервер пересылает
+  // его как картинку, урон идёт отдельным путём (reportHit).
+  if (isOnline()) {
+    shoot(game.guns.spec.code, { x: b.x, y: b.y, z: b.z }, { x: b.dx, y: b.dy, z: b.dz });
+  }
+}
+
+/** Что пришло по сокету из боя. */
+function applyNetEvent(ev) {
+  if (ev.t === 'shot') {
+    addForeignBolt(game.guns, ev);
+    return;
+  }
+  if (ev.t === 'hurt') {
+    // Корпус и щит берём СЕРВЕРНЫЕ, а не вычитаем свои: считать урон
+    // дважды — верный способ получить два разных корпуса у двух людей.
+    if (typeof ev.hull === 'number') ship.hull = ev.hull;
+    if (typeof ev.shield === 'number') ship.shield = ev.shield;
+    game.hurt = 0.4;
+    game.sinceHit = 0;
+    // Щит не виден вовсе — кроме этого мига. Вспышка у обшивки и есть
+    // весь его вид: постоянное свечение вокруг корабля превратило бы бой
+    // в дискотеку.
+    if (ev.absorbed > 0 && !hasShieldFlash(game.guns, 0, true)) {
+      // Стрелявший далеко, и его болт мог разойтись с нашим кадром.
+      // Тогда бьём оболочку со стороны стрелка — это ближе к правде, чем
+      // не показать её вовсе.
+      const from = game.peers.find((p) => p.id === ev.by) || null;
+      const at = from ? from.pos : { x: ship.pos.x, y: ship.pos.y, z: ship.pos.z + 1 };
+      shieldFlash(game.guns, 0, true, at, ship.pos, ship.basis);
+    }
+    audioCue(game.audio, 'hit', { damage: Math.min(1, (ev.dmg || 1) / 12) });
+    say(game.state, ev.absorbed > 0
+      ? 'ЩИТ ДЕРЖИТ · ' + Math.round(ship.shield)
+      : 'ПОПАДАНИЕ · КОРПУС ' + Math.round(ship.hull) + '%', '#ff7a66', 2);
+    if (ev.dead) killedInAction(ev.name || 'ПИЛОТ');
+    return;
+  }
+  if (ev.t === 'hitok') {
+    game.targetHull = {
+      id: ev.id, hull: ev.hull, max: ev.max,
+      shield: ev.shield, smax: ev.smax, at: performance.now() / 1000,
+    };
+    // Щит цели тоже виден только вспышкой — на её борту.
+    const t = game.peers.find((p) => p.id === ev.id);
+    if (t && ev.absorbed > 0 && !hasShieldFlash(game.guns, ev.id, false)) {
+      shieldFlash(game.guns, ev.id, false, ship.pos, t.pos, t.basis);
+    }
+    if (ev.dead) say(game.state, 'ЦЕЛЬ УНИЧТОЖЕНА', '#78e08f', 4);
+    return;
+  }
+  if (ev.t === 'boom') {
+    say(game.state, 'ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ', '#ffcc66', 3);
+  }
+}
+
+/**
+ * Нас сбили.
+ *
+ * Экрана гибели здесь нет намеренно: сервер уже вернул корабль в порт
+ * целым (Combat::respawn), и состояние надо просто забрать. Местный
+ * «начать заново» здесь не годится вовсе — он завёл бы нового пилота с
+ * демо-деньгами и затёр бы им серверного.
+ */
+async function killedInAction(by) {
+  game.guns.bolts.length = 0;
+  audioCue(game.audio, 'crash');
+  say(game.state, 'КОРАБЛЬ УНИЧТОЖЕН · ' + by, '#ff7a66', 6);
+  const st = await serverRefresh();
+  if (!st) { crash('Корабль уничтожен в бою.'); return; }
+  applyState(serverToSave(st));
+  applyServer(game.player, st);
+  save();
+  if (game.state.mode === ST.DOCKED) showDocked(game);
+  say(game.state, 'КОРАБЛЬ ВОССТАНОВЛЕН В ПОРТУ', '#ffcc66', 6);
 }
 
 // --- глобальные клавиши ------------------------------------------------------
@@ -850,7 +998,7 @@ function handleKeys(dt) {
   if (input.pressed('Tab')) {
     const t = pickTarget(game.nav, ship);
     if (!t) { say(st, 'НАВЕДИ НОС НА ЦЕЛЬ', '#ffcc66'); return; }
-    say(st, 'ЦЕЛЬ: ' + t.name);
+    say(st, 'ЦЕЛЬ: ' + targetLabel(t));
     // Смена цели на калибровке — это выбор другого маршрута, а не отказ
     // от прыжка: привод просто начинает считать заново.
     const q = game.quantum;
@@ -860,6 +1008,11 @@ function handleKeys(dt) {
       say(st, 'ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА', '#ff7a66');
     }
   }
+
+  // Левая кнопка мыши — огонь. Карданное оружие само доворачивает ствол
+  // к выбранному пилоту; цели нет — бьёт по оси корабля. Удержание, а не
+  // нажатие: очередь задаёт перезарядка, а не скорость пальца.
+  if (input.mouse.left && st.mode === ST.FLIGHT) fireNow();
 
   // B — квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
   if (input.pressed('KeyB')) {
@@ -996,6 +1149,36 @@ function step(dt) {
   // Часы пилота идут в любом режиме: срок задания не останавливается
   // оттого, что корабль стоит в порту.
   updatePlayer(game.player, dt);
+
+  // Болты летят и ищут цель. Попадание находит СТРЕЛЯВШИЙ — у него на
+  // экране и болт, и цель в одном времени, — но урон применяет сервер
+  // (server/src/Combat.php), и корпус мы узнаём от него.
+  const hits = updateGuns(game.guns, dt, combatShips());
+  for (const h of hits) {
+    if (isOnline()) reportHit(h.id, game.guns.spec.code);
+  }
+  // Щит показывается СРАЗУ по удару, не дожидаясь ответа сервера: ответ
+  // идёт полпинга, а оболочка должна вспыхнуть там же, где болт погас.
+  // Числа корпуса и щита потом всё равно придут серверные.
+  for (const h of game.guns.impacts) {
+    const charged = h.own
+      ? ship.shield > 0
+      : (game.peers.find((p) => p.id === h.id) || { shield: 0 }).shield > 0;
+    if (!charged) continue;
+    const hit = h.own ? ship : game.peers.find((p) => p.id === h.id);
+    if (hit) shieldFlash(game.guns, h.id, h.own, h, hit.pos, hit.basis);
+  }
+  if (game.hurt > 0) game.hurt = Math.max(0, game.hurt - dt);
+
+  // Щит отрастает сам — и здесь он отрастает ТОЛЬКО ДЛЯ ВИДА, по тем же
+  // числам, по которым его считает сервер (js/game/ship.js -> каталог).
+  // Настоящее значение приходит с каждым попаданием, и оно главнее.
+  if (ship.shield < SHIP.maxShield) {
+    game.sinceHit = (game.sinceHit || 0) + dt;
+    if (game.sinceHit > SHIP.shieldDelay) {
+      ship.shield = Math.min(SHIP.maxShield, ship.shield + SHIP.shieldRegen * dt);
+    }
+  }
 
   // Гравитационный захват: внутри сферы действия тела корабль
   // переносится вместе с ним (см. js/game/gravity.js). Без этого
@@ -1183,13 +1366,20 @@ function step(dt) {
 
 function prepareHud() {
   // Список целей пересобирается каждый кадр: маркеры показываются только
-  // у того тела, рядом с которым корабль сейчас находится.
-  refreshNav(game.nav, world, ship);
+  // у того тела, рядом с которым корабль сейчас находится, а чужие
+  // корабли появляются и исчезают сами.
+  refreshNav(game.nav, world, ship, game.peers);
   const target = currentTarget(game.nav);
   game.info = navInfo(ship, target);
   // На что наведён нос прямо сейчас: приборы подсвечивают это, и то же
   // самое выберет Tab.
   game.aimed = aimedTarget(game.nav, ship);
+
+  // Куда смотрит ствол — считаем КАЖДЫЙ кадр, а не при выстреле: прицел
+  // должен показывать упреждение до того, как нажали огонь, иначе по нему
+  // нечего проверять.
+  game.gunTarget = gunTarget();
+  aimDir(game.guns, ship, game.gunTarget, game.guns.aim);
 
   // Блипы сканера: станции, планеты, луны.
   game.scanBlips.length = 0;
@@ -1655,7 +1845,28 @@ function frame(now) {
       clockFromServer(worldClock, net.wt, tNow);
     }
     game.peers = peerPoses(peerStore, tNow, game.peers);
+
+    // Цель-пилот могла уйти из системы или закрыть игру. Привод обязан
+    // это заметить: иначе прыжок идёт к призраку — к последнему месту,
+    // где его видели, и выход происходит в пустоту.
+    const qt = game.quantum.target;
+    if (qt && qt.isPeer && !game.peers.includes(qt)) {
+      if (game.quantum.phase === 'jump') abortQuantum(game.quantum, ship);
+      else stopQuantum(game.quantum);
+      say(game.state, 'ЦЕЛЬ ПРОПАЛА С ЛОКАТОРА · ПРЫЖОК СОРВАН', '#ff7a66', 5);
+    }
     worldAim = clockTarget(worldClock, tNow);
+    // Качество связи считается здесь же, а не в приборах: приборов два
+    // (угловые панели и экраны кабины), и считать одно и то же дважды
+    // значит рано или поздно показать в них разное.
+    game.link = linkState(net, tNow, session.mode);
+    game.now = tNow;
+    // События боя разбираем здесь же: выстрелы чужих, наш урон и доклады
+    // сервера о наших попаданиях.
+    if (net.events.length) {
+      for (const ev of net.events) applyNetEvent(ev);
+      net.events.length = 0;
+    }
   }
 
   // Связь пропала или вернулась — игрок обязан это увидеть, а не
@@ -1872,6 +2083,20 @@ async function boot() {
     // бесполезна, а так первый же J даёт осмысленный перелёт.
     const away = world.stations.find((s) => s !== home);
     if (away) selectTarget(away);
+  }
+
+  // Какая видеокарта на самом деле досталась. Просить высокую
+  // производительность мы просим (js/gl/context.js), но решает система, и
+  // на машине с двумя картами браузер спокойно уходит на встроенную.
+  // Молча это выглядит как «игра тормозит», поэтому говорим вслух.
+  if (scene && scene.name) {
+    const kind = gpuKind(scene.name);
+    if (kind === 'software') {
+      say(game.state, 'ВИДЕОКАРТА НЕ ЗАДЕЙСТВОВАНА · ПРОГРАММНЫЙ РЕНДЕР', '#ff7a66', 12);
+    } else if (kind === 'integrated') {
+      say(game.state, 'ИГРА ИДЁТ НА ВСТРОЕННОЙ ГРАФИКЕ · ' + shortGpu(scene.name),
+        '#ffcc66', 10);
+    }
   }
 
   sound.setMuted(!game.audio.on);

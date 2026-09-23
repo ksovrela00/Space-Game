@@ -99,7 +99,8 @@ final class Players
     {
         $row = Db::row(
             'SELECT sh.*, t.`code` AS `type_code`, t.`name` AS `type_name`, t.`title` AS `type_title`,
-                    t.`hull_max`, t.`shield_max`, t.`hold_t`, t.`fuel_t` AS `fuel_max`,
+                    t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`,
+                    t.`hold_t`, t.`fuel_t` AS `fuel_max`,
                     t.`max_speed`, t.`accel`, t.`brake`, t.`lateral`, t.`quantum_speed`,
                     t.`boost_max`, t.`boost_burn`, t.`length_m`, t.`width_m`, t.`height_m`
              FROM `ship` sh JOIN `ship_type` t ON t.`id` = sh.`type_id`
@@ -113,11 +114,34 @@ final class Players
     }
 
     /** Полное состояние: то, с чего клиент начинает игру. */
+    /**
+     * Доустановить заводские модули, которых на корабле нет.
+     *
+     * Каталог пополняется по ходу разработки (так появилось оружие), а
+     * корабли заведены раньше. Без этого у старых пилотов не оказалось бы
+     * пушек вовсе, и «почему у меня не стреляет» выяснялось бы в бою.
+     * Вызов идемпотентный: ставит только недостающее.
+     */
+    public static function ensureStock(int $shipId): void
+    {
+        $missing = Db::all(
+            'SELECT e.`id` FROM `equipment_type` e
+             WHERE e.`stock`=1 AND e.`id` NOT IN (
+                 SELECT se.`equipment_id` FROM `ship_equipment` se WHERE se.`ship_id`=?
+             )',
+            [$shipId]
+        );
+        foreach ($missing as $e) {
+            Db::insert('ship_equipment', ['ship_id' => $shipId, 'equipment_id' => (int) $e['id']]);
+        }
+    }
+
     public static function state(int $playerId): array
     {
         $p = self::byId($playerId);
         $ship = self::ship($playerId);
         $shipId = (int) $ship['id'];
+        self::ensureStock($shipId);
 
         $equipment = Db::all(
             'SELECT e.`code`, e.`name`, e.`slot`, e.`spec`, se.`level`, se.`health`
@@ -167,7 +191,9 @@ final class Players
                 'id' => $shipId,
                 'name' => $ship['name'],
                 'hull' => (float) $ship['hull'],
-                'shield' => (float) $ship['shield'],
+                // Щит считается на СЕЙЧАС: в базе лежит его заряд на
+                // момент последнего попадания, а он с тех пор отрастал.
+                'shield' => Combat::shieldNow($ship),
                 'fuelT' => (float) $ship['fuel_t'],
                 'gearOut' => (bool) $ship['gear_out'],
                 'type' => [
@@ -176,6 +202,8 @@ final class Players
                     'title' => $ship['type_title'],
                     'hullMax' => (float) $ship['hull_max'],
                     'shieldMax' => (float) $ship['shield_max'],
+                    'shieldRegen' => (float) $ship['shield_regen'],
+                    'shieldDelay' => (float) $ship['shield_delay'],
                     'holdT' => (float) $ship['hold_t'],
                     'fuelMaxT' => (float) $ship['fuel_max'],
                     'maxSpeed' => (float) $ship['max_speed'],

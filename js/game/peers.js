@@ -73,7 +73,20 @@ function record(id) {
     samples: [],
     // Ответ отдаём в одном и том же объекте: пилотов мало, но кадров
     // шестьдесят в секунду, и мусорить ими незачем.
-    out: { id, name: '', mode: 'flight', v: 0, pos: v3(), basis: makeBasis() },
+    // vel — скорость вектором, а не числом: по ней считается упреждение
+    // при стрельбе (js/game/weapons.js). Из одного лишь модуля скорости
+    // упреждение не вывести — нужно знать, КУДА цель идёт.
+    out: {
+      id, name: '', mode: 'flight', v: 0,
+      pos: v3(), vel: v3(), basis: makeBasis(),
+      // Чужой корабль — такая же цель, как станция: его выбирают носом
+      // по Tab и по нему же считают дистанцию (js/game/nav.js). Радиус —
+      // половина корпуса: прицел, стоящий на корабле, обязан его брать.
+      isPeer: true, radius: 0.035,
+      // Корпус и щит соседа: их считает сервер и шлёт в каждом снимке,
+      // а рисуются они полосками у его метки (js/ui/hud.js).
+      hull: 0, hullMax: 0, shield: 0, shieldMax: 0,
+    },
   };
 }
 
@@ -94,6 +107,12 @@ export function ingestPeers(store, list, now) {
     if (!r) { r = record(id); store.by.set(id, r); }
     if (typeof p.name === 'string' && p.name) r.name = p.name;
     if (typeof p.mode === 'string' && p.mode) r.mode = p.mode;
+    // Корпус и щит — не в снимок движения, а прямо в ответ: между двумя
+    // снимками они не «интерполируются», они просто такие, какие есть.
+    if (Number.isFinite(p.hull)) r.out.hull = p.hull;
+    if (Number.isFinite(p.hmax)) r.out.hullMax = p.hmax;
+    if (Number.isFinite(p.sh)) r.out.shield = p.sh;
+    if (Number.isFinite(p.smax)) r.out.shieldMax = p.smax;
     r.seen = now;
     r.samples.push({
       t: now, x, y, z,
@@ -140,6 +159,7 @@ function poseAt(r, t) {
     // где он есть, чем не показать вовсе.
     const a = t <= s[0].t ? s[0] : last;
     set(o.pos, a.x, a.y, a.z);
+    set(o.vel, 0, 0, 0);
     o.v = a.v;
     setBasis(o.basis, a.fwd, a.up);
     return;
@@ -155,6 +175,7 @@ function poseAt(r, t) {
       last.x + (last.x - prev.x) * k,
       last.y + (last.y - prev.y) * k,
       last.z + (last.z - prev.z) * k);
+    setVel(o.vel, prev, last);
     o.v = last.v;
     setBasis(o.basis, last.fwd, last.up);
     return;
@@ -166,6 +187,7 @@ function poseAt(r, t) {
   const span = b.t - a.t;
   const k = span > 1e-6 ? (t - a.t) / span : 0;
   set(o.pos, a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k, a.z + (b.z - a.z) * k);
+  setVel(o.vel, a, b);
   o.v = a.v + (b.v - a.v) * k;
   // Оси тянем покомпонентно и ортонормализуем: поворот между снимками
   // мал, и разница с честным поворотом по дуге меньше, чем толщина
@@ -177,6 +199,13 @@ function poseAt(r, t) {
 
 const _tmpF = v3();
 const _tmpU = v3();
+
+/** Скорость между двумя снимками, км/с. */
+function setVel(out, a, b) {
+  const dt = b.t - a.t;
+  if (!(dt > 1e-6)) return set(out, 0, 0, 0);
+  return set(out, (b.x - a.x) / dt, (b.y - a.y) / dt, (b.z - a.z) / dt);
+}
 
 const lerp3 = (a, b, k, out) =>
   set(out, a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k, a.z + (b.z - a.z) * k);

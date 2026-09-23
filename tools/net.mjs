@@ -134,7 +134,7 @@ const SERVER_STATE = {
     targetBody: null, warpTo: null, lastStation: null, view: 'chase',
   },
   ship: {
-    id: 1, name: '', hull: 61.5, shield: 0, fuelT: 12, gearOut: false,
+    id: 1, name: '', hull: 61.5, shield: 17, fuelT: 12, gearOut: false,
     type: { code: 'challenger', name: 'Challenger', title: '', hullMax: 100, shieldMax: 0,
       holdT: 20, fuelMaxT: 12, maxSpeed: 1.2, accel: 0.45, brake: 0.75, lateral: 0.5,
       quantumSpeed: 60000, boostMax: 3, boostBurn: 10, lengthM: 65, widthM: 67.1, heightM: 19.3 },
@@ -225,6 +225,9 @@ if (CASE === 'server') {
   ok(Math.abs(game.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6,
     'место взято С СЕРВЕРА, а не из кэша браузера: x = ' + game.ship.pos.x);
   ok(Math.abs(game.ship.hull - 61.5) < 1e-9, 'корпус с сервера: ' + game.ship.hull);
+  // Щит тоже серверный: он тратится в бою и отрастает по серверным
+  // часам, и взятый из местного кэша он соврал бы ровно в бою.
+  ok(Math.abs(game.ship.shield - 17) < 2, 'щит с сервера: ' + game.ship.shield.toFixed(1));
   ok(game.state.view === 'chase', 'вид камеры с сервера: ' + game.state.view);
   ok(game.player.balance === 12345, 'счёт с сервера: ' + game.player.balance + ' кр');
   ok(game.player.cargo.length === 1 && game.player.cargo[0].name === 'ЗЕРНО',

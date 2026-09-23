@@ -36,6 +36,7 @@ const VMARK_MIN = 0.002;      // км/с
 const _vm = { x: 0, y: 0 };
 const _pt = { x: 0, y: 0 };
 const _pp = { x: 0, y: 0 };
+const _ga = { x: 0, y: 0 };
 // Точки под приборы на доске кабины: та же экономия, что и везде —
 // вектор на кадр это мусор в куче шестьдесят раз в секунду.
 const _pw = { x: 0, y: 0, z: 0 };
@@ -107,6 +108,10 @@ export function drawHud(r, game) {
   ctx.save();
   ctx.textBaseline = 'alphabetic';
 
+  // Связь показывается ДО всех проверок режима: в варпе и в прыжке
+  // приборов нет, а сеть там ломается ровно так же.
+  drawLink(ctx, game);
+
   // В варпе приборов нет по той же причине, что и в квантовом прыжке, и
   // ещё по одной: системы, к которой они относились бы, в этот момент
   // просто не существует.
@@ -144,6 +149,7 @@ export function drawHud(r, game) {
   // рамкой.
   drawTargetList(ctx, cam, game, target);
   drawPeerMarks(ctx, cam, game);
+  drawGunAim(ctx, cam, game);
   drawAimedLabel(ctx, cam, game, target);
   if (target) drawTargetMarker(ctx, cam, target);
 
@@ -158,7 +164,7 @@ export function drawHud(r, game) {
   // Рисует их один и тот же код: разница только в преобразовании
   // холста, которое ставит onPanel.
   const slots = state.view === 'cockpit' && game.cockpit ? game.cockpit.slots : null;
-  const lh = approach ? 68 : 112;
+  const lh = approach ? 68 : (SHIP.maxShield > 0 ? 126 : 112);
   const th = approach ? 68 : 112;
   if (slots) {
     // В кабине приборы — это СОФТ В МОНИТОРАХ (js/ui/panels.js), а не
@@ -705,10 +711,12 @@ function onPanel(ctx, cam, ship, slot, bw, bh, draw) {
   return true;
 }
 
-/** Левый блок: тяга, скорость, форсаж, корпус, шасси. */
+/** Левый блок: тяга, скорость, форсаж, корпус, щит, шасси. */
 function drawThrustBlock(ctx, px, py, game, approach) {
   const ship = game.ship;
-  const lh = approach ? 68 : 112;
+  // Со щитом в панели на строку больше. На подходе к планете её всё
+  // равно ужимают до тяги и корпуса, и там высота прежняя.
+  const lh = approach ? 68 : (SHIP.maxShield > 0 ? 126 : 112);
   panel(ctx, px, py, 132, lh);
   ctx.font = '10px Consolas, monospace';
   ctx.textAlign = 'left';
@@ -736,6 +744,13 @@ function drawThrustBlock(ctx, px, py, game, approach) {
   ctx.fillText('КОРПУС', px + 10, boostY + 14);
   bar(ctx, px + 58, boostY + 7, 64, 7, ship.hull / SHIP.maxHull,
     ship.hull > 40 ? GREEN : RED);
+  // Щит — своей строкой и своим цветом: он и восстанавливается сам, и
+  // тратится первым, поэтому смотреть на него надо отдельно от корпуса.
+  if (SHIP.maxShield > 0) {
+    ctx.fillStyle = CY_DIM;
+    ctx.fillText('ЩИТ', px + 10, boostY + 28);
+    bar(ctx, px + 58, boostY + 21, 64, 7, ship.shield / SHIP.maxShield, CY);
+  }
 
   // Шасси: строкой над панелью. У поверхности его состояние стоит в
   // приборах подхода отдельной клеткой, и здесь оно уже лишнее.
@@ -992,6 +1007,7 @@ function drawTargetList(ctx, cam, game, target) {
   ctx.lineJoin = 'round';
   for (const t of nav.list) {
     if (t === target) continue;              // у выбранной своя рамка
+    if (t.isPeer) continue;                  // у пилотов своя метка, с именем
     const c = cam.toCamera(t.pos);
     if (c.z <= cam.near) continue;           // за спиной
     const p = cam.project(c, _pt);
@@ -1029,6 +1045,112 @@ function drawTargetList(ctx, cam, game, target) {
       ctx.beginPath(); ctx.arc(p.x, p.y, r + 5, 0, TAU); ctx.stroke();
     }
   }
+  ctx.restore();
+}
+
+/**
+ * Связь: качество и пинг — в левом верхнем углу, ВСЕГДА.
+ *
+ * Это единственный прибор, который не про корабль, и поэтому он висит
+ * поверх всего, а не на доске в кабине: сеть ломается и в варпе, и в
+ * прыжке, и на стоянке, а узнавать об этом по тому, что чужие корабли
+ * перестали шевелиться, — худший из способов.
+ *
+ * Показано ровно то, по чему принимается решение: полоски — качество
+ * (задержка и потери вместе), число — задержка. Потери выводятся только
+ * когда они есть: постоянный «0%» глаз перестаёт читать через минуту.
+ */
+function drawLink(ctx, game) {
+  const l = game.link;
+  if (!l) return;
+  const k = Q.hudScale;
+  const x = 18, y = 22;
+  const live = l.mode === 'live';
+
+  // Цвет у полосок и у надписи один: разойдись они — и прибор пришлось бы
+  // читать дважды.
+  const color = !live ? (l.api === 'offline' || l.mode === 'connecting' ? AMBER
+    : l.mode === 'down' ? RED : CY_DIM)
+    : l.grade >= 3 ? GREEN : l.grade === 2 ? AMBER : RED;
+
+  let text;
+  if (live) {
+    text = (l.ping === null ? '— мс' : Math.round(l.ping) + ' мс')
+      + (l.loss > 0.05 ? '  ПОТЕРИ ' + Math.round(l.loss * 100) + '%' : '');
+  } else {
+    text = l.api === 'offline' ? 'АВТОНОМНО'
+      : l.mode === 'connecting' ? 'СОЕДИНЕНИЕ'
+        : l.mode === 'down' ? 'СВЯЗЬ ОБОРВАНА'
+          : 'БЕЗ СЕТИ';
+  }
+
+  ctx.save();
+  ctx.translate(x, y);
+  if (k !== 1) ctx.scale(k, k);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '11px Consolas, monospace';
+
+  // Четыре полоски растущей высоты: сколько горит — такое и качество.
+  // Столбик, а не число «качества», потому что числу нужна шкала, а
+  // столбику — нет.
+  const bw = 3, gap = 2, base = 10;
+  for (let i = 0; i < 4; i++) {
+    const h = 3 + i * 2;
+    const bx = i * (bw + gap);
+    ctx.fillStyle = i < l.grade ? color : 'rgba(255,255,255,0.14)';
+    ctx.fillRect(bx, base - h, bw, h);
+  }
+
+  const tx = 4 * (bw + gap) + 6;
+  // Подложка: строка стоит на звёздах и на подсвеченном крае планеты.
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.strokeText(text, tx, base);
+  ctx.fillStyle = color;
+  ctx.fillText(text, tx, base);
+  ctx.restore();
+}
+
+/**
+ * Прицел оружия: куда сейчас смотрит ствол.
+ *
+ * У карданного оружия ствол смотрит НЕ ТУДА, КУДА НОС: он доворачивает к
+ * упреждённой точке — туда, где цель окажется, когда болт долетит. Без
+ * этой отметки промах необъясним: прицел на цели, а болты идут мимо, и
+ * причина (упреждение) нигде не показана.
+ *
+ * Отметка зелёная, пока кардан дотягивается, и жёлтая, когда он упёрся в
+ * предел: во втором случае доворачивать надо самому.
+ */
+function drawGunAim(ctx, cam, game) {
+  const g = game.guns;
+  if (!g || !game.gunTarget) return;
+  const a = g.aim;
+  if (!a || !(Math.abs(a.x) + Math.abs(a.y) + Math.abs(a.z) > 0)) return;
+  const p = projectDir(cam, a.x, a.y, a.z, _ga);
+  if (p.back) return;
+
+  const color = g.locked ? GREEN : AMBER;
+  const r = 9;
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  const cross = () => {
+    ctx.beginPath();
+    ctx.moveTo(p.x - r, p.y); ctx.lineTo(p.x - r * 0.4, p.y);
+    ctx.moveTo(p.x + r * 0.4, p.y); ctx.lineTo(p.x + r, p.y);
+    ctx.moveTo(p.x, p.y - r); ctx.lineTo(p.x, p.y - r * 0.4);
+    ctx.moveTo(p.x, p.y + r * 0.4); ctx.lineTo(p.x, p.y + r);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 0.35, 0, TAU);
+    ctx.stroke();
+  };
+  cross();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.6;
+  cross();
   ctx.restore();
 }
 
@@ -1072,7 +1194,31 @@ function drawPeerMarks(ctx, cam, game) {
     ctx.lineWidth = 1.4;
     box();
 
-    const label = (p.name || 'ПИЛОТ') + '  ' + fmtDist(dist3(cam.pos, p.pos));
+    // Корпус цели показываем, пока свежо: это ответ сервера на наше
+    // попадание, и держать его вечно значит врать после того, как пилот
+    // починился.
+    const th = game.targetHull;
+    const hull = th && th.id === p.id && (game.now || 0) - th.at < 6
+      ? '  ' + Math.round((th.hull / (th.max || 100)) * 100) + '%' : '';
+    const label = (p.name || 'ПИЛОТ') + '  ' + fmtDist(dist3(cam.pos, p.pos)) + hull;
+
+    // Корпус и щит — полосками НАД квадратом. Числами их пришлось бы
+    // читать, а в бою читать некогда: нужен один взгляд, чтобы понять,
+    // добивать или уходить.
+    if (p.hullMax > 0) {
+      const bw = 30, bh = 3, by = s.y - r - 10;
+      const bar = (y, frac, color) => {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(s.x - bw / 2 - 1, y - 1, bw + 2, bh + 2);
+        ctx.fillStyle = color;
+        ctx.fillRect(s.x - bw / 2, y, bw * Math.max(0, Math.min(1, frac)), bh);
+      };
+      const hf = p.hull / p.hullMax;
+      bar(by, hf, hf > 0.6 ? GREEN : hf > 0.25 ? AMBER : RED);
+      // Щит рисуем, только если он есть: пустая полоска у пилота без
+      // щита читалась бы как «щит на нуле», а это разные вещи.
+      if (p.shieldMax > 0) bar(by - bh - 2, p.shield / p.shieldMax, CY);
+    }
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.7)';
     ctx.strokeText(label, s.x + r + 6, s.y);

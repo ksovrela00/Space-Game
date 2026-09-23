@@ -1014,6 +1014,123 @@ ${LOG_DEPTH_FRAG}
   outColor = vec4(col * a, a);
 }`;
 
+// --- Щит --------------------------------------------------------------------
+// Оболочки не видно, пока по ней не попали. Это и есть весь её вид:
+// постоянное свечение вокруг корабля превратило бы бой в дискотеку, а
+// разглядеть в нём что-либо стало бы нельзя.
+
+export const SHIELD_VS = `#version 300 es
+in vec3 aPos;            // единичная сфера
+
+uniform mat4 uProj;
+uniform mat4 uModelView; // оси КОРАБЛЯ, без масштаба
+uniform mat3 uNormalMat;
+uniform vec3 uScale;     // полуоси оболочки, км
+
+out vec3 vN;             // нормаль в осях КАМЕРЫ
+out vec3 vUnit;          // тот же aPos: по нему ищется точка удара
+out vec3 vViewPos;
+out float vFragDepth;
+
+void main() {
+  vec4 vp = uModelView * vec4(aPos * uScale, 1.0);
+  gl_Position = uProj * vp;
+  vFragDepth = 1.0 + gl_Position.w;
+  vViewPos = vp.xyz;
+  // Нормаль ЭЛЛИПСОИДА — это не его радиус: у сплюснутой оболочки они
+  // расходятся тем сильнее, чем сильнее сплюснута. Делением на полуоси
+  // получается именно нормаль, и кромка ложится по форме, а не по шару.
+  vN = uNormalMat * (aPos / uScale);
+  vUnit = aPos;
+}`;
+
+export const SHIELD_FS = `#version 300 es
+precision mediump float;
+
+in vec3 vN;
+in vec3 vUnit;
+in vec3 vViewPos;
+in float vFragDepth;
+
+uniform vec3 uHitDir;    // направление на точку удара, оси КОРАБЛЯ
+uniform vec3 uColor;
+uniform float uFade;     // 1 в момент попадания, 0 когда погасла
+uniform float uLogFC;
+
+out vec4 outColor;
+
+void main() {
+${LOG_DEPTH_FRAG}
+  vec3 n = normalize(vN);
+  vec3 v = normalize(-vViewPos);
+
+  // Кромка: в профиль оболочка видна, в лоб почти прозрачна. Без этого
+  // получается не оболочка, а заливка поверх корабля.
+  float rim = pow(1.0 - abs(dot(n, v)), 2.2);
+
+  // Пятно в точке удара: туда пришёл луч, и оболочка там раскалена.
+  // Считается по ПАРАМЕТРУ сферы, а не по нормали: на сплюснутой
+  // оболочке нормаль уводит пятно с места удара тем сильнее, чем
+  // площе борт. Степень большая намеренно — пятно должно быть пятном,
+  // а не половиной оболочки.
+  float spot = pow(max(0.0, dot(normalize(vUnit), uHitDir)), 22.0);
+
+  // Слабая ровная подсветка — чтобы сфера читалась целиком, а не одной
+  // только кромкой: иначе в момент попадания видно кольцо непонятно чего.
+  float a = (0.05 + rim * 0.30 + spot * 1.6) * uFade;
+  vec3 col = mix(uColor, vec3(1.0), clamp(spot * 0.8, 0.0, 1.0));
+  outColor = vec4(col * a, a);
+}`;
+
+// --- Болты ------------------------------------------------------------------
+// Короткий раскалённый шнур: белое ядро, цветная кромка. Геометрию
+// (четырёхугольник, развёрнутый к камере) считает процессор — болтов
+// десятки, а не тысячи, и шейдеру проще получить готовые точки.
+
+export const BOLT_VS = `#version 300 es
+in vec3 aPos;            // относительно КАМЕРЫ, мировые оси
+in vec2 aUv;             // x: поперёк (-1..1), y: вдоль (0 хвост, 1 голова)
+in vec3 aColor;
+
+uniform mat4 uProj;
+uniform mat4 uModelView;
+
+out vec2 vUv;
+out vec3 vColor;
+out float vFragDepth;
+
+void main() {
+  vec4 vp = uModelView * vec4(aPos, 1.0);
+  gl_Position = uProj * vp;
+  vFragDepth = 1.0 + gl_Position.w;
+  vUv = aUv;
+  vColor = aColor;
+}`;
+
+export const BOLT_FS = `#version 300 es
+precision mediump float;
+
+in vec2 vUv;
+in vec3 vColor;
+in float vFragDepth;
+
+uniform float uLogFC;
+
+out vec4 outColor;
+
+void main() {
+${LOG_DEPTH_FRAG}
+  // Поперёк — мягкий спад к краям, вдоль — голова ярче хвоста. Ровная
+  // по всей длине палка читается как нарисованная линия, а не как
+  // летящий сгусток.
+  float across = max(0.0, 1.0 - abs(vUv.x));
+  float head = mix(0.25, 1.0, clamp(vUv.y, 0.0, 1.0));
+  float a = pow(across, 1.6) * head;
+  // Ядро выбелено: раскалённое светится белым, а цвет виден по кромке.
+  vec3 col = mix(vColor, vec3(1.0), pow(across, 4.0) * 0.85);
+  outColor = vec4(col * a, a);
+}`;
+
 // --- Кольца -----------------------------------------------------------------
 
 export const RING_VS = `#version 300 es

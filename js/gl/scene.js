@@ -18,6 +18,7 @@ import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
   ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
   PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
+  BOLT_VS, BOLT_FS, SHIELD_VS, SHIELD_FS,
   WARPTUN_VS, WARPTUN_FS,
   SKY_VS, SKY_FS, SKY_BAKE_VS, SKY_BAKE_FS,
 } from './shaders.js';
@@ -35,9 +36,11 @@ import { shipShadow } from '../game/shadow.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
 import { ENTRY } from '../game/entry.js';
+import { SHIELD_AXES } from '../models/ships.js';
+
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
-  buildDynamicMesh, buildWarpMesh, buildMoteMesh, buildShockMesh,
+  buildDynamicMesh, buildWarpMesh, buildMoteMesh, buildShockMesh, buildBoltBuffer,
 } from './mesh.js';
 import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
@@ -78,6 +81,10 @@ const WARP_TAIL = 0.11;
 // они просто освещены солнцем системы.
 const WARP_COLOR = new Float32Array([0.82, 0.92, 1.0]);
 const MOTE_COLOR = new Float32Array([0.88, 0.91, 0.98]);
+/** Холодный цвет щита: он не должен путаться с огнём попадания. */
+const SHIELD_TINT = new Float32Array([0.42, 0.72, 1.0]);
+/** Полуоси оболочки: она повторяет габарит корпуса (js/models/ships.js). */
+const SHIELD_SCALE = new Float32Array(SHIELD_AXES);
 // Сколько пылинок стоит в ячейке решётки (js/game/flow.js, FLOW.box).
 // Четыре сотни на два километра — это крошка на каждые триста метров:
 // в кадре десятки черт. Считать их нечем и незачем: буфер статический,
@@ -201,6 +208,8 @@ export class GlScene {
     this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
     this.pWarpTun = buildProgram(gl, 'warptun', WARPTUN_VS, WARPTUN_FS);
     this.pMote = buildProgram(gl, 'mote', MOTE_VS, MOTE_FS);
+    this.pBolt = buildProgram(gl, 'bolt', BOLT_VS, BOLT_FS);
+    this.pShield = buildProgram(gl, 'shield', SHIELD_VS, SHIELD_FS);
 
     // Небо: полоса галактического диска и туманности (js/gl/nebula.js).
     // Не соберётся — сцена остаётся рабочей, фон просто чёрный, как был.
@@ -253,8 +262,22 @@ export class GlScene {
       positions: shell.positions,
       indices: shell.indices,
     });
+    // Оболочка щита — та же сфера, но СВОЙ буфер: расположение атрибутов
+    // у каждой программы своё, и делить один VAO между двумя нельзя.
+    // Уровень ниже: щит размером с корабль, и гранями его не разглядеть.
+    const shieldShell = icosphere(3);
+    this.shieldLocs = { aPos: this.pShield.attrib('aPos') };
+    this.shieldMesh = buildIndexedMesh(gl, this.shieldLocs, {
+      positions: shieldShell.positions,
+      indices: shieldShell.indices,
+    });
 
     this.quad = buildQuad(gl, this.pGlow.attrib('aQuad'));
+    this.bolts = buildBoltBuffer(gl, {
+      aPos: this.pBolt.attrib('aPos'),
+      aUv: this.pBolt.attrib('aUv'),
+      aColor: this.pBolt.attrib('aColor'),
+    });
     // Тень переписывается каждый кадр. Силуэт — это настоящие грани
     // корпуса, отвёрнутые от солнца, поэтому вершин у него тысячи, а не
     // десятки: буфер берём с запасом на весь корпус.
@@ -348,6 +371,9 @@ export class GlScene {
     this.sunDir = new Float32Array(3);
     this.tmp3 = new Float32Array(3);
     this.basisTmp = makeBasis();
+    // Единичный базис: им берут матрицу ЧИСТОГО поворота камеры для
+    // точек, уже посчитанных относительно неё (см. drawBolts).
+    this.identBasis = makeBasis();
     this.tmpPos = { x: 0, y: 0, z: 0 };
     this.jsMeshes = new WeakMap();
     this.logFC = logDepthCoef(FAR);
@@ -1496,6 +1522,12 @@ export class GlScene {
     gl.depthMask(false);
     gl.enable(gl.BLEND);
 
+    // Болты — первыми из светящегося: они летят между кораблями, и их
+    // обязан перекрывать корпус (глубина уже записана непрозрачным
+    // проходом), а не наоборот.
+    this.drawBolts(game);
+    this.drawShields(game);
+
     // Тень — первой: всё остальное прозрачное (выхлоп, ореолы) светится
     // и должно ложиться поверх неё.
     if (game.state.mode === 'flight' || game.state.mode === 'landed') {
@@ -1538,6 +1570,127 @@ export class GlScene {
     this.drawGlows(game, world);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Оболочка щита: сфера вокруг корабля, видимая только в момент удара.
+   *
+   * Складывается из трёх вещей: еле заметной ровной подсветки (чтобы
+   * читалась сама сфера), яркой кромки (чтобы это была оболочка, а не
+   * заливка поверх корабля) и пятна в точке удара — туда пришёл луч.
+   * Направление на точку хранится в осях МИРА и поворачивается сюда, а
+   * не запоминается точкой: корабль летит, и оболочка летит с ним.
+   */
+  drawShields(game) {
+    const guns = game.guns;
+    if (!guns || !guns.shields || !guns.shields.length) return;
+    const gl = this.gl;
+    const cam = this.camera;
+    const prog = this.pShield;
+    const b = cam.basis;
+
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform3fv(prog.loc('uColor'), SHIELD_TINT);
+    gl.uniform3fv(prog.loc('uScale'), SHIELD_SCALE);
+    // Сложение: оболочка светится и не должна темнить то, что за ней.
+    gl.blendFunc(gl.ONE, gl.ONE);
+
+    for (const f of guns.shields) {
+      const ship = f.own ? game.ship : (game.peers || []).find((p) => p.id === f.id);
+      if (!ship || !ship.pos || !ship.basis) continue;
+      // Вспышка гаснет быстрее, чем живёт: удар виден сразу, а память о
+      // нём — недолго.
+      const k = Math.max(0, 1 - f.age / f.life);
+      const fade = k * k;
+      if (fade < 0.01) continue;
+
+      // Оболочка идёт в ОСЯХ КОРАБЛЯ: она повторяет его форму, и вместе
+      // с ним же вертится. Масштаб задаётся не здесь, а полуосями в
+      // шейдере — матрица должна остаться поворотом.
+      modelView(cam.basis, cam.pos, ship.basis, ship.pos, 1, this.mv, this.nrm);
+      gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
+      gl.uniformMatrix3fv(prog.loc('uNormalMat'), false, this.nrm);
+      // Направление на точку удара уже в осях корабля — переводить его
+      // никуда не надо, там же живёт и параметр сферы.
+      gl.uniform3fv(prog.loc('uHitDir'), new Float32Array([f.dx, f.dy, f.dz]));
+      gl.uniform1f(prog.loc('uFade'), fade);
+      this.shieldMesh.draw();
+      this.draws++;
+      this.tris += this.shieldMesh.faces || this.shieldMesh.tris || 0;
+    }
+  }
+
+  /**
+   * Болты в кадре.
+   *
+   * Четырёхугольник разворачивается К КАМЕРЕ на процессоре: болт — это
+   * отрезок, и без разворота он пропадал бы, когда летит точно от нас или
+   * на нас. Точки считаются ОТНОСИТЕЛЬНО КАМЕРЫ, как и всё в этой сцене:
+   * в float32 координаты орбит теряют метры, а болт длиной пятьдесят
+   * метров из этих метров и состоит.
+   */
+  drawBolts(game) {
+    const guns = game.guns;
+    const buf = this.bolts;
+    if (!guns || !guns.bolts || !guns.bolts.length || !buf) return;
+    const gl = this.gl;
+    const cam = this.camera;
+    const prog = this.pBolt;
+
+    let n = 0;
+    for (const b of guns.bolts) {
+      if (n >= buf.max) break;
+      const hx = b.x - cam.pos.x, hy = b.y - cam.pos.y, hz = b.z - cam.pos.z;
+      const tx = hx - b.dx * b.len, ty = hy - b.dy * b.len, tz = hz - b.dz * b.len;
+
+      // Толщина с полом по расстоянию: болт в километре иначе тоньше
+      // пикселя, и очередь читается как редкое мигание.
+      const d = Math.hypot(hx, hy, hz);
+      const w = Math.max(0.0025, d * 0.0016);
+
+      // Поперечное направление: перпендикуляр и к болту, и к взгляду.
+      let sx = b.dy * hz - b.dz * hy;
+      let sy = b.dz * hx - b.dx * hz;
+      let sz = b.dx * hy - b.dy * hx;
+      const sl = Math.hypot(sx, sy, sz);
+      if (!(sl > 1e-12)) continue;            // смотрим ровно вдоль болта
+      sx = (sx / sl) * w; sy = (sy / sl) * w; sz = (sz / sl) * w;
+
+      const P = buf.pos, U = buf.uv, C = buf.col;
+      const q = [
+        [tx - sx, ty - sy, tz - sz, -1, 0],
+        [tx + sx, ty + sy, tz + sz, 1, 0],
+        [hx + sx, hy + sy, hz + sz, 1, 1],
+        [tx - sx, ty - sy, tz - sz, -1, 0],
+        [hx + sx, hy + sy, hz + sz, 1, 1],
+        [hx - sx, hy - sy, hz - sz, -1, 1],
+      ];
+      const col = b.color || [1, 0.4, 0.3];
+      for (let i = 0; i < 6; i++) {
+        const c = q[i];
+        const vi = n * 6 + i;
+        P[vi * 3] = c[0]; P[vi * 3 + 1] = c[1]; P[vi * 3 + 2] = c[2];
+        U[vi * 2] = c[3]; U[vi * 2 + 1] = c[4];
+        C[vi * 3] = col[0]; C[vi * 3 + 1] = col[1]; C[vi * 3 + 2] = col[2];
+      }
+      n++;
+    }
+    if (!n) return;
+
+    buf.upload(n);
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    // Матрица — чистый поворот камеры: точки уже сдвинуты к ней.
+    modelView(cam.basis, cam.pos, this.identBasis, cam.pos, 1, this.mv, this.nrm);
+    gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    // Сложение, а не смешивание: это свет, и два болта друг за другом
+    // должны быть ярче одного.
+    gl.blendFunc(gl.ONE, gl.ONE);
+    this.tris += buf.draw();
+    this.draws++;
   }
 
   /**
@@ -1613,6 +1766,21 @@ export class GlScene {
       this.quad.draw();
       this.draws++;
     };
+
+    // Вспышки попаданий. Радиус в ПИКСЕЛЯХ даёт постоянный размер на
+    // экране — это и нужно: вспышка в трёх километрах должна быть видна,
+    // а не превращаться в точку. Растёт и гаснет она по возрасту.
+    const guns = game.guns;
+    if (guns && guns.blasts && guns.blasts.length) {
+      for (const b of guns.blasts) {
+        const k = Math.max(0, 1 - b.age / b.life);
+        const grow = 1 - k * k;                   // сначала быстро, потом вяло
+        glow({ x: b.x, y: b.y, z: b.z },
+          (10 + 26 * grow) * (b.size || 1),
+          new Float32Array(b.color),
+          k * k);                                  // гаснет быстрее, чем растёт
+      }
+    }
 
     // Корона светила.
     const star = world.star;

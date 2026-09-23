@@ -12,6 +12,7 @@
 // приборные форматтеры.
 
 import { SHIP } from './ship.js';
+import { WEAPONS } from './weapons.js';
 
 /**
  * Ступени дальности сканера, км.
@@ -22,6 +23,27 @@ import { SHIP } from './ship.js';
  * сканера. В карточке корабля стоит последняя ступень — предел железа.
  */
 export const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
+
+/**
+ * Строка оружия в карточке.
+ *
+ * Числа берутся из WEAPONS — того же места, откуда их берёт сам бой. В
+ * карточке, где написано «3 урона», и в выстреле, который снимает четыре,
+ * виноват всегда второй список.
+ */
+function gun(w, installed) {
+  return {
+    code: w.code, slot: 'gun', name: w.name + ' · ' + w.mountName,
+    value: installed
+      ? w.damage + ' × ' + w.rate + '/с, до ' + w.range + ' км'
+      : 'ГНЕЗДО СВОБОДНО',
+    installed,
+    spec: {
+      kind: w.kind, mount: w.mount, damage: w.damage, rate: w.rate,
+      speed: w.speed, range: w.range, cone: w.cone,
+    },
+  };
+}
 
 /**
  * Модули корабля.
@@ -79,6 +101,9 @@ export function modules() {
       installed: true,
       spec: { steps: SCANNER_STEPS },
     },
+    gun(WEAPONS.laser_g, true),
+    gun(WEAPONS.missile, false),
+    gun(WEAPONS.turret, false),
     {
       code: 'gear', slot: 'gear', name: 'ШАССИ',
       value: SHIP.gearTime.toFixed(1) + ' с', installed: true,
@@ -91,8 +116,11 @@ export function modules() {
     },
     {
       code: 'shield', slot: 'shield', name: 'ЩИТЫ',
-      value: 'НЕТ', installed: SHIP.maxShield > 0,
-      spec: { max: SHIP.maxShield },
+      value: SHIP.maxShield > 0
+        ? SHIP.maxShield + ' ед., +' + SHIP.shieldRegen + '/с через ' + SHIP.shieldDelay + ' с'
+        : 'НЕТ',
+      installed: SHIP.maxShield > 0,
+      spec: { max: SHIP.maxShield, regen: SHIP.shieldRegen, delay: SHIP.shieldDelay },
     },
   ];
 }

@@ -17,7 +17,7 @@
 // успевает разогнаться до потолка, и всё занимает секунды. Отдельного
 // правила для ближних целей не нужно.
 
-import { v3, normalize } from '../core/vec3.js';
+import { v3, set, normalize } from '../core/vec3.js';
 import { lookAlong, aimAngles } from '../core/basis.js';
 import { bodyPosAt, nearestBody } from './world.js';
 
@@ -38,6 +38,14 @@ export const QUANTUM = {
   // доля радиуса: над светилом это 3100 км, над газовым гигантом 410.
   exitFrac: 0.05,
   exitStation: 40,    // км до станции
+  // К чужому кораблю выходим за двадцать километров. Ближе нельзя: у
+  // пилота есть право увидеть, кто к нему пришёл, и сманеврировать, а
+  // выход в упор — это не прыжок, а телепорт за спину.
+  exitPeer: 20,       // км до чужого корабля
+  // Быстрее этого скорость чужого корабля при выходе не наследуем:
+  // пилот, ушедший в квантовый прыжок, летит в сотни раз быстрее, и
+  // повторить его вектор значит улететь следом непонятно куда.
+  peerMatch: 2,       // км/с
   exitMin: 2,         // км — остаток до точки в пустоте
   // Оболочка рельефа: самый рваный тип поверхности поднимается на 1.7%
   // радиуса (js/gl/terrain.js), поэтому запас взят с небольшим походом.
@@ -79,9 +87,10 @@ export const clearOf = (b) => b.radius * (1 + QUANTUM.relief) + QUANTUM.clearPad
 
 /** Точка выхода: не сама цель, а подступ к ней с той стороны, откуда идём. */
 export function exitPoint(target, from, out = v3()) {
-  const gap = target.isStation ? QUANTUM.exitStation
-    : (target.isMarker ? QUANTUM.exitMin
-      : target.radius + Math.max(QUANTUM.exitAlt, target.radius * QUANTUM.exitFrac));
+  const gap = target.isPeer ? QUANTUM.exitPeer
+    : (target.isStation ? QUANTUM.exitStation
+      : (target.isMarker ? QUANTUM.exitMin
+        : target.radius + Math.max(QUANTUM.exitAlt, target.radius * QUANTUM.exitFrac)));
   const dx = from.x - target.pos.x, dy = from.y - target.pos.y, dz = from.z - target.pos.z;
   const d = Math.hypot(dx, dy, dz);
   if (d < 1e-6) {
@@ -375,23 +384,40 @@ export function updateQuantum(q, ship, world, dt) {
 }
 
 /**
- * Выход. Скорость — ноль ОТНОСИТЕЛЬНО цели.
+ * С какой скоростью выходим из прыжка: ноль ОТНОСИТЕЛЬНО цели.
  *
  * Внутри захвата корабль и так переносится вместе с телом, поэтому для
  * тела и его маркеров это буквально ноль. А вот станция крутится вокруг
  * своей планеты сама, и выйти рядом с ней в нуле значит смотреть, как
- * она уезжает на четырёх километрах в секунду.
+ * она уезжает на четырёх километрах в секунду. Чужой корабль — третий
+ * случай, и он разобран отдельно.
  */
-function arrive(q, ship) {
-  const t = q.target;
-  const tv = t.isMarker ? t.body.vel : t.vel;
-  const own = t.isMarker ? t.body : (t.isStation ? t.parent : t);
+export function exitVelocity(target, out = v3()) {
+  if (target.isPeer) {
+    // Чужой корабль никто не несёт: гравитационного захвата у него для
+    // нас нет, и «ноль относительно цели» здесь — это буквально его
+    // скорость. Кроме случая, когда он сам в прыжке: повторить вектор
+    // того, кто идёт в сотни раз быстрее, значит улететь следом
+    // непонятно куда (QUANTUM.peerMatch).
+    const v = target.vel || { x: 0, y: 0, z: 0 };
+    const keep = Math.hypot(v.x, v.y, v.z) <= QUANTUM.peerMatch;
+    return set(out, keep ? v.x : 0, keep ? v.y : 0, keep ? v.z : 0);
+  }
+  const tv = target.isMarker ? target.body.vel : target.vel;
+  const own = target.isMarker
+    ? target.body
+    : (target.isStation ? target.parent : target);
   const cx = own && own.vel ? own.vel.x : 0;
   const cy = own && own.vel ? own.vel.y : 0;
   const cz = own && own.vel ? own.vel.z : 0;
-  ship.vel.x = tv ? tv.x - cx : 0;
-  ship.vel.y = tv ? tv.y - cy : 0;
-  ship.vel.z = tv ? tv.z - cz : 0;
+  return set(out,
+    tv ? tv.x - cx : 0,
+    tv ? tv.y - cy : 0,
+    tv ? tv.z - cz : 0);
+}
+
+function arrive(q, ship) {
+  exitVelocity(q.target, ship.vel);
   ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
   ship.throttle = 0;
   stopQuantum(q);

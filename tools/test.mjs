@@ -18,7 +18,7 @@ import {
 } from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
-  corridorBlock, exitPoint, jumpTime, suggestHop, QUANTUM,
+  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM,
 } from '../js/game/quantum.js';
 import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
@@ -43,12 +43,21 @@ import {
   makePlayer, ledgerAdd, ledgerTotals, cargoTons, loadCargo, dropCargo,
   addMission, updatePlayer, missionExpired, savePlayer, loadPlayer, LEDGER_MAX,
 } from '../js/game/player.js';
+import { gpuKind } from '../js/gl/context.js';
 import {
   makePeers, ingestPeers, peerPoses, dropPeer, PEER_DELAY, PEER_AHEAD, PEER_TTL,
 } from '../js/game/peers.js';
 import {
   makeClock, clockFromServer, clockTarget, clockStep, CLOCK_SNAP, CLOCK_RATE,
 } from '../js/game/clock.js';
+import {
+  smoothPing, linkLoss, linkGrade, linkState, PING_SMOOTH,
+} from '../js/net/quality.js';
+import {
+  WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit,
+  BLAST_LIFE, shieldFlash, hasShieldFlash,
+} from '../js/game/weapons.js';
+import { SHIELD_AXES, HULL_SIZE } from '../js/models/ships.js';
 import { makeFlow, updateFlow, FLOW } from '../js/game/flow.js';
 import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
@@ -4415,6 +4424,386 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     'расхождение больше ' + CLOCK_SNAP + ' с подводится сразу');
   ok(clockStep(100, 100 + CLOCK_SNAP - 1, dt) < dt * 2,
     'а расхождение меньше порога рывком не подводится');
+}
+
+// --- качество связи ---------------------------------------------------------
+//
+// Сеть ломается не только «совсем»: гораздо чаще она просто становится
+// хуже, и в игре это выглядит как чужой корабль, который дёргается. Цифра
+// в углу — единственное, чем «сеть подтормаживает» отличается от «игра
+// тормозит».
+{
+  console.log('\n== качество связи ==');
+
+  ok(smoothPing(null, 40) === 40, 'первый замер берётся как есть');
+  const p1 = smoothPing(40, 140);
+  ok(p1 > 40 && p1 < 140 && Math.abs(p1 - (40 + 100 * PING_SMOOTH)) < 1e-9,
+    'скачок замера сглаживается: ' + p1.toFixed(1) + ' мс вместо 140');
+
+  // Потери считаются по ритму снимков: сервер шлёт их строго по тику.
+  const tick = 0.2;
+  const full = [];
+  for (let i = 0; i < 20; i++) full.push(100 + i * tick);
+  const now = 100 + 20 * tick;
+  ok(linkLoss(full, tick, now) < 0.06,
+    'ровный поток снимков — потерь нет: ' + (linkLoss(full, tick, now) * 100).toFixed(0) + '%');
+
+  const half = full.filter((t, i) => i % 2 === 0);
+  const lossHalf = linkLoss(half, tick, now);
+  ok(lossHalf > 0.4 && lossHalf < 0.6,
+    'половина снимков потерялась — видно: ' + (lossHalf * 100).toFixed(0) + '%');
+
+  ok(linkLoss(full, tick, now + 10) === 1,
+    'снимки кончились вовсе — потери полные');
+
+  // Поток мог оборваться совсем недавно: снимки до обрыва были ровные, и
+  // по ним одним связь выглядит идеальной. Ловится это молчанием.
+  const stalled = linkLoss(full, tick, now + 2);
+  ok(stalled > 0.3 && stalled < 1,
+    'поток встал две секунды назад — это уже потери: '
+    + (stalled * 100).toFixed(0) + '%');
+  ok(linkLoss([], tick, now) === 0 && linkLoss([100], tick, 100.1) === 0,
+    'на молодой связи потерь не выдумываем: считать ещё нечего');
+
+  // Оценка: пороги выбраны по тому, что видно в игре.
+  ok(linkGrade(20, 0) === 4, 'двадцать миллисекунд без потерь — отлично');
+  ok(linkGrade(120, 0) === 3 && linkGrade(200, 0) === 2 && linkGrade(500, 0) === 1,
+    'с ростом задержки оценка падает');
+  ok(linkGrade(20, 0.4) === 1,
+    'потери бьют сильнее задержки: потерянный снимок — это не «позже», а «никогда»');
+  ok(linkGrade(null, 0) === 0, 'пока пинга нет, оценки нет');
+
+  // Состояние целиком: пока сокет не живой, мерить нечего.
+  const off = linkState({ state: 'down', beats: full, tick, ping: 30 }, now, 'online');
+  ok(off.grade === 0 && off.ping === null,
+    'при оборванном сокете прибор не показывает старый пинг');
+  const live = linkState({ state: 'live', beats: full, tick, ping: 30 }, now, 'online');
+  ok(live.grade === 4 && live.ping === 30, 'на живой связи — оценка и пинг');
+}
+
+// --- сокет: проводка пинга и ритма ------------------------------------------
+//
+// Математика качества связи проверена выше, но между ней и сервером есть
+// проводка: послать ping, поймать pong, отметить каждый снимок. Ломается
+// она молча — цифра в углу просто застывает, — и увидеть это можно только
+// с настоящим сервером. Поэтому здесь поддельный сокет: он отвечает, как
+// отвечал бы Hub.
+{
+  console.log('\n== сокет: пинг и ритм ==');
+
+  const sent = [];
+  let live = null;
+  globalThis.localStorage = { getItem: () => 'т'.repeat(64), setItem() {}, removeItem() {} };
+  globalThis.location = { hostname: 'localhost', origin: 'http://localhost', pathname: '/x/' };
+  globalThis.WebSocket = class {
+    constructor() {
+      this.readyState = 1;
+      live = this;
+      setTimeout(() => this.onopen && this.onopen(), 0);
+    }
+    send(text) { sent.push(JSON.parse(text)); }
+    close() { this.readyState = 3; if (this.onclose) this.onclose(); }
+    say(msg) { if (this.onmessage) this.onmessage({ data: JSON.stringify(msg) }); }
+  };
+
+  const { net, connect, disconnect, SEND_EVERY } = await import('../js/net/socket.js');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  connect(() => ({ sys: 0, x: 1, y: 2, z: 3, v: 0.4, mode: 'flight',
+    fwd: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } }));
+  await wait(30);
+  ok(sent.length === 1 && sent[0].t === 'hello',
+    'первым делом представляемся: ' + (sent[0] ? sent[0].t : '—'));
+
+  live.say({ t: 'welcome', you: { id: 1, name: 'Я' }, tick: 0.2, wt: 500, peers: [] });
+  ok(net.state === 'live' && net.tick === 0.2 && net.wt === 500,
+    'приветствие принято: шаг сервера и время мира взяты из него');
+
+  // Первый же удар таймера шлёт и положение, и замер задержки.
+  await wait(SEND_EVERY + 60);
+  const pos = sent.find((m) => m.t === 'pos');
+  ok(pos && pos.fx === 0 && pos.fz === 1 && pos.uy === 1,
+    'положение уходит вместе с осанкой');
+  ok(sent.some((m) => m.t === 'ping'), 'замер задержки уходит на сервер');
+
+  live.say({ t: 'pong', time: 1 });
+  ok(typeof net.ping === 'number' && net.ping >= 0 && net.ping < 5000,
+    'по ответу сервера посчитана задержка: ' + Math.round(net.ping) + ' мс');
+
+  // Каждый снимок отмечается: по их ритму считаются потери.
+  const before = net.beats.length;
+  live.say({ t: 'peers', list: [], wt: 501 });
+  live.say({ t: 'peers', list: [], wt: 501.2 });
+  ok(net.beats.length === before + 2, 'каждый снимок отмечен во времени');
+
+  // Обрыв обнуляет измеренное: показывать старый пинг после обрыва —
+  // значит врать ровно тогда, когда на прибор и смотрят.
+  live.close();
+  ok(net.ping === null && net.beats.length === 0,
+    'после обрыва измеренное сбрасывается');
+
+  disconnect();
+  delete globalThis.WebSocket;
+  delete globalThis.localStorage;
+  delete globalThis.location;
+}
+
+// --- оружие -----------------------------------------------------------------
+//
+// Бой разбирается по кадрам, а глазами в браузере видно только «вроде
+// попал». Поэтому здесь проверяется всё, что можно посчитать: упреждение,
+// предел кардана, темп стрельбы, дальность и само попадание.
+{
+  console.log('\n== оружие ==');
+
+  const spec = WEAPONS.laser_g;
+  const ship = makeShip();
+  placeShip(ship, v3(0, 0, 0), makeBasis());
+
+  // Упреждение: по стоящей цели бьём в неё саму.
+  const still = { pos: v3(0, 0, 1), vel: v3(0, 0, 0) };
+  const p0 = leadPoint(ship.pos, still, spec.speed);
+  ok(Math.abs(p0.z - 1) < 1e-9 && Math.abs(p0.x) < 1e-9, 'по стоящей цели упреждения нет');
+
+  // По движущейся — точка встречи: цель и болт приходят туда ОДНОВРЕМЕННО.
+  const moving = { pos: v3(0, 0, 1), vel: v3(0.4, 0, 0) };
+  const p1 = leadPoint(ship.pos, moving, spec.speed);
+  const tBolt = Math.hypot(p1.x, p1.y, p1.z) / spec.speed;
+  const tGoal = Math.abs(p1.x - moving.pos.x) / 0.4;
+  ok(p1.x > 0.1 && Math.abs(tBolt - tGoal) < 1e-3,
+    'упреждение: болт и цель встречаются на ' + tBolt.toFixed(3) + ' с');
+
+  // Кардан доворачивает к упреждённой точке, пока та в конусе.
+  const guns = makeGuns('laser_g');
+  const near = { pos: v3(0.2, 0, 2), vel: v3(0, 0, 0) };   // ~5.7° от оси
+  const a1 = aimDir(guns, ship, near, v3());
+  const offAxis = Math.acos(Math.max(-1, Math.min(1, a1.z)));
+  ok(guns.locked && Math.abs(offAxis - Math.atan2(0.2, 2)) < 1e-6,
+    'в конусе ствол смотрит точно в упреждённую точку');
+
+  // За конусом — упирается в предел, а не бросает цель и не смотрит в неё.
+  const wide = { pos: v3(3, 0, 1), vel: v3(0, 0, 0) };     // ~71°
+  const a2 = aimDir(guns, ship, wide, v3());
+  const lim = Math.acos(Math.max(-1, Math.min(1, a2.z)));
+  ok(!guns.locked && Math.abs(lim - spec.cone) < 1e-6,
+    'за конусом ствол упирается в предел ' + (spec.cone * 180 / Math.PI).toFixed(0) + '°');
+  ok(Math.abs(Math.hypot(a2.x, a2.y, a2.z) - 1) < 1e-9, 'направление ствола единичное');
+
+  // Темп: между выстрелами ровно 1/rate, не чаще.
+  const g2 = makeGuns('laser_g');
+  const ports = [v3(-0.02, 0, 0.02), v3(0.02, 0, 0.02)];
+  const first = fireGuns(g2, ship, still, ports, []);
+  const second = fireGuns(g2, ship, still, ports, []);
+  ok(first.length === 1 && second.length === 0, 'второй выстрел подряд не проходит: пушка не остыла');
+  updateGuns(g2, 1 / spec.rate, []);
+  const third = fireGuns(g2, ship, still, ports, []);
+  ok(third.length === 1, 'после перезарядки стреляет снова');
+  // Стволы работают по очереди: залпом из всех сразу темп удваивается.
+  ok(Math.abs(first[0].x - third[0].x) > 0.03, 'стволы бьют по очереди, а не оба сразу');
+
+  // Болт летит и умирает на своей дальности, а не живёт вечно.
+  const g3 = makeGuns('laser_g');
+  fireGuns(g3, ship, null, [v3(0, 0, 0)], []);
+  updateGuns(g3, 0.1, []);
+  const b = g3.bolts[0];
+  ok(b && Math.abs(b.z - spec.speed * 0.1) < 1e-9,
+    'болт летит со своей скоростью: ' + (b ? b.z.toFixed(3) : '—') + ' км за 0.1 с');
+  updateGuns(g3, spec.range / spec.speed + 0.5, []);
+  ok(g3.bolts.length === 0, 'дальше ' + spec.range + ' км болта нет');
+
+  // Попадание ищется ОТРЕЗКОМ: за кадр болт проходит больше собственной
+  // длины и больше корабля, и проверка «попал ли центр в шар» промахнулась
+  // бы через раз.
+  const g4 = makeGuns('laser_g');
+  fireGuns(g4, ship, null, [v3(0, 0, 0)], []);
+  const target = { id: 5, pos: v3(0, 0, 0.6) };
+  const hits = updateGuns(g4, 0.5, [target]);       // за кадр пролетает 1.5 км
+  ok(hits.length === 1 && hits[0].id === 5 && hits[0].damage === spec.damage,
+    'цель на пути очереди поражена: урон ' + (hits[0] ? hits[0].damage : '—'));
+  ok(g4.bolts.length === 0, 'попавший болт исчезает, а не летит дальше');
+
+  // Мимо — значит мимо: цель в стороне не задевается.
+  const g5 = makeGuns('laser_g');
+  fireGuns(g5, ship, null, [v3(0, 0, 0)], []);
+  ok(updateGuns(g5, 0.5, [{ id: 6, pos: v3(0.2, 0, 0.6) }]).length === 0,
+    'цель в двухстах метрах в стороне не задета');
+
+  // Чужие выстрелы — только картинка, и мусор в них не должен пролезать.
+  const g6 = makeGuns('laser_g');
+  addForeignBolt(g6, { w: 'laser_g', x: 1, y: 2, z: 3, dx: 0, dy: 0, dz: 1, by: 4 });
+  addForeignBolt(g6, { w: 'laser_g', x: NaN, y: 0, z: 0, dx: 1, dy: 0, dz: 0, by: 4 });
+  ok(g6.bolts.length === 1 && g6.bolts[0].mine === false,
+    'чужой болт добавлен и помечен чужим, битый отброшен');
+  ok(updateGuns(g6, 0.5, [{ id: 9, pos: v3(1, 2, 4) }]).length === 0,
+    'чужим болтом мы никого не «попадаем»: это считает его хозяин');
+
+  // Чужой болт обязан ГАСНУТЬ о наш корпус. Урона он не наносит (его
+  // считает сервер), но пролетающий насквозь болт выглядит как поломка
+  // игры — с этого и началась эта правка.
+  const g7 = makeGuns('laser_g');
+  addForeignBolt(g7, { w: 'laser_g', x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1, by: 4 });
+  const me = { id: 8, pos: v3(0, 0, 0.6), own: true };
+  const rep = updateGuns(g7, 0.5, [me]);
+  ok(g7.bolts.length === 0 && rep.length === 0,
+    'чужой болт гаснет о наш корпус и ничего не докладывает');
+  ok(g7.blasts.length === 1, 'на месте попадания зажигается вспышка');
+
+  // Вспышка живёт недолго и гаснет сама.
+  updateGuns(g7, BLAST_LIFE + 0.01, []);
+  ok(g7.blasts.length === 0, 'вспышка гаснет через ' + BLAST_LIFE + ' с');
+
+  // В своего стрелка болт не попадает: он из него вылетел.
+  const g8 = makeGuns('laser_g');
+  addForeignBolt(g8, { w: 'laser_g', x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1, by: 4 });
+  ok(updateGuns(g8, 0.5, [{ id: 4, pos: v3(0, 0, 0.6) }]).length === 0
+    && g8.bolts.length === 1,
+    'чужой болт проходит сквозь СВОЕГО стрелка, а не гаснет о него');
+
+  // Оболочка щита обязана накрыть корпус ЦЕЛИКОМ, и проверяется это по
+  // самим вершинам, а не по габаритам: эллипсоид, который просто больше
+  // габаритного ящика, его углов не накрывает — на этом из-под щита
+  // торчали законцовки крыльев.
+  const half = [HULL_SIZE.x / 2, HULL_SIZE.y / 2, HULL_SIZE.z / 2];
+  const hull = buildCobra();
+  let worst = 0;
+  for (const v of hull.verts) {
+    worst = Math.max(worst,
+      Math.hypot(v.x / SHIELD_AXES[0], v.y / SHIELD_AXES[1], v.z / SHIELD_AXES[2]));
+  }
+  ok(worst <= 1,
+    'ни одна из ' + hull.verts.length + ' точек корпуса не торчит из оболочки: худшая '
+    + worst.toFixed(3) + ' от её края');
+  ok(worst > 0.8,
+    'и оболочка не раздута зря: самая выступающая точка на ' + worst.toFixed(3));
+  ok(SHIELD_AXES.every((a, i) => a > half[i]),
+    'оболочка больше габарита по каждой оси: '
+    + SHIELD_AXES.map((a) => (a * 1000).toFixed(0)).join('×')
+    + ' м против ' + half.map((h) => (h * 1000).toFixed(0)).join('×'));
+  ok(SHIELD_AXES[0] / SHIELD_AXES[1] > 1.5 && SHIELD_AXES[2] / SHIELD_AXES[1] > 1.5,
+    'и остаётся приплюснутой, как сам корпус: '
+    + (SHIELD_AXES[0] / SHIELD_AXES[1]).toFixed(1) + ':1');
+
+  // Пятно удара живёт в осях КОРАБЛЯ: он вертится, а пятно остаётся на
+  // том борту, куда пришёл луч.
+  const gs = makeGuns('laser_g');
+  const sh2 = makeShip();
+  placeShip(sh2, v3(0, 0, 0), makeBasis());
+  shieldFlash(gs, 0, true, v3(0.03, 0, 0), sh2.pos, sh2.basis);
+  ok(gs.shields.length === 1 && gs.shields[0].dx > 0.9,
+    'удар в правый борт даёт пятно справа: ' + gs.shields[0].dx.toFixed(2));
+  ok(hasShieldFlash(gs, 0, true) && !hasShieldFlash(gs, 7, false),
+    'свежая оболочка видна только у того корабля, по которому попали');
+
+  // Тот же удар по мировым координатам, но корабль развернулся носом
+  // вправо — пятно обязано оказаться уже НЕ на борту, а спереди.
+  rotateBasis(sh2.basis, 0, Math.PI / 2, 0);
+  shieldFlash(gs, 0, true, v3(0.03, 0, 0), sh2.pos, sh2.basis);
+  ok(gs.shields[1].dz > 0.9,
+    'после разворота то же место мира приходится в нос: ' + gs.shields[1].dz.toFixed(2));
+
+  // И свой болт не попадает в нас самих.
+  const g9 = makeGuns('laser_g');
+  fireGuns(g9, ship, null, [v3(0, 0, 0)], []);
+  ok(updateGuns(g9, 0.5, [{ id: 8, pos: v3(0, 0, 0.6), own: true }]).length === 0,
+    'свой болт в свой же корабль не попадает');
+}
+
+
+// --- цель в бою -------------------------------------------------------------
+//
+// Зазор до цели считается до её КРАЯ, и планета во полнеба всегда «ближе
+// к прицелу», чем корабль перед носом. Без отдельного правила выбрать
+// пилота было нельзя вовсе, пока за ним видно планету, — то есть почти
+// никогда.
+{
+  console.log('\n== цель в бою ==');
+  const ship = makeShip();
+  placeShip(ship, v3(0, 0, 0), makeBasis());
+  const planet = { name: 'ПЛАНЕТА', id: 1, pos: v3(0, 0, 100), radius: 30 };
+  const peer = { name: 'ПИЛОТ', id: 7, pos: v3(0.05, 0, 1), radius: 0.035, isPeer: true };
+  const nav = { list: [planet, peer], index: 0 };
+
+  const order = aimTargets(nav, ship).map((x) => x.t.name);
+  ok(order[0] === 'ПИЛОТ' && order.length === 2,
+    'под прицелом и планета, и пилот — первым идёт пилот: ' + order.join(', '));
+
+  const first = pickTarget(nav, ship);
+  const second = pickTarget(nav, ship);
+  ok(first === peer && second === planet,
+    'второе нажатие Tab доходит до планеты: пилот её не заслоняет навсегда');
+}
+
+// --- какая видеокарта досталась ---------------------------------------------
+//
+// Контекст просит высокую производительность, но решает система: на
+// машине с двумя картами браузер спокойно уходит на встроенную, и игра
+// идёт вдвое медленнее без единой ошибки в консоли. Разобрать это можно
+// только по названию карты — значит, разбирать его надо надёжно.
+{
+  console.log('\n== видеокарта ==');
+
+  const cases = [
+    ['ANGLE (NVIDIA, NVIDIA GeForce RTX 3050 Direct3D11 vs_5_0 ps_5_0, D3D11)', 'discrete'],
+    ['ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 Direct3D11, D3D11)', 'discrete'],
+    ['ANGLE (AMD, AMD Radeon RX 6600 Direct3D11, D3D11)', 'discrete'],
+    ['Apple M2', 'discrete'],
+    ['ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0, D3D11)', 'integrated'],
+    ['ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11, D3D11)', 'integrated'],
+    ['ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11, D3D11)', 'integrated'],
+    ['ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))', 'software'],
+    ['Mesa/X.org llvmpipe (LLVM 15, 256 bits)', 'software'],
+    ['Microsoft Basic Render Driver', 'software'],
+    ['', 'unknown'],
+    [null, 'unknown'],
+  ];
+  const wrong = cases.filter(([name, want]) => gpuKind(name) !== want);
+  ok(wrong.length === 0,
+    'карты разобраны верно (' + cases.length + ' случаев)'
+    + (wrong.length ? ': ошиблись на ' + wrong[0][0] + ' -> ' + gpuKind(wrong[0][0]) : ''));
+
+  // Своя же дискретная карта не должна попадать под предупреждение: ложная
+  // тревога про «встроенную графику» хуже её отсутствия — на неё перестают
+  // смотреть.
+  ok(gpuKind('ANGLE (NVIDIA, NVIDIA GeForce RTX 3050 Laptop GPU Direct3D11, D3D11)') === 'discrete',
+    'ноутбучная RTX — тоже дискретная, тревоги не будет');
+}
+
+// --- прыжок к чужому кораблю ------------------------------------------------
+//
+// Пилот — такая же точка назначения, как станция, но со своими двумя
+// правилами: выход за двадцать километров (чтобы это был прыжок, а не
+// телепорт за спину) и осторожность со скоростью цели.
+{
+  console.log('\n== прыжок к пилоту ==');
+
+  const peer = {
+    id: 5, name: 'ЦЕЛЬ', isPeer: true, radius: 0.035,
+    pos: v3(1000, 0, 0), vel: v3(0, 0, 0),
+  };
+  const from = v3(0, 0, 0);
+  const p = exitPoint(peer, from);
+  const gap = Math.hypot(p.x - peer.pos.x, p.y - peer.pos.y, p.z - peer.pos.z);
+  ok(Math.abs(gap - QUANTUM.exitPeer) < 1e-9,
+    'выход в ' + QUANTUM.exitPeer + ' км от пилота: получилось ' + gap.toFixed(3));
+  ok(p.x < peer.pos.x, 'и выходим с той стороны, откуда пришли');
+
+  // Ближе, чем к станции, но дальше, чем к точке в пустоте: пилоту нужно
+  // время увидеть, кто к нему пришёл.
+  ok(QUANTUM.exitPeer < QUANTUM.exitStation && QUANTUM.exitPeer > QUANTUM.exitMin,
+    'двадцать километров — между станцией (' + QUANTUM.exitStation
+    + ') и точкой в пустоте (' + QUANTUM.exitMin + ')');
+
+  // Выход: скорость равна скорости цели, если та летит по-обычному.
+  peer.vel = v3(0.4, 0, 0);
+  const vOk = exitVelocity(peer);
+  ok(Math.abs(vOk.x - 0.4) < 1e-9,
+    'рядом с целью выходим её же ходом: ' + vOk.x.toFixed(2) + ' км/с');
+
+  // А вот вектор пилота, который сам в прыжке, наследовать нельзя.
+  peer.vel = v3(40000, 0, 0);
+  const vFast = exitVelocity(peer);
+  ok(vFast.x === 0 && vFast.y === 0 && vFast.z === 0,
+    'за пилотом, ушедшим в прыжок, не улетаем: ' + vFast.x + ' км/с');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

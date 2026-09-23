@@ -18,16 +18,23 @@
  *     {"t":"pos","sys":0,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight",
  *      "fx":..,"fy":..,"fz":..,"ux":..,"uy":..,"uz":..}   куда смотрит и где верх
  *     {"t":"ping"}
+ *     {"t":"shot","w":"laser_g","x":..,"y":..,"z":..,"dx":..,"dy":..,"dz":..}
+ *     {"t":"hit","id":7,"w":"laser_g"}      попадание по пилоту 7
  *
  *   сервер -> клиент
  *     {"t":"welcome","you":{...},"peers":[...],"wt":123.4}
  *     {"t":"peers","list":[...],"wt":123.4}  раз в тик, только своя система
+ *       в списке у каждого: место, осанка, корпус и щит (hull/hmax/sh/smax)
  *
  * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
  * Оно идёт в каждом снимке, а не только при входе: вкладка в фоне
  * перестаёт получать кадры, её часы отстают, и без поправки пилот,
  * вернувшийся к игре, увидит станцию не там, где остальные.
  *     {"t":"leave","id":7}
+ *     {"t":"shot","by":7,...}                чужой выстрел — только картинка
+ *     {"t":"hurt","by":7,"dmg":3,"hull":61,"dead":false}   попали В НАС
+ *     {"t":"hitok","id":7,"hull":61,"dead":false}          попали МЫ
+ *     {"t":"boom","id":7}                    чей-то корабль уничтожен
  *     {"t":"error","code":"auth","message":"..."}
  *
  * Положение НЕ ПРОВЕРЯЕТСЯ: сервер не считает физику и знает лишь то, что
@@ -45,6 +52,12 @@ final class Hub
 
     /** Не чаще стольких обновлений положения в секунду от одного клиента. */
     public const POS_RATE = 25;
+
+    /** Не чаще стольких выстрелов в секунду от одного клиента. */
+    public const SHOT_RATE = 10;
+
+    /** Как часто перечитываем корпус и щит пилота из базы, с. */
+    public const STAT_EVERY = 10;
 
     /** Больше — молчащий клиент считается мёртвым, с. */
     public const IDLE_TIMEOUT = 90;
@@ -94,6 +107,20 @@ final class Hub
             'since' => $now,
             'seen' => $now,
             'posAt' => 0.0,
+            'shotAt' => 0.0,
+            'hitAt' => 0.0,
+            // Что стоит на корабле — спрашиваем у базы один раз на
+            // соединение: оружие в полёте не меняется, а запрос на
+            // каждое попадание превратил бы бой в поток запросов.
+            'guns' => [],
+            // Корпус и щит соседа рисуются у его метки, поэтому идут в
+            // каждом снимке. Читаются из базы РЕДКО: при входе, при
+            // попадании и раз в STAT_EVERY — гонять запрос на каждый тик
+            // ради двух чисел незачем.
+            'hull' => 0.0, 'hullMax' => 0.0,
+            'shield' => 0.0, 'shieldMax' => 0.0,
+            'regen' => 0.0, 'delay' => 0.0,
+            'shieldAt' => $now, 'statAt' => 0.0,
             'moved' => false,
         ];
     }
@@ -164,6 +191,34 @@ final class Hub
                 $peer['moved'] = true;
                 return;
 
+            case 'shot':
+                // Выстрел ПЕРЕСЫЛАЕТСЯ как есть: это картинка, урона в нём
+                // нет. Проверяется только темп — чтобы одним клиентом
+                // нельзя было залить систему пакетами.
+                if ($peer['player'] === null) {
+                    return;
+                }
+                if ($now - $peer['shotAt'] < 1.0 / self::SHOT_RATE) {
+                    return;
+                }
+                $peer['shotAt'] = $now;
+                $this->broadcast($peer['sys'], [
+                    't' => 'shot',
+                    'by' => $peer['player'],
+                    'w' => (string) ($msg['w'] ?? ''),
+                    'x' => self::num($msg['x'] ?? 0),
+                    'y' => self::num($msg['y'] ?? 0),
+                    'z' => self::num($msg['z'] ?? 0),
+                    'dx' => self::num($msg['dx'] ?? 0),
+                    'dy' => self::num($msg['dy'] ?? 0),
+                    'dz' => self::num($msg['dz'] ?? 1),
+                ], $peer['player']);
+                return;
+
+            case 'hit':
+                $this->hit($conn, $peer, $msg, $now);
+                return;
+
             case 'ping':
                 $this->send($conn, ['t' => 'pong', 'time' => round($now, 3)]);
                 return;
@@ -205,15 +260,114 @@ final class Hub
         $peer['player'] = $playerId;
         $peer['name'] = $row ? ($row['name'] ?: $row['login']) : ('#' . $playerId);
         $peer['sys'] = $row && $row['system_id'] !== null ? (int) $row['system_id'] : null;
+        $this->loadStats($peer, $now);
 
         $this->send($conn, [
             't' => 'welcome',
             'you' => ['id' => $playerId, 'name' => $peer['name'], 'sys' => $peer['sys']],
             'tick' => self::TICK,
             'wt' => Clock::worldTime(),
-            'peers' => $this->peersOf($peer['sys'], $playerId),
+            'peers' => $this->peersOf($peer['sys'], $playerId, $now),
         ]);
         $this->say('вошёл ' . $peer['name'] . ' (система ' . ($peer['sys'] ?? '—') . ')');
+    }
+
+    /**
+     * Попадание: что сервер может проверить, а что нет.
+     *
+     * Проверяемо: оружие стоит на корабле, цель в той же системе, она в
+     * пределах дальности с запасом, и попадания идут не чаще, чем оружие
+     * умеет стрелять. Непроверяемо: летел ли болт на самом деле — физики
+     * снарядов на сервере нет, как нет и физики полёта (см. Combat).
+     */
+    private function hit($conn, array &$peer, array $msg, float $now): void
+    {
+        if ($peer['player'] === null) {
+            $this->send($conn, ['t' => 'error', 'code' => 'auth', 'message' => 'сначала hello']);
+            return;
+        }
+        if ($now - $peer['hitAt'] < 1.0 / Combat::HIT_RATE) {
+            return;                                  // темп выше оружейного
+        }
+        $victimId = (int) ($msg['id'] ?? 0);
+        $code = (string) ($msg['w'] ?? '');
+        if ($victimId <= 0 || $victimId === $peer['player'] || $code === '') {
+            return;
+        }
+
+        // Жертва должна быть В СЕТИ И В ЭТОЙ ЖЕ СИСТЕМЕ: по кораблю,
+        // которого здесь нет, попасть нельзя ничем.
+        $victim = null;
+        foreach ($this->peers as $p) {
+            if ($p['player'] === $victimId && $p['sys'] === $peer['sys']) {
+                $victim = $p;
+                break;
+            }
+        }
+        if ($victim === null) {
+            return;
+        }
+
+        if (!isset($peer['guns'][$code])) {
+            $peer['guns'][$code] = Combat::armed($peer['player'], $code)
+                ? Combat::weapon($code) : null;
+        }
+        $gun = $peer['guns'][$code];
+        if ($gun === null) {
+            $this->send($conn, ['t' => 'error', 'code' => 'no_gun',
+                'message' => 'такого оружия на корабле нет']);
+            return;
+        }
+
+        $d = sqrt(
+            ($victim['x'] - $peer['x']) ** 2 +
+            ($victim['y'] - $peer['y']) ** 2 +
+            ($victim['z'] - $peer['z']) ** 2
+        );
+        if ($d > (float) $gun['range'] * Combat::RANGE_SLACK) {
+            return;                                  // дальше, чем бьёт оружие
+        }
+
+        $peer['hitAt'] = $now;
+        $res = Combat::damage($victimId, (float) $gun['damage']);
+
+        // Кэш жертвы обновляем сразу: её корпус и щит рисуются у метки в
+        // чужих приборах, и ждать перечитывания из базы там нечего.
+        foreach ($this->peers as $k => $p) {
+            if ($p['player'] === $victimId) {
+                $this->peers[$k]['hull'] = $res['hull'];
+                $this->peers[$k]['hullMax'] = $res['max'];
+                $this->peers[$k]['shield'] = $res['shield'];
+                $this->peers[$k]['shieldMax'] = $res['smax'];
+                $this->peers[$k]['shieldAt'] = $now;
+            }
+        }
+
+        $this->send($victim['conn'], [
+            't' => 'hurt', 'by' => $peer['player'], 'name' => $peer['name'],
+            'dmg' => (float) $gun['damage'], 'hull' => $res['hull'],
+            'max' => $res['max'], 'shield' => $res['shield'], 'smax' => $res['smax'],
+            'absorbed' => $res['absorbed'], 'dead' => $res['dead'],
+        ]);
+        $this->send($conn, [
+            't' => 'hitok', 'id' => $victimId,
+            'hull' => $res['hull'], 'max' => $res['max'],
+            'shield' => $res['shield'], 'smax' => $res['smax'],
+            'absorbed' => $res['absorbed'], 'dead' => $res['dead'],
+        ]);
+
+        if ($res['dead']) {
+            // Гибель сразу превращается в состояние, из которого можно
+            // играть дальше: корабль целый, пилот в своём порту.
+            Combat::respawn($victimId);
+            foreach ($this->peers as $k => $p) {
+                if ($p['player'] === $victimId) {
+                    $this->loadStats($this->peers[$k], $now);
+                }
+            }
+            $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $victimId], $victimId);
+            $this->say('уничтожен ' . $victim['name'] . ' (огнём ' . $peer['name'] . ')');
+        }
     }
 
     /**
@@ -242,15 +396,61 @@ final class Hub
                 $peer['conn']->close();
                 continue;
             }
-            $list = $this->peersOf($peer['sys'], $peer['player']);
+            // Корпус мог измениться мимо нас: починились в порту,
+            // например. Перечитываем редко, но перечитываем.
+            if ($now - $peer['statAt'] > self::STAT_EVERY) {
+                $this->loadStats($this->peers[$key], $now);
+            }
+            $list = $this->peersOf($peer['sys'], $peer['player'], $now);
             $this->send($peer['conn'], ['t' => 'peers', 'list' => $list, 'wt' => $wt]);
             $sent++;
         }
         return $sent;
     }
 
+    /**
+     * Перечитать корпус и щит пилота из базы.
+     *
+     * Нужно не только при входе: корпус чинят в порту, и без обновления
+     * сосед ещё десять минут висел бы битым в чужих приборах.
+     */
+    private function loadStats(array &$peer, float $now): void
+    {
+        $peer['statAt'] = $now;
+        $row = Db::row(
+            'SELECT s.`hull`, s.`shield`, s.`hit_at`,
+                    t.`hull_max`, t.`shield_max`, t.`shield_regen`, t.`shield_delay`
+             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
+             WHERE s.`owner_id`=? LIMIT 1',
+            [$peer['player']]
+        );
+        if ($row === null) {
+            return;
+        }
+        $peer['hull'] = (float) $row['hull'];
+        $peer['hullMax'] = (float) $row['hull_max'];
+        $peer['shieldMax'] = (float) $row['shield_max'];
+        $peer['regen'] = (float) $row['shield_regen'];
+        $peer['delay'] = (float) $row['shield_delay'];
+        // Щит приводим к ВРЕМЕНИ ХАБА: в базе он записан на момент
+        // последнего попадания по часам СУБД, а здесь всё считается от
+        // microtime процесса, и смешивать эти шкалы нельзя.
+        $peer['shield'] = Combat::shieldNow($row);
+        $peer['shieldAt'] = $now;
+    }
+
+    /** Щит соседа на данный момент: он отрастает и между попаданиями. */
+    private static function shieldOf(array $peer, float $now): float
+    {
+        if ($peer['shieldMax'] <= 0) {
+            return 0.0;
+        }
+        $idle = max(0.0, $now - $peer['shieldAt'] - $peer['delay']);
+        return min($peer['shieldMax'], $peer['shield'] + $peer['regen'] * $idle);
+    }
+
     /** Кто виден пилоту: только его система и только вошедшие. */
-    private function peersOf(?int $sys, int $exceptPlayer): array
+    private function peersOf(?int $sys, int $exceptPlayer, float $now): array
     {
         $out = [];
         foreach ($this->peers as $p) {
@@ -269,6 +469,8 @@ final class Hub
                 'v' => $p['v'],
                 'fx' => $p['fx'], 'fy' => $p['fy'], 'fz' => $p['fz'],
                 'ux' => $p['ux'], 'uy' => $p['uy'], 'uz' => $p['uz'],
+                'hull' => round($p['hull'], 1), 'hmax' => $p['hullMax'],
+                'sh' => round(self::shieldOf($p, $now), 1), 'smax' => $p['shieldMax'],
                 'mode' => $p['mode'],
             ];
         }

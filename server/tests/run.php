@@ -200,9 +200,22 @@ ok(count($state['ledger']) === 1 && $state['ledger'][0]['amount'] === Content::S
     'капитал пришёл строкой в ленте, а не присвоением баланса');
 ok($state['ship']['type']['code'] === 'challenger'
     && $state['ship']['hull'] === $state['ship']['type']['hullMax']
-    && count($state['ship']['equipment']) === 11,
+    && count($state['ship']['equipment']) === 13,
     'корабль с завода: ' . $state['ship']['type']['name'] . ', модулей '
     . count($state['ship']['equipment']));
+// Пушка входит в заводскую комплектацию: безоружный пилот в мире, где
+// стреляют, — это не «выбор игрока», а невозможность играть.
+$guns = array_values(array_filter($state['ship']['equipment'],
+    static fn($e) => $e['slot'] === 'gun'));
+// Щит — такой же модуль, как и остальные, и он тоже с завода: бой без
+// щита это бой, в котором первая же очередь снимает корпус.
+ok($state['ship']['type']['shieldMax'] > 0
+    && abs($state['ship']['shield'] - $state['ship']['type']['shieldMax']) < 1e-9,
+    'щит с завода целый: ' . $state['ship']['shield'] . ' из '
+    . $state['ship']['type']['shieldMax']);
+ok(count($guns) === 1 && $guns[0]['code'] === 'laser_g'
+    && (float) $guns[0]['spec']['damage'] > 0,
+    'на корабле с завода стоит ' . ($guns[0]['name'] ?? '—'));
 ok($state['position']['dockedBody'] !== null && $state['position']['systemId'] === 0,
     'пилот стоит в порту родной системы');
 ok($state['cargo'] === [] && $state['holdUsedT'] === 0.0, 'трюм пуст');

@@ -14,12 +14,22 @@
 // пропажа связи не ломала игру — список просто пустеет.
 
 import { token } from './api.js';
+import { smoothPing } from './quality.js';
 
 /** Порт сокет-сервера (server/ws/server.php). */
 export const PORT = 3893;
 
 /** Как часто шлём своё положение, мс. Чаще сервера всё равно не нужно. */
 export const SEND_EVERY = 200;
+
+/**
+ * Как часто меряем пинг, мс.
+ *
+ * Реже, чем шлём положение: замер — это лишний пакет в обе стороны, а
+ * задержка сети за две секунды не меняется настолько, чтобы это было
+ * видно в цифре.
+ */
+export const PING_EVERY = 2000;
 
 /** Ступени задержки перед повторным соединением, мс. */
 const BACKOFF = [1000, 2000, 5000, 10000, 20000];
@@ -43,6 +53,15 @@ export const net = {
   error: null,
   sent: 0,
   got: 0,
+  // Задержка до сервера, мс (сглаженная), и приходы снимков — по ним
+  // считается качество связи (js/net/quality.js).
+  ping: null,
+  beats: [],
+  tick: 0.2,
+  // Бой: чужие выстрелы и полученный урон. Очередь, а не поле, потому что
+  // за один кадр их приходит несколько, а разбирает их игра — в своём
+  // темпе и в своём порядке (js/main.js).
+  events: [],
 };
 
 let ws = null;
@@ -51,6 +70,8 @@ let tries = 0;
 let lastSend = 0;
 let getPose = null;      // откуда брать своё положение
 let stopped = false;
+let pingAt = 0;          // когда ушёл последний ping
+let pingDue = 0;         // когда пора слать следующий
 
 const url = () => 'ws://' + (location.hostname || 'localhost') + ':' + PORT;
 
@@ -98,7 +119,10 @@ function open() {
     // с разными правилами рано или поздно разъезжаются.
     send({ t: 'hello', token: token() });
     if (timer) clearInterval(timer);
-    timer = setInterval(pushPose, SEND_EVERY);
+    net.ping = null;
+    net.beats.length = 0;
+    pingDue = 0;
+    timer = setInterval(beat, SEND_EVERY);
   };
 
   ws.onmessage = (ev) => {
@@ -107,14 +131,26 @@ function open() {
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (!msg || !msg.t) return;
 
+    if (msg.t === 'pong') {
+      // Ответ на свой же ping: вот она, честно измеренная задержка.
+      net.ping = smoothPing(net.ping, now() - pingAt);
+      return;
+    }
+
     if (msg.t === 'welcome') {
       net.state = 'live';
       net.you = msg.you;
+      if (typeof msg.tick === 'number' && msg.tick > 0) net.tick = msg.tick;
+      mark();
       net.peers = msg.peers || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
       net.error = null;
     } else if (msg.t === 'peers') {
+      // Отмечаем КАЖДЫЙ снимок: по их ритму считаются потери. Сервер шлёт
+      // их строго по тику, поэтому «пришло меньше, чем должно было» —
+      // это и есть потери, других признаков у нас нет.
+      mark();
       net.peers = msg.list || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
@@ -122,6 +158,13 @@ function open() {
       net.peers = net.peers.filter((p) => p.id !== msg.id);
       net.rev++;
       net.left = msg.id;
+    } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
+               || msg.t === 'boom') {
+      // Очередь не копим бесконечно: если игра почему-то перестала её
+      // разбирать, сотня событий в памяти полезнее тысячи, а тысяча
+      // ничем не лучше сотни.
+      net.events.push(msg);
+      if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'error') {
       net.error = msg.message || msg.code;
       // 'replaced' — игрок открыл игру в другом окне. Это не сбой связи,
@@ -133,6 +176,8 @@ function open() {
 
   ws.onclose = () => {
     net.peers = [];
+    net.ping = null;
+    net.beats.length = 0;
     net.state = stopped ? 'off' : 'down';
     if (timer) { clearInterval(timer); timer = null; }
     retry();
@@ -148,6 +193,26 @@ function retry() {
   // Ступенчатая задержка, а не постоянная: сервер могли просто не
   // запустить, и долбить его раз в секунду весь вечер незачем.
   setTimeout(open, wait);
+}
+
+const now = () => (typeof performance === 'object' && performance.now
+  ? performance.now() : Date.now());
+
+/** Отметка о пришедшем снимке; храним только окно, нужное для потерь. */
+function mark() {
+  net.beats.push(now() / 1000);
+  if (net.beats.length > 64) net.beats.shift();
+}
+
+/** Раз в SEND_EVERY: своё положение, а изредка — замер задержки. */
+function beat() {
+  pushPose();
+  const t = now();
+  if (t >= pingDue) {
+    pingDue = t + PING_EVERY;
+    pingAt = t;
+    send({ t: 'ping' });
+  }
 }
 
 function pushPose() {
@@ -170,6 +235,27 @@ function pushPose() {
     fx: +p.fwd.x.toFixed(4), fy: +p.fwd.y.toFixed(4), fz: +p.fwd.z.toFixed(4),
     ux: +p.up.x.toFixed(4), uy: +p.up.y.toFixed(4), uz: +p.up.z.toFixed(4),
   });
+}
+
+/**
+ * Сказать всем: я выстрелил.
+ *
+ * Это ТОЛЬКО картинка — чужие увидят болт. Попадание считается отдельно
+ * (reportHit) и проверяется сервером: иначе «вижу выстрел» и «получил
+ * урон» пришлось бы выводить одно из другого, а они приходят разными
+ * путями и в разное время.
+ */
+export function shoot(weapon, from, dir) {
+  send({
+    t: 'shot', w: weapon,
+    x: +from.x.toFixed(3), y: +from.y.toFixed(3), z: +from.z.toFixed(3),
+    dx: +dir.x.toFixed(4), dy: +dir.y.toFixed(4), dz: +dir.z.toFixed(4),
+  });
+}
+
+/** Доложить о попадании. Урон посчитает и применит сервер. */
+export function reportHit(playerId, weapon) {
+  send({ t: 'hit', id: playerId | 0, w: weapon });
 }
 
 function send(msg) {

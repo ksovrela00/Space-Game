@@ -49,12 +49,14 @@ final class Seeder
         foreach ($catalog['shipTypes'] ?? [] as $t) {
             Db::run(
                 'INSERT INTO `ship_type`
-                   (`code`,`name`,`title`,`hull_max`,`shield_max`,`hold_t`,`fuel_t`,`max_speed`,
+                   (`code`,`name`,`title`,`hull_max`,`shield_max`,`shield_regen`,`shield_delay`,
+                    `hold_t`,`fuel_t`,`max_speed`,
                     `accel`,`brake`,`lateral`,`quantum_speed`,`boost_max`,`boost_burn`,
                     `length_m`,`width_m`,`height_m`,`price`)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
                    `hull_max`=VALUES(`hull_max`), `shield_max`=VALUES(`shield_max`),
+                   `shield_regen`=VALUES(`shield_regen`), `shield_delay`=VALUES(`shield_delay`),
                    `hold_t`=VALUES(`hold_t`), `fuel_t`=VALUES(`fuel_t`),
                    `max_speed`=VALUES(`max_speed`), `accel`=VALUES(`accel`), `brake`=VALUES(`brake`),
                    `lateral`=VALUES(`lateral`), `quantum_speed`=VALUES(`quantum_speed`),
@@ -63,6 +65,7 @@ final class Seeder
                    `height_m`=VALUES(`height_m`), `price`=VALUES(`price`)',
                 [
                     $t['code'], $t['name'], $t['title'] ?? '', $t['hullMax'], $t['shieldMax'],
+                    $t['shieldRegen'] ?? 0, $t['shieldDelay'] ?? 0,
                     $t['holdT'], $t['fuelT'], $t['maxSpeed'], $t['accel'], $t['brake'], $t['lateral'],
                     $t['quantumSpeed'], $t['boostMax'], $t['boostBurn'],
                     $t['lengthM'], $t['widthM'], $t['heightM'],
