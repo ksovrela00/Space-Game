@@ -49,11 +49,13 @@ import {
 } from './game/landing.js';
 import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
-import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
+import { drawHud, makeDockAssist, fmtDist, SCANNER_STEPS } from './ui/hud.js';
 import {
   showDocked, showCrash, showHelp, hideOverlay,
 } from './ui/screens.js';
 import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
+import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
+import { makePlayer, updatePlayer, savePlayer, loadPlayer } from './game/player.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 
 const STEP = 1 / 60;
@@ -64,7 +66,6 @@ const STEP = 1 / 60;
 // не туда — например, «на грунт» внутри газового гиганта. Ключ сменён,
 // чтобы такой сейв просто не нашёлся; цена — один перезапуск от порта.
 const SAVE_KEY = 'solar_trader_save_v2';
-const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
 
 // Высоты для телепорта к цели (клавиша K) — от «вся планета в кадре» до
 // «прямо над грунтом». Инструмент для проверки картинки: пройти весь
@@ -117,6 +118,8 @@ const game = {
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
   map: makeMap(),        // состояние карты системы: масштаб, центр, выбор
+  menu: makeMenu(),      // меню пилота (I): корабль, груз, задания, финансы
+  player: makePlayer(),  // кроны, трюм и задания — дела пилота, не корабля
   quantum: makeQuantum(),
   sys,                   // описание текущей системы из галактики
   warp: makeWarp(),      // межсистемный прыжок
@@ -358,6 +361,8 @@ game.restart = () => {
   updateWorld(world, 0);
   stopQuantum(game.quantum);
   game.stats = { docks: 0, crashes: 0, flownKm: 0, landings: 0 };
+  game.player = makePlayer();
+  game.menu.open = false;
   game.zone = null;
   game.capture = null;
   game.landInfo = null;
@@ -540,6 +545,8 @@ function save() {
       gear: ship.gear.out,
       audio: { on: game.audio.on, vol: game.audio.vol },
       stats: game.stats,
+      // Дела пилота переживают и смену системы, и смену корпуса.
+      player: savePlayer(game.player),
       time: world.time,
     }));
   } catch (e) { /* приватный режим — просто не сохраняем */ }
@@ -557,6 +564,7 @@ function load() {
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
   updateWorld(world, s.time || 0);
   game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
+  if (s.player) loadPlayer(game.player, s.player);
   selectTarget(targetById(world, s.target));
   game.state.view = s.view || 'cockpit';
   ship.hull = s.hull || SHIP.maxHull;
@@ -634,7 +642,23 @@ function handleKeys(dt) {
   // это карта того, чего сейчас нет (половину прыжка мир вообще не
   // собран), а справка и смена вида просто вернули бы игрока в кадр,
   // которого не рисуется.
-  if (game.warp.phase === 'tunnel') return;
+  if (game.warp.phase === 'tunnel') {
+    // Привод уходит в прыжок сам, когда корабль доцентровался, — и может
+    // сделать это при открытом меню. Оставить его открытым нельзя:
+    // клавиши в тоннеле не разбираются вовсе, и закрыть меню было бы
+    // нечем до самого прибытия.
+    game.menu.open = false;
+    return;
+  }
+
+  // Меню пилота забирает ввод целиком: полётные клавиши на это время
+  // не разбираются, иначе выбор раздела уводил бы корабль с курса.
+  if (game.menu.open) { menuInput(game.menu, input); return; }
+  if (input.pressed('KeyI')) {
+    // Только в полёте. В порту и на грунте своё меню появится отдельно.
+    if (st.mode === ST.FLIGHT) game.menu.open = true;
+    return;
+  }
 
   if (input.pressed('KeyH')) {
     if (st.mode === ST.HELP) game.closeOverlay();
@@ -843,6 +867,9 @@ function nearestStation() {
 function step(dt) {
   const st = game.state;
   updateWorld(world, dt);
+  // Часы пилота идут в любом режиме: срок задания не останавливается
+  // оттого, что корабль стоит в порту.
+  updatePlayer(game.player, dt);
 
   // Гравитационный захват: внутри сферы действия тела корабль
   // переносится вместе с ним (см. js/game/gravity.js). Без этого
@@ -1377,17 +1404,20 @@ function render2d() {
   renderer.end();
 }
 
-// Курсор виден только на карте (см. css/style.css). Переключаем по
-// изменению, а не каждый кадр: трогать DOM в кадре незачем.
-let cursorShown = false;
+// Курсор виден на карте и в меню пилота (см. css/style.css) — там, где
+// мышью выбирают. Переключаем по изменению, а не каждый кадр: трогать DOM
+// в кадре незачем. Вид курсора разный: на карте это прицел (наводятся на
+// тело), в меню — обычная стрелка (жмут на закладку).
+let cursorClass = '';
 
 function render() {
   setupCamera();
 
-  const wantCursor = game.state.mode === ST.MAP;
-  if (wantCursor !== cursorShown) {
-    cursorShown = wantCursor;
-    screenCanvas.classList.toggle('map', wantCursor);
+  const wantCursor = game.menu.open ? 'menu' : game.state.mode === ST.MAP ? 'map' : '';
+  if (wantCursor !== cursorClass) {
+    screenCanvas.classList.remove('map', 'menu');
+    if (wantCursor) screenCanvas.classList.add(wantCursor);
+    cursorClass = wantCursor;
   }
 
   if (scene) scene.render(game);
@@ -1420,9 +1450,12 @@ function render() {
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
+  // Меню рисуется ПОВЕРХ приборов, а не вместо них: кадр под ним живой.
+  if (game.menu.open) drawMenu(hud, game);
   // Сенсорные органы поверх приборов, но только в полёте и на грунте:
   // в меню и на карте они мешают, а делать нечего.
-  if (Q.touchUi && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
+  if (Q.touchUi && !game.menu.open
+      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
     touchDraw(hud.ctx, game.touch, touchArea, game);
   }
   if (game.fsButton) drawFullscreenButton(hud.ctx, game.fsButton, isFull());
@@ -1444,7 +1477,11 @@ function frame(now) {
   // Касания разбираются ДО управления: джойстик и кнопки должны попасть
   // в тот же кадр, что и клавиши, иначе палец отстаёт от клавиатуры на
   // кадр (на 60 Гц это заметно на посадке).
-  if (Q.touchUi) {
+  // Управление кораблём глохнет, пока открыто меню: нажатия (pressed)
+  // читаются всегда — ими меню и живёт, — а вот удержания (isDown) и
+  // сенсорные оси гасятся этим флагом.
+  input.enabled = !game.menu.open;
+  if (Q.touchUi && !game.menu.open) {
     touchUpdate(game.touch, [...touchPoints.values()], touchArea);
     touchApply(game.touch, ship);
   }

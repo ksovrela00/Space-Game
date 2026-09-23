@@ -45,6 +45,12 @@ const _p2 = { x: 0, y: 0 };
 // бухту (её размер приходит из js/models/cockpit.js), поэтому важны
 // только ПРОПОРЦИИ: бухты под них и сделаны.
 
+// Ступени дальности сканера. Прибор сам выбирает ближайшую, в которую
+// помещается всё вокруг (js/main.js), поэтому game.scannerRange — это
+// ТЕКУЩИЙ масштаб кольца, а не свойство железа. Предел железа — последняя
+// ступень, и в карточке корабля стоит именно она.
+export const SCANNER_STEPS = [5, 25, 120, 600, 3000, 20000];
+
 export const fmtDist = (km) => {
   if (!isFinite(km)) return '—';
   if (km < 1) return (km * 1000).toFixed(0) + ' м';
@@ -56,8 +62,12 @@ export const fmtDist = (km) => {
 export const fmtTime = (s) => {
   if (!isFinite(s)) return '—';
   if (s < 90) return Math.ceil(s) + ' с';
-  const m = Math.floor(s / 60);
-  if (m < 60) return m + ' мин ' + Math.round(s - m * 60) + ' с';
+  // Секунды округляются ДО деления на минуты, иначе на 29 мин 59.6 с
+  // выходит «29 мин 60 с»: минуты берутся от неокруглённого времени, а
+  // остаток округляется до полной минуты. Поймано на сроке задания.
+  const total = Math.round(s);
+  const m = Math.floor(total / 60);
+  if (m < 60) return m + ' мин ' + (total - m * 60) + ' с';
   return Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
 };
 

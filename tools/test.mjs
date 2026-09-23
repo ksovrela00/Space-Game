@@ -38,6 +38,11 @@ import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
+import { fmtTime } from '../js/ui/hud.js';
+import {
+  makePlayer, ledgerAdd, ledgerTotals, cargoTons, loadCargo, dropCargo,
+  addMission, updatePlayer, missionExpired, savePlayer, loadPlayer, LEDGER_MAX,
+} from '../js/game/player.js';
 import { makeFlow, updateFlow, FLOW } from '../js/game/flow.js';
 import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
@@ -4170,6 +4175,98 @@ console.log('\n== варп-привод ==');
 
   finishWarp(w, sh);
   ok(w.phase === 'idle' && sh.speed === 0 && w.to === null, 'после выхода привод выключен и ход погашен');
+}
+
+// --- дела пилота: кроны, трюм, задания ---------------------------------------
+console.log("\n== пилот: кроны, трюм, задания ==");
+{
+  // ЛЕНТА И БАЛАНС. Раздел «Финансы» — это лента операций, и деньги,
+  // появившиеся без строки в ней, были бы деньгами из ниоткуда. Поэтому
+  // баланс обязан сходиться с лентой копейка в копейку.
+  const p = makePlayer(false);
+  ledgerAdd(p, 'ПРОДАЖА РУДЫ', 1800);
+  ledgerAdd(p, 'РЕМОНТ КОРПУСА', -640);
+  ledgerAdd(p, 'СТЫКОВОЧНЫЙ СБОР', -35);
+  const sum = p.ledger.reduce((a, e) => a + e.sum, 0);
+  const t = ledgerTotals(p);
+  ok(p.balance === sum && p.balance === 1125 && t.in === 1800 && t.out === 675,
+    `баланс сходится с лентой: ${p.balance} = ${t.in} - ${t.out}`);
+
+  // Лента подрезается, баланс — нет. Считать баланс суммой записей
+  // нельзя ровно поэтому: за длинный вылет старые строки выпадают.
+  const q = makePlayer(false);
+  for (let i = 0; i < LEDGER_MAX + 40; i++) ledgerAdd(q, 'РЕЙС ' + i, 10);
+  ok(q.ledger.length === LEDGER_MAX && q.balance === (LEDGER_MAX + 40) * 10,
+    `лента подрезана до ${q.ledger.length}, а баланс помнит всё: ${q.balance}`);
+}
+{
+  // ТРЮМ. Меряется тоннами, и сверх ёмкости не лезет ничего.
+  const p = makePlayer(false);
+  ok(loadCargo(p, 'ВОДА', 6, 20) && loadCargo(p, 'ЗЕРНО', 4, 20) && cargoTons(p) === 10,
+    'груз кладётся, тоннаж считается: ' + cargoTons(p) + ' т');
+  ok(loadCargo(p, 'РУДА', 10, 20) && !loadCargo(p, 'РУДА', 0.5, 20),
+    'трюм заполняется ровно до края и дальше не берёт');
+  ok(cargoTons(p) === 20 && p.cargo.length === 3, 'перегруза нет: ' + cargoTons(p) + ' т');
+
+  // Одинаковый товар лежит ОДНОЙ кучей: две строки «вода» в накладной —
+  // это не два разных груза, а неряшливость.
+  const before = p.cargo.length;
+  const water = p.cargo.find((c) => c.name === 'ВОДА');
+  dropCargo(p, water.id, 6);
+  ok(before === 3 && p.cargo.length === 2 && cargoTons(p) === 14,
+    'сброс убирает позицию целиком: осталось ' + cargoTons(p) + ' т');
+  const ore = p.cargo.find((c) => c.name === 'РУДА');
+  dropCargo(p, ore.id, 4);
+  ok(p.cargo.find((c) => c.name === 'РУДА').tons === 6 && cargoTons(p) === 10,
+    'частичный сброс оставляет остаток: ' + cargoTons(p) + ' т');
+
+  // Демо-набор обязан помещаться в трюм ЭТОГО корабля: иначе меню с
+  // первого запуска показывает перегруз, которого не может быть.
+  ok(cargoTons(makePlayer()) <= SHIP.hold,
+    `стартовый груз влезает в трюм: ${cargoTons(makePlayer())} из ${SHIP.hold} т`);
+}
+{
+  // ВРЕМЯ НА ЭКРАНЕ. Округление секунд после деления на минуты давало
+  // «29 мин 60 с» — на сроке задания это и вылезло.
+  const bad = [];
+  for (let t = 90; t < 7200; t += 0.1) {
+    const s = fmtTime(t);
+    if (/ 60 с$/.test(s) || / 60 мин$/.test(s)) { bad.push(t.toFixed(1) + ' -> ' + s); break; }
+  }
+  ok(bad.length === 0 && fmtTime(1799.6) === '30 мин 0 с' && fmtTime(3599.7) === '1 ч 0 мин',
+    'время на экране не показывает 60 секунд и 60 минут' + (bad.length ? ': ' + bad[0] : ''));
+}
+{
+  // СРОКИ. Часы пилота идут всегда, срок падает до нуля и там стоит.
+  const p = makePlayer(false);
+  const m = addMission(p, { title: 'ДОСТАВКА', desc: 'куда-нибудь', reward: 900, time: 100 });
+  updatePlayer(p, 40);
+  ok(Math.abs(m.left - 60) < 1e-9 && Math.abs(p.time - 40) < 1e-9 && !missionExpired(m),
+    `срок идёт: осталось ${m.left} с, часы пилота ${p.time} с`);
+  updatePlayer(p, 200);
+  ok(m.left === 0 && missionExpired(m) && p.missions.length === 1,
+    'просроченное задание остаётся в списке и помечено');
+}
+{
+  // СОХРАНЕНИЕ. Сейв — чужие данные: он переживает смену формата и его
+  // правят руками. Кривое поле обязано давать пустоту, а не падение
+  // меню посреди полёта.
+  const p = makePlayer();
+  updatePlayer(p, 12);
+  const back = loadPlayer(makePlayer(false), JSON.parse(JSON.stringify(savePlayer(p))));
+  ok(back.balance === p.balance && cargoTons(back) === cargoTons(p) &&
+     back.missions.length === p.missions.length && Math.abs(back.time - p.time) < 1e-9,
+    'сейв пилота восстанавливается целиком');
+
+  const junk = loadPlayer(makePlayer(false), {
+    balance: 'много', ledger: [{ label: 'ЛАДНО', sum: 5 }, null, 7],
+    cargo: [{ name: 'ВОДА', tons: -3 }, { tons: 4 }, { name: 'РУДА', tons: 2 }],
+    missions: [{ reward: 100 }, { title: 'ЕСТЬ', left: 'скоро' }],
+    time: NaN,
+  });
+  ok(junk.balance === 0 && junk.time === 0 && junk.ledger.length === 1 &&
+     junk.cargo.length === 1 && junk.missions.length === 1 && junk.missions[0].left === 0,
+    'кривой сейв даёт пустоту, а не исключение');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

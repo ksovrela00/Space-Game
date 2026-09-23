@@ -4,6 +4,10 @@
 
 const calls = {};
 let texts = null;        // включается на время проверки вёрстки
+// Выравнивание и шрифт на момент вызова. Без них координата fillText
+// бессмысленна: при textAlign='right' это ПРАВЫЙ край строки, и проверка
+// вёрстки считала бы, что надпись уехала вправо на свою длину.
+const style = { align: 'left', font: '13px' };
 const count = (name) => { calls[name] = (calls[name] || 0) + 1; };
 
 const gradient = { addColorStop() { count('addColorStop'); } };
@@ -17,7 +21,14 @@ const ctx = new Proxy({}, {
         return gradient;
       };
     }
-    if (prop === 'measureText') return () => ({ width: 42 });
+    // Ширина текста считается по кеглю и длине строки, а не отдаётся
+    // постоянной. Постоянная (было 42) молча отключает ВСЯКИЙ перенос и
+    // всякую подгонку по ширине: код их вызывает, а проверка их не
+    // видит. Моноширинный Consolas — ровно тот случай, когда такую
+    // оценку можно дать честно: 0.55 em на знак.
+    if (prop === 'measureText') {
+      return (t) => ({ width: String(t).length * (parseFloat(style.font) || 13) * 0.55 });
+    }
     if (prop === 'setTransform') return () => count('setTransform');
     if (typeof prop === 'string' && /^(save|restore|beginPath|closePath|fill|stroke|clip|translate|rotate|scale|transform|setTransform|resetTransform|moveTo|lineTo|arc|ellipse|rect|fillRect|strokeRect|clearRect|fillText|strokeText|drawImage|setLineDash|quadraticCurveTo|bezierCurveTo)$/.test(prop)) {
       return (...a) => {
@@ -28,13 +39,19 @@ const ctx = new Proxy({}, {
         }
         // Надписи запоминаем с координатами: по ним проверяется вёрстка
         // приборов (см. проверку панели подхода).
-        if (prop === 'fillText' && texts) texts.push({ s: String(a[0]), x: a[1], y: a[2] });
+        if (prop === 'fillText' && texts) {
+          texts.push({ s: String(a[0]), x: a[1], y: a[2], align: style.align, font: style.font });
+        }
         count(prop);
       };
     }
     return undefined;
   },
-  set() { return true; },
+  set(_t, prop, v) {
+    if (prop === 'textAlign') style.align = String(v);
+    else if (prop === 'font') style.font = String(v);
+    return true;
+  },
 });
 
 const el = (id) => ({
@@ -168,6 +185,8 @@ const game = globalThis.window.GAME;   // main.js пишет в window, а не 
 const { lookAlong } = await import('../js/core/basis.js');
 const { exitPoint } = await import('../js/game/quantum.js');
 const { SHIP } = await import('../js/game/ship.js');
+const { fmtCrowns } = await import('../js/ui/menu.js');
+const { addMission } = await import('../js/game/player.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -648,6 +667,184 @@ await step('карта системы (M): масштаб, выбор, назн�
   if (nodes.screen.classList.contains('map')) throw new Error('курсор остался после карты');
 });
 
+// Меню пилота. Три свойства, которые нельзя проверить глазами за один
+// заход и очень легко сломать: раздел рисуется тот, что выбран; полёт на
+// это время глохнет, а МИР — НЕТ; клавиша I в порту не открывает ничего.
+await step('меню пилота (I): разделы, живой мир, мёртвое управление', () => {
+  try {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  // В пустое место и НА ТЯГЕ: просто присвоить скорость мало —
+  // стабилизатор гасит всё, что не задано ручкой, и корабль встаёт за
+  // полсекунды (первый заход этой проверки на том и сломался).
+  game.ship.pos.x = 0; game.ship.pos.y = 2.2e6; game.ship.pos.z = 0;
+  game.ship.throttle = 0.5;
+  frames(90);
+  if (!(game.ship.speed > 0.2)) throw new Error('корабль не разогнался: ' + game.ship.speed);
+
+  const seen = () => {
+    texts = [];
+    frames(1);
+    const list = texts.map((t) => t.s);
+    texts = null;
+    return list;
+  };
+  const has = (list, s) => list.some((t) => t.indexOf(s) >= 0);
+  const need = (list, ...parts) => {
+    for (const s of parts) if (!has(list, s)) throw new Error('нет строки «' + s + '»');
+  };
+
+  key('KeyI'); frames(1);
+  if (!game.menu.open) throw new Error('меню не открылось в полёте');
+  // ВЁРСТКА. Ни одна надпись не вылезает за рамку и не наезжает на
+  // соседнюю. Проверяется счётом, а не глазами: кегль и ширина колонок
+  // зависят от размера окна, и разъезжается это молча — на телефоне
+  // раньше, чем на мониторе.
+  const layout = (title) => {
+    texts = [];
+    frames(1);
+    const list = texts; texts = null;
+    // Меню рисуется последним, и первая его надпись — заголовок. Всё, что
+    // до него, принадлежит приборам под меню.
+    const from = list.findIndex((t) => t.s === 'МЕНЮ ПИЛОТА');
+    if (from < 0) throw new Error(title + ': заголовка меню нет в кадре');
+    const r = game.menu.rect, fs = game.menu.fs;
+    // Consolas: ширина знака 0.55 em — ровно та же оценка, что у
+    // measureText в этом моке. Брать здесь «с запасом» нельзя: перенос
+    // строки меряет текст по measureText, и запас в проверке объявлял бы
+    // виновным честно перенесённый абзац.
+    const span = (t) => {
+      const w = t.s.length * (parseFloat(t.font) || fs) * 0.55;
+      const x0 = t.align === 'right' ? t.x - w : t.align === 'center' ? t.x - w / 2 : t.x;
+      return { x0, x1: x0 + w, y: t.y, s: t.s };
+    };
+    const boxes = list.slice(from).map(span);
+    for (const b of boxes) {
+      if (b.x0 < r.x - 1 || b.x1 > r.x + r.w + 1 || b.y < r.y || b.y > r.y + r.h + 1) {
+        throw new Error(title + ': «' + b.s + '» вылезла за рамку меню');
+      }
+    }
+    for (let a = 0; a < boxes.length; a++) {
+      for (let c = a + 1; c < boxes.length; c++) {
+        const p = boxes[a], q = boxes[c];
+        if (Math.abs(p.y - q.y) > fs * 0.6) continue;      // разные строки
+        if (p.x0 < q.x1 - 1 && q.x0 < p.x1 - 1) {
+          throw new Error(title + ': «' + p.s + '» наезжает на «' + q.s + '»');
+        }
+      }
+    }
+    return boxes.length;
+  };
+  layout('КОРАБЛЬ');
+
+  // 1. КОРАБЛЬ: имя из модели, габариты из модели, щиты и бак.
+  const shipTab = seen();
+  need(shipTab, 'МЕНЮ ПИЛОТА', 'CHALLENGER', 'ГАБАРИТЫ', 'ДЛИНА', '65.0 м',
+    'УСТАНОВЛЕННЫЕ МОДУЛИ', 'КВАНТОВЫЙ ПРИВОД', 'НЕ УСТАНОВЛЕНЫ', 'ТОПЛИВО',
+    'КОРАБЛЬ В ПОЛЁТЕ');
+  if (has(shipTab, 'ЗАНЯТО') || has(shipTab, 'НАЧАЛЬНЫЙ КАПИТАЛ')) {
+    throw new Error('на вкладке корабля видно чужой раздел');
+  }
+
+  // 2. ГРУЗ: тоннаж и чем занято.
+  key('Digit2'); frames(1);
+  const cargoTab = seen();
+  need(cargoTab, 'ЗАНЯТО 13.0 / 20.0 Т', 'СВОБОДНО', 'ВОДА', 'ЗЕРНО', 'ЖЕЛЕЗНАЯ РУДА', '6.0 т');
+  layout('ГРУЗ');
+
+  // 3. ЗАДАНИЯ: срок и награда.
+  key('Digit3'); frames(1);
+  const questTab = seen();
+  need(questTab, 'ДОСТАВКА · LAVE VI', 'ОСТАЛОСЬ', fmtCrowns(1200), 'РАЗВЕДКА · BEON');
+  layout('ЗАДАНИЯ');
+
+  // 4. ФИНАНСЫ: баланс и лента.
+  key('Digit4'); frames(1);
+  const moneyTab = seen();
+  need(moneyTab, fmtCrowns(game.player.balance), 'НАЧАЛЬНЫЙ КАПИТАЛ',
+    fmtCrowns(3400, true), 'ПРИШЛО', 'УШЛО');
+  layout('ФИНАНСЫ');
+
+  // Мир под меню ЖИВЁТ: корабль летит дальше, часы пилота идут.
+  const p0 = { x: game.ship.pos.x, y: game.ship.pos.y, z: game.ship.pos.z };
+  const t0 = game.player.time, w0 = game.world.time;
+  frames(60);
+  const moved = Math.hypot(game.ship.pos.x - p0.x, game.ship.pos.y - p0.y, game.ship.pos.z - p0.z);
+  if (!(moved > 0.1)) throw new Error('корабль замер под меню: ' + moved.toFixed(3) + ' км');
+  if (!(game.world.time > w0) || !(game.player.time > t0)) throw new Error('время остановилось');
+
+  // ...а вот управление — нет: ни разворота, ни тяги, ни выбора цели.
+  const f0 = { ...game.ship.basis.fwd };
+  const thr0 = game.ship.throttle;
+  holdDown('KeyD'); holdDown('ShiftLeft');
+  frames(40);
+  release('KeyD'); release('ShiftLeft');
+  key('KeyZ'); frames(2);
+  const dot = f0.x * game.ship.basis.fwd.x + f0.y * game.ship.basis.fwd.y + f0.z * game.ship.basis.fwd.z;
+  if (dot < 0.99999) throw new Error('корабль развернулся при открытом меню: dot ' + dot.toFixed(5));
+  if (Math.abs(game.ship.throttle - thr0) > 1e-9) {
+    throw new Error('тяга изменилась при открытом меню: ' + thr0 + ' -> ' + game.ship.throttle);
+  }
+  // Зато D сделал своё дело как клавиша МЕНЮ: с четвёртого раздела
+  // пролистнул на первый, по кругу. Ровно это и значит «ввод забрало
+  // меню»: клавиша жива, но работает не на корабль.
+  if (game.menu.tab !== 0) throw new Error('D не пролистал разделы: ' + game.menu.tab);
+
+  // Мышь: щелчок по закладке переключает раздел. Курсор в меню видно
+  // (класс на #screen), и закладки обязаны на него отвечать.
+  key('Digit1'); frames(1);
+  const t3 = game.menu.tabRects[2];
+  mouse('mousedown', { button: 0, clientX: t3.x + t3.w / 2, clientY: t3.y + t3.h / 2 });
+  frames(1);
+  mouse('mouseup', { button: 0 });
+  if (game.menu.tab !== 2) throw new Error('щелчок по закладке не сработал: ' + game.menu.tab);
+
+  // Длинное описание обязано переноситься по словам. Без этой строки
+  // перенос не проверяется вовсе: у демо-заданий описания короткие и
+  // помещаются даже на телефоне — проверка вёрстки была бы зелёной и с
+  // напрочь выключенным переносом.
+  const longOne = addMission(game.player, {
+    title: 'ПОДРЯД · ДАЛЬНИЙ',
+    desc: 'Забрать партию охлаждённого биоматериала с орбитальной станции '
+      + 'газового гиганта и довезти её до внутренней планеты, не выходя за '
+      + 'срок и не превышая допустимую температуру в трюме.',
+    reward: 4100,
+    time: 30 * 60,
+  });
+
+  // ТЕЛЕФОН. Кегль и колонки считаются от размера окна, и разъезжается
+  // вёрстка первым делом на узком экране — там, где её труднее всего
+  // заметить. Проверяем все четыре раздела на 390x844.
+  const W0 = window.innerWidth, H0 = window.innerHeight;
+  window.innerWidth = 390; window.innerHeight = 844;
+  for (const fn of winListeners.resize || []) fn();
+  frames(2);
+  for (let tab = 1; tab <= 4; tab++) {
+    key('Digit' + tab); frames(1);
+    layout('ТЕЛЕФОН, РАЗДЕЛ ' + tab);
+  }
+  window.innerWidth = W0; window.innerHeight = H0;
+  for (const fn of winListeners.resize || []) fn();
+  frames(2);
+  game.player.missions = game.player.missions.filter((mm) => mm !== longOne);
+
+  key('KeyI'); frames(2);
+  if (game.menu.open) throw new Error('меню не закрылось');
+
+  // Закрытое меню возвращает управление — иначе проверка выше проходила
+  // бы и на намертво отключённых клавишах.
+  holdDown('KeyD'); frames(30); release('KeyD');
+  const back = f0.x * game.ship.basis.fwd.x + f0.y * game.ship.basis.fwd.y + f0.z * game.ship.basis.fwd.z;
+  if (back > 0.999) throw new Error('после закрытия меню корабль не слушается: dot ' + back.toFixed(5));
+  } finally {
+    // Что бы ни упало выше, следующие проверки должны начинать с
+    // закрытого меню и живого управления.
+    game.menu.open = false;
+    game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+    game.ship.speed = 0; game.ship.throttle = 0;
+    frames(2);
+  }
+});
+
 await step('справка (H)', () => {
   key('KeyH'); frames(3);
   if (game.state.mode !== 'help') throw new Error('режим ' + game.state.mode);
@@ -671,6 +868,12 @@ await step('докинг-компьютер доводит до стыковки
   key('KeyC');
   frames(60 * 130, 16.7);
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode + ', фаза ' + (game.ship.docking && game.ship.docking.phase) + ', причина: ' + game.crashReason);
+});
+
+await step('в порту меню пилота не открывается', () => {
+  if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+  key('KeyI'); frames(2);
+  if (game.menu.open) throw new Error('меню открылось на станции');
 });
 
 await step('вылет со станции по Space', () => {
