@@ -30,8 +30,14 @@
 
 final class Schema
 {
-    /** Версия схемы. Растёт при каждом изменении таблиц. */
-    public const VERSION = 5;
+    /**
+     * Версия схемы. Растёт при каждом изменении таблиц.
+     *
+     * 6 — щит и трюм переехали к модулям: столбцы `shield_max`,
+     * `shield_regen`, `shield_delay` и `hold_t` у `ship_type` снесены,
+     * их числа теперь у модулей в `equipment_type` (см. Loadout).
+     */
+    public const VERSION = 6;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
