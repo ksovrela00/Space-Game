@@ -28,6 +28,10 @@ export function makePlayer(demo = true) {
     missions: [],      // {id, title, desc, reward, left, total}
     time: 0,           // часы пилота, с: по ним ставятся отметки в ленте
     nextId: 1,
+    // Пришли ли эти данные с сервера. По нему меню решает, показывать ли
+    // оговорку «стартовый набор»: выдуманный груз не должен выглядеть
+    // как настоящий.
+    server: false,
   };
   if (demo) seedDemo(p);
   return p;
@@ -164,6 +168,59 @@ export function loadPlayer(p, s) {
       done: !!m.done,
     }))
     : [];
+  return p;
+}
+
+/**
+ * Заполнить дела пилота состоянием с сервера.
+ *
+ * Поля перекладываются, а не используются как есть, ровно по одной
+ * причине: меню рисует ОДНУ карточку и в сети, и без неё. Пусть
+ * перекладывание живёт здесь, в одном месте, чем в каждом разделе меню
+ * появится «если с сервера — то так, а если нет — то эдак».
+ *
+ * Стартовый набор при этом затирается целиком: как только сервер
+ * отвечает, выдуманные вода и зерно в трюме — вранье.
+ */
+export function applyServer(p, st) {
+  if (!st || !st.player) return p;
+
+  p.balance = st.player.balance | 0;
+  p.time = +st.player.playTimeS || 0;
+
+  // Лента с сервера приходит СВЕЖИМ ВПЕРЁД, а здесь она хранится в
+  // порядке событий: разворачиваем, иначе «Финансы» покажут историю
+  // задом наперёд.
+  p.ledger = (st.ledger || []).slice().reverse().map((e) => ({
+    // `at` — время сервера (UTC). Держим его рядом с числовым t:
+    // в сети отметка идёт по часам сервера, без сети — по часам пилота.
+    at: e.at,
+    t: p.time,
+    label: e.label,
+    sum: e.amount | 0,
+  }));
+
+  p.cargo = (st.cargo || []).map((c) => ({
+    id: c.commodity_id,
+    code: c.code,
+    name: c.name,
+    tons: +c.tons || 0,
+    avgPrice: +c.avg_price || 0,
+  }));
+
+  p.missions = (st.missions || []).map((m) => ({
+    id: m.id,
+    title: m.title,
+    desc: m.descr || '',
+    reward: m.reward | 0,
+    left: m.leftS === null || m.leftS === undefined ? 0 : +m.leftS,
+    total: +m.timeLimitS || 0,
+    done: m.state !== 'active',
+    target: m.target ? m.target.name : null,
+  }));
+
+  p.nextId = Math.max(p.nextId, 1);
+  p.server = true;
   return p;
 }
 

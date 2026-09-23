@@ -1,17 +1,15 @@
-// Клиент серверного API.
+// Клиент серверного API: голые вызовы поверх fetch.
 //
-// Пока НЕ ПОДКЛЮЧЁН к игре: сохранение по-прежнему идёт в localStorage.
-// Так сделано намеренно. Перевод игры на сервер — это переход с
-// мгновенного сохранения на сетевое, то есть «сохранить» перестаёт быть
-// мгновенным и начинает иногда не получаться; чинить это надо отдельным
-// шагом и с проверками, а не заодно с появлением базы.
+// Здесь нет ни одного решения о том, КОГДА и ЧТО вызывать, — только как
+// позвать и как разобрать ответ. Когда именно игра грузится, сохраняется
+// и что делает при обрыве, решает js/net/session.js. Разделение не
+// формальное: сетевые правила («не чаще раза в восемь секунд», «оборвалось
+// — играем дальше») меняются часто, а формат вызова — почти никогда.
 //
-// Модуль здесь для того, чтобы этот шаг был коротким, и чтобы уже сейчас
-// можно было поговорить с сервером из консоли браузера:
+// Отсюда же можно поговорить с сервером руками, из консоли браузера:
 //
 //   const api = await import('./js/net/api.js');
 //   await api.ping();
-//   await api.register('pilot', 'secret');
 //   await api.state();
 //
 // Токен хранится в localStorage. Это не «безопасное хранилище» (XSS его
@@ -56,10 +54,16 @@ export const online = () => !!token();
  * что показать. Разбирать текст сообщения для этого нельзя — он для
  * человека.
  */
-export async function call(route, data = {}) {
+export async function call(route, data = {}, timeoutMs = 6000) {
   const headers = { 'Content-Type': 'application/json' };
   const t = token();
   if (t) headers['X-Auth-Token'] = t;
+
+  // Срок ожидания обязателен. Без него зависший сервер вешает загрузку
+  // игры насмерть: fetch сам по себе не истекает никогда, а на этом
+  // вызове стоит запуск.
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl && timeoutMs > 0 ? setTimeout(() => ctl.abort(), timeoutMs) : null;
 
   let res;
   try {
@@ -67,6 +71,7 @@ export async function call(route, data = {}) {
       method: 'POST',
       headers,
       body: JSON.stringify(data),
+      signal: ctl ? ctl.signal : undefined,
     });
   } catch (e) {
     // Сети нет вовсе — это не ошибка сервера, и различать их важно:
@@ -74,6 +79,8 @@ export async function call(route, data = {}) {
     const err = new Error('сервер недоступен');
     err.code = 'offline';
     throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   let body = null;
@@ -122,6 +129,27 @@ export async function logout() {
 
 export const state = () => call('player.state');
 export const save = (payload) => call('player.save', { save: payload });
+
+/**
+ * Последнее сохранение при закрытии вкладки.
+ *
+ * fetch на выгрузке страницы браузер обрывает, а sendBeacon — нет: он
+ * отдаёт запрос браузеру и тот досылает его сам. Заголовков beacon не
+ * умеет вовсе, поэтому токен идёт В ТЕЛЕ — сервер принимает и так.
+ */
+export function saveBeacon(payload) {
+  const t = token();
+  if (!t || typeof navigator === 'undefined' || !navigator.sendBeacon) return false;
+  const body = new Blob(
+    [JSON.stringify({ save: payload, token: t })],
+    { type: 'application/json' }
+  );
+  return navigator.sendBeacon(base() + '?r=player.save', body);
+}
+
+export const dock = (system, station) => call('station.dock', { system, station });
+export const repair = () => call('station.repair');
+export const stations = (system) => call('galaxy.stations', { system });
 
 export const systems = () => call('galaxy.systems');
 export const system = (id) => call('galaxy.system', { id });

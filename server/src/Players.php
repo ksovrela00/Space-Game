@@ -151,8 +151,13 @@ final class Players
                 'pos' => ['x' => (float) $p['pos_x'], 'y' => (float) $p['pos_y'], 'z' => (float) $p['pos_z']],
                 'basis' => $p['basis'] === null ? null : json_decode($p['basis'], true),
                 'dockedBody' => $p['docked_body'] === null ? null : (int) $p['docked_body'],
+                'targetBody' => $p['target_body'] === null ? null : (int) $p['target_body'],
+                'warpTo' => $p['warp_to'] === null ? null : (int) $p['warp_to'],
+                'lastStation' => $p['last_station'] === null ? null : (int) $p['last_station'],
+                'view' => $p['view'],
                 'landedBody' => $p['landed_body'] === null ? null : (int) $p['landed_body'],
                 'landedPose' => $p['landed_pose'] === null ? null : json_decode($p['landed_pose'], true),
+                'landedSecured' => (bool) $p['landed_secured'],
             ],
             'ship' => [
                 'id' => $shipId,
@@ -252,10 +257,35 @@ final class Players
             if (is_array($landed) && isset($landed['id'])) {
                 $set['landed_body'] = $bodyIn($landed['id']);
                 $set['landed_pose'] = json_encode($landed['pose'] ?? null);
+                $set['landed_secured'] = !empty($landed['secured']) ? 1 : 0;
             } else {
                 $set['landed_body'] = null;
                 $set['landed_pose'] = null;
+                $set['landed_secured'] = 0;
             }
+        }
+        if (array_key_exists('target', $in)) {
+            $set['target_body'] = $bodyIn($in['target']);
+        }
+        if (array_key_exists('last', $in)) {
+            $set['last_station'] = $bodyIn($in['last']);
+        }
+        if (array_key_exists('warpTo', $in)) {
+            $w = $in['warpTo'];
+            if ($w === null || $w === '') {
+                $set['warp_to'] = null;
+            } else {
+                $wid = (int) $w;
+                if (Db::one('SELECT `id` FROM `star_system` WHERE `id`=?', [$wid]) === null) {
+                    throw ApiError::bad('нет такой системы для варпа: ' . $wid);
+                }
+                $set['warp_to'] = $wid;
+            }
+        }
+        if (isset($in['view'])) {
+            // Вид — из закрытого списка: это поле приходит от клиента, а
+            // любое поле от клиента может прийти каким угодно.
+            $set['view'] = in_array($in['view'], ['cockpit', 'chase'], true) ? $in['view'] : 'cockpit';
         }
         if (isset($in['time'])) {
             $set['play_time_s'] = max(0.0, $num($in['time']));

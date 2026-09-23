@@ -22,6 +22,7 @@ import { HULL_SIZE } from '../models/ships.js';
 import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.js';
 import { fmtTime, fmtSpeed } from './hud.js';
 import { modules } from '../game/loadout.js';
+import { session } from '../net/session.js';
 
 const MONO = 'Consolas, monospace';
 
@@ -424,7 +425,12 @@ export function drawMenu(r, game) {
   ctx.font = `${Math.round(fs * 1.1)}px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = INK;
-  ctx.fillText('МЕНЮ ПИЛОТА', x + fs, y + headH * 0.68);
+  // В шапке видно, ЧЬИ это дела и живы ли они. Без пометки о связи игрок
+  // не отличит «баланс такой» от «баланс был такой полчаса назад».
+  const who = session.mode === 'online' ? 'МЕНЮ ПИЛОТА · ' + session.name.toUpperCase()
+    : session.mode === 'offline' ? 'МЕНЮ ПИЛОТА · АВТОНОМНО'
+      : 'МЕНЮ ПИЛОТА';
+  ctx.fillText(who, x + fs, y + headH * 0.68);
   ctx.textAlign = 'right';
   ctx.fillStyle = game.player.balance < 0 ? RED : AMBER;
   ctx.fillText(fmtCrowns(game.player.balance), x + w - fs, y + headH * 0.68);

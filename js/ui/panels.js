@@ -196,7 +196,10 @@ function compass(ctx, cx, cy, r, ship, dirWorld) {
  * экрана от третьего лица.
  */
 export function scopeScreen(ctx, w, h, game) {
-  const f = chrome(ctx, w, h, 'ЛОКАТОР');
+  // Заголовок прибора говорит и о чужих кораблях: в кабине угловых
+  // панелей нет, и другого места для этого числа тоже нет.
+  const peers = game.peers ? game.peers.length : 0;
+  const f = chrome(ctx, w, h, peers > 0 ? 'ЛОКАТОР · ПИЛОТОВ РЯДОМ ' + peers : 'ЛОКАТОР');
   const cx = w / 2, cy = f.y + f.h / 2;
   const r = Math.min(f.w, f.h) / 2 - 4;
   const range = game.scannerRange;

@@ -56,7 +56,12 @@ import {
 } from './ui/screens.js';
 import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
-import { makePlayer, updatePlayer, savePlayer, loadPlayer } from './game/player.js';
+import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from './game/player.js';
+import {
+  session, start as sessionStart, queueSave, flushOnExit,
+  dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
+} from './net/session.js';
+import { net, connect as netConnect } from './net/socket.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 
 const STEP = 1 / 60;
@@ -156,6 +161,8 @@ const game = {
   stats: { docks: 0, crashes: 0, flownKm: 0, landings: 0 },
   crashReason: '',
   lastStation: null,
+  port: null,             // свойства порта с сервера: сбор, услуги, ставка ремонта
+  peers: [],              // чужие корабли в этой системе (сокет)
   landHold: 0,           // сколько уже держат клавишу взлёта на грунте
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
   restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
@@ -230,7 +237,14 @@ function enterSystem(target) {
 
 // --- переходы состояний ------------------------------------------------------
 
-function dockAt(station) {
+/**
+ * Встать в порт.
+ *
+ * @param {boolean} restoring — восстановление из сохранения, а не
+ *   настоящая стыковка. Отличать обязательно: за настоящую сервер берёт
+ *   сбор, и повторять его при каждой загрузке игры нельзя.
+ */
+function dockAt(station, restoring = false) {
   game.entry = null;
   ship.dockedAt = station;
   game.lastStation = station;
@@ -241,14 +255,45 @@ function dockAt(station) {
   ship.gear.out = false;
   ship.speed = 0;
   ship.throttle = 0;
-  ship.hull = SHIP.maxHull;
+  // БЕСПЛАТНЫЙ РЕМОНТ остался только в автономной игре. С сервером у
+  // корпуса появилась цена (station.repair), и чинить его даром за сам
+  // факт стыковки значило бы обесценить и удары, и деньги разом.
+  if (!isOnline()) ship.hull = SHIP.maxHull;
   game.state.mode = ST.DOCKED;
   audioCue(game.audio, 'dock');
   audioReset(game.audio, ship);
   input.releaseAll();
   showDocked(game);
   save();
+
+  if (!restoring && isOnline()) {
+    // Сбор за место берёт сервер, и он же считает стыковки. Ответ придёт
+    // фоном: ждать его, держа игрока в порту перед пустым экраном, незачем.
+    serverDock(sys.id, station.id).then((r) => {
+      if (!r) return;
+      game.port = r.station;
+      applyServer(game.player, session.player);
+      if (r.fee > 0) {
+        say(game.state, 'СТЫКОВОЧНЫЙ СБОР · ' + r.fee + ' кр', '#ffcc66', 3);
+      }
+      showDocked(game);
+    });
+  }
 }
+
+/** Ремонт в порту: кнопка на экране стыковки. */
+game.repair = async () => {
+  if (!isOnline()) return;
+  try {
+    const r = await serverRepair();
+    ship.hull = r.hull;
+    applyServer(game.player, session.player);
+    say(game.state, 'РЕМОНТ КОРПУСА · −' + r.cost + ' кр', '#78e08f', 3);
+  } catch (e) {
+    say(game.state, 'РЕМОНТ: ' + e.message, '#ff7a66', 4);
+  }
+  showDocked(game);
+};
 
 game.launch = () => {
   const st = ship.dockedAt || game.lastStation;
@@ -518,44 +563,73 @@ function selectTarget(t) {
 
 // --- сохранение --------------------------------------------------------------
 
+/**
+ * Что именно сохраняется. Вынесено из save() отдельно, потому что этот
+ * же снимок уходит на сервер: два разных набора полей у местного и
+ * сетевого сохранения означали бы, что после переезда игрок теряет
+ * половину состояния.
+ */
+function savePayload() {
+  return {
+    // Система — первым делом: всё остальное в сейве (цель, порт, точка
+    // стоянки) хранится идентификаторами тел, а те имеют смысл только
+    // внутри своей системы.
+    system: sys.id,
+    // Цель варпа — часть плана полёта, как и обычная цель: выбрал
+    // систему, отложил игру, вернулся.
+    warpTo: game.warpTarget ? game.warpTarget.id : null,
+    pos: ship.pos,
+    basis: ship.basis,
+    hull: ship.hull,
+    // Цель хранится идентификатором, а не номером в списке: список
+    // теперь меняется на ходу (у ближнего тела появляются маркеры), и
+    // номер после загрузки указывал бы в произвольное место.
+    target: currentTarget(game.nav) ? currentTarget(game.nav).id : null,
+    view: game.state.view,
+    docked: ship.dockedAt ? ship.dockedAt.id : null,
+    last: game.lastStation ? game.lastStation.id : null,
+    // Стоянка на поверхности хранится в локальных осях тела: мировые
+    // координаты через сутки указывали бы в пустоту.
+    landed: ship.landedAt
+      ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
+      : null,
+    gear: ship.gear.out,
+    audio: { on: game.audio.on, vol: game.audio.vol },
+    stats: game.stats,
+    // Дела пилота переживают и смену системы, и смену корпуса.
+    player: savePlayer(game.player),
+    time: world.time,
+  };
+}
+
 function save() {
+  const data = savePayload();
+  // Местное сохранение остаётся ВСЕГДА, даже когда есть сервер: это кэш,
+  // с которого игра поднимется, если сети не окажется в следующий раз.
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({
-      // Система — первым делом: всё остальное в сейве (цель, порт, точка
-      // стоянки) хранится идентификаторами тел, а те имеют смысл только
-      // внутри своей системы.
-      system: sys.id,
-      // Цель варпа — часть плана полёта, как и обычная цель: выбрал
-      // систему, отложил игру, вернулся.
-      warpTo: game.warpTarget ? game.warpTarget.id : null,
-      pos: ship.pos,
-      basis: ship.basis,
-      hull: ship.hull,
-      // Цель хранится идентификатором, а не номером в списке: список
-      // теперь меняется на ходу (у ближнего тела появляются маркеры), и
-      // номер после загрузки указывал бы в произвольное место.
-      target: currentTarget(game.nav) ? currentTarget(game.nav).id : null,
-      view: game.state.view,
-      docked: ship.dockedAt ? ship.dockedAt.id : null,
-      last: game.lastStation ? game.lastStation.id : null,
-      // Стоянка на поверхности хранится в локальных осях тела: мировые
-      // координаты через сутки указывали бы в пустоту.
-      landed: ship.landedAt
-        ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
-        : null,
-      gear: ship.gear.out,
-      audio: { on: game.audio.on, vol: game.audio.vol },
-      stats: game.stats,
-      // Дела пилота переживают и смену системы, и смену корпуса.
-      player: savePlayer(game.player),
-      time: world.time,
-    }));
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
   } catch (e) { /* приватный режим — просто не сохраняем */ }
+  // А на сервер оно уходит фоном и не чаще, чем нужно (js/net/session.js).
+  queueSave(data);
 }
 
 function load() {
   let s = null;
   try { s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { s = null; }
+  if (!s) return false;
+  return applyState(s);
+}
+
+/**
+ * Разложить сохранение по игре.
+ *
+ * Вынесено из load() потому, что источников сохранения стало два —
+ * localStorage и сервер, — а раскладывать его обязан ОДИН код. Иначе
+ * «загрузился из браузера» и «загрузился с сервера» неизбежно начнут
+ * отличаться мелочами вроде потерянной цели или вида камеры, и ловить
+ * это придётся руками в браузере.
+ */
+function applyState(s) {
   if (!s) return false;
   // Система восстанавливается ДО всего остального: пока она не та, любой
   // идентификатор из сейва указывает в чужой список тел.
@@ -576,6 +650,7 @@ function load() {
     game.audio.on = s.audio.on !== false;
     game.audio.vol = typeof s.audio.vol === 'number' ? s.audio.vol : game.audio.vol;
   }
+  if (typeof s.fuel === 'number') ship.fuel = s.fuel;
 
   if (s.landed && s.landed.pose) {
     const body = world.bodies.find((b) => b.id === s.landed.id);
@@ -598,12 +673,46 @@ function load() {
     game.state.mode = ST.DOCKED;
     return 'docked';
   }
-  if (s.pos && s.basis) {
-    placeShip(ship, s.pos, s.basis);
+  if (s.pos) {
+    // Базис может не прийти вовсе: у нового пилота на сервере он пуст, а
+    // место уже есть. Ставим корабль как есть — с нынешним разворотом,
+    // иначе игра решит, что сохранения нет, и начнёт с порта.
+    placeShip(ship, s.pos, s.basis || ship.basis);
     game.state.mode = ST.FLIGHT;
     return 'flight';
   }
   return false;
+}
+
+/**
+ * Состояние с сервера — в тот же вид, что и местное сохранение.
+ *
+ * Перекладывание в одном месте: дальше его разбирает applyState, тот же
+ * код, что и для localStorage.
+ */
+function serverToSave(st) {
+  const pos = st.position || {};
+  const sh = st.ship || {};
+  return {
+    system: pos.systemId === null || pos.systemId === undefined ? 0 : pos.systemId,
+    warpTo: pos.warpTo === undefined ? null : pos.warpTo,
+    pos: pos.pos,
+    basis: pos.basis,
+    hull: sh.hull,
+    fuel: sh.fuelT,
+    target: pos.targetBody === undefined ? null : pos.targetBody,
+    view: pos.view,
+    docked: pos.dockedBody === undefined ? null : pos.dockedBody,
+    last: pos.lastStation === undefined ? null : pos.lastStation,
+    landed: pos.landedBody
+      ? { id: pos.landedBody, pose: pos.landedPose, secured: pos.landedSecured }
+      : null,
+    gear: !!sh.gearOut,
+    stats: st.player ? st.player.stats : null,
+    time: st.player ? st.player.playTimeS : 0,
+    // Звук — настройка браузера, а не игрока: он остаётся местным.
+    audio: null,
+  };
 }
 
 // --- глобальные клавиши ------------------------------------------------------
@@ -1080,6 +1189,13 @@ function prepareHud() {
     if (d < nearestDist) nearestDist = d;
     game.scanBlips.push({ pos: s.pos, color: s === target ? '#ffcc66' : '#78e08f' });
   }
+  // Чужие корабли на сканере. Дальность из-за них НЕ растягиваем: пилот
+  // в другом конце системы не должен уводить масштаб кольца, на котором
+  // игрок читает подход к станции.
+  game.peers = net.peers;
+  for (const p of net.peers) {
+    game.scanBlips.push({ pos: p, color: '#ff9f6b', peer: true });
+  }
   game.scannerRange = SCANNER_STEPS.find((r) => r > nearestDist * 1.25) || SCANNER_STEPS[SCANNER_STEPS.length - 1];
 
   // Помощник стыковки — когда станция рядом.
@@ -1465,6 +1581,8 @@ function render() {
 
 // --- цикл --------------------------------------------------------------------
 
+// Режим связи с прошлого кадра: по смене показываем сообщение.
+let netMode = 'none';
 let last = performance.now();
 let acc = 0;
 let saveTimer = 0;
@@ -1497,6 +1615,19 @@ function frame(now) {
     steps++;
   }
   if (acc > STEP) acc = 0;
+
+  // Связь пропала или вернулась — игрок обязан это увидеть, а не
+  // догадываться по тому, что счёт перестал меняться.
+  if (session.mode !== netMode) {
+    if (netMode === 'online' && session.mode === 'offline') {
+      say(game.state, 'СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА · АВТОНОМНО', '#ffcc66', 5);
+    } else if (netMode === 'offline' && session.mode === 'online') {
+      say(game.state, 'СВЯЗЬ ВОССТАНОВЛЕНА', '#78e08f', 3);
+    } else if (session.mode === 'none' && netMode !== 'none') {
+      say(game.state, 'ВХОД ПРОСРОЧЕН · СОХРАНЕНИЕ ТОЛЬКО МЕСТНОЕ', '#ff7a66', 6);
+    }
+    netMode = session.mode;
+  }
 
   updateMessages(game.state, dt);
   if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
@@ -1607,7 +1738,7 @@ function resizeAll() {
   if (scene) scene.resize();
 }
 
-function boot() {
+async function boot() {
   input.attach(window);
   input.attachMouse(window);
   attachTouch(window);
@@ -1631,12 +1762,58 @@ function boot() {
   window.addEventListener('touchstart', wake);
   resizeAll();
   window.addEventListener('resize', resizeAll);
-  window.addEventListener('beforeunload', save);
+  // При закрытии вкладки fetch браузер обрывает, поэтому последнее
+  // сохранение уходит маячком (sendBeacon) — см. js/net/api.js.
+  window.addEventListener('beforeunload', () => {
+    save();
+    flushOnExit(savePayload());
+  });
 
   ship.mesh = shipMesh;
 
-  const dev = new URLSearchParams(location.search).get('dev') === '1';
-  const restored = dev ? false : load();
+  const q = new URLSearchParams(location.search);
+  const dev = q.get('dev') === '1';
+  // Автономный режим: игра без сервера, на одном localStorage. Нужен и
+  // для разработки, и как честный ответ на «сервер не поднят».
+  const solo = q.get('offline') === '1' || dev;
+
+  // Вход спрашивается ДО всего: состояние с сервера главнее местного, и
+  // применять сначала кэш, а потом поверх серверное — значит на секунду
+  // показать игроку чужое положение корабля.
+  let restored = false;
+  if (!solo) {
+    const mode = await sessionStart();
+    if (mode === 'none') {
+      // Входа нет — играть нечем: без него сервер не отдаст ни корабля,
+      // ни денег. Уходим на страницу входа, не запуская игру.
+      location.replace('login.html');
+      return;
+    }
+    if (mode === 'online') {
+      restored = applyState(serverToSave(session.player));
+      applyServer(game.player, session.player);
+      // Местный кэш сразу приводим к серверному состоянию: если в
+      // следующий раз сети не будет, игра поднимется отсюда.
+      save();
+      // Сокет поднимаем только при живом сервере: без входа он всё равно
+      // не пустит, а стучаться в закрытый порт незачем.
+      netConnect(() => ({
+        sys: sys.id,
+        x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
+        v: ship.speed,
+        mode: game.state.mode === ST.DOCKED ? 'docked'
+          : game.state.mode === ST.LANDED ? 'landed'
+            : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
+      }));
+    } else {
+      // Вход есть, а связи нет. Играем с местного кэша и продолжаем
+      // попытки — накопленное уйдёт, как только сервер ответит.
+      restored = load();
+      say(game.state, 'СЕРВЕР НЕ ОТВЕЧАЕТ · АВТОНОМНЫЙ РЕЖИМ', '#ffcc66', 6);
+    }
+  } else if (!dev) {
+    restored = load();
+  }
   if (dev) devSpawn();
   else if (!restored) {
     const home = world.home.station;

@@ -1130,6 +1130,15 @@ function drawScanner(ctx, cx, cy, game) {
   const rw = 150, rh = 42;
   const range = game.scannerRange;
   ctx.save();
+  // Чужие пилоты в системе: их отметки на кольце оранжевые, но по одной
+  // точке не понять, сколько их и есть ли они вообще, — поэтому число.
+  const peers = game.peers ? game.peers.length : 0;
+  if (peers > 0) {
+    ctx.fillStyle = '#ff9f6b';
+    ctx.font = '11px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('ПИЛОТОВ РЯДОМ ' + peers, cx + rw, cy - rh - 6);
+  }
   ctx.strokeStyle = CY_DIM;
   ctx.lineWidth = 1;
   ctx.beginPath();

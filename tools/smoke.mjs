@@ -100,7 +100,17 @@ globalThis.window = {
 // проверяется отдельно в tools/gl.mjs через мок GL-контекста.
 // touch=1 — принудительно мобильный профиль: касаний в Node нет, а
 // сенсорные органы проверять надо (js/core/quality.js).
-globalThis.location = { search: '?renderer=2d&touch=1' };
+// offline=1 — этот набор проверяет ИГРУ, а не сеть: сервер здесь не
+// поднят, и игра обязана работать без него ровно как раньше. Сетевой
+// запуск (вход, состояние с сервера, сохранение по сети) проверяется
+// отдельно — tools/net.mjs, где для этого подменяется fetch.
+globalThis.location = {
+  search: '?renderer=2d&touch=1&offline=1',
+  origin: 'http://localhost',
+  pathname: '/space_game/index.html',
+  replace(url) { this.replaced = url; },
+  replaced: null,
+};
 const store = {};
 globalThis.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
@@ -187,6 +197,7 @@ const { exitPoint } = await import('../js/game/quantum.js');
 const { SHIP } = await import('../js/game/ship.js');
 const { fmtCrowns } = await import('../js/ui/menu.js');
 const { addMission } = await import('../js/game/player.js');
+const { net } = await import('../js/net/socket.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -843,6 +854,40 @@ await step('меню пилота (I): разделы, живой мир, мёр
     game.ship.speed = 0; game.ship.throttle = 0;
     frames(2);
   }
+});
+
+// Чужие корабли в кадре. Проверка тупая, но именно она ловит класс
+// ошибок «нарисовали то, чего не рисовали никогда»: пока список пилотов
+// пуст, весь этот код просто не выполняется, и опечатка в нём живёт до
+// первой встречи в космосе (так и случилось: в подписи стояла переменная,
+// которой в этом файле нет).
+await step('чужие пилоты на сканере', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  const p = game.ship.pos;
+  // Кладём пилотов ТУДА, КУДА ИХ КЛАДЁТ СОКЕТ, а не прямо в game.peers:
+  // игра переписывает этот список каждый кадр, и проверка, подсунувшая
+  // его напрямую, проверяла бы саму себя.
+  net.peers = [
+    { id: 2, name: 'БЕТА', x: p.x + 40, y: p.y, z: p.z + 10, v: 0.4, mode: 'flight' },
+    { id: 3, name: 'ГАММА', x: p.x - 90, y: p.y + 5, z: p.z, v: 0, mode: 'docked' },
+  ];
+  // Сканер есть в обоих видах, но рисуют его РАЗНЫЕ модули: от третьего
+  // лица — угловая панель (js/ui/hud.js), в кабине — экран локатора
+  // (js/ui/panels.js). Проверяем оба: опечатка живёт ровно в том, куда
+  // не заглянули.
+  const seenIn = (view) => {
+    if (game.state.view !== view) { key('KeyV'); frames(2); }
+    texts = [];
+    frames(2);
+    const seen = texts.map((t) => t.s);
+    texts = null;
+    return seen.some((t) => t.indexOf('ПИЛОТОВ РЯДОМ 2') >= 0);
+  };
+  if (!seenIn('chase')) throw new Error('от третьего лица числа пилотов нет');
+  if (!seenIn('cockpit')) throw new Error('в кабине числа пилотов нет');
+
+  net.peers = [];
+  frames(2);
 });
 
 await step('справка (H)', () => {

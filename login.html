@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>SOLAR TRADER :: вход</title>
+<link rel="stylesheet" href="css/style.css">
+<style>
+  /* Форма входа — единственное место в игре, где есть поля ввода,
+     поэтому их вид описан здесь, а не в общем стиле: тащить в него
+     правила ради одной страницы значит засорять общее ради частного. */
+  .field { display:block; margin:0 0 12px; text-align:left; }
+  .field span { display:block; font-size:12px; letter-spacing:1px;
+    color:rgba(79,179,224,0.75); margin:0 0 4px; }
+  .field input {
+    width:100%; box-sizing:border-box; padding:9px 10px;
+    background:rgba(5,17,28,0.9); color:#d8f2ff;
+    border:1px solid rgba(79,179,224,0.35); border-radius:2px;
+    font:15px Consolas, monospace; letter-spacing:1px;
+  }
+  .field input:focus { outline:none; border-color:#4fb3e0; }
+  .err { color:#ff7a66; min-height:18px; margin:4px 0 12px; font-size:13px; }
+  .who { color:#78e08f; }
+</style>
+</head>
+<body>
+<div class="overlay">
+  <div class="panel">
+    <h1>SOLAR TRADER</h1>
+    <p class="sub">вход пилота</p>
+
+    <form id="form" autocomplete="on">
+      <label class="field"><span>ЛОГИН</span>
+        <input id="login" name="login" autocomplete="username" autocapitalize="off"
+               spellcheck="false" required></label>
+      <label class="field"><span>ПАРОЛЬ</span>
+        <input id="pass" name="pass" type="password" autocomplete="current-password" required></label>
+      <p class="err" id="err"></p>
+      <button class="btn" id="go" type="submit">ВОЙТИ</button>
+    </form>
+
+    <div id="have" style="display:none">
+      <p class="who" id="whoLine"></p>
+      <button class="btn" id="play">В ИГРУ</button>
+      <button class="btn ghost" id="out">ВЫЙТИ</button>
+    </div>
+
+    <p class="sub" id="note">Регистрации здесь нет: учётную запись заводят
+      командой <b>php server/cli/player.php add &lt;логин&gt; &lt;пароль&gt;</b>.
+      Играть без сервера — <a href="index.html?offline=1" style="color:#4fb3e0">автономно</a>.</p>
+  </div>
+</div>
+
+<script type="module">
+import * as api from './js/net/api.js';
+
+const $ = (id) => document.getElementById(id);
+const err = $('err');
+const form = $('form');
+
+const fail = (text) => { err.textContent = text; };
+
+/**
+ * Если вход уже выполнен, спрашивать пароль снова незачем — но и
+ * утверждать, что он рабочий, нельзя: токен мог протухнуть. Поэтому
+ * страница сначала спрашивает сервер, кто мы, и только потом решает,
+ * что показать.
+ */
+async function whoAmI() {
+  if (!api.online()) return null;
+  try {
+    const st = await api.state();
+    return st.player;
+  } catch (e) {
+    // Протухший токен api.js уже забыл — просто показываем форму.
+    if (e.code !== 'auth') fail('сервер не отвечает: ' + e.message);
+    return null;
+  }
+}
+
+const toGame = () => location.replace('index.html');
+
+whoAmI().then((me) => {
+  if (!me) {
+    $('login').focus();
+    return;
+  }
+  form.style.display = 'none';
+  $('have').style.display = '';
+  $('note').style.display = 'none';
+  $('whoLine').textContent = 'ВХОД ВЫПОЛНЕН: ' + (me.name || me.login)
+    + ' · ' + me.balance.toLocaleString('ru-RU') + ' кр';
+  $('play').addEventListener('click', toGame);
+  $('out').addEventListener('click', async () => {
+    await api.logout();
+    location.reload();
+  });
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('go');
+  btn.disabled = true;
+  fail('');
+  try {
+    await api.login($('login').value.trim(), $('pass').value);
+    toGame();
+  } catch (ex) {
+    // Сообщение сервера показываем как есть: оно написано для человека,
+    // и переписывать его здесь значит заводить вторую версию текста.
+    fail(ex.message);
+    btn.disabled = false;
+    $('pass').value = '';
+    $('pass').focus();
+  }
+});
+</script>
+</body>
+</html>

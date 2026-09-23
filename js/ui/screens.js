@@ -37,6 +37,42 @@ const show = (html, buttons) => {
 export function showDocked(game) {
   const st = game.ship.dockedAt;
   const planet = st ? st.parent : null;
+  const online = !!(game.player && game.player.server);
+  const port = game.port;
+  const hull = Math.round(game.ship.hull);
+
+  // Ремонт стоит денег и есть не везде. Цену считаем по ставке порта —
+  // ту же формулу применит сервер, и расхождение было бы обманом.
+  const damage = Math.max(0, 100 - hull);
+  const canRepair = online && port && port.services && port.services.repair;
+  const repairCost = canRepair ? Math.ceil(damage * port.repairRate) : 0;
+
+  const money = online
+    ? `<tr><td>Счёт</td><td class="v">${game.player.balance.toLocaleString('ru-RU')} кр</td></tr>`
+    : '';
+  const portRows = online && port ? `
+      <tr><td>Уровень порта</td><td class="v">${port.tech} из 5</td></tr>
+      <tr><td>Сбор за место</td><td class="v">${port.fee} кр</td></tr>
+      <tr><td>Услуги</td><td class="v">${
+        [port.services.market && 'рынок', port.services.board && 'подряды',
+          port.services.repair && 'ремонт', port.services.outfit && 'верфь']
+          .filter(Boolean).join(', ') || '—'}</td></tr>` : '';
+
+  const note = online
+    ? (damage > 0
+      ? (canRepair
+        ? `Корпус повреждён на ${damage}%. Ремонт здесь — ${repairCost} кр.`
+        : 'Корпус повреждён, а чинить здесь нечем: нужен порт с мастерской.')
+      : 'Корпус цел. Порт свободен для вылета.')
+    : 'Корпус восстановлен. Порт свободен для вылета.';
+
+  const buttons = [{ label: 'ВЫЛЕТ', onClick: () => game.launch() }];
+  if (canRepair && damage > 0) {
+    buttons.push({ label: 'РЕМОНТ · ' + repairCost + ' кр', onClick: () => game.repair() });
+  }
+  buttons.push({ label: 'КАРТА СИСТЕМЫ', ghost: true,
+    onClick: () => { hideOverlay(); game.state.mode = ST.MAP; } });
+
   show(`
     <h1>СТЫКОВКА</h1>
     <h2>${st ? st.name : ''}</h2>
@@ -45,14 +81,12 @@ export function showDocked(game) {
       <tr><td>Тип</td><td class="v">${planet ? KIND_RU[planet.kind] || planet.kind : '—'}</td></tr>
       <tr><td>Радиус планеты</td><td class="v">${planet ? fmtDist(planet.radius) : '—'}</td></tr>
       <tr><td>Высота орбиты</td><td class="v">${st && planet ? fmtDist(st.orbit.radius - planet.radius) : '—'}</td></tr>
-      <tr><td>Состояние корпуса</td><td class="v">${Math.round(game.ship.hull)}%</td></tr>
+      <tr><td>Состояние корпуса</td><td class="v">${hull}%</td></tr>
       <tr><td>Стыковок выполнено</td><td class="v">${game.stats.docks}</td></tr>
+      ${money}${portRows}
     </table>
-    <p class="sub">Корпус восстановлен. Порт свободен для вылета.</p>
-  `, [
-    { label: 'ВЫЛЕТ', onClick: () => game.launch() },
-    { label: 'КАРТА СИСТЕМЫ', ghost: true, onClick: () => { hideOverlay(); game.state.mode = ST.MAP; } },
-  ]);
+    <p class="sub">${note}</p>
+  `, buttons);
 }
 
 export function showCrash(game) {
@@ -124,6 +158,19 @@ export function showHelp(game) {
       тоннель и длится так долго — и поэтому в карточке чужой системы на
       карте галактики нет состава планет. Что там внутри, известно только по
       прибытии.</p>
+    <p class="sub">Игра идёт <b>на сервере</b>: состояние корабля, кроны,
+      трюм и подряды хранятся там, а браузер держит только кэш на случай
+      обрыва. Пропала связь — в шапке меню загорается «АВТОНОМНО», полёт
+      продолжается, и накопленное уйдёт на сервер, как только он ответит.
+      Стыковка стоит сбора, ремонт корпуса — денег (кнопка на экране
+      порта), и чинят не везде: нужна станция с мастерской. Играть без
+      сервера вовсе — <b>index.html?offline=1</b>; там же корпус, как
+      раньше, чинится при стыковке даром.</p>
+
+    <p class="sub">Оранжевые отметки на сканере — <b>другие пилоты</b> в
+      этой же системе, рядом с кольцом их число. Видно только тех, кто в
+      той же звёздной системе.</p>
+
     <p class="sub">Меню пилота (<b>I</b>) открывается только в полёте и
       мир при этом <b>не останавливает</b>: корабль летит дальше, поэтому в
       подвале меню всё время висит скорость. Управление на это время

@@ -31,7 +31,7 @@
 final class Schema
 {
     /** Версия схемы. Растёт при каждом изменении таблиц. */
-    public const VERSION = 2;
+    public const VERSION = 3;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -213,6 +213,17 @@ final class Schema
                 `docked_body` INT NULL,
                 `landed_body` INT NULL,
                 `landed_pose` TEXT NULL,
+                `landed_secured` TINYINT(1) NOT NULL DEFAULT 0,
+                -- План полёта: выбранная цель, отмеченная система варпа,
+                -- последний порт и вид камеры. Это не «настройки», а
+                -- состояние игры: выбрал цель, отложил, вернулся — цель
+                -- обязана быть на месте. В сейве браузера они были с
+                -- самого начала, и при переезде на сервер терять их
+                -- нельзя.
+                `target_body` INT NULL,
+                `warp_to` INT NULL,
+                `last_station` INT NULL,
+                `view` VARCHAR(16) NOT NULL DEFAULT 'cockpit',
                 `play_time_s` DOUBLE NOT NULL DEFAULT 0,
                 `flown_km` DOUBLE NOT NULL DEFAULT 0,
                 `docks` INT NOT NULL DEFAULT 0,
