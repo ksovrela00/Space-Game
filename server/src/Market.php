@@ -34,12 +34,12 @@ final class Market
             $r['legal'] = (bool) $r['legal'];
         }
         return [
-            'station' => [
-                'systemId' => $systemId,
-                'localId' => $stationLocalId,
-                'name' => $station['name'],
-                'world' => $station['parent_type'],
-            ],
+            // Свойства порта идут вместе с прайсом: клиенту в одном окне
+            // нужны и цены, и то, что здесь вообще есть (верфь, ремонт).
+            'station' => array_merge(
+                Stations::info($systemId, $stationLocalId),
+                ['world' => $station['parent_type']]
+            ),
             'goods' => $rows,
         ];
     }

@@ -59,9 +59,7 @@ $again = Schema::migrate();
 ok($again === [], 'повторная миграция ничего не создаёт заново');
 
 $catalog = Seeder::readCatalog(__DIR__ . '/../data/catalog.json');
-Seeder::content($catalog);
-$n = Seeder::catalog($catalog);
-Seeder::markets(true);
+$n = Seeder::all($catalog, true);
 
 $systems = (int) Db::one('SELECT COUNT(*) FROM `star_system`');
 $bodies = (int) Db::one('SELECT COUNT(*) FROM `body`');
@@ -173,7 +171,8 @@ ok($again['player_id'] === $pid && $again['token'] !== $token, 'вход выд�
 $unguarded = [];
 foreach (Api::routes() as $name => [$fn, $needsAuth]) {
     $isPublic = in_array($name, ['ping', 'auth.register', 'auth.login',
-        'galaxy.systems', 'galaxy.system', 'catalog.commodities', 'catalog.ships'], true);
+        'galaxy.systems', 'galaxy.system', 'galaxy.stations', 'station.info',
+        'catalog.commodities', 'catalog.ships'], true);
     if (!$isPublic && !$needsAuth) {
         $unguarded[] = $name;
     }
@@ -390,6 +389,77 @@ ok($failed !== null && $failed['state'] === 'failed'
 
 $sum = (int) Db::one('SELECT COALESCE(SUM(`amount`),0) FROM `ledger` WHERE `player_id`=?', [$pid]);
 ok($sum === $balanceAfter, 'после наград и штрафов баланс всё ещё сходится с лентой');
+
+// --- порты -------------------------------------------------------------------
+
+section('порты');
+
+$ports = (int) Db::one('SELECT COUNT(*) FROM `station`');
+ok($ports === $stations, "свойства есть у всех $ports портов");
+ok((int) Db::one('SELECT COUNT(*) FROM `station` WHERE `tech` < 1 OR `tech` > 5') === 0,
+    'уровень техники у всех в пределах 1–5');
+
+// Столица системы обязана быть развитее рудника: ради этой разницы
+// уровень техники и заведён — иначе все порты одинаковы и лететь дальше
+// незачем.
+$best = Db::row("SELECT st.`tech`, st.`name` FROM `station` st ORDER BY st.`tech` DESC LIMIT 1");
+$worst = Db::row("SELECT st.`tech`, st.`name` FROM `station` st ORDER BY st.`tech` ASC LIMIT 1");
+ok((int) $best['tech'] > (int) $worst['tech'],
+    'порты различаются: «' . $best['name'] . '» тех ' . $best['tech']
+    . ' против «' . $worst['name'] . '» тех ' . $worst['tech']);
+ok((int) Db::one('SELECT COUNT(*) FROM `station` WHERE `has_outfit`=1 AND `tech` < 4') === 0,
+    'верфь стоит только на развитых портах');
+
+// СТЫКОВКА СО СБОРОМ. Первый постоянный расход в игре.
+Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+$port = Api::call('station.info', ['system' => 0, 'station' => $home['dockedBody']])['station'];
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$dock = Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
+ok($dock['charged'] === true && $dock['balance'] === $before - $port['fee'],
+    'стыковка взяла сбор ' . $port['fee'] . ' кр в «' . $port['name'] . '»');
+ok(Db::one("SELECT `label` FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1", [$pid])
+    !== null && str_contains((string) Db::one(
+        "SELECT `label` FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1", [$pid]),
+        'СТЫКОВОЧНЫЙ СБОР'),
+    'сбор виден строкой в ленте');
+
+// Повторный вызов не должен обчищать игрока: клиент переспрашивает при
+// потере связи, и это нормальное поведение, а не ошибка.
+$twice = Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
+ok($twice['charged'] === false && $twice['fee'] === 0,
+    'повторная стыковка в том же порту сбор не берёт');
+
+// РЕМОНТ. До сих пор стыковка чинила корабль даром — то есть у корпуса не
+// было цены, и разбить его было не страшно.
+denies('no_damage', fn() => Api::call('station.repair', [], $token), 'целый корпус чинить нечего');
+
+Api::call('player.save', ['hull' => 55], $token);
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$fix = Api::call('station.repair', [], $token);
+ok($fix['hull'] === 100.0 && $fix['cost'] > 0 && $fix['balance'] === $before - $fix['cost'],
+    'ремонт: ' . $fix['repaired'] . '% корпуса за ' . $fix['cost'] . ' кр');
+
+// Там, где чинить нечем, не чинят.
+$poor = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
+                 FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
+                 WHERE st.`has_repair`=0 LIMIT 1");
+if ($poor) {
+    Api::call('player.save', ['system' => (int) $poor['system_id'],
+        'docked' => (int) $poor['local_id'], 'hull' => 40], $token);
+    denies('no_service', fn() => Api::call('station.repair', [], $token),
+        'на порту без мастерской («' . $poor['name'] . '») не чинят');
+    Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody'], 'hull' => 100], $token);
+} else {
+    ok(false, 'не нашлось порта без мастерской — проверять отказ не на чем');
+}
+
+$sum = (int) Db::one('SELECT COALESCE(SUM(`amount`),0) FROM `ledger` WHERE `player_id`=?', [$pid]);
+$balance = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+ok($sum === $balance, 'после сборов и ремонта баланс всё ещё сходится с лентой');
+
+$list = Api::call('galaxy.stations', ['system' => 0])['stations'];
+ok(count($list) === 4 && isset($list[0]['services']['outfit']),
+    'список портов системы отдаётся с услугами: ' . count($list));
 
 // --- каталог наружу ----------------------------------------------------------
 

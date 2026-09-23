@@ -6,12 +6,68 @@
  *   php server/cli/setup.php --reset        снести таблицы и собрать заново
  *   php server/cli/setup.php --market       пересчитать склады станций
  *   php server/cli/setup.php --status       что сейчас в базе
+ *   php server/cli/setup.php --demo         завести показательного пилота
  *
  * Перед первым запуском каталог надо выгрузить из генератора:
  *   node tools/export.mjs
  */
 
 require_once __DIR__ . '/../boot.php';
+
+/**
+ * Показательный пилот.
+ *
+ * Половина таблиц базы — про игрока, и пока не зарегистрировался ни один,
+ * они пусты. Это правильно, но по пустой базе не видно ни того, что всё
+ * связано, ни того, что вообще работает. Эта команда заводит пилота
+ * demo/demo и проживает за него первые полчаса: сбор за стыковку, покупка
+ * груза, взятый подряд. После неё в базе есть строки во всех таблицах.
+ */
+function demoPilot(callable $say): string
+{
+    $login = 'demo';
+    $exists = Db::one('SELECT `id` FROM `player` WHERE `login`=?', [$login]);
+    if ($exists !== null) {
+        return 'пилот demo уже есть (#' . $exists . '), новый не заводим';
+    }
+
+    $reg = Auth::register($login, 'demo', 'ДЕМО-ПИЛОТ');
+    $pid = $reg['player_id'];
+    $p = Players::byId($pid);
+    $sys = (int) $p['system_id'];
+    $port = (int) $p['docked_body'];
+
+    // Вылет и возвращение: так в ленте появляется сбор за стыковку.
+    Players::save($pid, ['docked' => null, 'pos' => ['x' => 620000, 'y' => 0, 'z' => 0]]);
+    Stations::dock($pid, $sys, $port);
+
+    // Немного груза — из того, что есть на складе.
+    $good = Db::row(
+        "SELECT c.`code` FROM `market` m
+         JOIN `commodity` c ON c.`id`=m.`commodity_id`
+         JOIN `body` b ON b.`id`=m.`station_id`
+         WHERE b.`system_id`=? AND b.`local_id`=? AND m.`stock` > 6 ORDER BY m.`price` LIMIT 1",
+        [$sys, $port]
+    );
+    if ($good) {
+        Market::buy($pid, $good['code'], 5);
+    }
+
+    // И один подряд с доски.
+    $board = Missions::board($sys, $port);
+    foreach ($board as $m) {
+        if ($m['tons'] <= 6) {
+            Missions::accept($pid, $m['id']);
+            break;
+        }
+    }
+
+    $st = Players::state($pid);
+    $say('пилот demo заведён: вход demo / demo');
+    $say('  баланс ' . $st['player']['balance'] . ' кр, в трюме ' . $st['holdUsedT'] . ' т, '
+        . 'подрядов ' . count($st['missions']) . ', записей в ленте ' . count($st['ledger']));
+    return 'теперь непустые все таблицы — смотрите в phpMyAdmin';
+}
 
 $args = array_slice($argv, 1);
 $has = static fn(string $f): bool => in_array($f, $args, true);
@@ -49,15 +105,17 @@ try {
     $catalog = Seeder::readCatalog($catalogPath);
     $say('выгрузка каталога от ' . $catalog['generatedAt']);
 
-    $n = Seeder::content($catalog);
+    $n = Seeder::all($catalog, $has('--market') || $has('--reset'));
     $say(sprintf('содержимое: товаров %d, типов кораблей %d, модулей %d',
         $n['commodity'], $n['ship_type'], $n['equipment_type']));
-
-    $n = Seeder::catalog($catalog);
     $say(sprintf('каталог: систем %d, тел %d', $n['star_system'], $n['body']));
+    $say(sprintf('порты: %d со свойствами, %d позиций на складах',
+        $n['station'], $n['market']));
 
-    $rows = Seeder::markets($has('--market') || $has('--reset'));
-    $say('склады станций: ' . $rows . ' позиций');
+    if ($has('--demo')) {
+        $say('');
+        $say(demoPilot($say));
+    }
 
     $say('готово');
     exit(0);

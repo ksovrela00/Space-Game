@@ -12,7 +12,7 @@ require_once __DIR__ . '/config.php';
 
 foreach ([
     'ApiError', 'Db', 'Schema', 'Content', 'Seeder',
-    'Galaxy', 'Ledger', 'Cargo', 'Market', 'Missions', 'Players', 'Auth', 'Api',
+    'Galaxy', 'Stations', 'Ledger', 'Cargo', 'Market', 'Missions', 'Players', 'Auth', 'Api',
 ] as $class) {
     require_once __DIR__ . '/src/' . $class . '.php';
 }

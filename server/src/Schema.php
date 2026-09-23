@@ -31,7 +31,7 @@
 final class Schema
 {
     /** Версия схемы. Растёт при каждом изменении таблиц. */
-    public const VERSION = 1;
+    public const VERSION = 2;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -102,6 +102,39 @@ final class Schema
                 UNIQUE KEY `in_system` (`system_id`, `local_id`),
                 KEY `by_kind` (`system_id`, `kind`),
                 CONSTRAINT `body_system` FOREIGN KEY (`system_id`)
+                    REFERENCES `star_system` (`id`) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // Станция — тело в `body`, но у неё есть то, чего у планеты
+            // нет и быть не может: сбор за стыковку, уровень техники,
+            // набор услуг. Держать это столбцами в `body` значило бы
+            // завести десяток полей, пустых у ста тел из ста шестнадцати.
+            'station' => "CREATE TABLE `station` (
+                `body_id` BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+                `system_id` INT NOT NULL,
+                `name` VARCHAR(96) NOT NULL,
+                -- Мир, вокруг которого висит: от него и рынок, и техника.
+                `world_type` VARCHAR(16) NOT NULL,
+                -- Уровень техники 1–5. Решает, что здесь вообще можно
+                -- получить: на руднике не продадут варп-привод.
+                `tech` TINYINT NOT NULL DEFAULT 1,
+                -- Сбор за стыковку, кроны. Первый постоянный расход в игре:
+                -- без расходов деньги только копятся.
+                `fee` INT NOT NULL DEFAULT 0,
+                `has_market` TINYINT(1) NOT NULL DEFAULT 1,
+                `has_board` TINYINT(1) NOT NULL DEFAULT 0,
+                `has_repair` TINYINT(1) NOT NULL DEFAULT 0,
+                `has_outfit` TINYINT(1) NOT NULL DEFAULT 0,
+                -- Кроны за один процент корпуса: на развитой станции дешевле.
+                `repair_rate` DOUBLE NOT NULL DEFAULT 20,
+                -- Мест у причала. Пока ни на что не влияет, но в онлайне
+                -- на этом стоит очередь на стыковку.
+                `pads` TINYINT NOT NULL DEFAULT 4,
+                `market_refresh_at` DATETIME NULL,
+                KEY `in_system` (`system_id`),
+                CONSTRAINT `station_body` FOREIGN KEY (`body_id`)
+                    REFERENCES `body` (`id`) ON DELETE CASCADE,
+                CONSTRAINT `station_system` FOREIGN KEY (`system_id`)
                     REFERENCES `star_system` (`id`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 

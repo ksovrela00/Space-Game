@@ -24,6 +24,10 @@ final class Api
             'auth.logout' => [[self::class, 'authLogout'], true],
             'galaxy.systems' => [[self::class, 'galaxySystems'], false],
             'galaxy.system' => [[self::class, 'galaxySystem'], false],
+            'galaxy.stations' => [[self::class, 'galaxyStations'], false],
+            'station.info' => [[self::class, 'stationInfo'], false],
+            'station.dock' => [[self::class, 'stationDock'], true],
+            'station.repair' => [[self::class, 'stationRepair'], true],
             'catalog.commodities' => [[self::class, 'commodities'], false],
             'catalog.ships' => [[self::class, 'shipTypes'], false],
             'player.state' => [[self::class, 'playerState'], true],
@@ -139,6 +143,35 @@ final class Api
             throw ApiError::bad('нужен номер системы');
         }
         return Galaxy::system($id);
+    }
+
+    public static function galaxyStations(array $in, ?int $playerId): array
+    {
+        $id = self::int($in, 'system');
+        if ($id === null) {
+            throw ApiError::bad('нужен номер системы');
+        }
+        return ['stations' => Stations::listOf($id)];
+    }
+
+    public static function stationInfo(array $in, ?int $playerId): array
+    {
+        $sys = self::int($in, 'system');
+        $loc = self::int($in, 'station');
+        if ($sys === null || $loc === null) {
+            throw ApiError::bad('нужен порт: система и номер тела');
+        }
+        return ['station' => Stations::info($sys, $loc)];
+    }
+
+    public static function stationDock(array $in, ?int $playerId): array
+    {
+        return Stations::dock($playerId, self::int($in, 'system'), self::int($in, 'station'));
+    }
+
+    public static function stationRepair(array $in, ?int $playerId): array
+    {
+        return Stations::repair($playerId);
     }
 
     public static function commodities(array $in, ?int $playerId): array

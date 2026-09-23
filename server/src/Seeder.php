@@ -12,6 +12,24 @@
 
 final class Seeder
 {
+    /**
+     * Залить всё разом.
+     *
+     * Единственный вход для заливки — и CLI, и проверки зовут именно его.
+     * Пока шагов было три, они были выписаны в обоих местах по отдельности,
+     * и добавление четвёртого (свойства портов) сломало проверки: они
+     * заливали базу по-старому и падали в другом месте. Один вызов —
+     * разойтись негде.
+     */
+    public static function all(array $catalog, bool $forceMarket = false): array
+    {
+        $n = self::content($catalog);
+        $n += self::catalog($catalog);
+        $n['station'] = self::stations();
+        $n['market'] = self::markets($forceMarket);
+        return $n;
+    }
+
     /** Товары, типы кораблей и модули. */
     public static function content(array $catalog): array
     {
@@ -129,6 +147,49 @@ final class Seeder
         Schema::setMeta('galaxy_seed', (string) $catalog['galaxySeed']);
         Schema::setMeta('catalog_generated_at', (string) $catalog['generatedAt']);
         Schema::setMeta('catalog_seeded_at', Db::now());
+        return $n;
+    }
+
+    /**
+     * Свойства станций.
+     *
+     * Считаются от вида мира, вокруг которого станция висит, и от того,
+     * обжитой ли он. Как и склады, заливка идёт на месте: сбор и услуги
+     * не должны меняться от того, что каталог перезалили.
+     */
+    public static function stations(): int
+    {
+        $rows = Db::all(
+            "SELECT s.`id`, s.`system_id`, s.`name`,
+                    COALESCE(p.`type`, 'station') AS `world`,
+                    COALESCE(p.`is_home_world`, 0) AS `home`
+             FROM `body` s
+             LEFT JOIN `body` p ON p.`system_id` = s.`system_id` AND p.`local_id` = s.`parent_local_id`
+             WHERE s.`kind` = 'station'"
+        );
+        $n = 0;
+        Db::tx(function () use ($rows, &$n) {
+            foreach ($rows as $st) {
+                $a = Content::stationOf($st['world'], (int) $st['id'], (bool) $st['home']);
+                Db::run(
+                    'INSERT INTO `station`
+                       (`body_id`,`system_id`,`name`,`world_type`,`tech`,`fee`,
+                        `has_market`,`has_board`,`has_repair`,`has_outfit`,`repair_rate`,`pads`)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `world_type`=VALUES(`world_type`),
+                       `tech`=VALUES(`tech`), `fee`=VALUES(`fee`), `has_market`=VALUES(`has_market`),
+                       `has_board`=VALUES(`has_board`), `has_repair`=VALUES(`has_repair`),
+                       `has_outfit`=VALUES(`has_outfit`), `repair_rate`=VALUES(`repair_rate`),
+                       `pads`=VALUES(`pads`)',
+                    [
+                        $st['id'], $st['system_id'], $st['name'], $st['world'],
+                        $a['tech'], $a['fee'], $a['has_market'], $a['has_board'],
+                        $a['has_repair'], $a['has_outfit'], $a['repair_rate'], $a['pads'],
+                    ]
+                );
+                $n++;
+            }
+        });
         return $n;
     }
 
