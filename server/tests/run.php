@@ -587,6 +587,28 @@ ok($fromApi['shipTypes'][0]['price'] > 0 && $engine['price'] > 0,
     'цены приехали вместе с предметами: корабль '
     . $fromApi['shipTypes'][0]['price'] . ' кр, двигатель ' . $engine['price'] . ' кр');
 
+
+// 8. База, отставшая от кода, говорит об этом словами. Случай не
+//    выдуманный: на второй машине делают git pull и забывают
+//    `npm run api:setup`. Без проверки игра получила бы модель без
+//    половины чисел и полетела бы на NaN — молча и никуда.
+Db::run('ALTER TABLE `ship_type` DROP COLUMN `spec`');
+$said = '';
+try {
+    Api::call('catalog.specs');
+} catch (Throwable $e) {
+    $said = $e->getMessage();
+}
+ok(strpos($said, 'база отстала') === 0 && strpos($said, 'api:setup') !== false,
+    'устаревшая база названа по имени: ' . ($said ?: 'промолчала'));
+
+// И чинится ровно тем, что сказано, — той же заливкой, без сноса данных.
+Schema::migrate();
+Seeder::content($catalog);
+$healed = Api::call('catalog.specs');
+ok(count($healed['shipTypes'][0]['spec']) === count(Specs::source()['shipTypes'][0]['spec']),
+    'после заливки модель снова целая: ' . count($healed['shipTypes'][0]['spec']) . ' чисел');
+
 // --- итог --------------------------------------------------------------------
 
 echo PHP_EOL . ($fails === 0

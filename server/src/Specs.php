@@ -255,6 +255,21 @@ final class Specs
             ];
         }
 
+        // База может быть старше кода: на второй машине сделали git pull и
+        // забыли `npm run api:setup`. Без этой проверки игра получила бы
+        // модель без половины чисел и полетела бы на NaN — то есть никуда,
+        // причём молча. Пусть лучше скажет, что делать.
+        $want = array_keys(self::source()['shipTypes'][0]['spec']);
+        foreach ($ships as $ship) {
+            $lack = array_values(array_diff($want, array_keys($ship['spec'])));
+            if ($lack !== []) {
+                throw new RuntimeException(
+                    'база отстала от кода: у корпуса «' . $ship['code'] . '» нет чисел ('
+                    . implode(', ', array_slice($lack, 0, 5)) . '). Выполните: npm run api:setup'
+                );
+            }
+        }
+
         $combat = json_decode((string) Db::one('SELECT `v` FROM `meta` WHERE `k`=?', [self::META_KEY]), true);
         if (!is_array($combat)) {
             $combat = self::source()['combat'] ?? [];
