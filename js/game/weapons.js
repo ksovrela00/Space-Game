@@ -4,12 +4,21 @@
 // время, на выходе — болты и попадания. Иначе это нечем проверить: бой
 // разбирается по кадрам, а глазами в браузере видно только «вроде попал».
 //
-// Три решения, на которых всё держится.
+// Четыре решения, на которых всё держится.
 //
 // **Болт летит, а не попадает мгновенно.** Скорость конечная (3 км/с при
 // дальности 2.5 км — почти секунда полёта), и поэтому по движущейся цели
 // нужно УПРЕЖДЕНИЕ. Мгновенное попадание («луч дошёл — значит попал»)
 // убило бы и упреждение, и уклонение разом, а вместе с ними весь бой.
+//
+// **Болт уносит с собой скорость корабля.** Его скорость в каталоге —
+// ДУЛЬНАЯ, то есть относительно стрелка, а мировая складывается со
+// скоростью корабля. Пока скорость была мировой, болт на полном ходу
+// отползал от носа на 3 − 1.2 = 1.8 км/с, а на форсаже (предел растёт
+// втрое, до 3.6 км/с) — оставался позади: очередь висела в воздухе, и
+// попасть можно было только тормозя. Отсюда же и упреждение считается в
+// осях СТРЕЛКА: идя с целью борт о борт, упреждать нечего, хотя в
+// мировых осях оба мчатся.
 //
 // **Кардан наводит сам, но в пределах конуса.** Карданное оружие
 // доворачивает ствол к упреждённой точке, пока та не дальше cone от оси
@@ -113,27 +122,39 @@ export function makeGuns(code = INSTALLED[0]) {
 }
 
 /**
- * Точка упреждения: куда бить, чтобы болт и цель встретились.
+ * Точка наводки: куда СМОТРЕТЬ стволу, чтобы болт и цель встретились.
  *
  * Решается |P + V·t − S| = c·t — уравнение встречи. Итерацией в три шага:
  * прямое решение квадратного уравнения дало бы то же самое, но развалилось
  * бы при скорости цели около скорости болта, а итерация просто перестаёт
  * сходиться и даёт разумный промах.
+ *
+ * Скорость цели берётся ОТНОСИТЕЛЬНО стрелка (fromVel), потому что болт
+ * уносит с собой скорость корабля: в осях стрелка он летит ровно speed, а
+ * цель идёт на разницу скоростей. Поэтому и точка возвращается такая, что
+ * направление на неё от `from` — это направление ствола; «где цель будет в
+ * мире» — другая точка, и целиться в неё было бы промахом на собственный
+ * ход.
+ *
+ * @param fromVel скорость стрелка; без неё (null) счёт идёт по мировым
+ *        скоростям — так ведёт себя неподвижная турель.
  */
-export function leadPoint(from, target, speed, out = v3()) {
-  const vel = target.vel || { x: 0, y: 0, z: 0 };
+export function leadPoint(from, target, speed, out = v3(), fromVel = null) {
+  const tv = target.vel || { x: 0, y: 0, z: 0 };
+  const sv = fromVel || { x: 0, y: 0, z: 0 };
+  const vx = tv.x - sv.x, vy = tv.y - sv.y, vz = tv.z - sv.z;
   let t = 0;
   for (let i = 0; i < 3; i++) {
-    const px = target.pos.x + vel.x * t - from.x;
-    const py = target.pos.y + vel.y * t - from.y;
-    const pz = target.pos.z + vel.z * t - from.z;
+    const px = target.pos.x + vx * t - from.x;
+    const py = target.pos.y + vy * t - from.y;
+    const pz = target.pos.z + vz * t - from.z;
     const d = Math.hypot(px, py, pz);
     t = speed > 1e-6 ? d / speed : 0;
   }
   return set(out,
-    target.pos.x + vel.x * t,
-    target.pos.y + vel.y * t,
-    target.pos.z + vel.z * t);
+    target.pos.x + vx * t,
+    target.pos.y + vy * t,
+    target.pos.z + vz * t);
 }
 
 const _lead = v3();
@@ -153,7 +174,7 @@ export function aimDir(guns, ship, target, out = v3()) {
     guns.locked = !!target && !!spec;
     return set(out, f.x, f.y, f.z);
   }
-  leadPoint(ship.pos, target, spec.speed, _lead);
+  leadPoint(ship.pos, target, spec.speed, _lead, ship.vel);
   set(_dir, _lead.x - ship.pos.x, _lead.y - ship.pos.y, _lead.z - ship.pos.z);
   const d = Math.hypot(_dir.x, _dir.y, _dir.z);
   if (!(d > 1e-9)) { guns.locked = false; return set(out, f.x, f.y, f.z); }
@@ -194,22 +215,49 @@ export function fireGuns(guns, ship, target, ports, out = []) {
   guns.port++;
   const from = port ? toWorld(ship.basis, ship.pos, port, v3()) : v3(ship.pos.x, ship.pos.y, ship.pos.z);
 
-  out.push(makeBolt(from, guns.aim, spec, true, 0));
+  out.push(makeBolt(from, guns.aim, spec, true, 0, ship.vel));
   guns.bolts.push(out[0]);
   guns.cool = 1 / spec.rate;
   guns.shots++;
   return out;
 }
 
-/** Болт: короткий отрезок, летящий по прямой. */
-export function makeBolt(from, dir, spec, mine, by) {
+/**
+ * Болт: короткий отрезок, летящий по прямой.
+ *
+ * Хранит МИРОВУЮ скорость вектором (vx,vy,vz) = дуло + ход корабля, и
+ * отдельно `dx,dy,dz` — куда он идёт на самом деле. Это не то же, что
+ * направление ствола: на ходу след болта уводит вперёд по движению, и
+ * рисовать его надо по пути, а не по прицелу, иначе очередь ляжет мимо
+ * собственного следа.
+ *
+ * Жизнь меряется СЕКУНДАМИ, а не остатком километров: дальность в
+ * каталоге — это «на сколько бьёт от стрелка», и на ходу пройденный в
+ * мире путь больше неё в полтора раза, хотя от корабля болт ушёл ровно на
+ * свои 2.5 км. Считая километры мировые, оружие теряло бы дальность
+ * тем больше, чем быстрее летишь.
+ *
+ * @param dir   направление ствола, единичное
+ * @param carry скорость стрелка (может не быть — тогда болт как из
+ *              неподвижной турели)
+ */
+export function makeBolt(from, dir, spec, mine, by, carry = null) {
+  const cx = carry ? carry.x : 0, cy = carry ? carry.y : 0, cz = carry ? carry.z : 0;
+  const vx = dir.x * spec.speed + cx;
+  const vy = dir.y * spec.speed + cy;
+  const vz = dir.z * spec.speed + cz;
+  const v = Math.hypot(vx, vy, vz);
+  // Скорость ровно ноль означала бы, что корабль летит точно навстречу
+  // собственному выстрелу с дульной скоростью. Такого в игре нет, но
+  // делить на ноль всё равно нельзя — след тогда рисуется по стволу.
+  const k = v > 1e-9 ? 1 / v : 0;
   return {
     x: from.x, y: from.y, z: from.z,
     px: from.x, py: from.y, pz: from.z,
-    dx: dir.x, dy: dir.y, dz: dir.z,
-    speed: spec.speed,
+    vx, vy, vz,
+    dx: k ? vx * k : dir.x, dy: k ? vy * k : dir.y, dz: k ? vz * k : dir.z,
+    life: spec.speed > 1e-9 ? spec.range / spec.speed : 0,
     len: spec.boltLen,
-    left: spec.range,
     damage: spec.damage,
     color: spec.color,
     mine: !!mine,
@@ -244,9 +292,8 @@ export function updateGuns(guns, dt, ships, hits = []) {
   const live = [];
   for (const b of guns.bolts) {
     b.px = b.x; b.py = b.y; b.pz = b.z;
-    const step = b.speed * dt;
-    b.x += b.dx * step; b.y += b.dy * step; b.z += b.dz * step;
-    b.left -= step;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
+    b.life -= dt;
 
     let gone = false;
     if (ships && ships.length) {
@@ -268,7 +315,7 @@ export function updateGuns(guns, dt, ships, hits = []) {
         break;
       }
     }
-    if (!gone && b.left > 0) live.push(b);
+    if (!gone && b.life > 0) live.push(b);
   }
   guns.bolts = live;
   return hits;
@@ -360,14 +407,23 @@ export function segmentHit(bolt, point, radius) {
   return dx * dx + dy * dy + dz * dz <= radius * radius;
 }
 
-/** Чужой выстрел — только картинка: попадания по нам считает сервер. */
-export function addForeignBolt(guns, msg) {
+/**
+ * Чужой выстрел — только картинка: попадания по нам считает сервер.
+ *
+ * Ход стрелка (`carry`) берётся ИЗ СВОЕГО списка пилотов, а не из
+ * сообщения. Скорость соседа у нас уже есть — она считается по его же
+ * снимкам (js/game/peers.js) и по ней ведётся упреждение, — и просить её
+ * у клиента значит принимать лишнее: чужому болту, вылетающему с чужой
+ * же придуманной скоростью, верить нечему. Нет соседа в списке (только
+ * появился) — болт летит одной дульной скоростью, как раньше.
+ */
+export function addForeignBolt(guns, msg, carry = null) {
   const spec = WEAPONS[msg.w] || guns.spec;
   const dir = normalize(v3(msg.dx, msg.dy, msg.dz));
   if (!Number.isFinite(dir.x + dir.y + dir.z)) return null;
   const from = v3(msg.x, msg.y, msg.z);
   if (!Number.isFinite(from.x + from.y + from.z)) return null;
-  const b = makeBolt(from, dir, spec, false, msg.by | 0);
+  const b = makeBolt(from, dir, spec, false, msg.by | 0, carry);
   guns.bolts.push(b);
   return b;
 }

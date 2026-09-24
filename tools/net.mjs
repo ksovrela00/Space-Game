@@ -24,7 +24,7 @@ const CASE = arg ? arg.slice(7) : null;
 if (!CASE) {
   console.log('\n== сеть: запуск игры с сервером ==');
   let bad = 0;
-  for (const name of ['server', 'offline', 'notoken']) {
+  for (const name of ['server', 'offline', 'notoken', 'wreck']) {
     const r = spawnSync(process.execPath, [process.argv[1], '--case=' + name], {
       stdio: 'inherit',
     });
@@ -203,6 +203,14 @@ globalThis.fetch = async (url, opts = {}) => {
   if (route === 'catalog.specs') {
     return reply(SERVER_SPECS);
   }
+  if (route === 'player.state' && CASE === 'wreck') {
+    // Разбитый корабль: корпус РОВНО ноль. Случай не выдуманный — ровно
+    // так и лежат в базе пилоты, которых сбили и которые не возродились.
+    const wreck = JSON.parse(JSON.stringify(SERVER_STATE));
+    wreck.ship.hull = 0;
+    wreck.ship.shield = 0;
+    return reply(wreck);
+  }
   if (route === 'player.state') {
     if (!opts.headers || opts.headers['X-Auth-Token'] !== TOKEN) {
       return { ok: false, status: 401, json: async () => ({ ok: false,
@@ -247,6 +255,16 @@ const mod = await import('../js/main.js');
 await new Promise((r) => setTimeout(r, 50));
 const game = globalThis.window.GAME;
 const { session } = await import('../js/net/session.js');
+
+if (CASE === 'wreck') {
+  // Ноль — это число, а не «значения нет». Здесь стояло `s.hull || max`,
+  // и разбитый корабль приезжал целёхоньким: на экране сотня, на сервере
+  // ноль, и первое же попадание убивало «полный» корпус.
+  ok(game && game.ship.hull === 0,
+    'корпус ровно 0 доехал нулём, а не полным: ' + (game ? game.ship.hull : 'игры нет'));
+  ok(game && game.ship.shield === 0,
+    'щит тоже: ' + (game ? game.ship.shield : '—'));
+}
 
 if (CASE === 'notoken') {
   ok(location.replaced === 'login.html', 'без входа игра уходит на страницу входа');

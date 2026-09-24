@@ -675,7 +675,11 @@ function applyState(s) {
   if (s.player) loadPlayer(game.player, s.player);
   selectTarget(targetById(world, s.target));
   game.state.view = s.view || 'cockpit';
-  ship.hull = s.hull || SHIP.maxHull;
+  // Ноль — это ЧИСЛО, а не «нет значения». Здесь стояло `s.hull || max`, и
+  // разбитый корабль (корпус ровно 0) приезжал с сервера целёхоньким: на
+  // экране сотня, на сервере ноль, и первое же попадание убивало «полный»
+  // корпус. Щит строкой ниже всегда читался правильно — тем обиднее.
+  ship.hull = typeof s.hull === 'number' ? s.hull : SHIP.maxHull;
   ship.shield = typeof s.shield === 'number' ? s.shield : SHIP.maxShield;
   game.lastStation = findStation(s.last);
   ship.gear.out = !!s.gear;
@@ -819,8 +823,13 @@ function fireNow() {
   const b = fired[0];
   // Чужие увидят выстрел только если мы о нём скажем: сервер пересылает
   // его как картинку, урон идёт отдельным путём (reportHit).
+  //
+  // Уходит направление СТВОЛА, а не путь болта: путь складывается ещё и
+  // с нашим ходом, а его сосед подставит сам — нашу скорость он и так
+  // знает по снимкам. Пошли мы путь, ход учёлся бы дважды.
   if (isOnline()) {
-    shoot(game.guns.spec.code, { x: b.x, y: b.y, z: b.z }, { x: b.dx, y: b.dy, z: b.dz });
+    const a = game.guns.aim;
+    shoot(game.guns.spec.code, { x: b.x, y: b.y, z: b.z }, { x: a.x, y: a.y, z: a.z });
   }
 }
 
@@ -853,7 +862,10 @@ function tellImpact(m, fatal = false) {
 /** Что пришло по сокету из боя. */
 function applyNetEvent(ev) {
   if (ev.t === 'shot') {
-    addForeignBolt(game.guns, ev);
+    // Скорость стрелка — из своего списка пилотов: болт обязан унести её
+    // с собой, иначе очередь соседа тянется за его кормой.
+    const from = game.peers.find((p) => p.id === ev.by) || null;
+    addForeignBolt(game.guns, ev, from ? from.vel : null);
     return;
   }
   if (ev.t === 'hurt') {
@@ -1063,8 +1075,14 @@ function handleKeys(dt) {
   // нажатие: очередь задаёт перезарядка, а не скорость пальца.
   if (input.mouse.left && st.mode === ST.FLIGHT) fireNow();
 
-  // B — квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
-  if (input.pressed('KeyB')) {
+  // B — квантовый привод. Клавиша осталась прежней, но теперь это
+  // синоним: тем же занимается J (см. ниже), и разучиваться не надо.
+  if (input.pressed('KeyB')) quantumKey();
+
+  /**
+   * Квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
+   */
+  function quantumKey() {
     const q = game.quantum;
     if (q.phase === 'jump') {
       abortQuantum(q, ship);
@@ -1096,28 +1114,43 @@ function handleKeys(dt) {
     }
   }
 
-  // J — варп-привод: центровка на другую систему, повторное нажатие
-  // отменяет. В тоннеле кнопка не делает ничего: оборвать прыжок между
-  // системами нельзя в принципе — обрывать некуда, старой системы уже
-  // нет в памяти, а до новой ещё не долетели.
+  // J — ПРЫЖОК. Одна клавиша на оба привода.
+  //
+  // Раньше их было две: B — квантовый, внутри системы, J — варп, между
+  // системами. Для игрока это различие техническое: он хочет «лететь к
+  // тому, что выбрал», а каким приводом — дело корабля. Теперь J смотрит,
+  // что выбрано, и берёт нужный привод; выбранная на карте галактики
+  // система при этом стоит отметкой на экране с самого выбора
+  // (drawWarpAim), а не появляется после первого нажатия.
+  //
+  // Порядок ветвей значим: J всегда отменяет ТО, ЧТО УЖЕ ИДЁТ, и только
+  // на холодную решает, куда лететь. Иначе «отменить» пришлось бы искать
+  // на другой клавише, и это была бы та же развилка, только хуже.
   if (input.pressed('KeyJ')) {
     const w = game.warp;
+    const q = game.quantum;
     if (w.phase === 'tunnel') {
+      // Оборвать прыжок между системами нельзя в принципе: обрывать
+      // некуда, старой системы уже нет в памяти, а до новой не долетели.
       say(st, L('ВАРП НЕ ПРЕРЫВАЕТСЯ'), '#ffcc66');
     } else if (w.phase === 'align') {
       stopWarp(w);
       say(st, L('ВАРП ОТКЛЮЧЁН'));
-    } else {
+    } else if (q.phase !== 'idle') {
+      quantumKey();                       // идёт квантовый — им же и отменяем
+    } else if (game.warpTarget) {
       const to = game.warpTarget;
       const res = canWarp(ship, sys, to);
       if (!res.ok) say(st, res.reason, '#ff7a66');
       else {
-        stopQuantum(game.quantum);
+        stopQuantum(q);
         stopDockingComputer(ship);
         stopLanding(ship);
         startWarp(w, sys, to);
         say(st, L('ВАРП: ЦЕНТРОВКА НА ') + to.name.toUpperCase(), '#9fd9ff', 4);
       }
+    } else {
+      quantumKey();
     }
   }
 
@@ -1461,7 +1494,11 @@ function prepareHud() {
   const st = ship.docking ? ship.docking.station : nearestStation();
   if (st) {
     const d = Math.hypot(st.pos.x - ship.pos.x, st.pos.y - ship.pos.y, st.pos.z - ship.pos.z);
-    if (d < 30) game.dockAssist = makeDockAssist(ship, st);
+    // Порог был 30 км — за ним помощник висел пустой рамкой с красными
+    // «ОСЬ/КРЕН» посреди экрана добрую минуту полёта, и читался как
+    // поломка. Шесть километров — это уже подход, а не «станция где-то
+    // в той стороне»: с них створ порта виден глазом.
+    if (d < 6) game.dockAssist = makeDockAssist(ship, st);
   }
 
   // Посадочный дисплей — когда близка поверхность, на которую можно сесть.

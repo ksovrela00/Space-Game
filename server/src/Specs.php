@@ -68,6 +68,18 @@ final class Specs
         return $out;
     }
 
+    /**
+     * Сколько предметов держит гнездо. Умолчание — один.
+     *
+     * Спрашивает дозаливка заводского набора (Players::ensureStock): ей
+     * надо знать, пусто ли гнездо, а «пусто» зависит от ёмкости.
+     */
+    public static function slotCap(string $slot): int
+    {
+        $caps = self::source()['slots'] ?? [];
+        return max(1, (int) ($caps[$slot] ?? 1));
+    }
+
     /** Лётная модель без того, что лежит столбцами: ровно это идёт в `spec`. */
     public static function specRest(array $spec): array
     {

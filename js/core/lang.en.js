@@ -553,4 +553,17 @@ export const EN = {
   'характеристики взяты из слепка: ': 'specifications taken from the snapshot: ',
   'характеристики пусты: нечем собрать корабль': 'specifications are empty: nothing to build a ship from',
   'слепок характеристик не читается: ': 'specification snapshot unreadable: ',
+  // Приборы от третьего лица: вид цели одним словом и подсказка клавишей.
+  'ЛУНА': 'MOON',
+  'ЗВЕЗДА': 'STAR',
+  'МЕТКА': 'MARKER',
+  'СИСТЕМА': 'SYSTEM',
+  'ОБЪЕКТ': 'OBJECT',
+  'лёту ': 'flight ',
+  'J — ПРЫЖОК К ЦЕЛИ': 'J — JUMP TO TARGET',
+  'ЦЕЛЬ ВАРПА · J — ПРЫЖОК': 'WARP TARGET · J — JUMP',
+  'J — ВАРП В ': 'J — WARP TO ',
+  // Левая колонка приборов: ход корабля.
+  'ХОД': 'SPEED',
+  'ХОД НАЗАД': 'REVERSE',
 };

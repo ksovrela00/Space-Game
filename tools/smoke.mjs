@@ -13,6 +13,32 @@ const count = (name) => { calls[name] = (calls[name] || 0) + 1; };
 
 const gradient = { addColorStop() { count('addColorStop'); } };
 
+// Текущее преобразование холста.
+//
+// Приборы в углах рисуются в СВОИХ пикселях, а на экран попадают через
+// translate+scale (js/ui/hud.js). Пока мок этого не знал, записанные
+// координаты надписей были панельными, и проверка вёрстки не могла
+// сказать, вылезла панель за кадр или нет, — а после того как приборы
+// стали расти вместе с экраном, это ровно тот вопрос, который надо
+// задавать.
+//
+// Матрица неполная: только translate, scale и rotate — больше холст
+// приборов ничего и не делает.
+let tm = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+const tmStack = [];
+const mul = (m, n) => ({
+  a: m.a * n.a + m.c * n.b,
+  b: m.b * n.a + m.d * n.b,
+  c: m.a * n.c + m.c * n.d,
+  d: m.b * n.c + m.d * n.d,
+  e: m.a * n.e + m.c * n.f + m.e,
+  f: m.b * n.e + m.d * n.f + m.f,
+});
+/** Точка холста -> точка экрана. */
+const onScreen = (x, y) => ({ x: tm.a * x + tm.c * y + tm.e, y: tm.b * x + tm.d * y + tm.f });
+/** Во сколько раз преобразование растягивает длины. */
+const tmScale = () => Math.hypot(tm.a, tm.b);
+
 const ctx = new Proxy({}, {
   get(_t, prop) {
     if (prop === 'createRadialGradient' || prop === 'createLinearGradient') {
@@ -30,7 +56,36 @@ const ctx = new Proxy({}, {
     if (prop === 'measureText') {
       return (t) => ({ width: String(t).length * (parseFloat(style.font) || 13) * 0.55 });
     }
-    if (prop === 'setTransform') return () => count('setTransform');
+    if (prop === 'setTransform') {
+      return (...a) => {
+        tm = a.length >= 6
+          ? { a: a[0], b: a[1], c: a[2], d: a[3], e: a[4], f: a[5] }
+          : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+        count('setTransform');
+      };
+    }
+    if (prop === 'resetTransform') {
+      return () => { tm = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; count('resetTransform'); };
+    }
+    if (prop === 'translate') {
+      return (x, y) => { tm = mul(tm, { a: 1, b: 0, c: 0, d: 1, e: x, f: y }); count('translate'); };
+    }
+    if (prop === 'scale') {
+      return (x, y) => { tm = mul(tm, { a: x, b: 0, c: 0, d: y, e: 0, f: 0 }); count('scale'); };
+    }
+    if (prop === 'rotate') {
+      return (r) => {
+        const cs = Math.cos(r), sn = Math.sin(r);
+        tm = mul(tm, { a: cs, b: sn, c: -sn, d: cs, e: 0, f: 0 });
+        count('rotate');
+      };
+    }
+    if (prop === 'save') {
+      return () => { tmStack.push({ ...tm }); count('save'); };
+    }
+    if (prop === 'restore') {
+      return () => { if (tmStack.length) tm = tmStack.pop(); count('restore'); };
+    }
     if (typeof prop === 'string' && /^(save|restore|beginPath|closePath|fill|stroke|clip|translate|rotate|scale|transform|setTransform|resetTransform|moveTo|lineTo|arc|ellipse|rect|fillRect|strokeRect|clearRect|fillText|strokeText|drawImage|setLineDash|quadraticCurveTo|bezierCurveTo)$/.test(prop)) {
       return (...a) => {
         for (const v of a) {
@@ -41,13 +96,19 @@ const ctx = new Proxy({}, {
         // Надписи запоминаем с координатами: по ним проверяется вёрстка
         // приборов (см. проверку панели подхода).
         if (prop === 'fillText' && texts) {
-          texts.push({ s: String(a[0]), x: a[1], y: a[2], align: style.align, font: style.font });
+          // Координаты ЭКРАННЫЕ: иначе по ним нельзя спросить, поместился
+          // ли прибор в кадр. Кегль — тоже экранный, по той же причине.
+          const p = onScreen(a[1], a[2]);
+          texts.push({ s: String(a[0]), x: p.x, y: p.y, align: style.align,
+            font: style.font, size: (parseFloat(style.font) || 13) * tmScale() });
         }
         // Прямоугольники — тем же способом и по той же причине: полоски
         // корпуса и щита никакого текста не рисуют, и проверить их можно
         // только по координатам.
         if (prop === 'fillRect' && rects) {
-          rects.push({ x: a[0], y: a[1], w: a[2], h: a[3], fill: style.fill });
+          const p = onScreen(a[0], a[1]);
+          const k = tmScale();
+          rects.push({ x: p.x, y: p.y, w: a[2] * k, h: a[3] * k, fill: style.fill });
         }
         count(prop);
       };
@@ -226,6 +287,7 @@ const { fmtCrowns } = await import('../js/ui/menu.js');
 const { addMission } = await import('../js/game/player.js');
 const { net } = await import('../js/net/socket.js');
 const { setLang } = await import('../js/core/lang.js');
+const { Q } = await import('../js/core/quality.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -272,6 +334,19 @@ await step('станция в кадре, полигоны рисуются', ()
 // РУССКИХ не осталось, — наполовину переведённый экран выглядит хуже
 // нетронутого.
 await step('английский язык: приборы, меню, карта, справка', () => {
+  // Язык возвращается ЧЕРЕЗ finally. Без этого падение внутри шага
+  // оставляло игру английской, и следующие тринадцать шагов падали на
+  // сверке русских надписей — по одной забытой строке в словаре набор
+  // выдавал четырнадцать ошибок, из которых тринадцать были ложью.
+  try {
+    langStep();
+  } finally {
+    setLang('ru');
+    frames(2);
+  }
+});
+
+function langStep() {
   const CYR = /[А-Яа-яЁё]/;
   if (game.state.mode !== 'flight') { key('Space'); frames(4); }
   // Сообщения на экране написаны на прежнем языке — они и должны такими
@@ -326,9 +401,7 @@ await step('английский язык: приборы, меню, карта,
       + (help.match(/[^<>]*[А-Яа-яЁё][^<>]*/) || [''])[0].slice(0, 60));
   }
 
-  setLang('ru');
-  frames(2);
-});
+}
 
 await step('ручное управление: тяга, рыскание, крен, тангаж', () => {
   holdDown('ShiftLeft'); frames(30); release('ShiftLeft');
@@ -1166,9 +1239,52 @@ await step('цель по Tab и огонь левой кнопкой', () => {
   const b = game.guns.bolts[0];
   if (!b) throw new Error('по цели сбоку не выстрелили');
   const f = game.ship.basis.fwd;
-  const along = b.dx * f.x + b.dy * f.y + b.dz * f.z;
+  // Направление СТВОЛА — это скорость болта за вычетом хода корабля: болт
+  // уносит наш ход с собой, и по мировому его пути кардан уже не
+  // проверить, там намешан ещё и снос.
+  const v = game.ship.vel;
+  const mx = b.vx - v.x, my = b.vy - v.y, mz = b.vz - v.z;
+  const ml = Math.hypot(mx, my, mz) || 1;
+  const along = (mx * f.x + my * f.y + mz * f.z) / ml;
   if (!(along < 0.9999)) throw new Error('кардан не довернул: болт ушёл строго по носу');
   if (!(along > 0.9)) throw new Error('кардан развернуло слишком сильно: ' + along.toFixed(4));
+
+  // Ход корабля болт уносит с собой: на полном ходу очередь обязана
+  // уходить от носа всё с той же дульной скоростью. Пока скорость болта
+  // была мировой, он отползал на 3 − 1.2 = 1.8 км/с, а на форсаже (предел
+  // втрое выше) оставался за кормой — очередь висела в воздухе.
+  //
+  // Ход даём на два кадра, а пушку разряжаем руками вместо ожидания
+  // перезарядки: за её четверть секунды корабль улетел бы на полкилометра
+  // и сдвинул весь дальнейший сценарий. Два кадра лётная модель погасить
+  // не успевает, и мерить есть что.
+  const top = SHIP.maxSpeed;
+  // Где стояли, туда и вернём. Даже сорок метров пролёта сдвигают цель
+  // относительно нас, а она приходит снимками: в следующем снимке она
+  // «прыгнет», и по прыжку ей припишется скорость, которой у неё нет.
+  const was = { x: game.ship.pos.x, y: game.ship.pos.y, z: game.ship.pos.z };
+  game.ship.vel.x = f.x * top; game.ship.vel.y = f.y * top; game.ship.vel.z = f.z * top;
+  game.ship.speed = top;
+  game.guns.cool = 0;
+  game.guns.bolts.length = 0;
+  mouse('mousedown', { button: 0 });
+  frames(2);
+  mouse('mouseup', { button: 0 });
+  const fb = game.guns.bolts[0];
+  if (!fb) throw new Error('на полном ходу не выстрелили вовсе');
+  const rel = Math.hypot(
+    fb.vx - game.ship.vel.x, fb.vy - game.ship.vel.y, fb.vz - game.ship.vel.z);
+  // Допуск щедрый: за два кадра ход чуть меняют и тяга, и тяготение.
+  // Ловим не третий знак, а провал почти вдвое — те самые 1.8 км/с.
+  if (Math.abs(rel - game.guns.spec.speed) > 0.1) {
+    throw new Error('на ходу ' + top + ' км/с болт уходит от корабля со скоростью '
+      + rel.toFixed(2) + ' вместо ' + game.guns.spec.speed);
+  }
+  game.ship.vel.x = game.ship.vel.y = game.ship.vel.z = 0;
+  game.ship.speed = 0;
+  game.ship.pos.x = was.x; game.ship.pos.y = was.y; game.ship.pos.z = was.z;
+  game.guns.bolts.length = 0;
+  game.guns.cool = 0;                         // и пушку — готовой, как была
 
   // Болт долетает и гаснет о корпус, а щит на миг проявляется. Цель
   // ставим близко намеренно: на километре полёт занимает треть секунды,
@@ -1394,13 +1510,19 @@ await step('телепорт к цели (K) и смена высоты (Shift+K
   if (!(d > 3 && d < 12)) throw new Error('телепорт к станции: дистанция ' + d.toFixed(1) + ' км');
 });
 
-await step('панель подхода: всё в одном месте и вокруг прицела', () => {
+await step('приборы подхода: в левой колонке, центр свободен', () => {
   const moon = game.world.bodies.find((b) => b.kind === 'moon');
   game.nav.index = game.nav.list.indexOf(moon);
   // Телепорт на малую высоту: там панель показывает и посадочные условия.
   game.teleAlt = 4;                       // 3 км (см. TELEPORT_ALTS)
   key('KeyK'); frames(3);
   if (!game.capture) throw new Error('нет гравитационного захвата у поверхности луны');
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+  // Сенсорные кнопки убираем: у них свои подписи («ТЯГА», «ЦЕЛЬ»), и
+  // проверка на дубли считала бы их за приборы. Речь здесь про приборы.
+  const wasTouch = Q.touchUi;
+  Q.touchUi = false;
+  frames(2);
 
   texts = [];
   frames(1);
@@ -1408,17 +1530,45 @@ await step('панель подхода: всё в одном месте и во
   texts = null;
 
   const has = (re) => seen.some((t) => re.test(t.s));
-  for (const re of [/ЗАХВАТ/, /ТЯЖЕСТЬ/, /ВЫСОТА/, /СКОРОСТЬ/, /ВЕРТ/, /БОК/, /ДО ЦЕЛИ/]) {
-    if (!has(re)) throw new Error('панель не показывает ' + re);
+  for (const re of [/ВЫСОТА/, /ВЕРТ/, /БОК/, /ТЯЖЕСТЬ/, /ШАССИ/, /НАКЛОН/, /УКЛОН/]) {
+    if (!has(re)) throw new Error('приборы не показывают ' + re);
   }
 
-  // Ничего не продублировано: то, что переехало в центр, из углов ушло.
-  // Две копии одного числа хуже одной — глаз всё равно мечется.
+  // НИЧЕГО НЕ ДУБЛИРУЕТСЯ. Раньше на подходе ход и дистанция переезжали
+  // из углов в центр, а углы ужимались: одно и то же число оказывалось
+  // то слева внизу, то посреди экрана, и глазу негде было закрепиться.
+  // Теперь углы стоят на месте всегда, а центр показывает только то,
+  // чего в них нет.
   const count = (re) => seen.filter((t) => re.test(t.s)).length;
-  for (const [re, name] of [[/^СКОРОСТЬ$/, 'скорость'], [/^ШАССИ/, 'шасси']]) {
+  for (const [re, name] of [[/^ТЯГА$/, 'тяга'], [/^ЦЕЛЬ · /, 'заголовок цели'],
+    [/^ВЫСОТА$/, 'высота'], [/^ХОД$/, 'ход']]) {
     if (count(re) !== 1) throw new Error(`${name}: ${count(re)} надписей вместо одной`);
   }
-  if (count(/^ДИСТ/) !== 0) throw new Error('дистанция осталась и в углу');
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const cx = W / 2, cy = H / 2;
+
+  // ВСЁ О КОРАБЛЕ — В ЛЕВОЙ КОЛОНКЕ. Высота, скорости у грунта и тяжесть
+  // — это про нас, а не про прицел, и раньше они стояли отдельным
+  // прибором посреди кадра. В виде от третьего лица низ середины занимает
+  // САМ КОРАБЛЬ, и приборы ложились прямо на корпус.
+  const mine = [/^ВЫСОТА$/, /^ВЕРТ$/, /^БОК$/, /^ТЯЖЕСТЬ$/, /^ХОД$/, /^ТЯГА$/, /^КОРПУС$/];
+  for (const re of mine) {
+    const t = seen.find((x) => re.test(x.s));
+    if (!t) continue;
+    if (t.x > W * 0.3) {
+      throw new Error(`«${t.s}» вне левой колонки: x = ${t.x.toFixed(0)}`);
+    }
+  }
+
+  // Середина кадра СВОБОДНА — и вокруг прицела, и под ним, где корабль.
+  // Исключение одно: строка площадки и кнопка взлёта на грунте, но здесь
+  // корабль в полёте.
+  for (const t of seen) {
+    if (Math.abs(t.x - cx) < W * 0.22 && Math.abs(t.y - cy) < H * 0.45) {
+      throw new Error(`надпись «${t.s}» посреди кадра: ${(t.x - cx).toFixed(0)}, ${(t.y - cy).toFixed(0)}`);
+    }
+  }
 
   // Отметка грунта: кольцо под кораблём и высота рядом с нитью. Это
   // главный признак масштаба у поверхности, и рисуется он только когда
@@ -1426,11 +1576,6 @@ await step('панель подхода: всё в одном месте и во
   {
     game.teleAlt = 6;                     // 0.05 км
     key('KeyK'); frames(3);
-    // Из кабины точка под кораблём остаётся за спиной у камеры — это
-    // верно и так и должно быть; смотрим из-за корпуса.
-    if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
-    // Пунктир (setLineDash) в приборах больше никто не рисует, поэтому по
-    // нему отметку видно однозначно; кольцо считаем по отрезкам.
     const l0 = calls.lineTo || 0, d0 = calls.setLineDash || 0;
     frames(1);
     const ring = (calls.lineTo || 0) - l0;
@@ -1438,36 +1583,27 @@ await step('панель подхода: всё в одном месте и во
     if (dash < 2) throw new Error('нити отметки нет: пунктир не рисовался');
     if (ring < 16) throw new Error('кольцо отметки не нарисовано: ' + ring + ' отрезков');
 
-    game.teleAlt = 0;                     // 2000 км — далеко, отметки быть не должно
+    game.teleAlt = 0;                     // 2000 км — далеко
     key('KeyK'); frames(3);
     const l1 = calls.lineTo || 0, d1 = calls.setLineDash || 0;
     frames(1);
     if ((calls.setLineDash || 0) - d1 > 0) throw new Error('отметка рисуется и с орбиты');
     if ((calls.lineTo || 0) - l1 > ring - 16) throw new Error('кольцо рисуется и с орбиты');
-  }
 
-  // Вёрстка: всё внутри рамки вокруг прицела, а сама середина свободна —
-  // иначе приборы закрывали бы то, на что целятся.
-  const w = window.innerWidth, h = window.innerHeight;
-  const cx = w / 2, cy = h / 2;
-  const BW = Math.min(Math.max(w * 0.10, 120), 220);
-  const BH = Math.min(Math.max(h * 0.13, 92), 160);
-  // Приборы занимают рамку вокруг прицела плюс шкалу тяжести справа от
-  // неё; середина рамки обязана остаться пустой.
-  const inFrame = (t) => Math.abs(t.x - cx) <= BW && Math.abs(t.y - cy) <= BH;
-  const inGauge = (t) => t.x > cx + BW && t.x < cx + BW + 130 &&
-    Math.abs(t.y - cy) <= BH + 60;
-  const mine = seen.filter((t) => Math.abs(t.x - cx) <= BW + 160 &&
-    Math.abs(t.y - cy) <= BH + 70);
-  if (mine.length < 12) throw new Error('в панели всего ' + mine.length + ' надписей');
-  for (const t of mine) {
-    if (!inFrame(t) && !inGauge(t)) {
-      throw new Error(`надпись «${t.s}» вылезла из приборов: ${(t.x - cx).toFixed(0)}, ${(t.y - cy).toFixed(0)}`);
-    }
-    if (Math.abs(t.x - cx) < 40 && Math.abs(t.y - cy) < 30) {
-      throw new Error(`надпись «${t.s}» лезет на прицел`);
+    // И приборы с орбиты ужимаются сами: вертикальная скорость
+    // относительно грунта за две тысячи километров не значит ничего, а
+    // место занимает и внимание отнимает.
+    texts = [];
+    frames(1);
+    const far = texts.map((t) => t.s);
+    texts = null;
+    if (!far.some((t) => /ВЫСОТА/.test(t))) throw new Error('с орбиты пропала и высота');
+    if (far.some((t) => /^ВЕРТ$/.test(t))) {
+      throw new Error('с орбиты всё ещё показана вертикальная скорость');
     }
   }
+  Q.touchUi = wasTouch;
+  frames(2);
 });
 
 await step('удар о грунт: отскок, урон и потеря управления', () => {
@@ -1728,6 +1864,84 @@ await step('отметка варпа не врёт, когда цель за с
 // остального кода. Логические проверки видят привод, но не видят, что
 // будет с навигацией, картой и приборами, когда тел старой системы не
 // станет прямо посреди кадра.
+// Одна клавиша на оба прыжка. Раньше их было две — B внутри системы и J
+// между системами, — и различие это техническое: игрок хочет «лететь к
+// выбранному», а каким приводом, дело корабля. Заодно проверяется то,
+// на что была жалоба: выбранная на карте система обязана СТОЯТЬ НА
+// ЭКРАНЕ до нажатия, а не появляться после него.
+await step('J — одна клавиша прыжка: привод выбирается сам', () => {
+  if (game.state.mode === 'docked') { key('Space'); frames(4); }
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+  // В пустоту: у грунта коридор перекрыт телом, и привод откажет по делу.
+  game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  game.ship.speed = 0; game.ship.throttle = 0;
+  game.warpTarget = null;
+  frames(2);
+
+  const shown = (n = 2) => {
+    texts = [];
+    frames(n);
+    const list = texts.map((t) => t.s);
+    texts = null;
+    return list;
+  };
+
+  // 1. Цель в своей системе — J берёт квантовый привод.
+  const star = game.world.bodies.find((b) => b.kind === 'star');
+  game.nav.index = game.nav.list.indexOf(star);
+  frames(2);
+  key('KeyJ'); frames(2);
+  if (game.quantum.phase !== 'calib') {
+    throw new Error('J не включил квантовый привод: ' + game.quantum.phase);
+  }
+  // Повторное нажатие отменяет — тем же пальцем, что и включило.
+  key('KeyJ'); frames(2);
+  if (game.quantum.phase !== 'idle') {
+    throw new Error('J не отменил квантовый привод: ' + game.quantum.phase);
+  }
+
+  // 2. Цель в другой системе — та же клавиша берёт варп.
+  key('KeyM'); frames(2);
+  key('KeyG'); frames(2);
+  key('ArrowRight'); frames(2);
+  const toName = game.warpTarget && game.warpTarget.name;
+  if (!toName) throw new Error('на карте галактики не выбралась система');
+  // Карту оставляем в том виде, в каком взяли: следующий шаг открывает её
+  // заново и ждёт вид системы. Проверка, меняющая обстановку за собой, —
+  // это проверка, которая ломает соседнюю, а виноватой выглядит игра.
+  key('KeyG'); frames(2);
+  key('KeyM'); frames(3);
+
+  // ГЛАВНОЕ: метка стоит ДО нажатия. Пока её не было, J приходилось
+  // жать вслепую — и только потом появлялось, куда наводиться.
+  //
+  // Сообщения гасим намеренно: выбор на карте сам печатает «ЦЕЛЬ ВАРПА:
+  // …» строкой в углу, и на ней проверка зеленела, даже когда метки не
+  // было вовсе (проверено сломом). Ищем ровно ту подпись, которую рисует
+  // сама метка, и имя системы рядом с кольцом.
+  game.state.messages.length = 0;
+  const before = shown();
+  if (!before.some((t) => t === 'ЦЕЛЬ ВАРПА · J — ПРЫЖОК')) {
+    throw new Error('метки цели варпа на экране нет: ' + before.join(' | '));
+  }
+  const nameAt = before.filter((t) => t === toName.toUpperCase()).length;
+  if (nameAt < 1) {
+    throw new Error('у метки не написано, куда она ведёт: ' + before.join(' | '));
+  }
+  if (game.warp.phase !== 'idle') throw new Error('привод запустился сам собой');
+
+  key('KeyJ'); frames(2);
+  if (game.warp.phase !== 'align') throw new Error('J не включил варп: ' + game.warp.phase);
+  // И отменяется тем же.
+  key('KeyJ'); frames(2);
+  if (game.warp.phase !== 'idle') throw new Error('J не отменил варп: ' + game.warp.phase);
+  // Цель варпа за собой НЕ убираем: следующий шаг открывает карту заново
+  // и ждёт, что выбор на ней уже есть. Обнулить её здесь значило бы
+  // подчистить не за собой, а за игрой.
+  frames(2);
+});
+
 await step('варп-прыжок (J) в другую систему целиком', () => {
   if (game.state.mode === 'docked') { key('Space'); frames(4); }
   if (game.state.mode !== 'flight') throw new Error('не в полёте: ' + game.state.mode);
@@ -1893,6 +2107,77 @@ await step('изменение размера окна', () => {
   window.innerWidth = 1920; window.innerHeight = 1080;
   for (const fn of winListeners.resize || []) fn();
   frames(5);
+});
+
+// Крупные приборы обязаны помещаться в кадр.
+//
+// Приборы растут вместе с экраном, и это ровно тот случай, когда легко
+// сделать хуже: на 2556 точках панели стали в полтора раза больше, и
+// если бы они лезли за край или друг на друга, жалоба «непонятный
+// интерфейс» сменилась бы на «обрезанный». Мок холста следит за
+// преобразованием (см. onScreen), поэтому угловые панели здесь видно в
+// экранных координатах, а не в своих.
+await step('крупные приборы помещаются в кадр', () => {
+  const wasW = window.innerWidth, wasH = window.innerHeight, wasK = Q.hudScale;
+  // Сенсорные кнопки в этой проверке ни при чём: речь про большой
+  // монитор с мышью, где их не рисуют вовсе. У них своя раскладка и свои
+  // размеры (js/ui/touch.js), и мерить их заодно значит мерить не то.
+  const wasTouch = Q.touchUi;
+  const resize = (w, h) => {
+    window.innerWidth = w; window.innerHeight = h;
+    for (const fn of winListeners.resize || []) fn();
+    frames(3);
+  };
+  try {
+    if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+    if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+    game.state.messages.length = 0;
+    Q.touchUi = false;
+    resize(2556, 1305);
+    Q.hudScale = 1.45;                    // столько даёт этот экран
+    frames(3);
+
+    texts = [];
+    frames(1);
+    const seen = texts;
+    texts = null;
+
+    const W = window.innerWidth, H = window.innerHeight;
+    for (const t of seen) {
+      if (t.x < -4 || t.x > W + 4 || t.y < 0 || t.y > H + 4) {
+        throw new Error(`надпись «${t.s}» вне кадра: ${t.x.toFixed(0)}, ${t.y.toFixed(0)}`);
+      }
+      // Левые надписи ещё и не должны выходить за правый край длиной.
+      if (t.align === 'left' && t.x + t.s.length * t.size * 0.55 > W + 4) {
+        throw new Error(`надпись «${t.s}» не влезла по ширине`);
+      }
+    }
+
+    // Приборы ВЫРОСЛИ: на этом экране самая мелкая подпись обязана быть
+    // крупнее прежних девяти пикселей, иначе вся затея впустую.
+    const sizes = seen.map((t) => t.size).filter((v) => v > 0);
+    const min = Math.min(...sizes);
+    if (!(min >= 13)) {
+      const worst = seen.filter((t) => t.size === min).map((t) => t.s).slice(0, 3);
+      throw new Error(`на большом экране осталась мелочь ${min.toFixed(1)} px: ` + worst.join(' | '));
+    }
+
+    // Левая панель и сканер не наезжают друг на друга: сканер стоит по
+    // центру низа, панель прижата к левому краю.
+    const left = seen.filter((t) => t.x < W * 0.33 && t.y > H * 0.75);
+    const mid = seen.filter((t) => Math.abs(t.x - W / 2) < W * 0.1 && t.y > H * 0.75);
+    if (!left.length) throw new Error('левой панели в углу нет');
+    if (!mid.length) throw new Error('сканера внизу нет');
+    const rightmost = Math.max(...left.map((t) => t.x + t.s.length * t.size * 0.55));
+    const leftmost = Math.min(...mid.map((t) => t.x - t.s.length * t.size * 0.3));
+    if (rightmost > leftmost) {
+      throw new Error(`панель тяги наехала на сканер: ${rightmost.toFixed(0)} > ${leftmost.toFixed(0)}`);
+    }
+  } finally {
+    Q.hudScale = wasK;
+    Q.touchUi = wasTouch;
+    resize(wasW, wasH);
+  }
 });
 
 await step('сохранение в localStorage', () => {

@@ -575,6 +575,69 @@ $ping = Api::call('ping');
 ok($ping['systems'] === $systems && $ping['schema'] === Schema::VERSION,
     'ping отдаёт версию схемы ' . $ping['schema'] . ' и размер каталога');
 
+// --- дозаливка заводского набора ----------------------------------------------
+
+section('гнёзда корабля');
+
+$shipId = (int) Db::one('SELECT `id` FROM `ship` WHERE `owner_id`=?', [$pid]);
+$slotRows = static fn(string $slot) => Db::all(
+    'SELECT e.`code` FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+     WHERE se.`ship_id`=? AND e.`slot`=?',
+    [$shipId, $slot]
+);
+
+// 1. Дозаливка идемпотентна: сколько её ни зови, лишнего не появится.
+$before = (int) Db::one('SELECT COUNT(*) FROM `ship_equipment` WHERE `ship_id`=?', [$shipId]);
+Players::ensureStock($shipId);
+Players::ensureStock($shipId);
+$after = (int) Db::one('SELECT COUNT(*) FROM `ship_equipment` WHERE `ship_id`=?', [$shipId]);
+ok($before === $after, "повторная дозаливка ничего не дописывает: $before -> $after");
+
+// 2. Гнездо на два прибора так и остаётся на два. Докинг-компьютер и
+//    посадочный — разные приборы в одном гнезде, и оба заводские.
+ok(count($slotRows('computer')) === 2 && Specs::slotCap('computer') === 2,
+    'в гнезде компьютеров оба прибора: ' . implode(', ', array_column($slotRows('computer'), 'code')));
+
+// 3. ГЛАВНОЕ. Второй заводской ВАРИАНТ для занятого гнезда не должен
+//    дозаливаться. Ёмкость считалась как «сколько заводских типов есть у
+//    слота», и появление второго привода делало ёмкость двойкой: сервер
+//    дозаливал кораблю второй привод при каждом запросе состояния, и
+//    удалить лишнюю строку руками было нельзя — она возвращалась.
+$driveBefore = $slotRows('drive');
+Db::run(
+    'INSERT INTO `equipment_type` (`code`,`name`,`slot`,`spec`,`price`,`stock`)
+     VALUES (?,?,?,?,?,1) ON DUPLICATE KEY UPDATE `stock`=1',
+    ['quantum_x', 'КВАНТОВЫЙ ПРИВОД X', 'drive', '{}', 99000]
+);
+Players::ensureStock($shipId);
+$driveAfter = $slotRows('drive');
+ok(count($driveAfter) === count($driveBefore) && count($driveAfter) === 1,
+    'второй заводской привод в занятое гнездо не лезет: приводов '
+    . count($driveAfter) . ' (' . implode(', ', array_column($driveAfter, 'code')) . ')');
+
+// 4. А пустое гнездо дозаливается — ради этого всё и заведено: так в
+//    старые корабли попали щиты и пушка, когда их добавили в каталог.
+Db::run('DELETE se FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+         WHERE se.`ship_id`=? AND e.`slot`=?', [$shipId, 'shield']);
+ok(count($slotRows('shield')) === 0, 'щит снят для проверки');
+Players::ensureStock($shipId);
+ok(count($slotRows('shield')) === 1, 'пустое гнездо дозаливается: щит вернулся');
+
+// 5. Гнездо на два прибора, занятое НАПОЛОВИНУ. Случай коварный: в
+//    цикле дозаливки надо брать только то, чего на корабле ещё нет, —
+//    иначе она натыкается на уже стоящий прибор, видит свободное место в
+//    гнезде и пытается вставить его второй раз. Это падение на уникальном
+//    ключе, а не лишняя строка, то есть весь запрос состояния в ошибку.
+Db::run('DELETE se FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+         WHERE se.`ship_id`=? AND e.`code`=?', [$shipId, 'land']);
+ok(count($slotRows('computer')) === 1, 'посадочный компьютер снят, докинг остался');
+Players::ensureStock($shipId);
+$comp = array_column($slotRows('computer'), 'code');
+sort($comp);
+ok($comp === ['dock', 'land'], 'дозалился ровно недостающий: ' . implode(', ', $comp));
+
+Db::run('DELETE FROM `equipment_type` WHERE `code`=?', ['quantum_x']);
+
 // --- характеристики: бэкенд им хозяин ----------------------------------------
 
 section('характеристики корабля');

@@ -145,6 +145,26 @@ export function targetById(world, id) {
   return null;
 }
 
+/**
+ * Что это за цель одним словом: станция, планета, пилот.
+ *
+ * Нужно приборам: имя «Lave II» само по себе не говорит, во что целишься
+ * — в планету, в порт или в чужой корабль, — а от этого зависит всё
+ * дальнейшее (стыковка, посадка, бой). Раньше вид приходилось угадывать
+ * по скобке в конце имени.
+ */
+export function targetKind(t) {
+  if (!t) return '';
+  if (t.isPeer) return 'ПИЛОТ';
+  if (t.isStation) return 'СТАНЦИЯ';
+  if (t.isMarker) return 'МЕТКА';
+  if (t.isSystem) return 'СИСТЕМА';
+  if (t.kind === 'star') return 'ЗВЕЗДА';
+  if (t.kind === 'moon') return 'ЛУНА';
+  if (t.kind === 'planet') return 'ПЛАНЕТА';
+  return 'ОБЪЕКТ';
+}
+
 export function targetLabel(t) {
   if (!t) return '—';
   if (t.isPeer) return t.name || L('ПИЛОТ');

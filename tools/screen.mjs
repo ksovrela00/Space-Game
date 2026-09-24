@@ -1,0 +1,378 @@
+// Снимок игры из НАСТОЯЩЕГО браузера.
+//
+// Зачем. Приборы рисуются на Canvas, сцена — в WebGL, и до сих пор
+// увидеть кадр можно было только глазами человека за монитором. Отсюда
+// вся беда с интерфейсом: правки делались вслепую, «покрупнее» и
+// «повыше» проверялись пересказом. ASCII-снимок (tools/shot.mjs)
+// перехватывает вызовы Canvas 2D и для WebGL бесполезен, а числа в
+// tools/smoke.mjs говорят, ЧТО нарисовано, но не КАК это выглядит.
+//
+// Здесь всё честно: Chrome запускается без окна, открывает игру по
+// http, доигрывает до нужной сцены и отдаёт PNG.
+//
+// Зависимостей нет и не будет. Chrome управляется своим протоколом
+// (DevTools Protocol) поверх WebSocket, который в Node 22 уже встроен, —
+// ни puppeteer, ни playwright ради сотни строк тянуть незачем.
+//
+//   node tools/screen.mjs                            снимок сцены flight
+//   node tools/screen.mjs --scene=approach           подлёт к луне
+//   node tools/screen.mjs --scene=dock --out=a.png   стыковка
+//   node tools/screen.mjs --list                     какие сцены есть
+//   node tools/screen.mjs --size=1920x1080 --hud=1.2
+//   node tools/screen.mjs --do="GAME.ship.hull = 12" произвольная правка
+//
+// Игру отдаёт тот же сервер, что и обычно (XAMPP, http://localhost/…).
+// Без сервера сцена не соберётся: числа корабля приходят из бэкенда.
+
+import { spawn } from 'node:child_process';
+import { writeFileSync, mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const arg = (name, def = null) => {
+  const hit = process.argv.find((a) => a.startsWith('--' + name + '='));
+  return hit === undefined ? def : hit.slice(name.length + 3);
+};
+const flag = (name) => process.argv.includes('--' + name);
+
+// --- где Chrome ---------------------------------------------------------------
+
+// Ищется так же, как PHP (tools/php.mjs): прописать абсолютный путь
+// значит сломать команду на второй машине.
+const CHROMES = [
+  process.env.SOLAR_CHROME,
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  process.env.LOCALAPPDATA && process.env.LOCALAPPDATA + '/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+].filter(Boolean);
+
+const chrome = CHROMES.find((p) => existsSync(p));
+if (!chrome) {
+  console.error('Chrome не найден. Укажите его явно: SOLAR_CHROME=путь node tools/screen.mjs');
+  console.error('искали: ' + CHROMES.join(', '));
+  process.exit(1);
+}
+
+// --- сцены --------------------------------------------------------------------
+//
+// Сцена — это кусок кода, который выполняется В СТРАНИЦЕ после загрузки.
+// Игра выставляет наружу window.GAME, и этого достаточно: положение,
+// цель, режим и вид ставятся прямо в объекте, как их ставит сама игра.
+//
+// Кадры после правки нужны обязательно: почти всё в игре считается за
+// кадр, и снимок сразу после присваивания показал бы прошлое состояние.
+
+const SCENES = {
+  boot: {
+    title: 'стартовый экран',
+    run: '',
+  },
+  flight: {
+    title: 'обычный полёт у станции',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 14);
+      GAME.state.view = 'chase';
+    `,
+  },
+  approach: {
+    title: 'подлёт к луне: приборы подхода',
+    run: `
+      liftoff();
+      const moon = GAME.world.bodies.find((b) => b.kind === 'moon');
+      aimAt(moon, 40);
+      GAME.state.view = 'chase';
+    `,
+  },
+  dock: {
+    title: 'створ порта: помощник стыковки',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 1.2);
+      GAME.state.view = 'chase';
+    `,
+  },
+  surface: {
+    title: 'у самого грунта: отметка земли и посадочные условия',
+    run: `
+      liftoff();
+      const moon = GAME.world.bodies.find((b) => b.kind === 'moon');
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      hover(moon, 0.35);
+      GAME.state.view = 'chase';
+    `,
+  },
+  warp: {
+    title: 'выбрана система на карте галактики: метка цели варпа',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 40);
+      GAME.state.view = 'chase';
+      press('KeyM'); press('KeyG'); press('ArrowRight'); press('KeyM');
+    `,
+  },
+  cockpit: {
+    title: 'вид из кабины',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 14);
+      GAME.state.view = 'cockpit';
+    `,
+  },
+  map: {
+    title: 'карта системы',
+    run: 'liftoff(); press("KeyM");',
+  },
+  menu: {
+    title: 'меню пилота',
+    run: 'liftoff(); press("KeyI");',
+  },
+};
+
+if (flag('list')) {
+  console.log('сцены:');
+  for (const [name, s] of Object.entries(SCENES)) console.log('  ' + name.padEnd(10) + s.title);
+  process.exit(0);
+}
+
+const sceneName = arg('scene', 'flight');
+const scene = SCENES[sceneName];
+if (!scene) {
+  console.error('нет такой сцены: ' + sceneName + '. Список: node tools/screen.mjs --list');
+  process.exit(1);
+}
+
+// --- что снимаем --------------------------------------------------------------
+
+const [W, H] = (arg('size', '1600x900')).split('x').map(Number);
+const out = arg('out', 'shot.png');
+const hud = arg('hud', null);
+const extra = arg('do', '');
+const wait = Number(arg('wait', 1200));
+
+let url = arg('url', 'http://localhost/space_game/');
+// Автономный режим: снимок не должен зависеть от того, вошёл ли кто-то в
+// игру на этой машине, а вход уводит на страницу входа.
+if (!url.includes('?')) url += '?offline=1';
+if (hud) url += '&hud=' + hud;
+
+// --- вспомогательное для сцен -------------------------------------------------
+//
+// Едет в страницу вместе со сценой. Это не часть игры: ставить корабль
+// «в 14 км от станции» игра умеет сама (телепорт по K), но в снимке
+// нужна точность, а не игровое удобство.
+
+const HELPERS = `
+  const GAME = window.GAME;
+  const frames = (n) => { for (let i = 0; i < n; i++) window.__tick(); };
+  const press = (code) => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { code }));
+    frames(2);
+    window.dispatchEvent(new KeyboardEvent('keyup', { code }));
+    frames(2);
+  };
+  const liftoff = () => {
+    const b = document.getElementById('bootBtn');
+    if (b) b.click();
+    frames(6);
+    if (GAME.state.mode === 'docked') press('Space');
+    frames(30);
+  };
+  // Поставить корабль в gap километрах от поверхности цели, носом на неё.
+  const aimAt = (t, gap) => {
+    const p = GAME.ship.pos;
+    const d = { x: 1, y: 0.25, z: 0.6 };
+    const len = Math.hypot(d.x, d.y, d.z);
+    const R = (t.radius || 0) + gap;
+    p.x = t.pos.x + d.x / len * R;
+    p.y = t.pos.y + d.y / len * R;
+    p.z = t.pos.z + d.z / len * R;
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0;
+    GAME.ship.throttle = 0;
+    const i = GAME.nav.list.indexOf(t);
+    if (i >= 0) GAME.nav.index = i;
+    frames(4);
+    // Нос на цель: тем же вызовом, которым это делает автопилот.
+    const fwd = { x: t.pos.x - p.x, y: t.pos.y - p.y, z: t.pos.z - p.z };
+    const fl = Math.hypot(fwd.x, fwd.y, fwd.z);
+    fwd.x /= fl; fwd.y /= fl; fwd.z /= fl;
+    window.__lookAlong(GAME.ship.basis, fwd, { x: 0, y: 1, z: 0 });
+    frames(20);
+  };
+  // Зависнуть над телом на высоте alt, носом ПО ГОРИЗОНТУ.
+  //
+  // Нужен отдельно от aimAt: тот наводит нос на центр тела, то есть у
+  // самой земли — прямо в грунт, и корабль честно в него влетает. У
+  // поверхности смотреть надо вдоль, а не вниз.
+  const hover = (b, alt) => {
+    const up = { x: 0.35, y: 0.9, z: 0.26 };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const R = b.radius + alt;
+    const p = GAME.ship.pos;
+    p.x = b.pos.x + up.x * R; p.y = b.pos.y + up.y * R; p.z = b.pos.z + up.z * R;
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0; GAME.ship.throttle = 0;
+    // Любое направление поперёк вертикали — это и есть горизонт.
+    const t = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const f = {
+      x: t.y * up.z - t.z * up.y,
+      y: t.z * up.x - t.x * up.z,
+      z: t.x * up.y - t.y * up.x,
+    };
+    const fl = Math.hypot(f.x, f.y, f.z);
+    f.x /= fl; f.y /= fl; f.z /= fl;
+    window.__lookAlong(GAME.ship.basis, f, up);
+    frames(30);
+  };
+`;
+
+// --- протокол Chrome ----------------------------------------------------------
+
+const profile = mkdtempSync(join(tmpdir(), 'solar-shot-'));
+const port = 9222 + Math.floor(Math.random() * 300);
+
+const proc = spawn(chrome, [
+  '--headless=new',
+  '--remote-debugging-port=' + port,
+  '--user-data-dir=' + profile,
+  '--window-size=' + W + ',' + H,
+  '--hide-scrollbars',
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--disable-extensions',
+  // Без этого в headless нет настоящего GL: кадр придёт чёрным.
+  '--use-angle=swiftshader',
+  '--enable-unsafe-swiftshader',
+  '--disable-gpu-sandbox',
+  'about:blank',
+], { stdio: 'ignore' });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Дождаться, пока Chrome поднимет свой порт, и взять адрес вкладки. */
+async function target() {
+  for (let i = 0; i < 100; i++) {
+    try {
+      const res = await fetch('http://127.0.0.1:' + port + '/json/list');
+      const list = await res.json();
+      const page = list.find((t) => t.type === 'page');
+      if (page && page.webSocketDebuggerUrl) return page.webSocketDebuggerUrl;
+    } catch (e) { /* ещё не поднялся */ }
+    await sleep(100);
+  }
+  throw new Error('Chrome не отозвался на порту ' + port);
+}
+
+function connect(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  const waiting = new Map();
+  let seq = 0;
+  ws.addEventListener('message', (ev) => {
+    const msg = JSON.parse(ev.data);
+    const slot = waiting.get(msg.id);
+    if (!slot) return;
+    waiting.delete(msg.id);
+    if (msg.error) slot.reject(new Error(msg.error.message));
+    else slot.resolve(msg.result);
+  });
+  const ready = new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve);
+    ws.addEventListener('error', () => reject(new Error('не подключиться к Chrome')));
+  });
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    waiting.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  return { ready, send, close: () => ws.close() };
+}
+
+/** Выполнить код в странице и вернуть результат. */
+async function run(cdp, code) {
+  const r = await cdp.send('Runtime.evaluate', {
+    expression: '(() => {' + code + '})()',
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (r.exceptionDetails) {
+    const e = r.exceptionDetails;
+    throw new Error('в странице: ' + (e.exception ? e.exception.description : e.text));
+  }
+  return r.result.value;
+}
+
+try {
+  const cdp = connect(await target());
+  await cdp.ready;
+  await cdp.send('Page.enable');
+  await cdp.send('Runtime.enable');
+  await cdp.send('Emulation.setDeviceMetricsOverride',
+    { width: W, height: H, deviceScaleFactor: 1, mobile: false });
+
+  await cdp.send('Page.navigate', { url });
+
+  // Ждём не «загрузки страницы», а саму игру: модули грузятся, потом
+  // загрузчик идёт за характеристиками на сервер, и только после этого
+  // появляется window.GAME.
+  let ok = false;
+  for (let i = 0; i < 200; i++) {
+    ok = await run(cdp, 'return !!(window.GAME && window.GAME.world)');
+    if (ok) break;
+    await sleep(100);
+  }
+  if (!ok) {
+    const err = await run(cdp, `
+      const b = document.getElementById('bootBody');
+      return b ? b.textContent.slice(0, 200) : 'страница пуста';
+    `);
+    throw new Error('игра не поднялась: ' + err);
+  }
+
+  // Кадры двигаем сами: requestAnimationFrame в headless идёт, но
+  // сцену надо доиграть до нужного места за предсказуемое число шагов.
+  await run(cdp, `
+    window.__tick = () => {};
+    const raf = window.requestAnimationFrame;
+    let cb = null;
+    window.requestAnimationFrame = (fn) => { cb = fn; return 1; };
+    let t = performance.now();
+    window.__tick = () => { t += 16.7; const f = cb; cb = null; if (f) f(t); };
+  `);
+  // lookAlong нужен помощникам сцены, а модули страницы наружу не видны.
+  await run(cdp, `
+    return import('./js/core/basis.js').then((m) => { window.__lookAlong = m.lookAlong; return true; });
+  `);
+
+  if (scene.run) await run(cdp, HELPERS + scene.run + '\nframes(8);');
+  if (extra) await run(cdp, HELPERS + extra + '\nframes(8);');
+  // Пауза перед снимком — чтобы досчитались плитки поверхности и тени:
+  // они собираются в потоках и по таймерам, а не в кадре. Ход игры при
+  // этом НЕ возобновляем: сцена должна остаться той, которую поставили,
+  // а не уехать за секунду ожидания (корабль у грунта за неё успевает
+  // сесть). Кадры добиваем вручную.
+  const until = Date.now() + wait;
+  while (Date.now() < until) {
+    await run(cdp, 'window.__tick(); return 1;');
+    await sleep(50);
+  }
+
+  const shot = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  writeFileSync(out, Buffer.from(shot.data, 'base64'));
+  console.log(`снимок: ${out}  (${W}×${H}, сцена «${scene.title}»)`);
+  cdp.close();
+} catch (e) {
+  console.error('ОШИБКА: ' + e.message);
+  process.exitCode = 1;
+} finally {
+  proc.kill();
+  try { rmSync(profile, { recursive: true, force: true }); } catch (e) { /* и ладно */ }
+}

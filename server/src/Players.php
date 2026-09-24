@@ -150,34 +150,49 @@ final class Players
      */
     public static function ensureStock(int $shipId): void
     {
-        $cap = [];
-        foreach (Db::all('SELECT `slot`, COUNT(*) AS `n` FROM `equipment_type`
-                          WHERE `stock`=1 GROUP BY `slot`') as $r) {
-            $cap[$r['slot']] = (int) $r['n'];
-        }
-
+        // Заняты ли гнёзда. Занятое НЕ ТРОГАЕМ: что в нём стоит, решает не
+        // эта функция — пилот мог купить другой двигатель, а хозяин
+        // сервера поставить руками что угодно.
         $busy = [];
         foreach (Db::all(
-            'SELECT e.`slot`, COUNT(*) AS `n`
-             FROM `ship_equipment` se JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
+            'SELECT e.`slot`, COUNT(*) AS `n` FROM `ship_equipment` se
+             JOIN `equipment_type` e ON e.`id`=se.`equipment_id`
              WHERE se.`ship_id`=? GROUP BY e.`slot`',
             [$shipId]
         ) as $r) {
-            $busy[$r['slot']] = (int) $r['n'];
+            $busy[(string) $r['slot']] = (int) $r['n'];
         }
 
-        $missing = Db::all(
-            'SELECT e.`id`, e.`slot` FROM `equipment_type` e
-             WHERE e.`stock`=1 AND e.`id` NOT IN (
-                 SELECT se.`equipment_id` FROM `ship_equipment` se WHERE se.`ship_id`=?
-             ) ORDER BY e.`id`',
-            [$shipId]
-        );
+        // Ёмкость гнезда СЧИТАЛАСЬ ПО ЧИСЛУ ЗАВОДСКИХ ТИПОВ этого слота, и
+        // это было неверно. Стоит завести второй заводской привод — и
+        // ёмкость слота `drive` становится двойкой, а кораблю с одним
+        // приводом дозаливается второй. Ровно так в базе появлялась лишняя
+        // строка после каждого запуска игры, сколько её ни удаляй: запрос
+        // состояния зовёт эту функцию каждый раз.
+        //
+        // Теперь ёмкость приходит из каталога (Specs::slotCap): гнездо
+        // `computer` держит два прибора — докинг-компьютер и посадочный, —
+        // а все прочие по одному. Заводится ещё один вариант привода —
+        // ёмкость не меняется, и дозаливка молчит.
+        //
+        // Заполненное гнездо не трогаем вовсе: что в нём стоит, решает не
+        // эта функция. Пилот мог купить другой двигатель, а хозяин сервера
+        // — поставить руками что угодно.
+        // Берём только то, чего на корабле ЕЩЁ НЕТ. Без этого отбора
+        // корабль с одним прибором из двухместного гнезда (скажем, с
+        // докинг-компьютером без посадочного) получал бы повторную вставку
+        // того же прибора — и падение на уникальном ключе.
         $put = false;
-        foreach ($missing as $e) {
+        foreach (Db::all(
+            'SELECT `id`, `slot` FROM `equipment_type`
+             WHERE `stock`=1 AND `id` NOT IN (
+                 SELECT se.`equipment_id` FROM `ship_equipment` se WHERE se.`ship_id`=?
+             ) ORDER BY `id`',
+            [$shipId]
+        ) as $e) {
             $slot = (string) $e['slot'];
-            if (($busy[$slot] ?? 0) >= ($cap[$slot] ?? 1)) {
-                continue;               // гнездо занято — это выбор пилота
+            if (($busy[$slot] ?? 0) >= Specs::slotCap($slot)) {
+                continue;
             }
             Db::insert('ship_equipment', ['ship_id' => $shipId, 'equipment_id' => (int) $e['id']]);
             $busy[$slot] = ($busy[$slot] ?? 0) + 1;

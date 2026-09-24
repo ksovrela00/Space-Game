@@ -23,6 +23,10 @@
 
 const has = (fn) => { try { return fn(); } catch (e) { return false; } };
 
+// Свой, а не из core/vec3: этот модуль читают ДО игры (профиль выбирается
+// при загрузке), и тянуть ради одной строки векторную математику незачем.
+const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
+
 /**
  * Что за устройство. Признаки берутся не из строки браузера (её
  * подделывают и она врёт), а из того, что можно спросить: есть ли
@@ -66,7 +70,16 @@ export function qualityFor(dev) {
       sky: 512,             // сторона грани кубической карты неба
       detail: true,         // процедурный рельеф на пиксель
       touchUi: dev.touch,   // сенсорные органы — по наличию касаний
-      hudScale: 1,
+      // Приборы РАСТУТ вместе с экраном. Раньше здесь стояла единица, и
+      // на широком мониторе (2556 точек) подписи в 9–10 пикселей
+      // превращались в нечитаемую сыпь: панель, занимавшая четверть
+      // кадра на 1280, занимала на нём десятую часть. Отсчёт идёт от
+      // 1600×900 — размера, на котором приборы и рисовались.
+      //
+      // Берётся МЕНЬШЕЕ из двух отношений: на широком и низком экране
+      // расти по ширине нельзя, панели полезли бы одна на другую по
+      // высоте. Верхний предел — чтобы приборы не съели кадр на 4K.
+      hudScale: clamp(Math.min(dev.w / 1600, dev.h / 900), 1, 2),
     };
   }
   // Мобильный. Масштаб приборов считается от высоты экрана: на 393
@@ -102,9 +115,15 @@ export function qualityFor(dev) {
 function forcedProfile(dev, search) {
   const q = new URLSearchParams(search || '');
   const f = q.get('touch');
-  if (f === '1') return qualityFor({ ...dev, mobile: true, touch: true, coarse: true });
-  if (f === '0') return qualityFor({ ...dev, mobile: false, touch: false, coarse: false });
-  return qualityFor(dev);
+  const base = f === '1' ? qualityFor({ ...dev, mobile: true, touch: true, coarse: true })
+    : (f === '0' ? qualityFor({ ...dev, mobile: false, touch: false, coarse: false })
+      : qualityFor(dev));
+  // Размер приборов — ручкой: `?hud=1.4`. Насколько они крупны на ЧУЖОМ
+  // экране, из кода не видно никак, а подбирать его перезапуском сборки
+  // значит не подбирать вовсе.
+  const hud = parseFloat(q.get('hud'));
+  if (Number.isFinite(hud)) base.hudScale = clamp(hud, 0.5, 3);
+  return base;
 }
 
 export const DEVICE = detectDevice();
