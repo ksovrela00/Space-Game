@@ -11,7 +11,7 @@ import { Starfield } from './render/starfield.js';
 import { drawBody } from './render/planetview.js';
 import { GlScene } from './gl/scene.js';
 import { buildCobra, buildGear, GUN_PORTS } from './models/ships.js';
-import { buildStation, STATION_D } from './models/station.js';
+import { stationMesh } from './models/stations.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { homeSystem, systemById } from './game/galaxy.js';
 import {
@@ -123,7 +123,7 @@ if (!scene) renderer = new Renderer(screenCanvas, { camera });
 let world = makeSystem(sys);
 const ship = makeShip();
 const shipMesh = buildCobra();
-const stationMesh = buildStation();
+
 const gearMesh = buildGear();
 // Кабина есть только в объёмном рендере: на запасном пути Canvas-2D
 // рисовать её нечем, и приборы там остаются по углам экрана, а стойки
@@ -327,9 +327,9 @@ game.launch = () => {
     b.right = { ...st.basis.right };
     b.up = { ...st.basis.up };
     placeShip(ship, v3(
-      st.pos.x + st.basis.fwd.x * (STATION_D + 1.5),
-      st.pos.y + st.basis.fwd.y * (STATION_D + 1.5),
-      st.pos.z + st.basis.fwd.z * (STATION_D + 1.5)), b);
+      st.pos.x + st.basis.fwd.x * (st.shape.D + 1.5),
+      st.pos.y + st.basis.fwd.y * (st.shape.D + 1.5),
+      st.pos.z + st.basis.fwd.z * (st.shape.D + 1.5)), b);
   }
   ship.dockedAt = null;
   audioReset(game.audio, ship);
@@ -1162,6 +1162,23 @@ function handleKeys(dt) {
     teleportToTarget();
   }
 
+  // O — фары (огни). Две лампы в носу: прямая и наклонённая вниз.
+  if (input.pressed('KeyO')) {
+    ship.lights = !ship.lights;
+    say(st, ship.lights ? L('ФАРЫ ВКЛЮЧЕНЫ') : L('ФАРЫ ВЫКЛЮЧЕНЫ'),
+      ship.lights ? '#ffe9a8' : null);
+  }
+
+  // T — гасители инерции. Выключил, и корабль летит по инерции: тяга
+  // разгоняет, но ничего не держит, а в тяготении начинается падение.
+  if (input.pressed('KeyT')) {
+    ship.damp = !ship.damp;
+    audioCue(game.audio, 'gear', { out: !ship.damp });
+    say(st, ship.damp ? L('ГАСИТЕЛИ ИНЕРЦИИ ВКЛЮЧЕНЫ')
+      : L('ГАСИТЕЛИ ИНЕРЦИИ ВЫКЛЮЧЕНЫ — ПОЛЁТ ПО ИНЕРЦИИ'),
+      ship.damp ? '#78e08f' : '#ffb454');
+  }
+
   if (input.pressed('KeyG')) {
     const out = toggleGear(ship);
     audioCue(game.audio, 'gear', { out });
@@ -1204,7 +1221,7 @@ function handleKeys(dt) {
   if (ship.docking || ship.landing) {
     if (input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE',
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
-      input.isDown('KeyR', 'KeyF', 'Space') || input.pressed('KeyX', 'KeyZ')) {
+      input.isDown('KeyR', 'KeyF', 'Space') || input.pressed('KeyX', 'KeyZ', 'KeyT')) {
       if (ship.docking) stopDockingComputer(ship);
       if (ship.landing) stopLanding(ship);
       say(st, L('РУЧНОЕ УПРАВЛЕНИЕ'));
@@ -1772,7 +1789,7 @@ function render2d() {
     const d = Math.hypot(s.pos.x - camera.pos.x, s.pos.y - camera.pos.y, s.pos.z - camera.pos.z);
     if (d > 4000) continue;   // дальше станция всё равно меньше пикселя
     normalize(v3(sunPos.x - s.pos.x, sunPos.y - s.pos.y, sunPos.z - s.pos.z), _sun);
-    renderer.drawMesh(stationMesh, s.pos, s.basis, 1, _sun, { outline: d < 30 });
+    renderer.drawMesh(stationMesh(s.type), s.pos, s.basis, 1, _sun, { outline: d < 30 });
   }
 
   if (game.state.view === 'chase' && game.state.mode !== ST.DOCKED) {

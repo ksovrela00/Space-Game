@@ -70,9 +70,10 @@ import {
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '../js/game/audio.js';
 import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
-import { STATION_D } from '../js/models/station.js';
+
 import { buildCobra, buildGear, HULL_HALF } from '../js/models/ships.js';
-import { buildStation, SLOT } from '../js/models/station.js';
+import { LAMP, lampBeams } from '../js/game/lamps.js';
+import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
 import { buildCockpit, makeYoke, updateYoke, YOKE } from '../js/models/cockpit.js';
@@ -171,7 +172,7 @@ ok(world.planets.every((p) => p.features.length > 0), 'у всех планет 
 // --- 2. Модели --------------------------------------------------------------
 console.log('\n== модели ==');
 const cobra = buildCobra();
-const stationMesh = buildStation();
+const stationMesh = buildStationMesh('coriolis');
 ok(cobra.faces.length > 10, `корабль: ${cobra.verts.length} вершин, ${cobra.faces.length} граней`);
 ok(stationMesh.faces.length > 20, `станция: ${stationMesh.verts.length} вершин, ${stationMesh.faces.length} граней`);
 // Нормали должны смотреть наружу от центра ДЕТАЛИ; у составной модели
@@ -655,6 +656,106 @@ console.log('== планета в кадре ==');
   ok(spread < 1e-9, `крен не меняет размер планеты (разброс ${spread.toExponential(1)})`);
 }
 
+
+// --- 2c. Станции: форма, столкновение, створ --------------------------------
+//
+// Станция — единственная модель, у которой форма это ИГРА, а не вид: в
+// неё влетают. Поэтому проверяется не «строится ли меш», а совпадение
+// трёх вещей: нарисованного корпуса, тела столкновения и коридора, по
+// которому в порт заходят.
+console.log('\n== станции ==');
+{
+  ok(STATION_KINDS.length === 2 && STATION_KINDS.includes('coriolis')
+    && STATION_KINDS.includes('orbis'),
+    'типов станций два: ' + STATION_KINDS.join(', '));
+
+  for (const kind of STATION_KINDS) {
+    const mesh = buildStationMesh(kind);
+    const sh = stationShape(kind);
+    let far = 0;
+    for (const v of mesh.verts) far = Math.max(far, Math.hypot(v.x, v.y, v.z));
+    ok(mesh.faces.length > 500 && Number.isFinite(far),
+      `${kind}: ${mesh.verts.length} вершин, ${mesh.faces.length} граней`);
+
+    // Габарит — это радиус станции как цели: по нему считают зазор до
+    // края, точку выхода из прыжка и отметку в приборах. Модель, которая
+    // из него торчит, означала бы, что выход из прыжка приходится внутрь
+    // станции.
+    ok(far <= sh.bound * 1.02,
+      `${kind}: модель не торчит из габарита — ${far.toFixed(2)} км при ${sh.bound.toFixed(2)}`);
+
+    // Огни порта светятся сами: половину витка станция повёрнута к
+    // солнцу спиной, и в эти полвитка створ виден только по ним.
+    const glow = mesh.faces.filter((f) => f.emissive).length;
+    ok(glow > 20, `${kind}: светящихся граней ${glow}`);
+
+    // Створ ВНУТРИ корпуса, а не где-то рядом с ним.
+    ok(sh.D > 0 && sh.D < sh.bound,
+      `${kind}: плоскость створа ${sh.D.toFixed(2)} км внутри габарита ${sh.bound.toFixed(2)}`);
+
+    // Рядом со щелью — корпус, перед створом — пусто. Без первого
+    // «промахнулся в створ» не значило бы ничего: корабль уходил бы
+    // сквозь обшивку.
+    ok(sh.inside(SLOT.hw * 3, 0, sh.D - 0.02),
+      `${kind}: мимо щели на том же уровне — корпус`);
+    ok(!sh.inside(0, 0, sh.D + 0.05),
+      `${kind}: перед створом пусто`);
+  }
+
+  // Кубооктаэдр: шесть квадратов, восемь треугольников, двенадцать
+  // вершин. Проверяем по САМОЙ форме, а не по числу граней меша (в нём
+  // ещё детали): все двенадцать вершин лежат на границе тела.
+  const cor = stationShape('coriolis');
+  const s = cor.D;
+  let onEdge = 0, outside = 0;
+  for (const zero of [0, 1, 2]) {
+    for (const a of [-s, s]) {
+      for (const b of [-s, s]) {
+        const p = [0, 0, 0];
+        const rest = [0, 1, 2].filter((i) => i !== zero);
+        p[rest[0]] = a; p[rest[1]] = b;
+        if (cor.inside(p[0] * 0.99, p[1] * 0.99, p[2] * 0.99)) onEdge++;
+        if (!cor.inside(p[0] * 1.02, p[1] * 1.02, p[2] * 1.02)) outside++;
+      }
+    }
+  }
+  ok(onEdge === 12 && outside === 12,
+    `«Кориолис»: все 12 вершин на границе тела (внутри ${onEdge}, снаружи ${outside})`);
+  // Углы срезаны: точка за срезом снаружи, хотя по осям она внутри.
+  ok(!cor.inside(s * 0.8, s * 0.8, s * 0.8) && cor.inside(s * 0.6, s * 0.6, s * 0.6),
+    '«Кориолис»: углы куба срезаны треугольными гранями');
+
+  // «Орбис»: кольцо — тело, а не картинка. Мимо ступицы, но в кольцо —
+  // столкновение; между ступицей и кольцом — пусто.
+  const orb = stationShape('orbis');
+  // Обе точки — ПО ДИАГОНАЛИ: по осям от ступицы к кольцу идут спицы, и
+  // там тело в любом случае. Проверка на оси проходила бы и с
+  // выброшенным кольцом — то есть не проверяла бы ничего.
+  const d45 = Math.SQRT1_2;
+  ok(orb.inside(1.0 * d45, 1.0 * d45, -0.02) && !orb.inside(0.42 * d45, 0.42 * d45, -0.02),
+    '«Орбис»: кольцо сплошное, а между ним и ступицей пусто');
+  ok(orb.inside(0.6, 0, -0.02), '«Орбис»: спица — тоже тело, а не картинка');
+  ok(orb.inside(0, 0, -0.8) && !orb.inside(0.4, 0, -0.8),
+    '«Орбис»: мачта позади ступицы — тело, вокруг неё пусто');
+
+  // Тип станции — от ИМЕНИ, и он обязан быть одинаковым в каждом полёте:
+  // по форме порта узнают систему.
+  const w1 = makeSystem(0x1a7e);
+  const w2 = makeSystem(0x1a7e);
+  const same = w1.stations.every((st, i) => st.type === w2.stations[i].type);
+  ok(same && w1.stations.every((st) => STATION_KINDS.includes(st.type)),
+    'тип станции повторяется от запуска к запуску: '
+    + w1.stations.map((st) => st.type).join(', '));
+
+  // И оба типа в галактике ВСТРЕЧАЮТСЯ: одинаковые порты во всех
+  // системах — это ровно то, ради чего типов два.
+  const seen = new Set();
+  for (let i = 0; i < 12; i++) {
+    for (const st of makeSystem(1000 + i * 7919).stations) seen.add(st.type);
+  }
+  ok(seen.size === 2, 'в галактике встречаются оба типа: ' + [...seen].join(', '));
+}
+
 // --- 3. Ортонормальность базиса при длительном вращении ----------------------
 console.log('\n== вращение ==');
 const b = makeBasis();
@@ -789,10 +890,51 @@ const t2 = dockTest(40, (st) => ({ x: st.basis.right.x, y: st.basis.right.y, z: 
 ok(t2.status === 'docked', `подход сбоку, 40 км -> ${t2.status} за ${t2.t ? t2.t.toFixed(0) : '?'} с`);
 
 const t3 = dockTest(60, (st) => ({ x: -st.basis.fwd.x, y: -st.basis.fwd.y, z: -st.basis.fwd.z }));
-ok(t3.status === 'docked', `подход с обратной стороны (из-за планеты), 60 км -> ${t3.status} за ${t3.t ? t3.t.toFixed(0) : '?'} с`);
+// Время тут не украшение: подход с обратной стороны — это обход станции
+// кругом, и «состыковались за ноль секунд» означает, что стыковкой
+// засчитали положение ПОЗАДИ станции, на её же оси.
+ok(t3.status === 'docked' && t3.t > 30,
+  `подход с обратной стороны (из-за планеты), 60 км -> ${t3.status} за ${t3.t ? t3.t.toFixed(0) : '?'} с`);
 
 const t4 = dockTest(400, (st) => ({ ...st.basis.fwd }));
 ok(t4.status === 'refused', `с 400 км докинг-компьютер отказывает: ${t4.reason || t4.status}`);
+
+// Заход в створ у ОБОИХ типов станций.
+//
+// Форма у них разная, и глубина створа разная: у «Кориолиса» плоскость
+// порта в 700 метрах от центра, у «Орбиса» — в 300. Вся стыковка считает
+// от неё, поэтому проверяется каждый тип отдельно: в створ — стыковка,
+// мимо створа на той же глубине — столкновение.
+{
+  const findStation = (kind) => {
+    for (let i = 0; i < 40; i++) {
+      const st = makeSystem(1000 + i * 7919).stations.find((x) => x.type === kind);
+      if (st) return st;
+    }
+    return null;
+  };
+  for (const kind of STATION_KINDS) {
+    const st = findStation(kind);
+    const sh = makeShip();
+    const enter = (dx, dy) => {
+      const b = st.basis, D = st.shape.D;
+      placeShip(sh, v3(
+        st.pos.x + b.fwd.x * (D - 0.05) + b.right.x * dx + b.up.x * dy,
+        st.pos.y + b.fwd.y * (D - 0.05) + b.right.y * dx + b.up.y * dy,
+        st.pos.z + b.fwd.z * (D - 0.05) + b.right.z * dx + b.up.z * dy), makeBasis());
+      lookAlong(sh.basis, v3(-b.fwd.x, -b.fwd.y, -b.fwd.z), b.up);
+      sh.vel.x = st.vel.x; sh.vel.y = st.vel.y; sh.vel.z = st.vel.z;
+      sh.speed = 0;
+      return checkStation(sh, st);
+    };
+    ok(st !== null && enter(0, 0) === 'docked',
+      `${kind}: по оси в створ — стыковка`);
+    ok(enter(SLOT.hw * 2.5, 0) === 'crash',
+      `${kind}: мимо створа в обшивку — столкновение`);
+    ok(enter(0, SLOT.hh * 4) === 'crash',
+      `${kind}: выше створа — тоже обшивка`);
+  }
+}
 
 // --- 5. Квантовый привод: перелёт между телами -----------------------------
 //
@@ -1750,6 +1892,182 @@ console.log('\n== тень ==');
 
 // --- 5g. Задний ход ----------------------------------------------------------
 // --- форсаж ---------------------------------------------------------------------
+console.log('\n== фары ==');
+{
+  // Фары — это геометрия: где лампа и куда смотрит. Картинку проверить
+  // нечем (её считает шейдер), а геометрию — можно целиком, и именно в
+  // ней живёт весь смысл: одна лампа по курсу, вторая под углом вниз.
+  const sh = makeShip();
+  placeShip(sh, v3(0, 0, 0), makeBasis());
+
+  ok(sh.lights === false && lampBeams(sh).length === 0,
+    'по умолчанию фары выключены и лучей нет');
+
+  sh.lights = true;
+  const beams = lampBeams(sh);
+  ok(beams.length === 2, 'ламп две: прямая и нижняя');
+
+  // Обе стоят в НОСУ: луч не должен упираться в собственный корпус.
+  const f = sh.basis.fwd;
+  for (const b of beams) {
+    const along = b.pos.x * f.x + b.pos.y * f.y + b.pos.z * f.z;
+    ok(Math.abs(along - HULL_HALF.z) < 1e-9 && Math.hypot(b.pos.x, b.pos.y) < 1e-9,
+      `лампа в носу: ${(along * 1000).toFixed(0)} м вперёд от центра`);
+  }
+
+  // Прямая смотрит ровно по носу.
+  const a0 = beams[0].dir.x * f.x + beams[0].dir.y * f.y + beams[0].dir.z * f.z;
+  ok(Math.abs(a0 - 1) < 1e-12, 'прямая лампа светит точно по курсу');
+
+  // Нижняя — под tiltDeg вниз ОТ НОСА, и это проверяется углом, а не
+  // тем, что «z отрицательный»: наклон живёт в осях корабля.
+  const d = beams[1].dir;
+  const cosF = d.x * f.x + d.y * f.y + d.z * f.z;
+  const u = sh.basis.up;
+  const cosU = d.x * u.x + d.y * u.y + d.z * u.z;
+  const tilt = Math.atan2(-cosU, cosF) * 180 / Math.PI;
+  ok(Math.abs(tilt - LAMP.tiltDeg) < 1e-9 && Math.abs(Math.hypot(cosF, cosU) - 1) < 1e-12,
+    `нижняя лампа наклонена вниз на ${tilt.toFixed(1)}°`);
+
+  // Нижняя ШИРЕ прямой: дальний свет узкий, ближний широкий.
+  ok(beams[1].cosOut < beams[0].cosOut,
+    `нижняя шире: ${LAMP.wideDeg}° против ${LAMP.coneDeg}°`);
+
+  // Крен и тангаж лампы уносят с собой: это фара, а не подвес.
+  const sh2 = makeShip();
+  placeShip(sh2, v3(0, 0, 0), makeBasis());
+  sh2.lights = true;
+  rotateBasis(sh2.basis, 0, 0, Math.PI);          // перевернулись через крен
+  const flipped = lampBeams(sh2);
+  const up2 = sh2.basis.up;
+  const cosU2 = flipped[1].dir.x * up2.x + flipped[1].dir.y * up2.y + flipped[1].dir.z * up2.z;
+  ok(cosU2 < 0 && flipped[1].dir.y > 0,
+    'перевернулись — ближний свет ушёл в небо, как и положено фаре');
+
+  // Выключили — лучей снова нет.
+  sh.lights = false;
+  ok(lampBeams(sh).length === 0, 'выключенные фары не светят');
+}
+
+console.log('\n== гасители инерции ==');
+{
+  // Выключенные гасители — это не «режим полёта», а снятие ровно тех
+  // трёх подпорок, которыми модель держится: подбора заноса, задания
+  // скорости тягой и компенсатора веса. Поэтому проверяется каждая из
+  // трёх по отдельности, и рядом — что с гасителями всё по-прежнему.
+  const mk = (damp) => {
+    const sh = makeShip();
+    placeShip(sh, v3(0, 0, 0), makeBasis());
+    sh.damp = damp;
+    return sh;
+  };
+  const run = (sh, secs, field = null, each = null) => {
+    for (let i = 0; i < Math.round(secs / STEP); i++) {
+      clearControls(sh);
+      if (each) each(sh);
+      updateShip(sh, STEP, field);
+    }
+    return sh;
+  };
+
+  ok(mk(true).damp === true, 'по умолчанию гасители включены');
+
+  // 1. Ход не гаснет сам. Это и есть «лететь по инерции».
+  {
+    const off = mk(false);
+    off.vel.z = 1; off.speed = 1;
+    run(off, 5);
+    const on = mk(true);
+    on.vel.z = 1; on.speed = 1;
+    run(on, 5);
+    ok(Math.abs(off.speed - 1) < 1e-9 && on.speed < 0.01,
+      `без гасителей ход держится (${off.speed.toFixed(3)} км/с), с ними гаснет `
+      + `(${on.speed.toFixed(3)})`);
+  }
+
+  // 2. Нос отворачивается от вектора скорости, и скорость остаётся
+  //    прежней — ради этого режим и нужен: идти боком, целясь назад.
+  {
+    const off = mk(false);
+    off.vel.z = 1; off.speed = 1;
+    // Разворот на 90° рысканием, ход при этом не трогаем.
+    run(off, 6, null, (sh) => { sh.control.yaw = 1; });
+    const drift = off.vel.z / Math.hypot(off.vel.x, off.vel.y, off.vel.z);
+    const nose = off.basis.fwd.z;
+    ok(Math.abs(off.speed - 1) < 1e-9 && drift > 0.999 && nose < 0.6,
+      `нос ушёл от вектора скорости (нос ${nose.toFixed(2)} по оси, скорость `
+      + `${drift.toFixed(3)}), а сама скорость не изменилась`);
+
+    // С гасителями тот же разворот ведёт скорость за носом.
+    const on = mk(true);
+    on.vel.z = 1; on.speed = 1;
+    run(on, 6, null, (sh) => { sh.control.yaw = 1; });
+    const follow = on.vel.z / Math.max(1e-9, Math.hypot(on.vel.x, on.vel.y, on.vel.z));
+    ok(follow < 0.9, `с гасителями скорость идёт за носом (${follow.toFixed(2)})`);
+  }
+
+  // 3. В тяготении корабль ПАДАЕТ — то, чего в обычном режиме не бывает
+  //    вовсе: там вес держит компенсатор высоты.
+  {
+    const g = 0.0024;                       // 2.4 м/с², как у луны покрупнее
+    const field = { up: v3(0, 1, 0), g };
+    const off = run(mk(false), 10, field);
+    const vFall = -off.vel.y, drop = -off.pos.y;
+    ok(Math.abs(vFall - g * 10) < 1e-6 && Math.abs(drop - g * 100 / 2) < 0.01,
+      `свободное падение: за 10 с ${(vFall * 1000).toFixed(1)} м/с `
+      + `(gt = ${(g * 10 * 1000).toFixed(1)}), просело ${(drop * 1000).toFixed(0)} м `
+      + `(gt²/2 = ${(g * 50 * 1000).toFixed(0)})`);
+
+    const on = run(mk(true), 10, field);
+    ok(Math.abs(on.pos.y) < 1e-6,
+      `с гасителями высота стоит: ${(on.pos.y * 1000).toFixed(1)} м за те же 10 с`);
+  }
+
+  // 4. Тяга даёт УСКОРЕНИЕ и упирается в предел двигателя...
+  {
+    const off = mk(false);
+    off.throttle = 1;
+    run(off, 12);
+    ok(Math.abs(off.speed - SHIP.maxSpeed) < 1e-6,
+      `тяга разгоняет до предела двигателя: ${off.speed.toFixed(3)} км/с`);
+
+    // ...но НЕ тормозит сверх него: набранное форсажем или тяготением
+    // корабль несёт сам. Иначе это был бы тот же гаситель, только
+    // односторонний.
+    const fast = mk(false);
+    fast.vel.z = SHIP.maxSpeed * 2.5; fast.speed = fast.vel.z;
+    const was = fast.speed;
+    run(fast, 3, null, () => { /* тяга остаётся полной */ });
+    fast.throttle = 1;
+    run(fast, 3);
+    ok(Math.abs(fast.speed - was) < 1e-9,
+      `сверх предела не тормозит: было ${was.toFixed(2)}, стало ${fast.speed.toFixed(2)}`);
+  }
+
+  // 5. Автоматика гасители ВКЛЮЧАЕТ. Докинг-компьютер и посадочный
+  //    задают вектор скорости напрямую и держаться на нём могут только
+  //    пока занос подбирают маневровые.
+  {
+    const sh = mk(false);
+    sh.docking = { station: null, phase: 'gate' };
+    updateShip(sh, STEP, null);
+    ok(sh.damp === true, 'докинг-компьютер включает гасители сам');
+
+    const sh2 = mk(false);
+    sh2.landing = { phase: 'descend' };
+    updateShip(sh2, STEP, null);
+    ok(sh2.damp === true, 'посадочный — тоже');
+  }
+
+  // 6. Постановка корабля в точку (вылет, рестарт) возвращает гасители:
+  //    и то и другое — начало полёта, а не его продолжение.
+  {
+    const sh = mk(false);
+    placeShip(sh, v3(1, 2, 3), makeBasis());
+    ok(sh.damp === true, 'вылет и рестарт возвращают гасители');
+  }
+}
+
 console.log('\n== форсаж ==');
 {
   // Форсаж — удержание с расходуемым зарядом. Кроме физики у него есть
@@ -5259,6 +5577,24 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     // трассы на куски — приём расчёта, а не свойство привода.
     ok(QUANTUM.segs === 12 && QUANTUM.relief === 0.02,
       'параметры расчёта коридора остались в коде: ' + QUANTUM.segs + ' кусков');
+  }
+
+  // 13. Фары — такое же снаряжение: своих чисел в игре нет, а пришедшие
+  //     доезжают и переводятся в то, чем считает шейдер.
+  {
+    const lampMod = doc.modules.find((m) => m.code === 'lamp');
+    const src = readFileSync('js/game/lamps.js', 'utf8')
+      .replace(new RegExp('/\\*[\\s\\S]*?\\*/', 'g'), '')
+      .replace(new RegExp('^\\s*//.*$', 'gm'), '');
+    const baked = Object.keys(lampMod.spec)
+      .filter((k) => new RegExp('(?<![.\\w])' + k + '\\s*:\\s*-?\\d').test(src));
+    ok(baked.length === 0,
+      'числа фар не вписаны в игру' + (baked.length ? ': ' + baked.join(', ') : ''));
+    ok(LAMP.range === lampMod.spec.range && LAMP.power === lampMod.spec.power,
+      `дальность фар ${LAMP.range} км — число из бэкенда`);
+    ok(Math.abs(LAMP.tilt - (lampMod.spec.tiltDeg * Math.PI) / 180) < 1e-12
+      && Math.abs(LAMP.cosOut - Math.cos((lampMod.spec.coneDeg * Math.PI) / 180)) < 1e-12,
+      `углы фар переведены: наклон ${lampMod.spec.tiltDeg}°, конус ${lampMod.spec.coneDeg}°`);
   }
 
   // 11. Пустой набор — это отказ, а не «полетим на умолчаниях».

@@ -609,7 +609,7 @@ export function objectCard(game, obj) {
   } else if (obj.isStation) {
     const p = obj.parent;
     card.desc = L('Орбитальный порт: единственное место, где восстанавливают ') +
-      L('корпус. Створ смотрит от планеты, барабан вращается — крен на входе ') +
+      L('корпус. Створ смотрит от планеты, станция вращается — крен на входе ') +
       L('согласуют с ним.');
     rows.push([L('ПЛАНЕТА'), p ? p.name : '—']);
     rows.push([L('ВЫСОТА ОРБИТЫ'), p ? fmtDist(obj.orbit.radius - p.radius) : '—']);

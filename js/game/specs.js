@@ -25,6 +25,7 @@ import { L } from '../core/lang.js';
 import { SHIP, applyShipSpec } from './ship.js';
 import { applyWeaponSpecs } from './weapons.js';
 import { applyModuleSpecs, applyShipEquipment, flightModel, installedIn, moduleSpec } from './loadout.js';
+import { applyLampSpec } from './lamps.js';
 import { applyQuantumSpec } from './quantum.js';
 
 /** Последний полученный набор — из него берут корпуса и цены. */
@@ -84,6 +85,9 @@ function refit(type) {
   // друге им незачем.
   const drive = installedIn('drive');
   if (drive) applyQuantumSpec(moduleSpec(drive));
+  // Фары — тем же приёмом: свои числа берёт стоящий на корабле модуль.
+  const lamp = installedIn('lamp');
+  if (lamp) applyLampSpec(moduleSpec(lamp));
 }
 
 /**

@@ -61,6 +61,14 @@ in vec2 vUv;
 uniform vec3 uSunDir;    // направление НА солнце в координатах камеры
 uniform mat3 uNormalMat;
 uniform float uAmbient;
+// Фары корабля: две лампы, всё в координатах КАМЕРЫ. uLampN = 0 —
+// выключены, и весь блок пропускается одним сравнением.
+uniform int uLampN;
+uniform vec3 uLampPos[2];
+uniform vec3 uLampDir[2];
+uniform vec2 uLampCos[2];   // косинусы внутренней и внешней кромки пятна
+uniform float uLampRange;   // км — дальше луч не достаёт
+uniform float uLampPower;
 uniform float uLogFC;
 // Запечённая поверхность: нормаль в локальных осях (RGB) и тон (A).
 // uSurfMode = 0 — текстуры нет (корабли, станции, светило).
@@ -147,7 +155,33 @@ ${detail ? `
   if (dot(n, normalize(vViewPos)) > 0.0) n = -n;
 
   float lam = max(dot(n, uSunDir), 0.0);
-  float shade = mix(uAmbient + (1.0 - uAmbient) * lam, 1.0, vColor.a);
+  float lit = uAmbient + (1.0 - uAmbient) * lam;
+
+  // Фары. Свет точечный и направленный: от лампы до точки считается
+  // настоящее расстояние, дальше — конус и падение с дальностью.
+  //
+  // Падение НЕ обратный квадрат. По честному закону пятно на десяти
+  // километрах слабее, чем на ста метрах, в десять тысяч раз — то есть
+  // его нет вовсе. У фары есть заявленная дальность, и гаснуть луч
+  // должен к ней, а не на первой сотне метров: это прожектор с отражателем,
+  // а не голая лампочка.
+  for (int i = 0; i < 2; i++) {
+    if (i >= uLampN) break;
+    vec3 d = vViewPos - uLampPos[i];
+    float dist = length(d);
+    if (dist > uLampRange) continue;
+    vec3 L = d / dist;
+    float c = dot(L, uLampDir[i]);
+    if (c <= uLampCos[i].y) continue;
+    float cone = smoothstep(uLampCos[i].y, uLampCos[i].x, c);
+    float fall = 1.0 - dist / uLampRange;
+    lit += uLampPower * cone * fall * fall * max(dot(n, -L), 0.0);
+  }
+  // Потолок: два луча, сошедшиеся в упор на светлой обшивке, иначе
+  // выжигают кадр в белое.
+  lit = min(lit, 1.45);
+
+  float shade = mix(lit, 1.0, vColor.a);
   outColor = vec4(albedo * shade, 1.0);
 }`;
 

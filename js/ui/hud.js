@@ -7,7 +7,7 @@ import { QUANTUM } from '../game/quantum.js';
 import { warpDistance, offWarpAxis, warpAxis } from '../game/warp.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
 import { gearLabel, landedInfo, LAND } from '../game/landing.js';
-import { SLOT, STATION_D } from '../models/station.js';
+import { SLOT } from '../models/stations.js';
 import { targetLabel, targetKind } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
@@ -787,6 +787,13 @@ function drawShipColumn(ctx, px, py, game, approach) {
   if (SHIP.maxShield > 0) {
     rows.push({ kind: 'gauge', label: L('ЩИТ'), frac: ship.shield / SHIP.maxShield, color: CY });
   }
+  // Снятые гасители — состояние, о котором нельзя не сказать: корабль
+  // ведёт себя принципиально иначе, а по самой картинке в пустоте этого
+  // не видно, пока не попробуешь затормозить.
+  if (!ship.damp) {
+    rows.push({ kind: 'note', text: L('ГАСИТЕЛИ ВЫКЛ'), color: AMBER });
+  }
+  if (ship.lights) rows.push({ kind: 'note', text: L('ФАРЫ'), color: '#ffe9a8' });
   if (ship.gear.t > 0.005 || ship.gear.out) {
     rows.push({ kind: 'note', text: gearLabel(ship),
       color: ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER });
@@ -1562,7 +1569,7 @@ function drawDockAssist(ctx, cx, cy, a) {
   ctx.font = fnt(13);
   ctx.textAlign = 'center';
   ctx.fillStyle = CY;
-  ctx.fillText(L('СТВОР ПОРТА  ') + fmtDist(Math.max(0, a.q.local.z - STATION_D)), 0, -h / 2 - sc(10));
+  ctx.fillText(L('СТВОР ПОРТА  ') + fmtDist(Math.max(0, a.q.gap)), 0, -h / 2 - sc(10));
 
   ctx.textAlign = 'left';
   const rows = [

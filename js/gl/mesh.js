@@ -71,7 +71,10 @@ export function buildFlatMesh(gl, locs, mesh) {
   for (const f of mesh.faces) {
     const idx = f.v;
     const r = f.c[0] / 255, g = f.c[1] / 255, b = f.c[2] / 255;
-    const em = f.emissive ? 1 : 0;
+    // Доля свечения: 0 — обычная грань, 1 — светится сама. Промежуточные
+    // значения нужны окнам (см. js/models/stations.js).
+    const em = typeof f.emissive === 'number'
+      ? Math.max(0, Math.min(1, f.emissive)) : (f.emissive ? 1 : 0);
     for (let t = 1; t + 1 < idx.length; t++) {
       const tri = [idx[0], idx[t], idx[t + 1]];
       for (const vi of tri) {

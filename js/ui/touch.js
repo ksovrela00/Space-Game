@@ -75,6 +75,7 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
     btn(w - R - pad - TOUCH.btnR, insets.top + pad + TOUCH.btnR, 'view', 'ВИД', 'KeyV'),
     btn(w - R - pad - TOUCH.btnR - step, insets.top + pad + TOUCH.btnR, 'map', 'КАРТА', 'KeyM'),
     btn(w - R - pad - TOUCH.btnR - step * 2, insets.top + pad + TOUCH.btnR, 'land', 'ПОСАД', 'KeyL'),
+    btn(w - R - pad - TOUCH.btnR - step * 3, insets.top + pad + TOUCH.btnR, 'damp', 'ГАСИТ', 'KeyT'),
   ];
   // Подъёмные движки: пара кнопок над джойстиком — ими держат высоту
   // на посадке, и нужны они именно вместе с ним, левой рукой.

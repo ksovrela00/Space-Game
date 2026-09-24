@@ -38,6 +38,7 @@ import { localDir, altitudeOf } from '../game/surface.js';
 import { ENTRY } from '../game/entry.js';
 import { L } from '../core/lang.js';
 import { SHIELD_AXES } from '../models/ships.js';
+import { lampBeams, LAMP } from '../game/lamps.js';
 
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
@@ -371,6 +372,11 @@ export class GlScene {
     this.viewMat3 = new Float32Array(9);
     this.sunDir = new Float32Array(3);
     this.tmp3 = new Float32Array(3);
+    // Фары: два луча, положение и направление в осях камеры.
+    this.lampPos = new Float32Array(6);
+    this.lampDir = new Float32Array(6);
+    this.lampCos = new Float32Array(4);
+    this.lampDir3 = new Float32Array(3);
     this.basisTmp = makeBasis();
     // Единичный базис: им берут матрицу ЧИСТОГО поворота камеры для
     // точек, уже посчитанных относительно неё (см. drawBolts).
@@ -465,6 +471,53 @@ export class GlScene {
     out[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z;
     out[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
     return out;
+  }
+
+  /**
+   * Фары корабля — в uniform-ы меша.
+   *
+   * Всё считается В ОСЯХ КАМЕРЫ, как и вся сцена: положение лампы
+   * приводится к камере в double и только потом в float32. Если бы
+   * лампа уехала в шейдер мировыми координатами, на орбите в четыре
+   * миллиона километров от неё осталась бы труха — тот же довод, что и
+   * для всей сцены.
+   *
+   * Ставится ОДИН РАЗ НА ПРОХОД, а не на объект: лампы одни и те же для
+   * всего, что рисуется этой программой.
+   */
+  setLamps(prog, game) {
+    const gl = this.gl;
+    const beams = (game && game.ship) ? lampBeams(game.ship) : [];
+    gl.uniform1i(prog.loc('uLampN'), beams.length);
+    if (!beams.length) return 0;
+    for (let i = 0; i < beams.length; i++) {
+      const b = beams[i];
+      this.centerInCamera(b.pos, this.tmp3);
+      this.lampPos[i * 3] = this.tmp3[0];
+      this.lampPos[i * 3 + 1] = this.tmp3[1];
+      this.lampPos[i * 3 + 2] = this.tmp3[2];
+      dirToCamera(this.camera.basis, b.dir.x, b.dir.y, b.dir.z, this.lampDir3);
+      this.lampDir[i * 3] = this.lampDir3[0];
+      this.lampDir[i * 3 + 1] = this.lampDir3[1];
+      this.lampDir[i * 3 + 2] = this.lampDir3[2];
+      this.lampCos[i * 2] = b.cosIn;
+      this.lampCos[i * 2 + 1] = b.cosOut;
+    }
+    // Имена с «[0]»: у массива uniform-ов адрес спрашивают по первому
+    // элементу. Без скобок часть драйверов (и программный растеризатор,
+    // на котором снимаются кадры) возвращает null, а запись по null —
+    // молчаливый пропуск: фары «включались» и не светили.
+    gl.uniform3fv(prog.loc('uLampPos[0]'), this.lampPos);
+    gl.uniform3fv(prog.loc('uLampDir[0]'), this.lampDir);
+    gl.uniform2fv(prog.loc('uLampCos[0]'), this.lampCos);
+    gl.uniform1f(prog.loc('uLampRange'), LAMP.range);
+    gl.uniform1f(prog.loc('uLampPower'), LAMP.power);
+    return beams.length;
+  }
+
+  /** Погасить фары для прохода, которому они не нужны (кабина, варп). */
+  noLamps(prog) {
+    this.gl.uniform1i(prog.loc('uLampN'), 0);
   }
 
   setSunDir(objPos, sunPos) {
@@ -804,6 +857,9 @@ export class GlScene {
     gl.uniform1f(prog.loc('uSurfMode'), 0);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projCabin);
     gl.uniform1f(prog.loc('uAmbient'), CABIN_AMBIENT);
+    // В кабине фар нет: лампы стоят в носу снаружи, и светить внутрь
+    // им нечем.
+    this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
     this.setDetail(prog, null, 0);
 
@@ -885,6 +941,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uSurfMode'), 0);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), WARP_AMBIENT);
+    this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
     this.setDetail(prog, null, 0);
 
@@ -1233,6 +1290,9 @@ export class GlScene {
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    // Фары — на весь проход разом: и грунт, и камни, и станции, и чужие
+    // корабли рисуются этой же программой.
+    this.lamps = this.setLamps(prog, game);
 
     // Поверхность плитками: она полностью заменяет сферу этого тела,
     // поэтому ни трафарет, ни деталь на пиксель тут не нужны.
@@ -1314,7 +1374,9 @@ export class GlScene {
         st.pos.y - this.camera.pos.y,
         st.pos.z - this.camera.pos.z);
       if (d > 8000) continue;
-      this.drawObject(prog, this.glMeshFor(game.stationMesh), st.pos, st.basis, 1, sunPos);
+      // Меш берётся по ТИПУ станции: их два, а станций в системе
+      // несколько, и каждая просит свой (js/models/stations.js).
+      this.drawObject(prog, this.glMeshFor(game.stationMesh(st.type)), st.pos, st.basis, 1, sunPos);
     }
 
     // Свой корабль — только в виде от третьего лица.

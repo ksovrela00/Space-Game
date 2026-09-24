@@ -113,6 +113,14 @@ export function makeShip() {
     // вращение в пустоте не стоит ничего, и пыхать там нечему.
     rcs: { pitch: 0, yaw: 0, roll: 0 },
     zeroHold: 0,        // сколько ещё держать тягу на нуле (см. SHIP.zeroDwell)
+    // Фары: две лампы в носу (js/game/lamps.js). Состояние живёт здесь,
+    // а не в приборах, потому что это состояние КОРАБЛЯ — его видят и
+    // рендер, и сеть, и проверки.
+    lights: false,
+    // Гасители инерции. Включены — обычный полёт: занос поперёк носа
+    // подбирают маневровые, вес держит компенсатор высоты, тяга задаёт
+    // скорость. Выключены — чистая баллистика (см. updateShip).
+    damp: true,
     stun: 0,            // сколько ещё лететь без управления после удара
     // Отрыв от грунта: столько секунд подъёмные движки работают на
     // полный ход сами. Толчком это сделать нельзя — набранную скорость
@@ -294,8 +302,71 @@ export function updateShip(ship, dt, field = null) {
   const lift = ship.liftHold > 0 ? 1 : c.lift;
   const liftOn = lift !== 0;
 
+  // Автоматика летает ТОЛЬКО с гасителями. Докинг-компьютер и
+  // посадочный задают вектор скорости напрямую (js/game/pilot.js) —
+  // рассчитывать, что этот вектор кто-то выдержит, они могут лишь пока
+  // занос подбирают маневровые. Поэтому включение тут, в модели, а не в
+  // клавишах: автоматику заводит и сеть, и меню, а гасители нужны ей
+  // всегда.
+  if (ship.docking || ship.landing || ship.autopilot) ship.damp = true;
+
   // Направление тяги — всегда нос, независимо от шасси.
   const fx = f.x, fy = f.y, fz = f.z;
+
+  // Сила подъёмных движков привязана к местной тяжести (SHIP.liftTWR),
+  // вдали от тел — постоянная. Нужна обоим режимам, поэтому считается
+  // до развилки.
+  const liftAcc = Math.max(SHIP.liftMin, g * SHIP.liftTWR) * lift;
+  ship.lift = liftAcc;
+
+  // Предел скорости и ход вдоль носа — тоже общие.
+  const lim = SHIP.maxSpeed * (gearOut ? SHIP.gearSpeed : 1) * boost;
+  const cur = ship.vel.x * fx + ship.vel.y * fy + ship.vel.z * fz;
+  const aBoost = ship.boosting ? SHIP.boostAccel : 1;
+
+  if (!ship.damp) {
+    // --- ГАСИТЕЛИ ИНЕРЦИИ СНЯТЫ ---------------------------------------
+    //
+    // Здесь выключено разом всё, что делает модель аркадной:
+    //
+    //   * тяга даёт УСКОРЕНИЕ, а не заданную скорость — отпустил, и
+    //     корабль несёт дальше, а не тормозит;
+    //   * занос поперёк носа никто не подбирает — нос можно отвернуть от
+    //     вектора скорости и лететь боком, что и есть весь смысл режима;
+    //   * компенсатор высоты не держит вес, и в захвате тела корабль
+    //     ПАДАЕТ.
+    //
+    // Расчёт тот же самый, что работает после удара о грунт (см. stunned
+    // выше), с одной разницей: управление никуда не делось.
+    //
+    // Предел скорости при этом остаётся пределом ДВИГАТЕЛЯ: дальше него
+    // он не толкает. Но и не тормозит — набранное сверх предела
+    // (форсажем, тяготением, отскоком) корабль несёт сам.
+    let step = SHIP.accel * aBoost * ship.throttle * dt;
+    const limF = lim, limB = lim * SHIP.reverse;
+    if (step > 0) step = Math.max(0, Math.min(step, limF - cur));
+    else if (step < 0) step = Math.min(0, Math.max(step, -limB - cur));
+    ship.vel.x += fx * step;
+    ship.vel.y += fy * step;
+    ship.vel.z += fz * step;
+
+    // Подъёмные движки — такая же чистая тяга, вдоль «верха» корпуса.
+    if (liftOn) {
+      ship.vel.x += la.x * liftAcc * dt;
+      ship.vel.y += la.y * liftAcc * dt;
+      ship.vel.z += la.z * liftAcc * dt;
+    }
+
+    // И тяжесть. В обычном режиме её не видно вовсе — вес держат
+    // движки; здесь держать нечем, и это ровно то, ради чего гасители
+    // снимают у поверхности: свободное падение, разгон по орбите,
+    // гравитационный манёвр.
+    if (field) {
+      ship.vel.x -= up.x * g * dt;
+      ship.vel.y -= up.y * g * dt;
+      ship.vel.z -= up.z * g * dt;
+    }
+  } else {
 
   // Главные движки: разгон до скорости, заданной тягой. С выпущенным
   // шасси предел ниже — на нём не летают.
@@ -304,10 +375,7 @@ export function updateShip(ship, dt, field = null) {
   // предел не видит того, что корабль летит вниз, и продолжает
   // разгонять его вдоль носа — вертикальная скорость при этом растёт
   // без всякого предела. Так корабль и уходил сквозь луну.
-  const lim = SHIP.maxSpeed * (gearOut ? SHIP.gearSpeed : 1) * boost;
   const target = ship.throttle * lim * (ship.throttle < 0 ? SHIP.reverse : 1);
-  const cur = ship.vel.x * fx + ship.vel.y * fy + ship.vel.z * fz;
-  const aBoost = ship.boosting ? SHIP.boostAccel : 1;
   const aLim = (Math.abs(target) > Math.abs(cur) ? SHIP.accel * aBoost : SHIP.brake) * dt;
   const step = clamp(target - cur, -aLim, aLim);
   ship.vel.x += fx * step;
@@ -349,11 +417,6 @@ export function updateShip(ship, dt, field = null) {
     ship.vel.z -= pz * k;
   }
 
-  // Подъёмные движки: ТЯГА, а не скорость. Сила привязана к местной
-  // тяжести (SHIP.liftTWR), вдали от тел — постоянная.
-  const liftAcc = Math.max(SHIP.liftMin, g * SHIP.liftTWR) * lift;
-  ship.lift = liftAcc;
-
   if (liftOn) {
     // Вес в точности гасит компенсатор высоты, и движки разгоняют
     // корабль по вертикали — скорость КОПИТСЯ, как и любая другая.
@@ -361,6 +424,8 @@ export function updateShip(ship, dt, field = null) {
     // накренился — и подъёмные толкают больше вбок, чем вверх.
     vUp += liftAcc * dt;
     ship.vel.x += la.x * vUp; ship.vel.y += la.y * vUp; ship.vel.z += la.z * vUp;
+  }
+
   }
 
   ship.speed = Math.hypot(ship.vel.x, ship.vel.y, ship.vel.z);
@@ -389,6 +454,10 @@ export function placeShip(ship, pos, basis) {
   ship.boostLock = false;
   ship.zeroHold = 0;
   ship.stun = 0;
+  // Гасители включаются сами: корабль ставят в точку либо при вылете,
+  // либо после крушения, и в обоих случаях лететь по инерции — не то,
+  // чего ждут.
+  ship.damp = true;
   ship.lift = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
 }

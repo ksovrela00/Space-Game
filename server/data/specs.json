@@ -234,6 +234,20 @@
             "installed": true
         },
         {
+            "code": "lamp",
+            "name": "ФАРЫ",
+            "slot": "lamp",
+            "spec": {
+                "range": 12,
+                "coneDeg": 13,
+                "wideDeg": 20,
+                "tiltDeg": 60,
+                "power": 1.15
+            },
+            "price": 2600,
+            "installed": true
+        },
+        {
             "code": "scanner",
             "name": "СКАНЕР",
             "slot": "scanner",

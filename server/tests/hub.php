@@ -326,6 +326,67 @@ ok(isset($seenPeer['hull'], $seenPeer['hmax'], $seenPeer['sh'], $seenPeer['smax'
     . ($seenPeer['hull'] ?? '—') . '/' . ($seenPeer['hmax'] ?? '—') . ' и '
     . ($seenPeer['sh'] ?? '—') . '/' . ($seenPeer['smax'] ?? '—'));
 
+
+// --- прыжок: пилота между системами нет ---------------------------------------
+//
+// Игра ставит корабль к звезде НОВОЙ системы за несколько секунд до
+// выхода из тоннеля (js/main.js, событие handover): координаты к этому
+// моменту уже её, а пилот ещё в прыжке — он не видит ничего и ничего не
+// может. Пока хаб раздавал его наравне со всеми, эти секунды были
+// подарком тому, кто ждёт у звезды: цель видно, цель не отвечает.
+
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 0, 'y' => 0, 'z' => 0]), $t);
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0]), $t);
+$hub->tick($t);
+ok(count($ca->last('peers')['list'] ?? []) === 1, 'до прыжка сосед виден');
+
+// Ушёл в прыжок: координаты те же и система та же, но режим другой.
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0,
+    'mode' => 'warp']), $t);
+ok(($ca->last('leave')['id'] ?? 0) === $b['player_id'],
+    'об уходе в прыжок сказано сразу, а не по истечении срока');
+$hub->tick($t);
+ok(($ca->last('peers')['list'] ?? []) === [],
+    'в прыжке пилота в снимке нет, хотя координаты он прислал здешние');
+
+// И достать его нельзя. Стрелок при этом рядом и с оружием — отказ
+// именно из-за прыжка, а не из-за дальности.
+$hullWarp = $hullOf($b['player_id']);
+Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
+$t += 1;
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+ok(abs($hullOf($b['player_id']) - $hullWarp) < 1e-9,
+    'по ушедшему в прыжок попасть нельзя: корпус ' . round($hullOf($b['player_id']), 1));
+
+// Из прыжка и сам не стреляет: ни картинкой, ни уроном.
+$t += 1;
+$before = count($ca->sent);
+$hub->message($cb, json_encode(['t' => 'shot', 'w' => 'laser_g',
+    'x' => 0, 'y' => 0, 'z' => 0, 'dx' => 1, 'dy' => 0, 'dz' => 0]), $t);
+$shotSeen = false;
+for ($i = $before; $i < count($ca->sent); $i++) {
+    if (($ca->sent[$i]['t'] ?? '') === 'shot') {
+        $shotSeen = true;
+    }
+}
+ok(!$shotSeen, 'выстрел из прыжка соседям не показывают');
+
+$hullA = $hullOf($a['player_id']);
+Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$a['player_id']]);
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'hit', 'id' => $a['player_id'], 'w' => 'laser_g']), $t);
+ok(abs($hullOf($a['player_id']) - $hullA) < 1e-9,
+    'и попаданий из прыжка не бывает: корпус цели ' . round($hullOf($a['player_id']), 1));
+
+// Вышел — и снова виден, без всякой повторной регистрации.
+$t += 1;
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0,
+    'mode' => 'flight']), $t);
+$hub->tick($t);
+ok(count($ca->last('peers')['list'] ?? []) === 1, 'вышел из прыжка — снова в снимке');
+
 // --- уход ---------------------------------------------------------------------
 
 $t += 1;

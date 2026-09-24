@@ -124,6 +124,14 @@ export function engineScreen(ctx, w, h, game) {
   ctx.fillStyle = ship.gear.out && ship.gear.t >= 0.995 ? GREEN
     : (ship.gear.t > 0.005 ? AMBER : CY_DIM);
   ctx.fillText(gearLabel(ship), f.x, f.y + f.h - 2);
+
+  // Снятые гасители — строкой над шасси. В кабине приборы свои, но
+  // молчать об этом нельзя и здесь: корабль летит принципиально иначе, а
+  // на глаз в пустоте это заметно только когда попробуешь затормозить.
+  if (!ship.damp) {
+    ctx.fillStyle = AMBER;
+    ctx.fillText(L('ГАСИТЕЛИ ВЫКЛ'), f.x, f.y + f.h - 16);
+  }
 }
 
 /** Правый экран: цель. Имя, дистанция, время, компас. */

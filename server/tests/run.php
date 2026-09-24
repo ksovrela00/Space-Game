@@ -207,11 +207,16 @@ ok($state['player']['balance'] === Content::START_BALANCE,
     'стартовый капитал ' . $state['player']['balance'] . ' кр');
 ok(count($state['ledger']) === 1 && $state['ledger'][0]['amount'] === Content::START_BALANCE,
     'капитал пришёл строкой в ленте, а не присвоением баланса');
+// Сколько модулей на заводском корабле — считаем ПО КАТАЛОГУ, а не
+// числом: заводским объявляет каталог (`stock`), и каждый новый такой
+// модуль обязан оказаться на корабле сам. Числом эта проверка ловила не
+// «набор собран», а «набор не менялся».
+$stock = (int) Db::one('SELECT COUNT(*) FROM `equipment_type` WHERE `stock`=1');
 ok($state['ship']['type']['code'] === 'challenger'
     && $state['ship']['hull'] === $shipSpec['maxHull']
-    && count($state['ship']['equipment']) === 13,
+    && count($state['ship']['equipment']) === $stock,
     'корабль с завода: ' . $state['ship']['type']['name'] . ', модулей '
-    . count($state['ship']['equipment']));
+    . count($state['ship']['equipment']) . ' из ' . $stock . ' заводских');
 // Пушка входит в заводскую комплектацию: безоружный пилот в мире, где
 // стреляют, — это не «выбор игрока», а невозможность играть.
 $guns = array_values(array_filter($state['ship']['equipment'],

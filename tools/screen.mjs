@@ -79,6 +79,38 @@ const SCENES = {
       GAME.state.view = 'chase';
     `,
   },
+  station: {
+    title: 'станция «Кориолис» крупным планом',
+    run: `
+      liftoff();
+      showStation(pickStation('coriolis'), 3.2);
+      GAME.state.view = 'chase';
+    `,
+  },
+  orbis: {
+    title: 'станция «Орбис» крупным планом',
+    run: `
+      liftoff();
+      showStation(pickStation('orbis'), 4.2);
+      GAME.state.view = 'chase';
+    `,
+  },
+  port: {
+    title: 'створ порта в упор',
+    run: `
+      liftoff();
+      showStation(pickStation('coriolis'), 2.4, 0.05, 0);
+      GAME.state.view = 'chase';
+    `,
+  },
+  orbisport: {
+    title: 'створ «Орбиса» в упор',
+    run: `
+      liftoff();
+      showStation(pickStation('orbis'), 3.0, 0.05, 0);
+      GAME.state.view = 'chase';
+    `,
+  },
   approach: {
     title: 'подлёт к луне: приборы подхода',
     run: `
@@ -95,6 +127,29 @@ const SCENES = {
       const st = GAME.world.stations[0];
       aimAt(st, 1.2);
       GAME.state.view = 'chase';
+    `,
+  },
+  lights: {
+    title: 'фары на ночной стороне луны',
+    run: `
+      liftoff();
+      const moon = GAME.world.bodies.find((b) => b.kind === 'moon');
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      hover(moon, 1.4, 'night');
+      // Нос вниз: горизонтальный луч уходил бы в горизонт по касательной,
+      // и на грунте от него не оставалось бы ничего. Снижаются носом
+      // вниз, и смотреть фары должны туда же.
+      const b = GAME.ship.basis;
+      const u = { x: b.up.x, y: b.up.y, z: b.up.z };
+      const d = {
+        x: b.fwd.x * 0.87 - u.x * 0.5,
+        y: b.fwd.y * 0.87 - u.y * 0.5,
+        z: b.fwd.z * 0.87 - u.z * 0.5 };
+      const dl = Math.hypot(d.x, d.y, d.z);
+      window.__lookAlong(b, { x: d.x / dl, y: d.y / dl, z: d.z / dl }, u);
+      GAME.ship.lights = true;
+      GAME.state.view = 'chase';
+      frames(20);
     `,
   },
   surface: {
@@ -207,18 +262,93 @@ const HELPERS = `
     window.__lookAlong(GAME.ship.basis, fwd, { x: 0, y: 1, z: 0 });
     frames(20);
   };
+  // Встать у станции в dist километрах от центра, с видом на створ.
+  //
+  // Направление подбирается СМЕСЬЮ оси порта и направления на солнце:
+  // станция висит над планетой портом наружу, и с оси порта её половину
+  // витка видно только тёмной. Двигать станцию по орбите ради снимка
+  // нельзя — так и потеряли её из кадра в первый раз.
+  // Из станций нужного типа берём ту, что повёрнута портом к солнцу:
+  // порт смотрит наружу от планеты, и у половины станций он в тени.
+  const pickStation = (type) => {
+    const sun = GAME.world.star;
+    const all = GAME.world.stations.filter((s) => s.type === type);
+    let best = null;
+    for (const s of (all.length ? all : GAME.world.stations)) {
+      const d = { x: sun.pos.x - s.pos.x, y: sun.pos.y - s.pos.y, z: sun.pos.z - s.pos.z };
+      const l = Math.hypot(d.x, d.y, d.z) || 1;
+      const k = (s.basis.fwd.x * d.x + s.basis.fwd.y * d.y + s.basis.fwd.z * d.z) / l;
+      if (!best || k > best.k) best = { k, s };
+    }
+    return best.s;
+  };
+  const showStation = (st, dist, side = 0.45, sunMix = 0.75) => {
+    const sun = GAME.world.star || GAME.world.bodies.find((b) => b.kind === 'star');
+    const toSun = {
+      x: sun.pos.x - st.pos.x, y: sun.pos.y - st.pos.y, z: sun.pos.z - st.pos.z };
+    const sl = Math.hypot(toSun.x, toSun.y, toSun.z) || 1;
+    toSun.x /= sl; toSun.y /= sl; toSun.z /= sl;
+
+    const f = st.basis.fwd, r = st.basis.right, u = st.basis.up;
+    const d = {
+      x: f.x * 0.9 + toSun.x * sunMix + r.x * side + u.x * side * 0.5,
+      y: f.y * 0.9 + toSun.y * sunMix + r.y * side + u.y * side * 0.5,
+      z: f.z * 0.9 + toSun.z * sunMix + r.z * side + u.z * side * 0.5 };
+    const l = Math.hypot(d.x, d.y, d.z);
+    d.x /= l; d.y /= l; d.z /= l;
+    const p = GAME.ship.pos;
+    p.x = st.pos.x + d.x * dist;
+    p.y = st.pos.y + d.y * dist;
+    p.z = st.pos.z + d.z * dist;
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0; GAME.ship.throttle = 0;
+    const i = GAME.nav.list.indexOf(st);
+    if (i >= 0) GAME.nav.index = i;
+    // Смотрим чуть НИЖЕ станции: в виде от третьего лица низ кадра
+    // занимает свой же корабль, и станция в середине уходила бы за него.
+    // Смещение считаем по МИРОВОЙ вертикали, а не по «верху» станции:
+    // она вращается, и её верх за оборот успевает показать во все
+    // стороны — кадр от этого прыгал.
+    const aim = {
+      x: st.pos.x - p.x,
+      y: st.pos.y - dist * 0.22 - p.y,
+      z: st.pos.z - p.z };
+    const al = Math.hypot(aim.x, aim.y, aim.z) || 1;
+    window.__lookAlong(GAME.ship.basis,
+      { x: aim.x / al, y: aim.y / al, z: aim.z / al }, { x: 0, y: 1, z: 0 });
+    frames(20);
+  };
   // Зависнуть над телом на высоте alt, носом ПО ГОРИЗОНТУ.
   //
   // Нужен отдельно от aimAt: тот наводит нос на центр тела, то есть у
   // самой земли — прямо в грунт, и корабль честно в него влетает. У
   // поверхности смотреть надо вдоль, а не вниз.
-  const hover = (b, alt) => {
-    const up = { x: 0.35, y: 0.9, z: 0.26 };
+  const hover = (b, alt, side = null) => {
+    // side — с какой стороны тела висеть. По умолчанию произвольная;
+    // 'night' ставит на противосолнечную, где только фары и светят.
+    const sun = GAME.world.star;
+    const up = side === 'night'
+      ? { x: b.pos.x - sun.pos.x, y: b.pos.y - sun.pos.y, z: b.pos.z - sun.pos.z }
+      : { x: 0.35, y: 0.9, z: 0.26 };
     const ul = Math.hypot(up.x, up.y, up.z);
     up.x /= ul; up.y /= ul; up.z /= ul;
-    const R = b.radius + alt;
+
+    // Высота считается ОТ ГРУНТА, а не от радиуса тела: рельеф у луны в
+    // несколько километров, и «радиус плюс километр» оказывается внутри
+    // горы. Корабль тогда честно садится, и вместо зависания в кадре
+    // стоянка.
+    const S = window.__surf;
     const p = GAME.ship.pos;
-    p.x = b.pos.x + up.x * R; p.y = b.pos.y + up.y * R; p.z = b.pos.z + up.z * R;
+    const dirLocal = S.localDir(b, {
+      x: b.pos.x + up.x * b.radius,
+      y: b.pos.y + up.y * b.radius,
+      z: b.pos.z + up.z * b.radius });
+    S.worldPoint(b, dirLocal, S.groundRadius(b, dirLocal) + alt, p);
+    // «Вверх» пересчитываем от настоящего места: над горой он другой.
+    up.x = p.x - b.pos.x; up.y = p.y - b.pos.y; up.z = p.z - b.pos.z;
+    const ul2 = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul2; up.y /= ul2; up.z /= ul2;
+
     GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
     GAME.ship.speed = 0; GAME.ship.throttle = 0;
     // Любое направление поперёк вертикали — это и есть горизонт.
@@ -350,6 +480,12 @@ try {
   // lookAlong нужен помощникам сцены, а модули страницы наружу не видны.
   await run(cdp, `
     return import('./js/core/basis.js').then((m) => { window.__lookAlong = m.lookAlong; return true; });
+  `);
+  // Рельеф: без него «зависнуть на километре» означает «радиус плюс
+  // километр», а у тела с горами это внутри горы — корабль садится, и
+  // сцена показывает не то, что просили.
+  await run(cdp, `
+    return import('./js/game/surface.js').then((m) => { window.__surf = m; return true; });
   `);
 
   if (scene.run) await run(cdp, HELPERS + scene.run + '\nframes(8);');

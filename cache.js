@@ -43,7 +43,7 @@
     ],
     'game/': [
       'audio', 'bodyinfo', 'clock', 'docking', 'dust', 'entry', 'flow',
-      'galaxy', 'gravity', 'landing', 'loadout', 'nav', 'peers', 'pilot',
+      'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
       'warp', 'weapons', 'world'
     ],
@@ -54,7 +54,8 @@
       'tiles', 'tileworker'
     ],
     'models/': [
-      'cockpit', 'geometry', 'hull.data', 'ships', 'station'
+      'cockpit', 'geometry', 'hull.data', 'ships', 'station.parts',
+      'stations'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'

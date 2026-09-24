@@ -642,7 +642,29 @@ await step('выбор цели наведением (Tab) и форсаж (Spac
   // Цель выбирается тем, что на неё наведён нос. Наводимся на планету
   // явно: «нажать Tab и посмотреть, что изменилось» теперь ничего не
   // проверяет — могло и не быть под прицелом никого.
-  const planet = game.world.home;
+  //
+  // Планету выбираем ту, что дальше всех по углу от любой станции.
+  //
+  // Станция теперь два километра поперёк, и с пары километров она
+  // накрывает прицел целиком; рукотворное под прицелом выигрывает у
+  // планеты намеренно (js/game/nav.js) — целятся в порт, а не в тело за
+  // ним. Ткнуть в планету «рядом со станцией» и ждать планету значит
+  // проверять совпадение, а не правило.
+  const dirTo = (b) => {
+    const sp = game.ship.pos;
+    const d = Math.hypot(b.pos.x - sp.x, b.pos.y - sp.y, b.pos.z - sp.z) || 1;
+    return { x: (b.pos.x - sp.x) / d, y: (b.pos.y - sp.y) / d, z: (b.pos.z - sp.z) / d };
+  };
+  let planet = game.world.home, apart = -1;
+  for (const b of game.world.planets) {
+    const d = dirTo(b);
+    let worst = 1;
+    for (const st of game.world.stations) {
+      const s2 = dirTo(st);
+      worst = Math.min(worst, 1 - (d.x * s2.x + d.y * s2.y + d.z * s2.z));
+    }
+    if (worst > apart) { apart = worst; planet = b; }
+  }
   const p = planet.pos, sp = game.ship.pos;
   const d = Math.hypot(p.x - sp.x, p.y - sp.y, p.z - sp.z) || 1;
   const fwd = { x: (p.x - sp.x) / d, y: (p.y - sp.y) / d, z: (p.z - sp.z) / d };
@@ -678,6 +700,95 @@ await step('выбор цели наведением (Tab) и форсаж (Spac
   if (Math.abs(game.camera.fov - fov0) > 0.005) {
     throw new Error('поле зрения не вернулось: ' + (game.camera.fov * 57.3).toFixed(1) + '°');
   }
+});
+
+// Фары (O): две лампы в носу. Картинку считает шейдер, и её здесь не
+// проверить, а вот связку «клавиша — состояние корабля — надпись в
+// приборах» проверить можно и нужно: именно она рвётся молча.
+await step('фары: O включает свет и говорит об этом', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  const was = game.ship.lights;
+  if (was) { key('KeyO'); frames(2); }
+
+  key('KeyO'); frames(2);
+  if (!game.ship.lights) throw new Error('O не включил фары');
+  texts = [];
+  frames(2);
+  const on = texts.map((t) => t.s);
+  texts = null;
+  if (!on.some((t) => t.indexOf('ФАРЫ') >= 0)) {
+    throw new Error('в приборах не сказано, что фары включены');
+  }
+
+  key('KeyO'); frames(2);
+  if (game.ship.lights) throw new Error('O не выключил фары');
+  texts = [];
+  frames(2);
+  const off = texts.map((t) => t.s);
+  texts = null;
+  if (off.some((t) => t === 'ФАРЫ')) {
+    throw new Error('выключенные фары всё ещё в приборах');
+  }
+  if (was) { key('KeyO'); frames(2); }
+});
+
+// Гасители инерции (T): выключенные, они меняют полёт целиком, и
+// сказать об этом обязаны приборы. Проверяется вся связка разом —
+// клавиша, модель, надпись.
+await step('гасители инерции: T, полёт по инерции и надпись в приборах', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  // Вид и место возвращаем в конце: шаг не должен менять сцену под
+  // соседями. На этом он один раз уже сломал проверку отметки грунта —
+  // та рисуется только от третьего лица.
+  const view0 = game.state.view;
+  const at0 = { x: game.ship.pos.x, y: game.ship.pos.y, z: game.ship.pos.z };
+  if (view0 !== 'chase') { key('KeyV'); frames(2); }
+
+  // В пустое место и на ход: у поверхности снятые гасители означают
+  // падение, а проверяем мы здесь не его.
+  game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
+  game.ship.throttle = 1;
+  frames(150);
+  const cruise = game.ship.speed;
+  if (!(cruise > 0.3)) throw new Error('корабль не разогнался: ' + cruise.toFixed(3));
+
+  key('KeyT'); frames(2);
+  if (game.ship.damp !== false) throw new Error('T не выключил гасители');
+
+  texts = [];
+  frames(2);
+  const list = texts.map((t) => t.s);
+  texts = null;
+  if (!list.some((t) => t.indexOf('ГАСИТЕЛИ') >= 0)) {
+    throw new Error('в приборах не сказано, что гасители сняты');
+  }
+
+  // Тяга в ноль — и корабль НЕ тормозит. Это и есть весь режим.
+  //
+  // Отсчёт берётся ИМЕННО ЗДЕСЬ, а не до нажатия: на полной тяге корабль
+  // ещё разгонялся, и сравнение с более ранним значением ловило бы этот
+  // разгон, а не работу гасителей.
+  game.ship.throttle = 0;
+  frames(2);
+  const drift = game.ship.speed;
+  frames(120);
+  if (Math.abs(game.ship.speed - drift) > 1e-6) {
+    throw new Error('без гасителей ход изменился сам: '
+      + drift.toFixed(3) + ' -> ' + game.ship.speed.toFixed(3));
+  }
+
+  // Обратно: с гасителями тот же нулевой ход корабль останавливает.
+  key('KeyT'); frames(2);
+  if (game.ship.damp !== true) throw new Error('T не включил гасители обратно');
+  frames(180);
+  if (!(game.ship.speed < drift * 0.5)) {
+    throw new Error('с гасителями корабль не тормозит: ' + game.ship.speed.toFixed(3));
+  }
+
+  game.ship.vel.x = game.ship.vel.y = game.ship.vel.z = 0;
+  game.ship.speed = 0; game.ship.throttle = 0;
+  game.ship.pos.x = at0.x; game.ship.pos.y = at0.y; game.ship.pos.z = at0.z;
+  if (game.state.view !== view0) { key('KeyV'); frames(2); }
 });
 
 await step('поток за бортом: еле виден обычным ходом, полосы на форсаже', () => {
@@ -1557,7 +1668,7 @@ await step('приборы подхода: в левой колонке, цен�
     const t = seen.find((x) => re.test(x.s));
     if (!t) continue;
     if (t.x > W * 0.3) {
-      throw new Error(`«${t.s}» вне левой колонки: x = ${t.x.toFixed(0)}`);
+      throw new Error(`«${t.s}» вне левой колонки: x = ${t.x.toFixed(0)}, окно ${W}x${H}, порог ${(W * 0.3).toFixed(0)}`);
     }
   }
 

@@ -17,7 +17,7 @@ import { makeRng, makeName, ROMAN } from '../core/rng.js';
 import { setGravity } from './gravity.js';
 import { HOME_SEED, HOME_CLASS, HAB_HOME, systemBySeed } from './galaxy.js';
 import { pressureOf } from './bodyinfo.js';
-import { STATION_R } from '../models/station.js';
+import { STATION_KINDS, stationShape } from '../models/stations.js';
 import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
@@ -173,12 +173,30 @@ const makeBody = (rng, opts) => {
 const makeStation = (rng, planet, name) => {
   const alt = planet.radius * rng.range(0.45, 0.75);
   const plane = orbitPlane(rng);
+  // Тип порта — от ИМЕНИ станции, а не из общего генератора мира.
+  //
+  // Взять число у rng было бы проще, но это сдвинуло бы весь дальнейший
+  // поток: планеты, луны и орбиты во ВСЕЙ галактике переехали бы на
+  // новые места, а мир уже лежит слепком в базе и в сохранениях пилотов.
+  // Имя же и так детерминировано и уникально, и по нему тип получается
+  // тот же самый у клиента, у сервера и в каждом полёте.
+  let h = 2166136261;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const type = STATION_KINDS[(h >>> 0) % STATION_KINDS.length];
+  const shape = stationShape(type);
   return {
     id: nextId++,
     kind: 'station',
+    type,
+    shape,
     name,
     parent: planet,
-    radius: STATION_R,
+    // Габарит модели целиком: по нему считают зазор до края и точку
+    // выхода из прыжка. У «Орбиса» он больше — кольцо шире ступицы.
+    radius: shape.bound,
     orbit: {
       radius: planet.radius + alt,
       period: rng.range(1.5e7, 2.5e7),

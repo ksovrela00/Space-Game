@@ -5,7 +5,7 @@ import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { toLocal, toWorld } from '../core/basis.js';
 import { SHIP } from './ship.js';
 import { aimAt, flyVelocity, levelRoll } from './pilot.js';
-import { STATION_R, STATION_D, SLOT } from '../models/station.js';
+import { SLOT } from '../models/stations.js';
 import { HULL_HALF } from '../models/ships.js';
 import { L } from '../core/lang.js';
 
@@ -15,7 +15,9 @@ export const LIMITS = {
   roll: 0.78,      // косинус рассогласования крена (по модулю)
 };
 
-const DRUM_RI = STATION_R * 0.9239;   // радиус вписанной окружности восьмигранника
+// Форма станции у каждой своя (js/models/stations.js): «Кориолис» —
+// кубооктаэдр, «Орбис» — ступица с кольцом. Модуль про неё знает ровно
+// две вещи: где плоскость створа и что считать попаданием в корпус.
 const _lp = v3();
 const _rel = v3();
 
@@ -40,6 +42,9 @@ export function dockingQuality(ship, station) {
   return {
     align, roll, speed,
     local: { x: p.x, y: p.y, z: p.z },
+    // Остаток до створа считается ЗДЕСЬ, а не в приборах: глубина у
+    // типов станций разная, и приборам незачем знать их форму.
+    gap: p.z - station.shape.D,
     inSlot: Math.abs(p.x) < SLOT.hw && Math.abs(p.y) < SLOT.hh,
     ok: align > LIMITS.align && roll > LIMITS.roll && speed < LIMITS.speed,
   };
@@ -50,30 +55,38 @@ export function dockingQuality(ship, station) {
  * @returns null | 'docked' | 'crash'
  */
 export function checkStation(ship, station) {
+  const sh = station.shape;
   const p = stationLocal(ship, station);
-  if (p.z > STATION_D || p.z < -STATION_D) return null;
-
-  const rad = Math.hypot(p.x, p.y);
-  if (rad > DRUM_RI) return null;              // проходим мимо, снаружи барабана
+  // Створ — это СЛОЙ от плоскости порта до задней стенки, а не всё
+  // полупространство за ней. Без нижней границы корабль, оказавшийся на
+  // оси в шестидесяти километрах ПОЗАДИ станции, считался бы вошедшим в
+  // щель и стыковался мгновенно — так и было, пока проверку не написали.
+  if (p.z > sh.D || p.z < -sh.D) return null;
 
   // Зазор в створе — по реальным обводам корпуса, а не по числу из
   // воздуха: в щель проходит корабль целиком, а не его центр.
   const inSlot = Math.abs(p.x) < SLOT.hw - HULL_HALF.x
     && Math.abs(p.y) < SLOT.hh - HULL_HALF.y;
-  if (!inSlot) return 'crash';                 // впечатались в раму или в борт
-
-  // В створе порта: считаем стыковку состоявшейся, когда прошли раму.
-  if (p.z < STATION_D - 0.03) {
-    const q = dockingQuality(ship, station);
-    return q.ok ? 'docked' : 'crash';
+  if (inSlot) {
+    // В створе порта: считаем стыковку состоявшейся, когда прошли раму.
+    if (p.z < sh.D - 0.03) {
+      const q = dockingQuality(ship, station);
+      return q.ok ? 'docked' : 'crash';
+    }
+    return null;
   }
-  return null;
+  // Мимо щели. Столкновение — только если ТОЧКА ВНУТРИ КОРПУСА, а
+  // корпус у каждого типа свой: у «Кориолиса» это кубооктаэдр, у
+  // «Орбиса» — ступица, кольцо, спицы и мачта. Проверка нарисованного и
+  // проверка столкновения — одни и те же числа (js/models/stations.js),
+  // иначе корабль бьётся о пустоту и пролетает сквозь балки.
+  return sh.inside(p.x, p.y, p.z) ? 'crash' : null;
 }
 
 // --- Докинг-компьютер --------------------------------------------------------
 
 export const DOCK_RANGE = 120;   // км — дальше компьютер не берётся
-const GATE_Z = 1.2;              // км перед створом порта
+const GATE_GAP = 1.2;            // км перед створом порта
 
 export function startDockingComputer(ship, station) {
   const d = Math.hypot(
@@ -127,11 +140,13 @@ export function updateDockingComputer(ship, dt) {
   const latY = b.right.y * p.x + b.up.y * p.y;
   const latZ = b.right.z * p.x + b.up.z * p.y;
 
+  const D = st.shape.D;
+  const GATE_Z = D + GATE_GAP;
   // Подход с обратной стороны: сначала обходим станцию сбоку, иначе
   // прямая на створ прошла бы сквозь корпус.
-  if (d.phase !== 'enter' && p.z < 1.0) d.phase = 'skirt';
+  if (d.phase !== 'enter' && p.z < D + 0.3) d.phase = 'skirt';
   // Промахнулись в створ — уходим на повторный круг, а не в обшивку.
-  if (d.phase === 'enter' && p.z < STATION_D + 0.02 && lateral > SLOT.hw * 0.7) {
+  if (d.phase === 'enter' && p.z < D + 0.02 && lateral > SLOT.hw * 0.7) {
     d.phase = 'skirt';
   }
 
@@ -139,7 +154,9 @@ export function updateDockingComputer(ship, dt) {
     let ux = p.x, uy = p.y;
     const l = Math.hypot(ux, uy);
     if (l < 0.05) { ux = 1; uy = 0; } else { ux /= l; uy /= l; }
-    const skirt = stationPoint(st, ux * 4, uy * 4, GATE_Z * 2);
+    // Обход берём заведомо снаружи любого корпуса: у «Орбиса» кольцо
+    // шириной в два километра, и четырёх километров хватает обоим.
+    const skirt = stationPoint(st, ux * 4, uy * 4, GATE_Z + st.shape.bound);
     const dist = distTo(ship, skirt);
     const off = aimAt(ship, skirt);
     levelRoll(ship);
@@ -176,7 +193,7 @@ export function updateDockingComputer(ship, dt) {
 
   // enter: сближение по оси со скоростью, привязанной к остатку пути,
   // плюс скорость станции и гашение бокового сноса.
-  const gap = p.z - STATION_D;
+  const gap = p.z - D;
   const closing = clamp(gap / 8, 0.03, 0.12);
   matchRoll(ship, st, 2.2);
   const vx = st.vel.x - b.fwd.x * closing - latX * 0.5;

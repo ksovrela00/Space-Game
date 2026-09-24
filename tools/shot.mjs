@@ -399,7 +399,7 @@ lookPhase(home, 3, 'full'); show('ФАЗА: солнце за спиной — �
 lookPhase(home, 3, 'half'); show('ФАЗА: солнце сбоку — освещена половина');
 lookPhase(home, 3, 'new');  show('ФАЗА: солнце за планетой — почти чёрный диск');
 
-lookPhase(st, 7, 'full'); show('станция, солнце за спиной: барабан и створ порта');
+lookPhase(st, 7, 'full'); show('станция, солнце за спиной: корпус и створ порта');
 game.state.view = 'chase';
 lookPhase(home, 2.6, 'half'); show('вид от 3-го лица: корабль на фоне планеты');
 game.state.view = 'cockpit';

@@ -151,6 +151,7 @@ const CARD = {
     ? s.steps[s.steps.length - 1].toLocaleString(numLocale()) + L(' км')
     : L('НЕТ')),
   gear: (s) => s.gearTime.toFixed(1) + L(' с'),
+  lamp: (s) => s.range + L(' км, ') + s.coneDeg + '°/' + s.wideDeg + '°',
   hold: (s) => s.hold + L(' т'),
   shield: (s) => (s.maxShield > 0
     ? s.maxShield + L(' ед., +') + s.shieldRegen + L('/с через ') + s.shieldDelay + L(' с')

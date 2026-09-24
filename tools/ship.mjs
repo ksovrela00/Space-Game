@@ -98,9 +98,15 @@ function decodePng(buf) {
 // --- OBJ --------------------------------------------------------------------
 function parseObj(text) {
   const verts = [], uvs = [], norms = [], faces = [];
+  // Имя материала грани. Кораблям оно не нужно — у них цвет берётся из
+  // текстуры, — а деталям станции нужно: в паке Kenney текстур нет
+  // вовсе, и весь цвет лежит в материалах (tools/station.mjs).
+  let mat = '';
   for (const line of text.split('\n')) {
     const s = line.trim();
-    if (s.startsWith('v ')) {
+    if (s.startsWith('usemtl ')) {
+      mat = s.slice(7).trim();
+    } else if (s.startsWith('v ')) {
       const p = s.split(/\s+/);
       verts.push([+p[1], +p[2], +p[3]]);
     } else if (s.startsWith('vt ')) {
@@ -118,7 +124,7 @@ function parseObj(text) {
         if (ti) t.push(idx(ti, uvs.length));
         if (ni) n.push(idx(ni, norms.length));
       }
-      faces.push({ v, t, n });
+      faces.push({ v, t, n, m: mat });
     }
   }
   return { verts, uvs, norms, faces };

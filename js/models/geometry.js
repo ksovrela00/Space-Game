@@ -27,7 +27,10 @@ export const makeMesh = (verts, faceDefs) => {
     c: f.c,
     n: faceNormal(verts, f.v),
     twoSided: !!f.twoSided,
-    emissive: !!f.emissive,
+    // Свечение — ДОЛЯ, а не признак: окно светится вполсилы, огонь порта
+    // в полную. Булево здесь давало бы либо тусклый маяк, либо окна,
+    // выжигающие всё вокруг.
+    emissive: typeof f.emissive === 'number' ? f.emissive : (f.emissive ? 1 : 0),
   }));
   return { verts, faces };
 };
@@ -111,7 +114,7 @@ export const loft = (planform, topY, botY, colorTop, colorBot, colorSide) => {
   return orientOutward(makeMesh(verts, faceDefs));
 };
 
-// Призма/цилиндр вдоль оси Z (для барабана станции и сопел).
+// Призма/цилиндр вдоль оси Z (сопла, ступица «Орбиса»).
 export const prismZ = (sides, radius, halfDepth, colorSide, colorCap, twist = 0) => {
   const verts = [];
   for (let i = 0; i < sides; i++) {

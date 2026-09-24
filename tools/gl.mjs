@@ -1870,6 +1870,8 @@ console.log('\n== мок GL: путь отрисовки ==');
     // нему видно и то, дошёл ли параметр до шейдера вообще, и то,
     // меняется ли он от плитки к плитке.
     uni: {}, uniMin: {},
+    // Векторные uniform-ы и целые — по имени (см. uniform3fv ниже).
+    vecName: {}, ints: {},
   };
   const CONST = {};
   let constCounter = 1;
@@ -1905,6 +1907,25 @@ console.log('\n== мок GL: путь отрисовки ==');
       if (!loc) return;
       state.vec2[loc.name] = [a, b];
       if (state.orderOn) state.order.push(loc.name);
+    },
+    // Векторные uniform-ы запоминаются ПО ИМЕНИ. Имя здесь — не
+    // придирка: у массива адрес спрашивают по первому элементу
+    // («uLampPos[0]»), и без скобок настоящий драйвер возвращает null, а
+    // запись по null молча проходит. Мок такого не различает, поэтому
+    // проверяется само имя.
+    uniform3fv: (loc, v) => {
+      if (!loc) return;
+      state.vecName[loc.name] = Array.from(v);
+      checkArgs('uniform3fv', [v]);
+    },
+    uniform2fv: (loc, v) => {
+      if (!loc) return;
+      state.vecName[loc.name] = Array.from(v);
+      checkArgs('uniform2fv', [v]);
+    },
+    uniform1i: (loc, v) => {
+      if (!loc) return;
+      state.ints[loc.name] = v;
     },
     uniform1f: (loc, v) => {
       if (!loc) return;
@@ -1973,7 +1994,7 @@ console.log('\n== мок GL: путь отрисовки ==');
   const { Starfield } = await import('../js/render/starfield.js');
   const { GlScene } = await import('../js/gl/scene.js');
   const { buildCobra } = await import('../js/models/ships.js');
-  const { buildStation } = await import('../js/models/station.js');
+  const { stationMesh } = await import('../js/models/stations.js');
   const { makeShip, placeShip } = await import('../js/game/ship.js');
 
   const cam = new Camera();
@@ -1989,7 +2010,7 @@ console.log('\n== мок GL: путь отрисовки ==');
   const game = {
     world, ship,
     shipMesh: buildCobra(),
-    stationMesh: buildStation(),
+    stationMesh,
     state: { view: 'cockpit', mode: 'flight' },
   };
 
@@ -2067,6 +2088,42 @@ console.log('\n== мок GL: путь отрисовки ==');
     const withBolt = frame();
     ok(withBolt === boltBase + 1,
       `болт лазера рисуется: ${boltBase} вызовов без него, ${withBolt} с ним`);
+
+    // Фары: два луча уезжают в шейдер мешей — тот же, которым рисуются
+    // и грунт, и камни, и станции.
+    //
+    // Проверяется ИМЯ uniform-а, а не только число: у массива адрес
+    // спрашивают по первому элементу, «uLampPos[0]». Без скобок
+    // настоящий драйвер возвращает null, запись по null молча проходит —
+    // и фары «включаются», не светя ничем. Ровно это и случилось.
+    game.guns = { bolts: [], blasts: [], shields: [] };
+    // Вид от третьего лица: в кабине фары гасятся отдельным проходом
+    // (лампы снаружи, светить внутрь им нечем), и последним значением
+    // uniform-а оказался бы ноль от него.
+    const view0 = game.state.view;
+    game.state.view = 'chase';
+    game.ship.lights = false;
+    frame();
+    ok(state.ints.uLampN === 0, 'выключенные фары уходят в шейдер нулём');
+
+    game.ship.lights = true;
+    frame();
+    ok(state.ints.uLampN === 2, `включённые фары: ${state.ints.uLampN} луча в шейдере`);
+    ok(Array.isArray(state.vecName['uLampPos[0]'])
+      && state.vecName['uLampPos[0]'].length === 6,
+      'положения ламп уехали массивом по имени uLampPos[0]');
+    ok(Array.isArray(state.vecName['uLampDir[0]'])
+      && Math.abs(Math.hypot(...state.vecName['uLampDir[0]'].slice(0, 3)) - 1) < 1e-5,
+      'направления ламп единичные');
+    ok(state.uni.uLampRange > 0 && state.uni.uLampPower > 0,
+      `дальность и яркость доехали: ${state.uni.uLampRange} км`);
+
+    // А в кабине их нет: тот же кадр, другой вид.
+    game.state.view = 'cockpit';
+    frame();
+    ok(state.ints.uLampN === 0, 'в кабине фары в шейдер не уходят');
+    game.state.view = view0;
+    game.ship.lights = false;
 
     // Вспышка попадания — ореолом, тем же, что корона звезды и факелы.
     game.guns = {
