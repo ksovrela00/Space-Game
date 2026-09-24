@@ -1,5 +1,5 @@
 // Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
-import { v3, normalize, dot, len, clamp } from '../js/core/vec3.js';
+import { v3, normalize, dot, cross, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
 import { ROMAN } from '../js/core/rng.js';
@@ -15,6 +15,7 @@ import { HOME_LAYOUT } from '../js/game/world.js';
 import { makeShip, updateShip, placeShip, clearControls, SHIP, applyShipSpec } from '../js/game/ship.js';
 import {
   makeNav, refreshNav, currentTarget, targetById, pickTarget, aimedTarget, aimTargets, AIM_CONE,
+  targetKind,
 } from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
@@ -37,6 +38,9 @@ import { shipShadow, convexHull } from '../js/game/shadow.js';
 import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
+import { CITY, cityPlan, cityBlocked, nearestPad, partBox } from '../js/models/city.js';
+import { makeCity, cityCrash, cityPadUnder, canHostCity, citySite } from '../js/game/city.js';
+import { buildCityGeometry, cityTris } from '../js/gl/citymesh.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
@@ -5602,6 +5606,204 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   try { applySpecs({ shipTypes: [] }); } catch (e) { refused = true; }
   ok(refused, 'без характеристик игра не собирается');
   applySpecs(doc);
+}
+
+
+console.log('\n== наземный город ==');
+{
+  const w = makeSystem(HOME_SEED);
+  ok(w.cities.length === 1, `в родной системе один город: ${w.cities.length}`);
+  const c = w.cities[0];
+  const b = c.body;
+  ok(c.isCity && canHostCity(b) && b.kind === 'rock',
+    `${c.name} стоит на ${b.name} (${b.kind}, без атмосферы)`);
+
+  // --- Площадка в рельефе.
+  //
+  // Главное свойство города: грунт под ним РОВНЫЙ, и ровный он в той же
+  // функции, по которой считаются посадка и столкновение. Проверяется
+  // уклоном, а не высотой: на шаре «одинаковая высота» и «ровно» — это
+  // одно и то же, а уклон ещё и ловит рябь мелких масштабов.
+  {
+    const u = v3(), vv = v3();
+    const helper = Math.abs(c.dir.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0);
+    normalize(cross(helper, c.dir), u);
+    normalize(cross(c.dir, u), vv);
+    const at = (du, dv) => normalize(v3(
+      c.dir.x + u.x * du + vv.x * dv,
+      c.dir.y + u.y * du + vv.y * dv,
+      c.dir.z + u.z * du + vv.z * dv));
+    let worst = 0, worstKm = 0;
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 12) * Math.PI;
+      const km = (i % 4) * 0.6 + 0.3;          // 0.3 … 2.1 км от середины
+      const s = slopeAt(b, at(Math.cos(a) * km / b.radius, Math.sin(a) * km / b.radius));
+      if (s > worst) { worst = s; worstKm = km; }
+    }
+    ok(worst * 57.3 < 0.05,
+      `грунт города ровный: худший уклон ${(worst * 57.3).toFixed(3)}° в ${worstKm.toFixed(1)} км от середины`);
+
+    // И площадка КОНЧАЕТСЯ: за переходом рельеф тот же, каким был. Иначе
+    // выравнивание расползлось бы по всему телу.
+    const far = at(0, (CITY.plate + CITY.rim + 3) / b.radius);
+    const withPlate = groundRadius(b, far);
+    b.plate = null;                     // рельеф читает площадку на лету
+    const bare = groundRadius(b, far);
+    const bareCenter = groundRadius(b, c.dir);
+    b.plate = c.plate;
+    ok(Math.abs(withPlate - bare) < 1e-9,
+      `за краем перехода рельеф нетронут: ${(Math.abs(withPlate - bare) * 1e6).toFixed(3)} мм разницы`);
+    ok(Math.abs(bareCenter - c.groundR) > 1e-4,
+      `а под городом — срезан: ${((c.groundR - bareCenter) * 1000).toFixed(0)} м правки`);
+  }
+
+  // Город стоит НА грунте, а не над ним и не в нём: его начало отсчёта —
+  // ровно та высота, которую вернёт рельеф под ним.
+  ok(Math.abs(groundRadius(b, c.dir) - c.groundR) < 1e-9,
+    `начало города на грунте: ${(Math.abs(groundRadius(b, c.dir) - c.groundR) * 1e6).toFixed(3)} мм`);
+
+  // --- Площадки свободны, постройки твёрдые.
+  {
+    let occupied = 0;
+    for (const p of c.plan.pads) {
+      for (let i = -3; i <= 3; i++) {
+        for (let j = -3; j <= 3; j++) {
+          if (cityBlocked(c.plan, p.x + (i * p.r) / 3, 0.01, p.z + (j * p.r) / 3, HULL_HALF.x)) {
+            occupied++;
+          }
+        }
+      }
+    }
+    ok(c.plan.pads.length === CITY.pads && occupied === 0,
+      `посадочных площадок ${c.plan.pads.length}, и на них ничего не стоит`);
+
+    // Столкновение: в середине каждой коробки — есть, над крышей — нет.
+    let hit = 0, above = 0;
+    for (const box of c.plan.boxes) {
+      if (cityBlocked(c.plan, box.x, box.h * 0.5, box.z)) hit++;
+      if (cityBlocked(c.plan, box.x, box.h + 0.05, box.z)) above++;
+    }
+    ok(hit === c.plan.boxes.length && above === 0,
+      `во все ${c.plan.boxes.length} построек врезаешься, над крышами — пусто`);
+
+    // Постройки не растут одна сквозь другую. Это не придирка к виду:
+    // коробки столкновения точные, и дом внутри ангара означал бы, что
+    // корабль бьётся о воздух между двумя стенами, которых там нет.
+    let overlap = 0, deepest = 0;
+    const B = c.plan.boxes;
+    for (let i = 0; i < B.length; i++) {
+      for (let j = i + 1; j < B.length; j++) {
+        const dx = B[i].hw + B[j].hw - Math.abs(B[i].x - B[j].x);
+        const dz = B[i].hd + B[j].hd - Math.abs(B[i].z - B[j].z);
+        if (dx > 0 && dz > 0) { overlap++; deepest = Math.max(deepest, Math.min(dx, dz)); }
+      }
+    }
+    ok(overlap === 0,
+      `постройки не пересекаются${overlap ? `: ${overlap} пар, до ${(deepest * 1000).toFixed(0)} м` : ''}`);
+  }
+
+  // То же через мир: корабль в башне разбивается, над площадкой — нет.
+  {
+    const toWorldCity = (x, y, z) => v3(
+      c.pos.x + c.basis.right.x * x + c.basis.up.x * y + c.basis.fwd.x * z,
+      c.pos.y + c.basis.right.y * x + c.basis.up.y * y + c.basis.fwd.y * z,
+      c.pos.z + c.basis.right.z * x + c.basis.up.z * y + c.basis.fwd.z * z);
+    const tall = c.plan.boxes.reduce((a, x) => (x.h > a.h ? x : a), c.plan.boxes[0]);
+    const inTower = { pos: toWorldCity(tall.x, tall.h * 0.5, tall.z) };
+    const overPad = { pos: toWorldCity(c.plan.pads[0].x, 0.05, c.plan.pads[0].z) };
+    ok(cityCrash(w, inTower) === c && !cityCrash(w, overPad),
+      `в башню ${(tall.h * 1000).toFixed(0)} м врезаешься, над площадкой — свободно`);
+    // И на площадке корабль ЗНАЕТ, что он в городе: по этому отличают
+    // посадку в порту от посадки в чистом поле.
+    const at = cityPadUnder(w, overPad.pos);
+    ok(at && at.city === c && at.pad.n >= 1,
+      `над площадкой ${at ? at.pad.n : '—'} корабль числится в городе`);
+  }
+
+  // --- Геометрия. Тут ловится то, чего не видно ни в планировке, ни на
+  // экране: город собирается из чисел пака, и любая ошибка в их разборе
+  // даёт либо пустой меш, либо кашу из NaN.
+  {
+    const geo = buildCityGeometry(c.plan);
+    ok(geo.faces === cityTris(c.plan) && geo.faces > 20000,
+      `геометрия города: ${geo.faces} треугольников — ровно столько, сколько обещано`);
+
+    let nan = 0, far = 0, high = 0;
+    for (let i = 0; i < geo.positions.length; i += 3) {
+      const x = geo.positions[i], y = geo.positions[i + 1], z = geo.positions[i + 2];
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) nan++;
+      far = Math.max(far, Math.hypot(x, z));
+      high = Math.max(high, y);
+    }
+    ok(nan === 0, `в вершинах города нет NaN (${geo.positions.length / 3} штук)`);
+    // Габарит — это радиус цели: по нему город берут в прицел и по нему
+    // считают, «дальше пикселя или нет». Модель, торчащая из него,
+    // означала бы башню, в которую целиться нечем.
+    ok(far <= c.radius, `застройка не торчит из габарита: ${far.toFixed(2)} км при ${c.radius}`);
+    ok(high > 0.15 && high < 0.5, `самое высокое здание ${(high * 1000).toFixed(0)} м`);
+
+    // ЭТО БЫЛО СЛОМАНО: цвет граней лежит в палитре детали, а генератор
+    // палитру не выводил вовсе. Меш при этом собирался «успешно» — из
+    // undefined, — и город уходил в кадр чёрным пятном с NaN в цвете.
+    // Проверка требует и цвета, и свечения: окна и огни на безатмосферном
+    // теле — единственное, чем город виден ночью.
+    // Окна и огни считаются ОТДЕЛЬНО: огни город рисует сам (доля 1),
+    // а свечение окон приезжает из палитры, и только по ним видно, что
+    // палитра вообще доехала.
+    let win = 0, lamp = 0, bad = 0;
+    for (let i = 0; i < geo.colors.length; i += 4) {
+      const a = geo.colors[i + 3];
+      if (!Number.isFinite(geo.colors[i]) || !Number.isFinite(a)) bad++;
+      else if (a >= 0.99) lamp++;
+      else if (a > 0.3) win++;
+    }
+    ok(bad === 0 && win > 1000 && lamp > 1000,
+      `цвет взят из палитры: окон ${win}, огней ${lamp}, битых ${bad}`);
+  }
+
+  // --- Детерминизм. Мир лежит слепком в базе и в сохранениях пилотов, и
+  // город обязан оказываться на том же месте в каждом запуске.
+  {
+    const w2 = makeSystem(HOME_SEED);
+    const c2 = w2.cities[0];
+    const d = Math.hypot(c.dir.x - c2.dir.x, c.dir.y - c2.dir.y, c.dir.z - c2.dir.z);
+    ok(c2.name === c.name && d < 1e-12 && c2.plan.parts.length === c.plan.parts.length,
+      `город тот же в новом запуске: ${c2.name}, ${c2.plan.parts.length} деталей`);
+  }
+
+  // --- Цель. Ради этого город и попадает в список навигации.
+  {
+    const ship = makeShip();
+    placeShip(ship, v3(c.pos.x + 20, c.pos.y, c.pos.z), makeBasis());
+    const nav = makeNav(w);
+    refreshNav(nav, w, ship);
+    ok(nav.list.includes(c) && targetKind(c) === 'ГОРОД',
+      `город в списке целей и подписан как «${targetKind(c)}»`);
+    ok(targetById(w, c.id) === c,
+      'город находится по идентификатору — иначе он терялся бы при загрузке');
+  }
+
+  // --- Прыжок. Точка выхода считается ОТ ТЕЛА и над городом: сам город
+  // лежит на грунте, и «подступ с той стороны, откуда идём» приходился бы
+  // внутрь планеты.
+  {
+    const from = v3(b.pos.x + b.radius * 40, b.pos.y, b.pos.z);
+    const p = exitPoint(c, from);
+    const alt = Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z) - b.radius;
+    const up = normalize(v3(c.pos.x - b.pos.x, c.pos.y - b.pos.y, c.pos.z - b.pos.z));
+    const dirExit = normalize(v3(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z));
+    ok(alt > 1 && dot(up, dirExit) > 0.9999,
+      `выход из прыжка — над городом, в ${alt.toFixed(0)} км над поверхностью`);
+  }
+
+  // --- Камни. На расчищенной площадке их быть не должно: валун посреди
+  // улицы означал бы, что город никто не строил.
+  {
+    const onPlate = scatterRocks(b, c.dir, 0.15).length;
+    const away = scatterRocks(b, normalize(v3(-c.dir.x, -c.dir.y, -c.dir.z)), 0.15).length;
+    ok(onPlate === 0 && away > 0,
+      `на площадке камней нет, в стороне от неё — ${away}`);
+  }
 }
 
 // --- перевод ----------------------------------------------------------------

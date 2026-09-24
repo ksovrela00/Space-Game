@@ -1995,6 +1995,7 @@ console.log('\n== мок GL: путь отрисовки ==');
   const { GlScene } = await import('../js/gl/scene.js');
   const { buildCobra } = await import('../js/models/ships.js');
   const { stationMesh } = await import('../js/models/stations.js');
+  const { cityTris } = await import('../js/gl/citymesh.js');
   const { makeShip, placeShip } = await import('../js/game/ship.js');
 
   const cam = new Camera();
@@ -3049,6 +3050,46 @@ console.log('\n== мок GL: путь отрисовки ==');
       `на раскрытии тоннеля мир ещё рисуется: ${opening} вызовов при силе ` +
       `${warpPower(game.warp).toFixed(2)}`);
     game.warp = null;
+  }
+
+
+  // --- Наземный город ---------------------------------------------------------
+  //
+  // Город — самый крупный меш в игре (сто тысяч граней), и собирается он
+  // порциями. Здесь проверяется то, чего не видно ни в планировке, ни на
+  // снимке: что он вообще доходит до видеокарты, что собирается ОДИН раз
+  // и что его не тащат в кадр с другого конца системы.
+  {
+    const city = world.cities[0];
+    const toCity = (alt) => {
+      const u = city.basis.up;
+      const at = v3(
+        city.pos.x + u.x * alt, city.pos.y + u.y * alt, city.pos.z + u.z * alt);
+      placeShip(ship, at, null);
+      lookAt(at, city.pos);
+    };
+
+    toCity(2);
+    let frames = 0;
+    while (!scene.city.mesh && frames < 400) { scene.render(game); frames++; }
+    const built = scene.city.mesh ? scene.city.mesh.faces : 0;
+    ok(scene.city.mesh && built === cityTris(city.plan) && frames < 200,
+      `город собран за ${frames} кадров: ${built} треугольников`);
+
+    scene.render(game);
+    const drawn = scene.cityDraws;
+    const builds0 = scene.city.builds;
+    for (let i = 0; i < 60; i++) scene.render(game);
+    ok(drawn === 1 && scene.city.builds === builds0,
+      `город рисуется одним вызовом и не пересобирается (${scene.city.builds - builds0} ` +
+      'сборок за 60 кадров)');
+
+    // Ушли из системы — память отдана. Сто тысяч граней на теле, которого
+    // больше нет в кадре, это десять мегабайт в драйвере ни за что.
+    toCity(city.radius * 200);
+    for (let i = 0; i < 4; i++) scene.render(game);
+    ok(!scene.city.mesh && scene.cityDraws === 0,
+      'издалека город не держат в памяти и не рисуют');
   }
 
   ok(state.nan === 0,

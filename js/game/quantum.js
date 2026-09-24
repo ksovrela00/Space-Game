@@ -92,6 +92,21 @@ export const clearOf = (b) => b.radius * (1 + QUANTUM.relief) + QUANTUM.clearPad
 
 /** Точка выхода: не сама цель, а подступ к ней с той стороны, откуда идём. */
 export function exitPoint(target, from, out = v3()) {
+  // Наземный город — особый случай: он лежит НА поверхности, и подходить
+  // к нему «с той стороны, откуда идём» негде — с трёх сторон из четырёх
+  // там грунт. Поэтому выход считается не от города, а от его тела и
+  // строго НАД городом: на той же высоте, на какую привод выводит к
+  // самой планете. Без этого прыжок к городу означал бы выход в двух
+  // километрах от построек, то есть внутри планеты.
+  if (target.isCity) {
+    const b = target.body;
+    const gap = b.radius + Math.max(QUANTUM.exitAlt, b.radius * QUANTUM.exitFrac);
+    const k = gap / (target.groundR || b.radius);
+    out.x = b.pos.x + (target.pos.x - b.pos.x) * k;
+    out.y = b.pos.y + (target.pos.y - b.pos.y) * k;
+    out.z = b.pos.z + (target.pos.z - b.pos.z) * k;
+    return out;
+  }
   const gap = target.isPeer ? QUANTUM.exitPeer
     : (target.isStation ? QUANTUM.exitStation
       : (target.isMarker ? QUANTUM.exitMin
@@ -408,8 +423,8 @@ export function exitVelocity(target, out = v3()) {
     const keep = Math.hypot(v.x, v.y, v.z) <= QUANTUM.peerMatch;
     return set(out, keep ? v.x : 0, keep ? v.y : 0, keep ? v.z : 0);
   }
-  const tv = target.isMarker ? target.body.vel : target.vel;
-  const own = target.isMarker
+  const tv = target.isMarker || target.isCity ? target.body.vel : target.vel;
+  const own = target.isMarker || target.isCity
     ? target.body
     : (target.isStation ? target.parent : target);
   const cx = own && own.vel ? own.vel.x : 0;

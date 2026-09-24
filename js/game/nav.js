@@ -41,6 +41,10 @@ export function refreshNav(nav, world, ship, peers = null) {
     nav.list.push(b);
     if (b === local && b.markers) for (const m of b.markers) nav.list.push(m);
     if (b.station) nav.list.push(b.station);
+    // Город показывается ВСЕГДА, а не только вблизи тела, — в отличие от
+    // орбитальных маркеров. Причина простая: к городу летят, и знать, что
+    // он есть, надо до того, как окажешься рядом.
+    if (b.city) nav.list.push(b.city);
   }
   // Чужие корабли идут в конец списка, но в aimTargets порядок не значит
   // ничего: там сортируют по зазору до прицела, и корабль под носом
@@ -141,6 +145,7 @@ export function targetById(world, id) {
   if (id === null || id === undefined) return null;
   for (const b of world.bodies) if (b.id === id) return b;
   for (const s of world.stations) if (s.id === id) return s;
+  for (const c of world.cities || []) if (c.id === id) return c;
   for (const m of world.markers) if (m.id === id) return m;
   return null;
 }
@@ -157,6 +162,7 @@ export function targetKind(t) {
   if (!t) return '';
   if (t.isPeer) return 'ПИЛОТ';
   if (t.isStation) return 'СТАНЦИЯ';
+  if (t.isCity) return 'ГОРОД';
   if (t.isMarker) return 'МЕТКА';
   if (t.isSystem) return 'СИСТЕМА';
   if (t.kind === 'star') return 'ЗВЕЗДА';
@@ -169,6 +175,7 @@ export function targetLabel(t) {
   if (!t) return '—';
   if (t.isPeer) return t.name || L('ПИЛОТ');
   if (t.isStation) return t.name;
+  if (t.isCity) return t.name;
   if (t.isMarker) return t.name;
   if (t.kind === 'star') return t.name + L(' (звезда)');
   if (t.kind === 'moon') return t.name + L(' (луна)');

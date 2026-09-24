@@ -31,6 +31,7 @@ import {
   updateDockingComputer, DOCK_RANGE,
 } from './game/docking.js';
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
+import { cityCrash, cityPadUnder } from './game/city.js';
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
@@ -1190,8 +1191,13 @@ function handleKeys(dt) {
     if (ship.landing) { stopLanding(ship); say(st, L('ПОСАДОЧНЫЙ КОМПЬЮТЕР ОТКЛЮЧЁН')); }
     else {
       // Цель — либо выбранное навигатором тело, либо то, над которым летим.
+      // Город значит то же, что его тело: садятся не «в город», а на
+      // грунт под собой, и вывести корабль ИМЕННО НАД городом — работа
+      // квантового привода, а не посадочного компьютера (тот снижается
+      // отвесно, потому что поверхность за время спуска уезжает).
       const t = currentTarget(game.nav);
-      const body = isLandable(t) ? t : (game.zone ? game.zone.body : null);
+      const aim = t && t.isCity ? t.body : t;
+      const body = isLandable(aim) ? aim : (game.zone ? game.zone.body : null);
       if (!body) say(st, L('РЯДОМ НЕТ ТЕЛА, НА КОТОРОЕ МОЖНО СЕСТЬ'), '#ff7a66');
       else {
         const res = startLanding(ship, body, ship.pos);
@@ -1410,6 +1416,12 @@ function step(dt) {
     return;
   }
 
+  // Постройки города — такая же преграда, как грунт. Иначе город был бы
+  // голограммой: сквозь башню в двести метров корабль проходил бы
+  // насквозь, и ни одна из них ничего не значила бы.
+  const hitCity = cityCrash(world, ship);
+  if (hitCity) { crash(L('Столкновение с постройкой: ') + hitCity.name + '.'); return; }
+
   if (zone) {
     const touch = checkTouchdown(ship, zone);
     if (touch && touch.result === 'landed') {
@@ -1418,7 +1430,13 @@ function step(dt) {
         tellImpact(touch.impact);
         say(st, L('ПОСАДКА БЕЗ ШАССИ · −') + Math.round(touch.damage) + L('% КОРПУСА'), '#ffcc66', 2);
       } else {
-        say(st, L('ПОСАДКА ВЫПОЛНЕНА: ') + zone.body.name, '#78e08f');
+        // Сел на площадку города — об этом говорят отдельно: пилот
+        // целился именно в неё, и «посадка выполнена: Lave IV» на
+        // размеченном бетоне читалось бы как промах.
+        const at = cityPadUnder(world, ship.pos);
+        say(st, at
+          ? L('ПОСАДКА ВЫПОЛНЕНА: ') + at.city.name + L(', ПЛОЩАДКА ') + at.pad.n
+          : L('ПОСАДКА ВЫПОЛНЕНА: ') + zone.body.name, '#78e08f');
       }
       landAt(zone, !!touch.damage);
       return;
@@ -1495,6 +1513,12 @@ function prepareHud() {
     const d = Math.hypot(s.pos.x - ship.pos.x, s.pos.y - ship.pos.y, s.pos.z - ship.pos.z);
     if (d < nearestDist) nearestDist = d;
     game.scanBlips.push({ pos: s.pos, color: s === target ? '#ffcc66' : '#78e08f' });
+  }
+  // Наземные города. Своим цветом: на сканере они стоят вплотную к своей
+  // планете (город на ней и стоит), и без отдельного цвета отметка
+  // читалась бы как утолщение планетной.
+  for (const c of world.cities) {
+    game.scanBlips.push({ pos: c.pos, color: c === target ? '#ffcc66' : '#e0a83e' });
   }
   // Чужие корабли на сканере. Дальность из-за них НЕ растягиваем: пилот
   // в другом конце системы не должен уводить масштаб кольца, на котором
@@ -1874,6 +1898,16 @@ function render() {
     ? { count: scene.rocks.count, builds: scene.rocks.builds, drawn: scene.rockDraws || 0 }
     : null;
   st.dust = game.dust ? game.dust.list.length : 0;
+  // Наземный город: собран ли он и рисуется ли. Собирается он порциями и
+  // сто тысяч граней, поэтому «города не видно» имеет две разные причины
+  // — ещё не собран или уже не рисуется, — и различить их иначе нечем.
+  st.city = scene && scene.city && (scene.city.mesh || scene.city.job)
+    ? {
+      built: scene.city.mesh ? (scene.city.mesh.faces || 0) : 0,
+      drawn: scene.cityDraws || 0,
+      km: scene.cityNear || 0,
+    }
+    : null;
 
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();

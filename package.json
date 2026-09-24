@@ -15,6 +15,7 @@
     "sounds": "node tools/sounds.mjs",
     "ship": "node tools/ship.mjs",
     "station": "node tools/station.mjs",
+    "city": "node tools/city.mjs",
     "api:export": "node tools/export.mjs",
     "api:setup": "node tools/export.mjs && node tools/php.mjs server/cli/setup.php",
     "api:status": "node tools/php.mjs server/cli/setup.php --status",

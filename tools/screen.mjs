@@ -152,6 +152,46 @@ const SCENES = {
       frames(20);
     `,
   },
+  // Город снимается ИЗ КАБИНЫ, а не от третьего лица: свой корабль в
+  // таком виде занимает низ кадра и закрывает ровно то, ради чего снимок.
+  city: {
+    url: '&surface=clipmap',
+    title: 'наземный город: вид с воздуха',
+    run: `
+      liftoff();
+      showCity(1.1, 3.6);
+      GAME.state.view = 'cockpit';
+    `,
+  },
+  citypad: {
+    url: '&surface=clipmap',
+    title: 'посадочная площадка города в упор',
+    run: `
+      liftoff();
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      showCityPad(0.32, 0.55);
+      GAME.state.view = 'cockpit';
+    `,
+  },
+  cityair: {
+    url: '&surface=clipmap',
+    title: 'город сверху: расчищенная площадка в рельефе',
+    run: `
+      liftoff();
+      showCity(9, 0.8);
+      GAME.state.view = 'cockpit';
+    `,
+  },
+  citynight: {
+    url: '&surface=clipmap',
+    title: 'город ночью: окна и огни порта',
+    run: `
+      liftoff();
+      showCity(1.1, 3.6, 'night');
+      GAME.ship.lights = true;
+      GAME.state.view = 'cockpit';
+    `,
+  },
   surface: {
     title: 'у самого грунта: отметка земли и посадочные условия',
     run: `
@@ -216,6 +256,12 @@ let url = arg('url', 'http://localhost/space_game/');
 // Автономный режим: снимок не должен зависеть от того, вошёл ли кто-то в
 // игру на этой машине, а вход уводит на страницу входа.
 if (!url.includes('?')) url += '?offline=1';
+// Сцена может попросить свой ключ в адресе. Нужно городу: поверхность
+// плитками печётся на видеокарте, а в headless её изображает
+// SwiftShader — полсекунды на плитку, то есть за всё ожидание успевают
+// три штуки, и город стоит на грубой сфере, проваливаясь в неё.
+// Заплатки (surface=clipmap) считаются на процессоре и приезжают сразу.
+if (scene.url && !arg('url', null)) url += scene.url;
 if (hud) url += '&hud=' + hud;
 
 // --- вспомогательное для сцен -------------------------------------------------
@@ -317,6 +363,103 @@ const HELPERS = `
     window.__lookAlong(GAME.ship.basis,
       { x: aim.x / al, y: aim.y / al, z: aim.z / al }, { x: 0, y: 1, z: 0 });
     frames(20);
+  };
+  // Повернуть тело так, чтобы город смотрел на солнце (или от него).
+  //
+  // Двигать по орбите нельзя — уедет вся система, — а суточное вращение
+  // ровно для этого и есть: город стоит на грунте и едет вместе с ним.
+  const turnCity = (c, side) => {
+    const b = c.body;
+    const sun = GAME.world.star;
+    const d = { x: sun.pos.x - b.pos.x, y: sun.pos.y - b.pos.y, z: sun.pos.z - b.pos.z };
+    const dl = Math.hypot(d.x, d.y, d.z) || 1;
+    d.x /= dl; d.y /= dl; d.z /= dl;
+    const want = side === 'night' ? -1 : 1;
+    let best = null;
+    const tmp = { x: 0, y: 0, z: 0 };
+    const keep = b.spinPhase;
+    for (let i = 0; i < 360; i++) {
+      b.spinPhase = (i / 360) * Math.PI * 2;
+      window.__surf.dirToWorldBody(b, c.dir, tmp);
+      const k = (tmp.x * d.x + tmp.y * d.y + tmp.z * d.z) * want;
+      if (!best || k > best.k) best = { k, ph: b.spinPhase };
+    }
+    b.spinPhase = best ? best.ph : keep;
+    frames(2);
+  };
+  // Встать над городом: alt километров высоты, dist километров в сторону.
+  const showCity = (alt, dist, side = null) => {
+    const c = GAME.world.cities[0];
+    if (!c) throw new Error('в системе нет города');
+    turnCity(c, side);
+    const u = c.basis.up, r = c.basis.right;
+    const p = GAME.ship.pos;
+    p.x = c.pos.x + u.x * alt + r.x * dist;
+    p.y = c.pos.y + u.y * alt + r.y * dist;
+    p.z = c.pos.z + u.z * alt + r.z * dist;
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0; GAME.ship.throttle = 0;
+    const i = GAME.nav.list.indexOf(c);
+    if (i >= 0) GAME.nav.index = i;
+    const look = () => {
+      const f = { x: c.pos.x - p.x, y: c.pos.y - p.y, z: c.pos.z - p.z };
+      const fl = Math.hypot(f.x, f.y, f.z) || 1;
+      window.__lookAlong(GAME.ship.basis,
+        { x: f.x / fl, y: f.y / fl, z: f.z / fl }, c.basis.up);
+    };
+    look();
+    // Держим корабль над городом всё ожидание: плитки поверхности
+    // считаются в потоках и приходят через несколько секунд, а свободный
+    // корабль за это время падает и уезжает с грунтом.
+    window.__hold = () => {
+      p.x = c.pos.x + c.basis.up.x * alt + c.basis.right.x * dist;
+      p.y = c.pos.y + c.basis.up.y * alt + c.basis.right.y * dist;
+      p.z = c.pos.z + c.basis.up.z * alt + c.basis.right.z * dist;
+      GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+      GAME.ship.speed = 0;
+      look();
+    };
+    frames(30);
+  };
+  // То же, но целясь в посадочную площадку, а не в середину города.
+  const showCityPad = (alt, dist, side = null) => {
+    const c = GAME.world.cities[0];
+    if (!c) throw new Error('в системе нет города');
+    turnCity(c, side);
+    const pad = c.plan.pads[1] || c.plan.pads[0];
+    const u = c.basis.up, r = c.basis.right, fw = c.basis.fwd;
+    const at = {
+      x: c.pos.x + r.x * pad.x + fw.x * pad.z,
+      y: c.pos.y + r.y * pad.x + fw.y * pad.z,
+      z: c.pos.z + r.z * pad.x + fw.z * pad.z };
+    const p = GAME.ship.pos;
+    p.x = at.x + u.x * alt + r.x * dist;
+    p.y = at.y + u.y * alt + r.y * dist;
+    p.z = at.z + u.z * alt + r.z * dist;
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0; GAME.ship.throttle = 0;
+    const look = () => {
+      const a2 = {
+        x: c.pos.x + c.basis.right.x * pad.x + c.basis.fwd.x * pad.z,
+        y: c.pos.y + c.basis.right.y * pad.x + c.basis.fwd.y * pad.z,
+        z: c.pos.z + c.basis.right.z * pad.x + c.basis.fwd.z * pad.z };
+      const f = { x: a2.x - p.x, y: a2.y - p.y, z: a2.z - p.z };
+      const fl = Math.hypot(f.x, f.y, f.z) || 1;
+      window.__lookAlong(GAME.ship.basis,
+        { x: f.x / fl, y: f.y / fl, z: f.z / fl }, c.basis.up);
+      return a2;
+    };
+    look();
+    window.__hold = () => {
+      const a2 = look();
+      p.x = a2.x + c.basis.up.x * alt + c.basis.right.x * dist;
+      p.y = a2.y + c.basis.up.y * alt + c.basis.right.y * dist;
+      p.z = a2.z + c.basis.up.z * alt + c.basis.right.z * dist;
+      GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+      GAME.ship.speed = 0;
+      look();
+    };
+    frames(30);
   };
   // Зависнуть над телом на высоте alt, носом ПО ГОРИЗОНТУ.
   //
@@ -497,7 +640,11 @@ try {
   // сесть). Кадры добиваем вручную.
   const until = Date.now() + wait;
   while (Date.now() < until) {
-    await run(cdp, 'window.__tick(); return 1;');
+    // Сцена может попросить удерживать корабль: window.__hold зовётся на
+    // каждом шаге ожидания. Нужно тем сценам, где корабль висит без
+    // опоры, — за секунды ожидания он успевает и упасть, и уехать вместе
+    // с грунтом, и снимок показывает не то, что ставили.
+    await run(cdp, 'if (window.__hold) window.__hold(); window.__tick(); return 1;');
     await sleep(50);
   }
 

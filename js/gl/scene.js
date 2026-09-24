@@ -51,6 +51,7 @@ import {
 } from './planetmesh.js';
 import { SurfacePatch } from './patches.js';
 import { RockField } from './rocks.js';
+import { CityField } from './citymesh.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
@@ -328,6 +329,11 @@ export class GlScene {
     // Камни у самой поверхности: предметы известного размера, по которым
     // глаз и меряет высоту (см. js/gl/rocks.js).
     this.rocks = new RockField(gl, this.meshLocs);
+    // Наземный город: сто тысяч граней, собираемых порциями и один раз
+    // (js/gl/citymesh.js). Рисуется как обычный предмет — со своим
+    // положением и базисом, а не в долях радиуса тела.
+    this.city = new CityField(gl, this.meshLocs);
+    this.cityDraws = 0;
 
     // Поверхность плитками: геометрия и текстуры считаются по одному
     // разу на плитку и живут в кэше (js/gl/tiles.js). Прежний путь —
@@ -579,6 +585,13 @@ export class GlScene {
     gl.uniform1i(prog.loc('uOctFrom'), u.octFrom);
     gl.uniform1i(prog.loc('uCsFrom'), u.csFrom);
     gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw || 0);
+    // Площадка наземного города (js/gl/terrain.js): на ней мелкого
+    // рельефа нет. Нулевой радиус означает «площадки нет» — так тела без
+    // города не платят за неё ничем.
+    const pl = u.plate;
+    gl.uniform4f(prog.loc('uPlate'),
+      pl ? pl.x : 0, pl ? pl.y : 0, pl ? pl.z : 0, pl ? pl.d0 : 0);
+    gl.uniform1f(prog.loc('uPlateRim'), pl ? pl.d1 : 1);
   }
 
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
@@ -607,6 +620,7 @@ export class GlScene {
     this.tris = 0;
     this.draws = 0;
     this.rockDraws = 0;
+    this.cityDraws = 0;
     this.streamDraws = 0;
     this.moteDraws = 0;
     this.cabinDraws = 0;
@@ -1056,6 +1070,7 @@ export class GlScene {
   forgetSystem(world) {
     if (this.tiles) this.tiles.clear();
     if (this.rocks) this.rocks.clear();
+    if (this.city) this.city.clear();
     this.tileBody = null;
     this.rockBody = null;
     this.skySeed = null;         // небо чужой системы печётся заново
@@ -1080,6 +1095,7 @@ export class GlScene {
   updatePatches(game) {
     const body = this.nearestSurface(game.world);
     this.updateRocks(body, game.world.star.pos);
+    this.updateCity(game.world);
     if (this.tilesOn) {
       this.updateTiles(body);
       this.patchBody = null;
@@ -1088,6 +1104,27 @@ export class GlScene {
     this.patchBody = body
       ? this.patch.update(body, this.camera.pos, body._glLevel || 0, PATCH_MS)
       : this.patch.update(null, null, 0, 0);
+  }
+
+  /**
+   * Наземный город: какой собирать и когда.
+   *
+   * Сборка заводится ЗАРАНЕЕ — за сотню радиусов города, то есть задолго
+   * до того, как он займёт в кадре хоть пиксель. Причина в том, что
+   * подходят к нему сверху и быстро: начни собирать по видимости, и сто
+   * тысяч граней появлялись бы уже на глазах.
+   */
+  updateCity(world) {
+    const cities = world.cities;
+    if (!cities || !cities.length) { this.city.clear(); return; }
+    const cam = this.camera;
+    let near = null, nd = Infinity;
+    for (const c of cities) {
+      const d = Math.hypot(c.pos.x - cam.pos.x, c.pos.y - cam.pos.y, c.pos.z - cam.pos.z);
+      if (d < nd) { nd = d; near = c; }
+    }
+    this.cityNear = nd;
+    this.city.update(nd < near.radius * 100 ? near : null);
   }
 
   /**
@@ -1365,6 +1402,21 @@ export class GlScene {
       bodyBasis(this.rockBody, this.basisTmp);
       this.drawObject(prog, this.rocks.mesh, this.rockBody.pos, this.basisTmp,
         this.rockBody.radius, sunPos);
+    }
+
+    // Наземный город. После грунта и камней, но до станций: он ближе
+    // всего к камере, и так он реже перерисовывается поверх уже
+    // закрашенного (глубина отсекает остальное сама).
+    if (this.city.mesh && this.city.city) {
+      const c = this.city.city;
+      const d = Math.hypot(
+        c.pos.x - this.camera.pos.x, c.pos.y - this.camera.pos.y, c.pos.z - this.camera.pos.z);
+      // Дальше этого город не занимает и пикселя — рисовать его там
+      // незачем, за это отвечает метка в приборах.
+      if (d < c.radius * 2 * this.camera.focal) {
+        this.drawObject(prog, this.city.mesh, c.pos, c.basis, 1, sunPos);
+        this.cityDraws = 1;
+      }
     }
 
     // Станции.

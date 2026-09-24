@@ -97,6 +97,10 @@ export function drawDebug(r, game, dbg) {
       ? `камни: ${rs.rocks.count} в поле, нарисовано ${rs.rocks.drawn}, ` +
         `сборок ${rs.rocks.builds}   пыль: ${rs.dust} частиц`
       : '',
+    rs.city
+      ? `город: граней ${rs.city.built}, нарисован ${rs.city.drawn}, ` +
+        `до него ${rs.city.km.toFixed(1)} км`
+      : '',
     game.entry
       ? `вход в атмосферу: нагрев ${(game.entry.heat * 100).toFixed(0)}%, ` +
         `обдув ${(game.entry.speed * 1000).toFixed(0)} м/с, плотность ` +

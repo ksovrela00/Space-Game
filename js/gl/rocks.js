@@ -20,7 +20,7 @@
 
 import { faceDir } from './quadtree.js';
 import { cubeLookup } from './bake.js';
-import { terrainOf } from './terrain.js';
+import { terrainOf, plateAt } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
 import { Q } from '../core/quality.js';
 
@@ -109,6 +109,9 @@ export function scatterRocks(body, dir, radius, out = []) {
       if (Math.abs(u) > 1 || Math.abs(v) > 1) continue;    // соседняя грань
       const d = faceDir(look.face, u, v, { x: 0, y: 0, z: 0 });
       if (d.x * dir.x + d.y * dir.y + d.z * dir.z < cosLim) continue;   // за краем поля
+      // Площадка города расчищена: валуны на перроне и в улицах означали
+      // бы, что город никто не строил, а просто положил поверх камней.
+      if (body.plate && plateAt(body.plate, d.x, d.y, d.z) > 0) continue;
       // Размер: мелких много, крупных мало — так и выглядит настоящая
       // россыпь (распределение размеров у них степенное и крутое).
       const t = h[3] ** 3;

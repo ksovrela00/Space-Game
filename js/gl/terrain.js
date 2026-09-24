@@ -368,6 +368,31 @@ const rampAt = (ramp, t, out) => {
  * её использует игровая логика (высота поверхности под кораблём), а
  * сетки рендера просят ровно столько, сколько способны показать.
  */
+// --- Ровная площадка под наземным городом --------------------------------------
+//
+// Город стоит не на подставке: площадка — это САМА ПОВЕРХНОСТЬ. По ней
+// считаются и высота под кораблём, и посадка, и столкновение, и сетка,
+// которую рисует видеокарта, — иначе нарисованное и настоящее разошлись
+// бы, а посадочная площадка оказалась бы на склоне кратерного вала
+// (js/game/city.js).
+//
+// Вес считается по КВАДРАТУ ХОРДЫ между направлениями, а не по углу:
+// рельеф выбирают миллионы раз за кадр, и арккосинус в этом месте стоил
+// бы дороже самого рельефа. Квадрат хорды монотонен по углу и даётся
+// тремя умножениями.
+
+/** Бетон площадки. Светлее грунта — это видно и с орбиты. */
+export const PLATE_RGB = [0.42, 0.435, 0.455];
+
+/** Вес площадки в точке: 1 на плите, 0 за краем перехода. */
+export function plateAt(plate, x, y, z) {
+  const dx = x - plate.x, dy = y - plate.y, dz = z - plate.z;
+  const d2 = dx * dx + dy * dy + dz * dz;
+  if (d2 >= plate.d1) return 0;
+  if (d2 <= plate.d0) return 1;
+  return 1 - smooth01((d2 - plate.d0) / (plate.d1 - plate.d0));
+}
+
 export const terrainOf = (body) => body._terrain || (body._terrain = makeTerrain(body));
 
 export function makeTerrain(body) {
@@ -452,7 +477,12 @@ export function makeTerrain(body) {
       ? craterW * craterField(seed + CRATER_SEED, x, y, z, d.cs, dens)
       : 0;
     // Ниже уровня моря — ровная водная сфера, а не дно.
-    const h = flat ? 0 : clamp01((r - cfg.sea) / span) * cfg.amp + cr;
+    let h = flat ? 0 : clamp01((r - cfg.sea) / span) * cfg.amp + cr;
+    // Площадка города: выравнивает и высоту, и цвет. Читается прямо из
+    // тела, а не запоминается при сборке рельефа, — тогда порядок
+    // «сначала город, потом первая выборка» перестаёт быть условием.
+    const pw = body.plate ? plateAt(body.plate, x, y, z) : 0;
+    if (pw > 0) h += (body.plate.h - h) * pw;
 
     if (rgb) {
       let t = normOf(r);
@@ -476,6 +506,11 @@ export function makeTerrain(body) {
       rgb[0] = clamp01(rgb[0] * k);
       rgb[1] = clamp01(rgb[1] * k);
       rgb[2] = clamp01(rgb[2] * k);
+      if (pw > 0) {
+        rgb[0] += (PLATE_RGB[0] - rgb[0]) * pw;
+        rgb[1] += (PLATE_RGB[1] - rgb[1]) * pw;
+        rgb[2] += (PLATE_RGB[2] - rgb[2]) * pw;
+      }
     }
     return h;
   };
@@ -544,6 +579,10 @@ export function makeTerrain(body) {
     ridge: cfg.ridge ? 1 : 0,
     craterW,
     flat,
+    // Площадка нужна и шейдеру: он досчитывает мелкий рельеф поверх
+    // сетки, и без неё на срезанной плите проступали бы камни и валы,
+    // которых там уже нет.
+    plate: body.plate || null,
   });
 
   return {

@@ -2291,6 +2291,110 @@ await step('крупные приборы помещаются в кадр', () 
   }
 });
 
+
+await step('город: цель по Tab и посадка на площадку', () => {
+  // Шаг идёт последним, и в каком состоянии его застанут предыдущие,
+  // заранее не известно: возвращаем корабль в полёт сами.
+  if (game.state.mode === 'crashed') { key('Space'); frames(10); }
+  if (game.state.mode === 'docked') { key('Space'); frames(90); }
+  const city = game.world.cities[0];
+  if (!city) throw new Error('в родной системе нет города');
+  const pad = city.plan.pads[1];
+  const u = city.basis.up, r = city.basis.right, f = city.basis.fwd;
+  // Точка над второй площадкой. Высоту берём небольшую: спуск с орбиты
+  // проверяет соседний шаг (луна), а здесь проверяется город.
+  const at = {
+    x: city.pos.x + r.x * pad.x + f.x * pad.z,
+    y: city.pos.y + r.y * pad.x + f.y * pad.z,
+    z: city.pos.z + r.z * pad.x + f.z * pad.z,
+  };
+  const alt = 2;
+  game.ship.pos.x = at.x + u.x * alt;
+  game.ship.pos.y = at.y + u.y * alt;
+  game.ship.pos.z = at.z + u.z * alt;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  game.ship.speed = 0;
+  game.ship.throttle = 0;
+  // Нос вниз, на город.
+  const b = game.ship.basis;
+  b.fwd = { x: -u.x, y: -u.y, z: -u.z };
+  b.right = { x: r.x, y: r.y, z: r.z };
+  b.up = {
+    x: b.fwd.y * b.right.z - b.fwd.z * b.right.y,
+    y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
+    z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
+  };
+  frames(4);
+
+  // Город выбирается тем же Tab, что и всё остальное. Под прицелом
+  // сейчас и планета, и город: планета сортируется первой (её край
+  // накрывает прицел со всех сторон), поэтому до города доходят вторым
+  // нажатием — ровно так эта механика и задумана.
+  let picked = null;
+  for (let i = 0; i < 4 && picked !== city; i++) {
+    key('Tab');
+    frames(2);
+    picked = game.nav.list[game.nav.index];
+  }
+  if (picked !== city) {
+    throw new Error('город не выбирается прицелом: ' + (picked && picked.name));
+  }
+
+  // Посадочный компьютер по городу означает «на его тело»: садятся не в
+  // город, а на грунт под собой, и вывести корабль НАД городом — работа
+  // квантового привода.
+  key('KeyL');
+  frames(30);
+  if (!game.ship.landing) throw new Error('посадочный компьютер не включился в городе');
+  if (game.ship.landing.body !== city.body) {
+    throw new Error('компьютер взял не то тело: ' + game.ship.landing.body.name);
+  }
+  for (let i = 0; i < 400 && game.state.mode === 'flight'; i++) frames(60);
+  if (game.state.mode !== 'landed') {
+    throw new Error('режим ' + game.state.mode + ', причина: ' + game.crashReason);
+  }
+  // Сел именно на площадку, а не рядом с городом. Переводим место
+  // посадки в оси города теми же векторами, которыми город поставлен.
+  {
+    const p = game.ship.pos;
+    const dx = p.x - city.pos.x, dy = p.y - city.pos.y, dz = p.z - city.pos.z;
+    const lx = dx * city.basis.right.x + dy * city.basis.right.y + dz * city.basis.right.z;
+    const lz = dx * city.basis.fwd.x + dy * city.basis.fwd.y + dz * city.basis.fwd.z;
+    const off = Math.hypot(lx - pad.x, lz - pad.z);
+    if (off > pad.r) {
+      throw new Error('сел мимо площадки: ' + (off * 1000).toFixed(0) + ' м от середины');
+    }
+  }
+  // И об этом сказано в кадре: «посадка выполнена: <город>, площадка N».
+  texts = [];
+  frames(1);
+  const seen = texts;
+  texts = null;
+  if (!seen.some((t) => new RegExp(city.name).test(t.s))) {
+    throw new Error('в кадре не сказано, что сели в городе');
+  }
+
+  // Постройки твёрдые: взлетаем и въезжаем в ближайшую башню. Это и есть
+  // разница между городом и картинкой города.
+  key('KeyG'); frames(30);                       // шасси убрать
+  const tall = city.plan.boxes.reduce((a, x) => (x.h > a.h ? x : a), city.plan.boxes[0]);
+  game.ship.landedAt = null;
+  game.ship.secured = false;
+  game.state.mode = 'flight';
+  game.ship.pos.x = city.pos.x + r.x * tall.x + u.x * tall.h * 0.5 + f.x * tall.z;
+  game.ship.pos.y = city.pos.y + r.y * tall.x + u.y * tall.h * 0.5 + f.y * tall.z;
+  game.ship.pos.z = city.pos.z + r.z * tall.x + u.z * tall.h * 0.5 + f.z * tall.z;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  frames(4);
+  if (game.state.mode !== 'crashed') {
+    throw new Error('в башне корабль цел: режим ' + game.state.mode);
+  }
+  if (!/постройк/i.test(game.crashReason || '')) {
+    throw new Error('причина крушения не про постройку: ' + game.crashReason);
+  }
+  key('Space'); frames(10);          // вернуться в игру
+});
+
 await step('сохранение в localStorage', () => {
   frames(60 * 6);
   if (!savedJson()) throw new Error('сейв не записан');

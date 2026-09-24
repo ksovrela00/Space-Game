@@ -282,7 +282,13 @@ export class TileSet {
       if (e && !e.mesh) this.tiles.delete(f.key);
     }
 
-    const spec = { kind: body.kind, name: body.name, id: body.id };
+    // Площадка города уезжает в поток вместе с телом: рельеф там ровный,
+    // и сетка обязана быть ровной с обеих сторон — иначе плитки,
+    // собранные в потоке, разошлись бы с тем, по чему считается посадка.
+    const spec = {
+      kind: body.kind, name: body.name, id: body.id,
+      plate: body.plate || null,
+    };
     while (this.pool.free && this.wanted.length) {
       const t = this.takeBest();
       if (!t) break;
@@ -335,6 +341,10 @@ export class TileSet {
       // Сверху окно не обрезано: в текстуру пишется вся поверхность.
       gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw);
       gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
+      const pl = u.plate;
+      gl.uniform4f(prog.loc('uPlate'),
+        pl ? pl.x : 0, pl ? pl.y : 0, pl ? pl.z : 0, pl ? pl.d0 : 0);
+      gl.uniform1f(prog.loc('uPlateRim'), pl ? pl.d1 : 1);
       gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
       this.quad.draw();
     });

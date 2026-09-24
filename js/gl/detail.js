@@ -162,6 +162,12 @@ export function bakeUniforms(terrain) {
     maxOct: BAKE_MAX_OCT,
     // Сверху окно не обрезано: в текстуру пишется вся поверхность.
     bakeFw: 0,
+    // Площадка города: в запечённой текстуре она обязана быть такой же
+    // ровной, как в геометрии. Иначе на срезанном грунте остаются тени
+    // кратеров, которых там уже нет, — а это единственное, что видно с
+    // воздуха, потому что сорокаметровая яма с километра не читается
+    // ничем, кроме своей тени.
+    plate: p.plate || null,
   };
 }
 
@@ -187,6 +193,7 @@ export function detailUniforms(terrain, meshCell, budget = 1) {
     octFrom: d.oct,
     csFrom: d.cs,
     bakeFw: 0,
+    plate: p.plate || null,
   };
 }
 
@@ -233,6 +240,13 @@ uniform int uMaxOct;        // предел на октавы шума
 // пикселем есть (0 — нет). Всё, что крупнее, уже лежит в текстуре, и
 // добавлять это второй раз нельзя.
 uniform float uBakeFw;
+// Ровная площадка наземного города: xyz — направление на неё, w —
+// квадрат хорды её края (0 — площадки на этом теле нет). Мелкий рельеф
+// на ней не считается: он срезан вместе с грунтом, и досчитывать его
+// поверх значило бы рисовать камни там, где их уже нет
+// (js/gl/terrain.js, plateAt — та же арифметика).
+uniform vec4 uPlate;
+uniform float uPlateRim;    // квадрат хорды внешнего края перехода
 
 const float D_GAIN = ${f(GAIN)};
 const float D_LAC = ${f(LAC)};
@@ -268,6 +282,13 @@ uint dHash(int seed, ivec3 c) {
          ^ (uint(c.y) * 668265263u) ^ (uint(c.z) * 1442695041u);
   h = (h ^ (h >> 13u)) * 1274126177u;
   return h ^ (h >> 16u);
+}
+
+/** Вес площадки: 1 на плите, 0 за краем перехода. */
+float dPlate(vec3 dir) {
+  if (uPlate.w <= 0.0) return 0.0;
+  vec3 q = dir - uPlate.xyz;
+  return 1.0 - smoothstep(uPlate.w, uPlateRim, dot(q, q));
 }
 
 float dFade(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }

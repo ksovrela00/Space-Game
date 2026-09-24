@@ -43,19 +43,19 @@
     ],
     'game/': [
       'audio', 'bodyinfo', 'clock', 'docking', 'dust', 'entry', 'flow',
-      'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
+      'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
       'warp', 'weapons', 'world'
     ],
     'gl/': [
-      'bake', 'context', 'detail', 'gputime', 'icosphere', 'mat4',
+      'bake', 'citymesh', 'context', 'detail', 'gputime', 'icosphere', 'mat4',
       'mesh', 'nebula', 'patches', 'planetmesh', 'program', 'quadtree',
       'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
       'tiles', 'tileworker'
     ],
     'models/': [
-      'cockpit', 'geometry', 'hull.data', 'ships', 'station.parts',
-      'stations'
+      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'ships',
+      'station.parts', 'stations'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'

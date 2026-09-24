@@ -18,6 +18,7 @@ import { setGravity } from './gravity.js';
 import { HOME_SEED, HOME_CLASS, HAB_HOME, systemBySeed } from './galaxy.js';
 import { pressureOf } from './bodyinfo.js';
 import { STATION_KINDS, stationShape } from '../models/stations.js';
+import { makeCity, updateCity, canHostCity } from './city.js';
 import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
@@ -565,6 +566,7 @@ export function makeSystem(spec = HOME_SEED) {
     bodies: [],            // плоский список тел для рендера и навигации
     stations: [],
     markers: [],           // орбитальные маркеры (цели квантового прыжка)
+    cities: [],            // наземные города
   };
 
   world.bodies.push(star);
@@ -579,6 +581,27 @@ export function makeSystem(spec = HOME_SEED) {
   for (const b of world.bodies) {
     b.markers = makeMarkers(b);
     for (const m of b.markers) world.markers.push(m);
+  }
+
+  // Наземный город. Пока один и только в родной системе: это первый
+  // город в игре, и прежде чем застраивать галактику, на него нужно
+  // посмотреть глазами — планировка, масштаб, подход на посадку.
+  //
+  // Тело выбирается ПРАВИЛОМ, а не случайно: первая по орбите КАМЕННАЯ
+  // планета без атмосферы, а если такой нет — любая безатмосферная.
+  // Каменная предпочтительнее не из вкуса: на лавовом мире грунт светится
+  // сам, и город на нём читался бы как пожар, а не как город. Луны не в
+  // счёт — город на луне газового гиганта пришлось бы искать.
+  //
+  // Правило детерминированное, поэтому город остаётся на том же месте
+  // между запусками и в чужих сохранениях.
+  if (seed === HOME_SEED) {
+    const host = planets.find((p) => canHostCity(p) && p.kind === 'rock')
+      || planets.find((p) => canHostCity(p));
+    if (host) {
+      host.city = makeCity(host, 'c' + host.id);
+      world.cities.push(host.city);
+    }
   }
 
   // Гравитация: масса из плотности и радиуса, радиус захвата — из массы
@@ -644,6 +667,10 @@ export function updateWorld(world, dt) {
       cross(f, s.basis.right, s.basis.up);
     }
   }
+
+  // Город, наоборот, ВРАЩАЕТСЯ вместе с телом: он стоит на грунте, и
+  // сутки для него — это настоящие сутки.
+  for (const c of world.cities) updateCity(c);
 
   // Маркеры едут вместе со своим телом, но НЕ вращаются с ним: иначе
   // точка, к которой только что прыгнул, уезжала бы за сутки.
