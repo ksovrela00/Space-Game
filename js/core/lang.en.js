@@ -346,6 +346,13 @@ export const EN = {
   '/с, до ': '/s, up to ',
   'ЧИСЛА НЕ ЧИТАЮТСЯ': 'DATA UNREADABLE',
   'ГРУНТ': 'GROUND',
+  'ГОРОД': 'CITY',
+  'ПЛОЩАДКИ': 'LANDING PADS',
+  'РАЗМЕР': 'SIZE',
+  'Наземный город на выровненной плите. Садиться можно на ':
+    'A surface city on a levelled plate. You may land on ',
+  'его площадки — они ровные и обозначены, в отличие от дикого грунта.':
+    'its pads: flat and marked, unlike raw ground.',
   'ГНЕЗДО СВОБОДНО': 'MOUNT EMPTY',
   'МАРШЕВЫЙ ДВИГАТЕЛЬ': 'MAIN ENGINE',
   'ФОРСИРОВАННЫЙ ДВИГАТЕЛЬ': 'UPRATED ENGINE',

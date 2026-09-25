@@ -21,6 +21,7 @@
 // при входе. Подписи, не подтверждённой числом из мира, в карточке нет.
 
 import { fmtDist, fmtTime } from './hud.js';
+import { CITY } from '../models/city.js';
 import {
   KIND_INFO, kindLabel, massOf, escapeSpeed, dayLength, atmosphereOf,
   temperatureOf, toCelsius, EARTH_MASS, starDistance,
@@ -93,6 +94,10 @@ function spanOf(obj, world) {
   if (!obj) return outerOrbit(world);
   if (obj.isMarker) return obj.dist * 1.6;
   if (obj.isStation) return obj.orbit.radius * 1.5;
+  // Город стоит НА теле, и сам по себе он точка. Показываем его вместе с
+  // телом: иначе карта прыгнула бы в масштаб двух километров, где нет
+  // ничего, кроме самого города.
+  if (obj.isCity) return obj.body.radius * 3;
   if (obj.kind === 'star') return outerOrbit(world) * 2.2;
   let span = obj.radius * 8;
   for (const m of obj.moons || []) span = Math.max(span, m.orbit.radius * 1.4);
@@ -142,6 +147,7 @@ const markerHost = (sel) => {
   if (!sel) return null;
   if (sel.isMarker) return sel.body;
   if (sel.isStation) return sel.parent;
+  if (sel.isCity) return sel.body;
   return sel.isBody ? sel : null;
 };
 
@@ -156,7 +162,11 @@ export function mapObjects(world, sel, out = []) {
   for (const p of world.planets) {
     out.push(p);
     if (p.station) out.push(p.station);
-    for (const m of p.moons) out.push(m);
+    if (p.city) out.push(p.city);
+    for (const m of p.moons) {
+      out.push(m);
+      if (m.city) out.push(m.city);
+    }
   }
   const host = markerHost(sel);
   if (host && host.markers) for (const m of host.markers) out.push(m);
@@ -168,6 +178,10 @@ function offsetOf(obj) {
   if (!obj) return Infinity;
   if (obj.isMarker) return obj.dist;
   if (obj.isStation) return obj.orbit.radius;
+  // Город лежит на поверхности, то есть ровно в радиусе тела от его
+  // центра. По этому же числу решается, показывать ли его: пока диск
+  // планеты мельче нескольких пикселей, город — утолщение точки.
+  if (obj.isCity) return obj.body.radius;
   if (obj.parent && obj.parent.parent) return obj.orbit.radius;   // луна
   return Infinity;
 }
@@ -178,7 +192,7 @@ const visibleAt = (obj, scale) => offsetOf(obj) * scale > 5;
 
 /** Радиус значка на экране, пикселей. */
 export function glyphRadius(obj, map) {
-  if (!obj || obj.isMarker || obj.isStation) return 4;
+  if (!obj || obj.isMarker || obj.isStation || obj.isCity) return 4;
   const min = obj.kind === 'star' ? 5 : (obj.kind === 'moon' ? 2 : 3.2);
   return Math.max(min, Math.min(obj.radius * map.scale, Math.min(map.vw, map.vh) * 0.45));
 }
@@ -606,6 +620,13 @@ export function objectCard(game, obj) {
     rows.push([L('УДАЛЕНИЕ'), fmtDist(obj.dist) +
       ' (' + (obj.dist / obj.body.radius).toFixed(0) + L(' радиуса)')]);
     range();
+  } else if (obj.isCity) {
+    card.desc = L('Наземный город на выровненной плите. Садиться можно на ') +
+      L('его площадки — они ровные и обозначены, в отличие от дикого грунта.');
+    rows.push([L('ТЕЛО'), obj.body.name]);
+    rows.push([L('ПЛОЩАДКИ'), String(CITY.pads)]);
+    rows.push([L('РАЗМЕР'), fmtDist(obj.radius * 2)]);
+    range();
   } else if (obj.isStation) {
     const p = obj.parent;
     card.desc = L('Орбитальный порт: единственное место, где восстанавливают ') +
@@ -651,6 +672,7 @@ export function objectCard(game, obj) {
     rows.push([L('ПОСАДКА'), landingNote(obj)]);
     if (obj.rings) rows.push([L('КОЛЬЦА'), L('есть')]);
     if (obj.station) rows.push([L('СТАНЦИЯ'), obj.station.name]);
+    if (obj.city) rows.push([L('ГОРОД'), obj.city.name]);
     if (obj.moons && obj.moons.length) {
       rows.push([L('ЛУНЫ'), obj.moons.length + ': ' + obj.moons.map((m) => m.name).join(', ')]);
     }
@@ -831,6 +853,16 @@ function drawGlyph(ctx, obj, sx, sy, map, isTarget) {
   } else if (obj.isStation) {
     ctx.strokeStyle = sel ? AMBER : GREEN;
     ctx.strokeRect(sx - 3.5, sy - 3.5, 7, 7);
+  } else if (obj.isCity) {
+    // Город — домик: треугольник на основании. Зелёным, как порт: это
+    // тоже место, куда садятся, в отличие от тел и точек в пустоте.
+    ctx.strokeStyle = sel ? AMBER : GREEN;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 4.5);
+    ctx.lineTo(sx + 4, sy + 3);
+    ctx.lineTo(sx - 4, sy + 3);
+    ctx.closePath();
+    ctx.stroke();
   } else {
     // Тело рисуется своим же цветом — тем, каким его видно из кабины, —
     // и своим же радиусом, пока он крупнее метки.
@@ -859,7 +891,8 @@ function drawGlyph(ctx, obj, sx, sy, map, isTarget) {
   if (off > 22 || sel) {
     ctx.textAlign = 'left';
     ctx.fillStyle = sel ? AMBER
-      : (obj.isStation ? 'rgba(120,224,143,0.85)' : 'rgba(159,217,230,0.78)');
+      : (obj.isStation || obj.isCity ? 'rgba(120,224,143,0.85)'
+        : 'rgba(159,217,230,0.78)');
     ctx.fillText(obj.name, sx + size + 5, sy + 4);
   }
 }

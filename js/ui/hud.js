@@ -1175,7 +1175,14 @@ function drawTargetList(ctx, cam, game, target) {
     const shape = () => {
       ctx.beginPath();
       if (t.isStation) ctx.rect(p.x - r, p.y - r, r * 2, r * 2);
-      else if (t.isMarker) {
+      else if (t.isCity) {
+        // Домик, тот же значок, что на карте: город — место на грунте, а
+        // не тело и не точка в пустоте, и путать их в прицеле нельзя.
+        ctx.moveTo(p.x, p.y - r);
+        ctx.lineTo(p.x + r * 0.9, p.y + r * 0.7);
+        ctx.lineTo(p.x - r * 0.9, p.y + r * 0.7);
+        ctx.closePath();
+      } else if (t.isMarker) {
         ctx.moveTo(p.x - r, p.y - r); ctx.lineTo(p.x + r, p.y + r);
         ctx.moveTo(p.x + r, p.y - r); ctx.lineTo(p.x - r, p.y + r);
       } else ctx.arc(p.x, p.y, r, 0, TAU);

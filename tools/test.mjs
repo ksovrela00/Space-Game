@@ -67,7 +67,7 @@ import {
   massOf, escapeSpeed, temperatureOf, atmosphereOf, starDistance, dayLength,
   KIND_INFO, T_EQ_HOME,
 } from '../js/game/bodyinfo.js';
-import {
+import { resetMap,
   makeMap, mapObjects, objectCard, focusOn, fitScale, pickAt, fmtMass,
   markerOnBody, glyphRadius,
 } from '../js/ui/map.js';
@@ -3279,9 +3279,36 @@ console.log('\n== карта системы ==');
   // Луны считаются из мира, а не числом: их количество задаётся макетом
   // системы и меняется каждый раз, когда в неё добавляют планету.
   const moonCount = world.planets.reduce((n, p) => n + p.moons.length, 0);
-  ok(plain.length === 1 + world.planets.length + world.stations.length + moonCount &&
-     withMarks.length === plain.length + 6,
-    `в списке карты ${plain.length} объектов, с маркерами выбранного тела — ${withMarks.length}`);
+  // Города — тоже объекты карты: к ним летят и на них садятся, и не
+  // показать их значило бы, что город есть только в прицеле.
+  const cityCount = world.cities.length;
+  ok(plain.length === 1 + world.planets.length + world.stations.length
+       + moonCount + cityCount &&
+     withMarks.length === plain.length + 6 &&
+     cityCount > 0 && plain.filter((o) => o.isCity).length === cityCount,
+    `в списке карты ${plain.length} объектов (городов ${cityCount}), ` +
+    `с маркерами выбранного тела — ${withMarks.length}`);
+
+  {
+    // Город на карте виден не всегда, и это правильно: пока планета сама
+    // размером в точку, город был бы её утолщением. Зато выбрать его
+    // можно всегда — и тогда карта показывает его ВМЕСТЕ с телом, а не
+    // прыгает в масштаб двух километров, где нет ничего, кроме него.
+    const city = world.cities[0];
+    const m = makeMap();
+    m.vw = 800; m.vh = 600; m.vx = 0; m.vy = 0;
+    resetMap(m, world);
+    // Масштаб карта считает при отрисовке: «вся система в кадре» на
+    // множитель приближения.
+    const scaleOf = () => fitScale(m, world) * m.zoom;
+    const wide = city.body.radius * scaleOf();
+    focusOn(m, world, city);
+    const near = city.body.radius * scaleOf();
+    ok(wide < 5 && near > 20 && near < Math.min(m.vw, m.vh) &&
+       glyphRadius(city, m) === 4,
+      `город на карте: на общем виде диск планеты ${wide.toFixed(1)} px (город скрыт), ` +
+      `после выбора — ${near.toFixed(0)} px, значок 4 px`);
+  }
 
   // Попадание курсором: по экранным координатам, а не по мировым.
   map.items = [{ obj: home, sx: 100, sy: 100 }, { obj: st, sx: 124, sy: 100 }];
