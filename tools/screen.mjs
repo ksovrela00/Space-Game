@@ -202,6 +202,69 @@ const SCENES = {
       GAME.state.view = 'cockpit';
     `,
   },
+  // Фары в городе. Тени от них считаются НА ПИКСЕЛЬ (js/gl/citymesh.js),
+  // в мешe их нет вовсе, и увидеть их можно только так: ночью, у самых
+  // домов, от третьего лица — чтобы в кадр попал и сам луч, и то, что
+  // он не достаёт за постройками.
+  citylamp: {
+    url: '&surface=clipmap',
+    title: 'фары в городе ночью: тени от луча',
+    run: `
+      liftoff();
+      showCity(0.35, 0.6, 'night');
+      GAME.ship.lights = true;
+      GAME.state.view = 'chase';
+    `,
+  },
+  // Список пилотов в сети (клавиша P).
+  //
+  // Сокета в снимке нет и быть не может, поэтому состав сети
+  // подставляется в window.NET — тот самый объект, из которого игра
+  // каждый кадр считает состояние связи. Значит, и строка вверху, и
+  // панель считаются тем же кодом, что и в игре, а не рисуются мимо неё.
+  pilots: {
+    title: 'список пилотов в сети',
+    run: `
+      liftoff();
+      aimAt(GAME.world.stations[0], 14);
+      GAME.state.view = 'chase';
+      const n = window.NET;
+      const fake = () => {
+        n.state = 'live';
+        n.ping = 34;
+        n.tick = 0.2;
+        n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+        n.roster = [
+          { id: 1, name: 'ДЖЕЙМСОН', sys: 0 },
+          { id: 4, name: 'АННА', sys: 0 },
+          { id: 7, name: 'ЗАХАР', sys: 3 },
+          { id: 9, name: 'ГОСТЬ', sys: null },
+        ];
+        // Приходы снимков — по часам ИГРЫ (GAME.now), иначе они
+        // считаются просроченными и связь выходит «в потерях».
+        const t = GAME.now || performance.now() / 1000;
+        n.beats.length = 0;
+        for (let i = 10; i > 0; i--) n.beats.push(t - i * 0.2);
+        GAME.showPilots = true;
+      };
+      fake();
+      window.__hold = fake;
+      frames(4);
+    `,
+  },
+  // Страница входа — НЕ игра: window.GAME на ней не появится никогда,
+  // и ждать его значит не снять её вовсе. Отсюда plain: страница
+  // снимается как страница, без игровой обвязки и без кадров.
+  login: {
+    plain: 'login.html?offline=1',
+    title: 'страница входа',
+    run: '',
+  },
+  signup: {
+    plain: 'login.html?offline=1',
+    title: 'страница входа: регистрация',
+    run: "document.getElementById('swap').click();",
+  },
   surface: {
     title: 'у самого грунта: отметка земли и посадочные условия',
     run: `
@@ -239,6 +302,10 @@ const SCENES = {
     title: 'меню пилота',
     run: 'liftoff(); press("KeyI");',
   },
+  help: {
+    title: 'страница управления (клавиша H)',
+    run: 'liftoff(); press("KeyH");',
+  },
 };
 
 if (flag('list')) {
@@ -262,7 +329,8 @@ const hud = arg('hud', null);
 const extra = arg('do', '');
 const wait = Number(arg('wait', 1200));
 
-let url = arg('url', 'http://localhost/space_game/');
+let url = arg('url', 'http://localhost/space_game/'
+  + (scene.plain && !arg('url', null) ? scene.plain : ''));
 // Автономный режим: снимок не должен зависеть от того, вошёл ли кто-то в
 // игру на этой машине, а вход уводит на страницу входа.
 if (!url.includes('?')) url += '?offline=1';
@@ -605,8 +673,26 @@ try {
 
   // Ждём не «загрузки страницы», а саму игру: модули грузятся, потом
   // загрузчик идёт за характеристиками на сервер, и только после этого
-  // появляется window.GAME.
+  // появляется window.GAME. Страница без игры (plain) ждёт своё: чтобы
+  // скрипт модулем успел расставить надписи.
   let ok = false;
+  if (scene.plain) {
+    for (let i = 0; i < 100 && !ok; i++) {
+      ok = await run(cdp, "return !!document.querySelector('#go') && document.querySelector('#go').textContent !== ''");
+      if (!ok) await sleep(50);
+    }
+    if (!ok) throw new Error('страница не собралась: нет кнопки входа');
+    if (scene.run) await run(cdp, scene.run);
+    if (extra) await run(cdp, extra);
+    await sleep(wait);
+    const shotP = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+    writeFileSync(out, Buffer.from(shotP.data, 'base64'));
+    console.log(`снимок: ${out}  (${W}×${H}, сцена «${scene.title}»)`);
+    cdp.close();
+    proc.kill();
+    try { rmSync(profile, { recursive: true, force: true }); } catch (e) { /* и ладно */ }
+    process.exit(0);
+  }
   for (let i = 0; i < 200; i++) {
     ok = await run(cdp, 'return !!(window.GAME && window.GAME.world)');
     if (ok) break;

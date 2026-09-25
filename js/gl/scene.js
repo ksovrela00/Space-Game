@@ -39,7 +39,7 @@ import { localDir, altitudeOf } from '../game/surface.js';
 import { ENTRY } from '../game/entry.js';
 import { L } from '../core/lang.js';
 import { SHIELD_AXES } from '../models/ships.js';
-import { lampBeams, LAMP } from '../game/lamps.js';
+import { lampBeams, lampCone, LAMP } from '../game/lamps.js';
 
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
@@ -52,7 +52,7 @@ import {
 } from './planetmesh.js';
 import { SurfacePatch } from './patches.js';
 import { RockField } from './rocks.js';
-import { CityField } from './citymesh.js';
+import { CityField, SHADE_MAX, shadeBoxes } from './citymesh.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
@@ -148,6 +148,10 @@ const _tint = new Float32Array(3);
 const _cityAt = { x: 0, y: 0, z: 0 };
 // Направление на звезду в осях города: по нему кладутся тени.
 const _citySun = { x: 0, y: 0, z: 0 };
+// Где фара и куда светит — в осях города: по этому отбираются
+// постройки, кладущие тень (js/gl/citymesh.js).
+const _lampAt = { x: 0, y: 0, z: 0 };
+const _lampCone = { x: 0, y: 0, z: 0, cos: 1 };
 function starTint(sys) {
   const c = sys && sys.cls ? sys.cls.color : [255, 226, 168];
   for (let i = 0; i < 3; i++) _tint[i] = 0.35 + 0.65 * (c[i] / 255);
@@ -389,6 +393,12 @@ export class GlScene {
     this.lampDir = new Float32Array(6);
     this.lampCos = new Float32Array(4);
     this.lampDir3 = new Float32Array(3);
+    // Тени от фар: коробки ближайших построек и оси города.
+    this.shadeA = new Float32Array(SHADE_MAX * 4);
+    this.shadeB = new Float32Array(SHADE_MAX * 4);
+    this.cityOrg = new Float32Array(3);
+    this.cityAxes = new Float32Array(9);
+    this.axis3 = new Float32Array(3);
     this.basisTmp = makeBasis();
     // Единичный базис: им берут матрицу ЧИСТОГО поворота камеры для
     // точек, уже посчитанных относительно неё (см. drawBolts).
@@ -525,6 +535,60 @@ export class GlScene {
     gl.uniform1f(prog.loc('uLampRange'), LAMP.range);
     gl.uniform1f(prog.loc('uLampPower'), LAMP.power);
     return beams.length;
+  }
+
+  /**
+   * Тени построек от фар — в uniform-ы меша.
+   *
+   * Ставится ОДИН РАЗ НА ПРОХОД, рядом с самими фарами и по той же
+   * причине: коробки нужны и грунту, и городу, и кораблю — всё это
+   * рисуется одной программой, и тень одного дома должна лечь на всё
+   * разом.
+   *
+   * Отбор — в осях города (js/gl/citymesh.js, shadeBoxes), а в шейдер
+   * едут оси: фрагмент приходит в координатах камеры и переводится в
+   * городские одним поворотом. Держать коробки в осях камеры нельзя —
+   * их пришлось бы пересчитывать на каждый поворот головы.
+   */
+  setCityShade(prog, game) {
+    const gl = this.gl;
+    const city = this.city.city;
+    const beams = (city && this.lamps && game && game.ship) ? lampBeams(game.ship) : [];
+    let n = 0;
+    if (beams.length) {
+      cityLocal(city, beams[0].pos, _lampAt);
+      // Грубая отсечка: луч не достаёт до города вовсе. Иначе перебор
+      // тысяч коробок шёл бы каждый кадр и с орбиты.
+      const far = city.radius + LAMP.range;
+      if (Math.abs(_lampAt.y) < far && Math.hypot(_lampAt.x, _lampAt.z) < far) {
+        const cone = lampCone(beams);
+        const b = city.basis;
+        _lampCone.x = cone.x * b.right.x + cone.y * b.right.y + cone.z * b.right.z;
+        _lampCone.y = cone.x * b.up.x + cone.y * b.up.y + cone.z * b.up.z;
+        _lampCone.z = cone.x * b.fwd.x + cone.y * b.fwd.y + cone.z * b.fwd.z;
+        _lampCone.cos = cone.cos;
+        n = shadeBoxes(city.plan, _lampAt, _lampCone, LAMP.range, city.groundR,
+          this.shadeA, this.shadeB);
+      }
+    }
+    gl.uniform1i(prog.loc('uShadeN'), n);
+    if (!n) return 0;
+    this.centerInCamera(city.pos, this.cityOrg);
+    // Столбцы матрицы — оси города в осях камеры: в шейдере p * M даёт
+    // ровно три скалярных произведения, то есть перевод в оси города.
+    const bs = city.basis;
+    const axes = [bs.right, bs.up, bs.fwd];
+    for (let i = 0; i < 3; i++) {
+      dirToCamera(this.camera.basis, axes[i].x, axes[i].y, axes[i].z, this.axis3);
+      this.cityAxes[i * 3] = this.axis3[0];
+      this.cityAxes[i * 3 + 1] = this.axis3[1];
+      this.cityAxes[i * 3 + 2] = this.axis3[2];
+    }
+    gl.uniform3fv(prog.loc('uCityOrg'), this.cityOrg);
+    gl.uniformMatrix3fv(prog.loc('uCityAxes'), false, this.cityAxes);
+    gl.uniform4fv(prog.loc('uShadeA[0]'), this.shadeA);
+    gl.uniform4fv(prog.loc('uShadeB[0]'), this.shadeB);
+    return n;
   }
 
   /** Погасить фары для прохода, которому они не нужны (кабина, варп). */
@@ -1350,6 +1414,8 @@ export class GlScene {
     // Фары — на весь проход разом: и грунт, и камни, и станции, и чужие
     // корабли рисуются этой же программой.
     this.lamps = this.setLamps(prog, game);
+    // Тени от фар — туда же и тем же проходом.
+    this.cityShade = this.setCityShade(prog, game);
 
     // Поверхность плитками: она полностью заменяет сферу этого тела,
     // поэтому ни трафарет, ни деталь на пиксель тут не нужны.

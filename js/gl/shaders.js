@@ -2,6 +2,7 @@
 // и отдельными файлами их пришлось бы догружать по сети.
 
 import { DETAIL_GLSL, BAKE_DETAIL_GLSL } from './detail.js';
+import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
 
 // Глубина пишется логарифмически (см. mat4.js): иначе на диапазоне от
@@ -70,6 +71,9 @@ uniform vec2 uLampCos[2];   // косинусы внутренней и внеш
 uniform float uLampRange;   // км — дальше луч не достаёт
 uniform float uLampPower;
 uniform float uLogFC;
+// Тени построек от фар: коробки города и его оси (js/gl/citymesh.js).
+// uShadeN = 0 — города рядом нет, и весь блок пропускается одним сравнением.
+${SHADE_GLSL}
 // Запечённая поверхность: нормаль в локальных осях (RGB) и тон (A).
 // uSurfMode = 0 — текстуры нет (корабли, станции, светило).
 uniform sampler2D uSurfTex;
@@ -170,6 +174,12 @@ ${detail ? `
   // его нет вовсе. У фары есть заявленная дальность, и гаснуть луч
   // должен к ней, а не на первой сотне метров: это прожектор с отражателем,
   // а не голая лампочка.
+  // Тень считается ОДИН РАЗ на фрагмент: обе фары стоят в носу, в
+  // одной точке, и тень у них общая. Но это ПРОВЕРЯЕТСЯ, а не
+  // предполагается: лампа, которую когда-нибудь переставят на
+  // крыло, получит свою.
+  vec3 shadeFrom = vec3(1e30);
+  bool shaded = false;
   for (int i = 0; i < 2; i++) {
     if (i >= uLampN) break;
     vec3 d = vViewPos - uLampPos[i];
@@ -178,6 +188,15 @@ ${detail ? `
     vec3 L = d / dist;
     float c = dot(L, uLampDir[i]);
     if (c <= uLampCos[i].y) continue;
+    // Постройки между лампой и точкой — после конуса: за его
+    // кромкой света нет и без всякой тени, а проверка не даровая.
+    if (uShadeN > 0) {
+      if (distance(uLampPos[i], shadeFrom) > 1e-6) {
+        shadeFrom = uLampPos[i];
+        shaded = shadeHit(vViewPos, shadeFrom);
+      }
+      if (shaded) continue;
+    }
     float cone = smoothstep(uLampCos[i].y, uLampCos[i].x, c);
     float fall = 1.0 - dist / uLampRange;
     lit += uLampPower * cone * fall * fall * max(dot(n, -L), 0.0);

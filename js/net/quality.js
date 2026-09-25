@@ -83,10 +83,14 @@ export function linkGrade(ping, loss) {
  */
 export function linkState(net, now, api = 'online') {
   const mode = net && net.state ? net.state : 'off';
+  // Сколько пилотов в игре — вместе с качеством связи, а не отдельным
+  // прибором: это тот же вопрос «что с сетью», и ответ на него читают
+  // в одном месте.
+  const roster = net && Array.isArray(net.roster) ? net.roster : [];
   if (mode !== 'live') {
-    return { mode, api, ping: null, loss: 1, grade: 0 };
+    return { mode, api, ping: null, loss: 1, grade: 0, roster: [], you: null };
   }
   const loss = linkLoss(net.beats, net.tick || 0.2, now);
   const ping = typeof net.ping === 'number' && Number.isFinite(net.ping) ? net.ping : null;
-  return { mode, api, ping, loss, grade: linkGrade(ping, loss) };
+  return { mode, api, ping, loss, grade: linkGrade(ping, loss), roster, you: net.you || null };
 }

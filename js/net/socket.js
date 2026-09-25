@@ -39,6 +39,11 @@ export const net = {
   // 'off' — не подключались; 'connecting'; 'live'; 'down' — оборвалось.
   state: 'off',
   peers: [],          // [{id, name, x, y, z, v, mode, fx..uz}] — своя система
+  // Состав сети целиком: [{id, name, sys}] по ВСЕЙ галактике. Не
+  // то же, что peers: те рядом и с координатами, а эти где угодно и
+  // только числом системы. Приходит не в тик, а при изменениях
+  // (server/src/Hub.php, sendRoster).
+  roster: [],
   // Номер снимка. По нему игра отличает НОВЫЙ список от того же самого:
   // сглаживание чужого движения считает временем снимка время его
   // прихода, и принять один список дважды значит сказать, что корабль
@@ -100,6 +105,7 @@ export function disconnect() {
   ws = null;
   net.state = 'off';
   net.peers = [];
+  net.roster = [];
 }
 
 function open() {
@@ -144,6 +150,7 @@ function open() {
       if (typeof msg.tick === 'number' && msg.tick > 0) net.tick = msg.tick;
       mark();
       net.peers = msg.peers || [];
+      net.roster = msg.roster || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
       net.error = null;
@@ -155,6 +162,11 @@ function open() {
       net.peers = msg.list || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
+    } else if (msg.t === 'roster') {
+      // Состав не считается снимком: по снимкам идёт счёт потерь
+      // (js/net/quality.js), а приходят эти сообщения вразнобой —
+      // отметить их значило бы завысить качество связи на ровном месте.
+      net.roster = msg.list || [];
     } else if (msg.t === 'leave') {
       net.peers = net.peers.filter((p) => p.id !== msg.id);
       net.rev++;
@@ -177,6 +189,7 @@ function open() {
 
   ws.onclose = () => {
     net.peers = [];
+    net.roster = [];
     net.ping = null;
     net.beats.length = 0;
     net.state = stopped ? 'off' : 'down';

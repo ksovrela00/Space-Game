@@ -92,3 +92,37 @@ export function lampBeams(ship, out = _beams) {
 
   return out;
 }
+
+const _cone = { x: 0, y: 0, z: 0, cos: 1 };
+
+/**
+ * Один конус на все фары: куда корабль светит и насколько широко.
+ *
+ * Нужен отбору теней (js/gl/citymesh.js, shadeBoxes). Проверять
+ * постройки против каждого луча отдельно значило бы держать в шейдере
+ * по набору коробок на лампу, а лучи расходятся на десятки градусов:
+ * нижняя наклонена на tiltDeg. Поэтому берётся конус, накрывающий оба:
+ * середина — по сумме направлений, угол — по самой дальней кромке.
+ *
+ * Конус ЗАВЕДОМО ШИРЕ обоих лучей, и это правильная сторона ошибки:
+ * лишняя постройка в отборе стоит места в uniform-ах, недостающая —
+ * пропавшей тени.
+ *
+ * @returns {x, y, z, cos} или null, если фары не светят
+ */
+export function lampCone(beams, out = _cone) {
+  if (!beams || !beams.length) return null;
+  let x = 0, y = 0, z = 0;
+  for (const b of beams) { x += b.dir.x; y += b.dir.y; z += b.dir.z; }
+  const l = Math.hypot(x, y, z);
+  // Лучи, смотрящие врозь: середины у них нет, и конус — вся сфера.
+  if (l < 1e-6) { out.x = 0; out.y = 0; out.z = 1; out.cos = -1; return out; }
+  out.x = x / l; out.y = y / l; out.z = z / l;
+  let ang = 0;
+  for (const b of beams) {
+    const c = Math.max(-1, Math.min(1, out.x * b.dir.x + out.y * b.dir.y + out.z * b.dir.z));
+    ang = Math.max(ang, Math.acos(c) + Math.acos(Math.max(-1, Math.min(1, b.cosOut))));
+  }
+  out.cos = ang >= Math.PI ? -1 : Math.cos(ang);
+  return out;
+}

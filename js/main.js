@@ -75,7 +75,9 @@ import {
   makeGuns, updateGuns, fireGuns, addForeignBolt, aimDir, shieldFlash, hasShieldFlash,
 } from './game/weapons.js';
 import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
+import { shipAnchor, anchorOk, anchorPose } from './game/anchor.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
+import { drawPilots } from './ui/pilots.js';
 import { gpuKind } from './gl/context.js';
 import { L, initLang, setLang, getLang } from './core/lang.js';
 
@@ -160,6 +162,7 @@ const game = {
   yoke: makeYoke(),      // положение штурвала в кабине (вид от 1-го лица)
   touch: makeTouch(),    // сенсорные органы: джойстик, тяга, кнопки
   capture: null,         // тело, в чьём гравитационном захвате корабль
+  showPilots: false,     // показан ли список пилотов в сети (P)
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   // Камера из-за спины со своей инерцией: она догоняет корабль, а не
   // сидит на нём намертво (см. updateChase).
@@ -649,6 +652,11 @@ function savePayload() {
     landed: ship.landedAt
       ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
       : null,
+    // ...и место в ПОЛЁТЕ — по той же причине и в тех же осях
+    // (js/game/anchor.js). Мир при входе ставится на серверное «сейчас»,
+    // а корабль — туда, где он был записан: за час между этими двумя
+    // моментами грунт Lave IV уезжает на восемьсот километров.
+    anchor: game.state.mode === ST.FLIGHT ? shipAnchor(game.capture, ship) : null,
     gear: ship.gear.out,
     audio: { on: game.audio.on, vol: game.audio.vol },
     stats: game.stats,
@@ -738,6 +746,18 @@ function applyState(s) {
     game.state.mode = ST.DOCKED;
     return 'docked';
   }
+  // Место у тела — ПЕРЕД мировыми координатами: пока пилота не было,
+  // планета и повернулась, и уехала по орбите, и мировая точка теперь
+  // указывает либо в пустоту, либо внутрь горы (js/game/anchor.js).
+  if (anchorOk(s.anchor)) {
+    const host = world.bodies.find((b) => b.id === s.anchor.id);
+    const pose = anchorPose(host, s.anchor);
+    if (pose) {
+      placeShip(ship, pose.pos, pose.basis);
+      game.state.mode = ST.FLIGHT;
+      return 'flight';
+    }
+  }
   if (s.pos) {
     // Базис может не прийти вовсе: у нового пилота на сервере он пуст, а
     // место уже есть. Ставим корабль как есть — с нынешним разворотом,
@@ -781,6 +801,8 @@ function serverToSave(st) {
     landed: pos.landedBody
       ? { id: pos.landedBody, pose: pos.landedPose, secured: pos.landedSecured }
       : null,
+    anchor: pos.anchorBody && pos.anchorPose
+      ? Object.assign({ id: pos.anchorBody }, pos.anchorPose) : null,
     gear: !!sh.gearOut,
     stats: st.player ? st.player.stats : null,
     // ВРЕМЯ МИРА, а не налёт пилота. Здесь стоял playTimeS, и это была
@@ -972,6 +994,10 @@ function handleKeys(dt) {
   const st = game.state;
 
   if (input.pressed('Backquote')) dbg.on = !dbg.on;
+
+  // Список пилотов — вне разбора режимов и без захвата управления: его
+  // смотрят на ходу, решая, куда лететь, а не вместо полёта.
+  if (input.pressed('KeyP')) game.showPilots = !game.showPilots;
 
   // Звук. Клавиши намеренно вне разбора режимов ниже: выключать гул
   // надо и на карте, и в порту, а не только в полёте.
@@ -1964,6 +1990,12 @@ function render() {
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
+  // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в
+  // справке: там свои экраны целиком.
+  if (game.state.mode === ST.MAP || game.state.mode === ST.FLIGHT
+      || game.state.mode === ST.LANDED) {
+    drawPilots(hud, game);
+  }
   // Меню рисуется ПОВЕРХ приборов, а не вместо них: кадр под ним живой.
   if (game.menu.open) drawMenu(hud, game);
   // Сенсорные органы поверх приборов, но только в полёте и на грунте:
@@ -2391,6 +2423,14 @@ boot();
 
 // Полезно для отладки из консоли браузера.
 window.GAME = game;
+// Сцена — отдельно: без неё не снять ни одного опыта над картинкой
+// (tools/screen.mjs): чтобы сравнить кадр с тенями и без, надо дотянуться
+// до того, кто их ставит. null на запасном пути Canvas 2D.
+window.SCENE = scene;
+// Состояние сокета — туда же и затем же: сеть в снимке не поднимают,
+// а приборы связи и список пилотов без неё пусты. С этим объектом
+// состав сети подставляется руками (tools/screen.mjs, сцена pilots).
+window.NET = net;
 window.fmtDist = fmtDist;
 window.dot = dot;
 window.clamp = clamp;

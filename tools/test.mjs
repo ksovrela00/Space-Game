@@ -1,11 +1,13 @@
 // Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
 import { v3, normalize, dot, cross, len, clamp } from '../js/core/vec3.js';
 import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
+import { shipAnchor, anchorOk, anchorPose } from '../js/game/anchor.js';
+import { pilotRows, pilotsShown } from '../js/ui/pilots.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
 import { ROMAN } from '../js/core/rng.js';
 import {
   makeGalaxy, systemDistance, warpSeconds, SYSTEM_COUNT, MIN_APART,
-  HOME_SEED, HAB_HOME, WARP_MIN, WARP_MAX,
+  HOME_SEED, HAB_HOME, WARP_MIN, WARP_MAX, systemById,
 } from '../js/game/galaxy.js';
 import {
   makeWarp, updateWarp, startWarp, canWarp, warpAxis, warpPower,
@@ -46,6 +48,7 @@ import {
 import {
   buildCityGeometry, cityTris, nearSet, NEAR_TRIS,
   SHADOW_RGB, SHADOW_LIFT, SHADOW_MAX, sunCasts,
+  SHADE_MAX, shadeBoxes, shadeHit,
 } from '../js/gl/citymesh.js';
 import { plateAt } from '../js/gl/terrain.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
@@ -83,7 +86,7 @@ import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
 
 import { buildCobra, buildGear, HULL_HALF } from '../js/models/ships.js';
-import { LAMP, lampBeams } from '../js/game/lamps.js';
+import { LAMP, lampBeams, lampCone } from '../js/game/lamps.js';
 import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
@@ -1954,6 +1957,40 @@ console.log('\n== фары ==');
   const cosU2 = flipped[1].dir.x * up2.x + flipped[1].dir.y * up2.y + flipped[1].dir.z * up2.z;
   ok(cosU2 < 0 && flipped[1].dir.y > 0,
     'перевернулись — ближний свет ушёл в небо, как и положено фаре');
+
+  // Общий конус обеих фар. По нему отбираются постройки, кладущие тень
+  // (js/gl/citymesh.js, shadeBoxes), и он обязан НАКРЫВАТЬ оба луча
+  // целиком: потерянная кромка — это пропавшая тень, а лишний запас
+  // стоит всего лишь места в uniform-ах.
+  {
+    const cone = lampCone(beams);
+    let worst = 0;
+    for (const b of beams) {
+      const half = Math.acos(b.cosOut);
+      // Пара поперечных осей к лучу — по ним обходим его кромку.
+      const h = Math.abs(b.dir.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      const ux = b.dir.y * h.z - b.dir.z * h.y;
+      const uy = b.dir.z * h.x - b.dir.x * h.z;
+      const uz = b.dir.x * h.y - b.dir.y * h.x;
+      const ul = Math.hypot(ux, uy, uz);
+      const u = { x: ux / ul, y: uy / ul, z: uz / ul };
+      const v = {
+        x: b.dir.y * u.z - b.dir.z * u.y,
+        y: b.dir.z * u.x - b.dir.x * u.z,
+        z: b.dir.x * u.y - b.dir.y * u.x };
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        const cs = Math.cos(half), sn = Math.sin(half);
+        const rx = b.dir.x * cs + (u.x * Math.cos(a) + v.x * Math.sin(a)) * sn;
+        const ry = b.dir.y * cs + (u.y * Math.cos(a) + v.y * Math.sin(a)) * sn;
+        const rz = b.dir.z * cs + (u.z * Math.cos(a) + v.z * Math.sin(a)) * sn;
+        worst = Math.min(worst, (rx * cone.x + ry * cone.y + rz * cone.z) - cone.cos);
+      }
+    }
+    ok(worst > -1e-12,
+      `общий конус фар накрывает оба луча: ${(Math.acos(cone.cos) * 180 / Math.PI).toFixed(0)}° `
+      + `вокруг середины, запас по кромке ${worst.toExponential(0)}`);
+  }
 
   // Выключили — лучей снова нет.
   sh.lights = false;
@@ -5058,6 +5095,369 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   }
 }
 
+// --- место в полёте живёт в осях тела ----------------------------------------
+//
+// ЭТО БЫЛО СЛОМАНО, и ломалось насмерть. Мир при входе в игру ставится
+// на серверное «сейчас» (js/game/clock.js: время общее и идёт без
+// игрока), а корабль — туда, где его записали. Между записью и входом
+// проходит сколько угодно: минута до обновления страницы, неделя до
+// следующего вечера. Всё это время планета вертится, и у Lave IV грунт
+// на экваторе идёт 269 м/с.
+//
+// Отсюда обе жалобы: у самой земли корабль при входе оказывался внутри
+// рельефа и погибал, а с двух десятков километров город обнаруживался на
+// другой стороне планеты.
+//
+// Лечится это не подгонкой, а сменой системы отсчёта: место хранится в
+// осях тела, как давно хранится стоянка на грунте. Проверяется тем же
+// инвариантом, что и перенос: над какой точкой грунта корабль висел, над
+// той и появляется — сколько бы времени ни прошло.
+{
+  console.log('\n== место в полёте живёт в осях тела ==');
+
+  const T0 = 4000;
+  const at = (t) => { const w = makeSystem(HOME_SEED); updateWorld(w, t); return w; };
+  const w0 = at(T0);
+  const city0 = w0.cities[0];
+
+  // Корабль висит над серединой города носом вниз.
+  const hover = (w, alt) => {
+    const c = w.cities[0];
+    const u = c.basis.up;
+    const s = makeShip();
+    const b = makeBasis();
+    lookAlong(b, normalize(v3(-u.x, -u.y, -u.z)));
+    placeShip(s, v3(c.pos.x + u.x * alt, c.pos.y + u.y * alt, c.pos.z + u.z * alt), b);
+    return s;
+  };
+  const groundOf = (body, pos) => localDir(body, pos, v3());
+  // Отвес в МИРОВЫХ осях: с ним сравнивается нос корабля, а он тоже
+  // мировой. Через местные оси такое сравнение врало бы — они за час
+  // уезжают вместе с телом.
+  const upAt = (body, pos) => normalize(
+    v3(pos.x - body.pos.x, pos.y - body.pos.y, pos.z - body.pos.z));
+  const apart = (a, b, body) => Math.acos(clamp(dot(a, b), -1, 1)) * body.radius;
+
+  for (const alt of [1, 20]) {
+    const ship0 = hover(w0, alt);
+    const body0 = captureBody(w0, ship0.pos);
+    const rec = shipAnchor(body0, ship0);
+    const wasDir = groundOf(body0, ship0.pos);
+    const wasAlt = altitudeOf(body0, ship0.pos).alt;
+    // Куда смотрит нос относительно грунта — это тоже надо вернуть:
+    // иначе после входа горизонт оказывается где угодно.
+    const wasNose = dot(upAt(body0, ship0.pos), ship0.basis.fwd);
+
+    // Час без игрока.
+    const w1 = at(T0 + 3600);
+    const body1 = w1.bodies.find((b) => b.id === rec.id);
+    const pose = anchorPose(body1, rec);
+    const ship1 = makeShip();
+    placeShip(ship1, pose.pos, pose.basis);
+
+    const drift = apart(wasDir, groundOf(body1, ship1.pos), body1);
+    const dAlt = Math.abs(altitudeOf(body1, ship1.pos).alt - wasAlt);
+    const nose = Math.abs(dot(upAt(body1, ship1.pos), ship1.basis.fwd) - wasNose);
+    // А так было: те же мировые координаты через час.
+    const old = apart(wasDir, groundOf(body1, ship0.pos), body1);
+    const oldAlt = altitudeOf(body1, ship0.pos).alt;
+
+    ok(drift < 0.002 && dAlt < 0.002 && nose < 1e-6,
+      `с ${alt} км над городом через час корабль над той же точкой грунта `
+      + `(${(drift * 1000).toFixed(1)} м, высота ${(dAlt * 1000).toFixed(1)} м) — `
+      + `а по мировым координатам он был бы за ${old.toFixed(0)} км `
+      + `на высоте ${oldAlt.toFixed(1)} вместо ${wasAlt.toFixed(1)} км`);
+
+    // И город при входе там же, где был: ради этого всё и делается.
+    const city1 = w1.cities[0];
+    const toCity = Math.hypot(city1.pos.x - ship1.pos.x,
+      city1.pos.y - ship1.pos.y, city1.pos.z - ship1.pos.z);
+    const oldToCity = Math.hypot(city1.pos.x - ship0.pos.x,
+      city1.pos.y - ship0.pos.y, city1.pos.z - ship0.pos.z);
+    ok(Math.abs(toCity - alt) < 0.01 && oldToCity > alt + 100,
+      `город остался под кораблём: ${toCity.toFixed(2)} км вместо `
+      + `${oldToCity.toFixed(0)} км по-старому`);
+  }
+
+  // Запись приходит из чужих рук — из localStorage или от сервера.
+  // Кривая не должна ставить корабль никуда: NaN в координатах это
+  // чёрный экран, и разбираться в нём пришлось бы уже в браузере.
+  {
+    const body = w0.bodies.find((b) => b.id === city0.body.id);
+    const good = { pos: v3(1, 2, 3), fwd: v3(0, 0, 1), up: v3(0, 1, 0) };
+    const bad = [
+      null,
+      { pos: v3(1, 2, 3) },                                   // нет осей
+      { pos: v3(NaN, 0, 0), fwd: v3(0, 0, 1), up: v3(0, 1, 0) },
+      { pos: v3(1, 2, 3), fwd: v3(0, 0, 2), up: v3(0, 1, 0) }, // ось не единичная
+    ];
+    ok(anchorOk(good) && bad.every((r) => !anchorOk(r) && anchorPose(body, r) === null),
+      `кривая запись места корабль никуда не ставит: ${bad.length} видов брака`);
+  }
+
+  // Порядок в загрузке: место у тела разбирается ПЕРЕД мировыми
+  // координатами. Наоборот — и весь этот раздел ничего не значит:
+  // корабль встанет по мировым, а якорь никто не спросит.
+  {
+    const src = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    const byAnchor = src.indexOf('anchorOk(s.anchor)');
+    const byPos = src.indexOf('placeShip(ship, s.pos');
+    ok(byAnchor > 0 && byPos > byAnchor && src.includes('shipAnchor(game.capture'),
+      'при входе место у тела спрашивают раньше мировых координат');
+  }
+}
+
+// --- кто ещё в игре и где ---------------------------------------------------
+//
+// Сканер отвечает только на вопрос «кто рядом», а мир — семь систем.
+// Состав сети приходит с хаба списком {id, name, sys}, а строки для
+// панели собирает pilotRows — его и проверяем: порядок, имя системы
+// и отметку «здесь». Пиксели панели — глазами.
+{
+  console.log('\n== список пилотов ==');
+
+  const roster = [
+    { id: 7, name: 'ЗАХАР', sys: 3 },
+    { id: 1, name: 'Я', sys: 0 },
+    { id: 4, name: 'АННА', sys: 0 },
+    { id: 9, name: 'ГОСТЬ', sys: null },
+    { id: 12, name: 'ЧУЖОЙ', sys: 999 },
+  ];
+  const rows = pilotRows(roster, 1, 0);
+
+  ok(rows[0].you && rows[0].name === 'Я',
+    'себя показываем первым: от этой строки читают остальные');
+  ok(rows[1].name === 'АННА' && rows[1].here,
+    'сосед по системе выше дальних: ' + rows.map((x) => x.name).join(', '));
+  ok(rows.filter((x) => x.here).length === 2 && !rows.find((x) => x.id === 7).here,
+    '«здесь» стоит только у своей системы');
+
+  // Имя системы — из галактики, а не номером: «в системе 3» ничего
+  // не говорит тому, кто решает, лететь ли туда.
+  ok(rows.find((x) => x.id === 7).where === systemById(3).name
+    && rows.find((x) => x.id === 1).where === systemById(0).name,
+    'система названа именем: '
+    + rows.find((x) => x.id === 7).where);
+
+  // Между системами системы нет вовсе — это не ошибка, а прыжок.
+  ok(rows.find((x) => x.id === 9).where === 'В ПРЫЖКЕ',
+    'пилот без системы показан как ушедший в прыжок');
+
+  // А вот система, которой в галактике нет, — это уже расхождение
+  // каталогов игры и сервера, и молчать об этом нельзя.
+  ok(rows.find((x) => x.id === 12).where === '#999',
+    'незнакомая система показана номером, а не спрятана');
+
+  ok(pilotRows(null).length === 0 && pilotRows([{ id: 5 }])[0].name === '#5',
+    'пустой и кривый список панель не роняют');
+
+  // Панель есть только в сети и только по клавише: без сервера показывать
+  // в ней нечего, и пустая рамка читается как поломка.
+  ok(!pilotsShown({ showPilots: false, link: { mode: 'live' } })
+    && pilotsShown({ showPilots: true, link: { mode: 'live' } })
+    && pilotsShown({ showPilots: true, link: { mode: 'down' } }),
+    'панель слушается клавиши, а не связи: без связи она скажет об этом');
+
+  // Всё, что панель пишет, переведено. Без этой строки новая надпись
+  // молча осталась бы русской на английском экране: список пилотов
+  // дымовой прогон не открывает — без сервера его нет.
+  {
+    const need = ['ПИЛОТЫ В СЕТИ', '  В СЕТИ ', 'никого', 'В ПРЫЖКЕ', 'СВЯЗИ НЕТ',
+      'кто ещё в игре и в какой он системе'];
+    const noEn = need.filter((t) => !hasEn(t));
+    ok(noEn.length === 0,
+      'надписи списка переведены' + (noEn.length ? ': нет у ' + noEn.join(', ') : ''));
+  }
+}
+
+// --- справка знает все клавиши ----------------------------------------------
+//
+// Справку правят реже, чем управление, и она молча отстаёт: фары (O) и
+// гасители инерции (T) прожили в игре не один месяц, а на странице
+// управления их не было вовсе — про них знал только README. Игрок при
+// этом не виноват: единственное место, где он ищет клавиши, — эта
+// страница.
+//
+// Поэтому список здесь не переписан от руки, а СВЕРЯЕТСЯ С КОДОМ: что
+// игра читает через pressed/isDown/axis, то и обязано стоять в таблице
+// справки. Новая клавиша без строки в справке роняет проверку.
+{
+  console.log('\n== справка про клавиши ==');
+
+  const root = new URL('../', import.meta.url);
+  const files = [];
+  (function walk(dir) {
+    for (const e of readdirSync(new URL(dir, root), { withFileTypes: true })) {
+      if (e.isDirectory()) walk(dir + e.name + '/');
+      else if (e.name.endsWith('.js')) files.push(dir + e.name);
+    }
+  })('js/');
+
+  // Номер раздела меню склеивается ('Digit' + i), и в исходнике видно
+  // только приставку. Сами 1–4 проверяются отдельной строкой ниже.
+  const COMPUTED = new Set(['Digit', 'Numpad']);
+  // Цифровая клавиатура — дубликат основной клавиши, и отдельной строки
+  // в справке ей не нужно: «Numpad0» игроку не говорит ничего, а место
+  // в таблице занимает.
+  const SAME = { Numpad0: 'Digit0', NumpadEnter: 'Enter', NumpadAdd: 'Equal', NumpadSubtract: 'Minus' };
+
+  const used = new Map();                 // код -> файл, где он читается
+  for (const f of files) {
+    const src = readFileSync(new URL(f, root), 'utf8');
+    for (const call of src.matchAll(/\b(?:pressed|isDown|axis)\(([^)]*)\)/g)) {
+      for (const lit of call[1].matchAll(/'([^']+)'/g)) {
+        const code = SAME[lit[1]] || lit[1];
+        if (!COMPUTED.has(code) && !used.has(code)) used.set(code, f);
+      }
+    }
+  }
+  ok(used.size > 30 && used.has('KeyO') && used.has('KeyT'),
+    `клавиши игры собраны из исходников: ${used.size} шт.`);
+
+  // Как клавиша без буквы выглядит в таблице. Кода, которого тут нет,
+  // быть не должно: новая клавиша обязана попасть и сюда тоже, иначе
+  // проверка тихо пропустила бы её.
+  const NAMED = {
+    Tab: ['Tab'], Space: ['Space'], Enter: ['Enter'], Escape: ['Esc'],
+    Backquote: ['~'], Minus: ['-'], Equal: ['='],
+    ArrowUp: ['&uarr;'], ArrowDown: ['&darr;'],
+    ArrowLeft: ['&larr;'], ArrowRight: ['&rarr;'],
+    ShiftLeft: ['Shift'], ShiftRight: ['Shift'],
+    ControlLeft: ['Ctrl'], ControlRight: ['Ctrl'],
+  };
+
+  const src = readFileSync(new URL('js/ui/screens.js', root), 'utf8');
+  const help = src.slice(src.indexOf('export function showHelp'), src.indexOf('// Названия типов тел'));
+  const table = help.slice(help.indexOf('<table'), help.indexOf('</table>'));
+  ok(table.length > 0 && help.includes("L('УПРАВЛЕНИЕ')"),
+    'таблица клавиш найдена в справке');
+
+  // Буквы и цифры берём ТОЛЬКО из первой ячейки строки — из столбца
+  // клавиш. Считай мы и описания, любое упоминание буквы в тексте
+  // («I или Esc — закрыть») сходило бы за строку таблицы, и выкинутую
+  // клавишу проверка бы не заметила.
+  const keysOf = (text) => {
+    const out = new Set();
+    for (const row of text.matchAll(/<tr><td>([\s\S]*?)<\/td>/g)) {
+      const cell = row[1].replace(/\$\{L\('/g, '').replace(/'\)\}/g, '');
+      for (const m of cell.matchAll(/(?<![A-Za-z])([A-Z])(?![A-Za-z])/g)) out.add('Key' + m[1]);
+      for (const m of cell.matchAll(/(?<![0-9])([0-9])(?![0-9])/g)) out.add('Digit' + m[1]);
+    }
+    return out;
+  };
+  const keys = keysOf(table);
+
+  const missing = [], unknown = [];
+  for (const [code, where] of used) {
+    if (/^(Key[A-Z]|Digit[0-9])$/.test(code)) {
+      if (!keys.has(code)) missing.push(`${code} (${where})`);
+    } else if (!NAMED[code]) {
+      unknown.push(`${code} (${where})`);
+    } else if (!NAMED[code].some((t) => table.includes(t))) {
+      missing.push(`${code} (${where})`);
+    }
+  }
+  ok(unknown.length === 0,
+    'каждой клавише известно, как она выглядит в справке'
+    + (unknown.length ? ': нечем показать ' + unknown.join(', ') : ''));
+  ok(missing.length === 0,
+    `все ${used.size} клавиш игры стоят в таблице справки`
+    + (missing.length ? ': нет ' + missing.join(', ') : ''));
+
+  ok(table.includes('1–4'),
+    'разделы меню (1–4) названы в справке: в коде их номер склеивается, и из него клавиш не видно');
+
+  // Проверка кусается: убери из таблицы строку про фары — и она это
+  // скажет. Без этой строки предыдущая сверка молча проходила бы на
+  // любой таблице, где буква нашлась хоть где-нибудь.
+  // Файлы в дереве с CRLF, поэтому конец строки здесь — \r?\n.
+  const cut = table.replace(/ *<tr><td>O<\/td>[\s\S]*?<\/tr>\r?\n/, '');
+  ok(cut.length < table.length && !keysOf(cut).has('KeyO'),
+    'выкинутая строка справки видна проверке (пробуем на фарах)');
+
+  // Всё, что таблица пишет, переведено. Справку на английском никто не
+  // открывает в дымовом прогоне, и русская строка дожила бы до игрока.
+  {
+    const noEn = [...table.matchAll(/L\('([^']+)'\)/g)].map((m) => m[1]).filter((t) => !hasEn(t));
+    ok(noEn.length === 0,
+      'вся таблица клавиш переведена' + (noEn.length ? ': нет у ' + noEn.join(' | ') : ''));
+  }
+}
+
+// --- длинный экран прокручивается -------------------------------------------
+//
+// Справка выросла до трёх экранов текста, а прокрутить её было нечем:
+// игра гасила колесо и клавиши прокрутки на всей странице разом. Панель
+// при этом честно умела прокручиваться — ей просто не давали. Ошибка
+// незаметная: панель выглядит целой, а продолжения у неё как будто нет.
+//
+// Проверяем сам разбор события, а не картинку: окно подставляем своё и
+// смотрим, что игра делает с колесом над сценой и над длинной панелью.
+{
+  console.log('\n== прокрутка длинных экранов ==');
+
+  const on = {};
+  const fakeWin = { addEventListener: (t, f) => { (on[t] = on[t] || []).push(f); } };
+  input.attachMouse(fakeWin);
+  input.attach(fakeWin);
+
+  // Цель события: холст сцены или что-то внутри панели. Настоящий DOM
+  // отвечает на closest(), этого хватает и здесь.
+  const overScene = { closest: () => null };
+  const overPanel = (tall) => ({
+    closest: (sel) => (sel === '.panel'
+      ? { scrollHeight: tall ? 900 : 300, clientHeight: 300 } : null),
+  });
+
+  const wheel = (target, dy = 120) => {
+    let stopped = false;
+    const e = { deltaY: dy, cancelable: true, target, preventDefault: () => { stopped = true; } };
+    for (const f of on.wheel) f(e);
+    return stopped;
+  };
+  const key = (code, target) => {
+    let stopped = false;
+    for (const f of on.keydown) f({ code, target, preventDefault: () => { stopped = true; } });
+    return stopped;
+  };
+
+  input.takeWheel();
+  const tookScene = wheel(overScene);
+  ok(tookScene && input.takeWheel() === 120,
+    'над сценой колесо забирает игра: им меняют масштаб карты');
+
+  const tookPanel = wheel(overPanel(true));
+  ok(!tookPanel && input.takeWheel() === 0,
+    'над длинным экраном колесо отдано браузеру — и в счётчик игры не попало');
+
+  // Короткая панель (экран порта) прокручивать нечего, и отдавать ей
+  // колесо незачем: под ней карта, и это единственное, чем оно занято.
+  ok(wheel(overPanel(false)),
+    'короткий экран колесо не забирает');
+
+  ok(key('ArrowDown', overScene) && !key('ArrowDown', overPanel(true)),
+    'стрелка в длинном экране прокручивает его, а не глохнет');
+  input.releaseAll();
+
+  // Пальцем на телефоне — то же самое, но решает это CSS: у страницы
+  // сенсорное поведение выключено целиком (touch-action: none), иначе
+  // ломается джойстик, и панели нужно исключение.
+  {
+    const css = readFileSync(new URL('../css/style.css', import.meta.url), 'utf8');
+    const panel = css.slice(css.indexOf('.panel {'), css.indexOf('.btn {'));
+    ok(/touch-action:\s*pan-y/.test(panel) && /overflow-y:\s*auto/.test(panel),
+      'панель разрешено тянуть пальцем: у страницы прокрутка выключена целиком');
+  }
+
+  // И справка обязана открываться с начала: панель одна на все экраны,
+  // её прокрутка от прошлого открытия сама не сбрасывается.
+  {
+    const src = readFileSync(new URL('../js/ui/screens.js', import.meta.url), 'utf8');
+    ok(/p\.scrollTop = 0/.test(src) && /p\.tabIndex = -1/.test(src),
+      'экран открывается с начала и может брать фокус для клавиш прокрутки');
+  }
+}
+
 // --- качество связи ---------------------------------------------------------
 //
 // Сеть ломается не только «совсем»: гораздо чаще она просто становится
@@ -6121,6 +6521,139 @@ console.log('\n== наземный город ==');
       const night = unit(0.6, -0.8, 0);
       ok(!sunCasts(night) && cityTris(c.plan, null, night) === cityTris(c.plan, null, null),
         'под горизонтом солнце теней не отбрасывает');
+    }
+  }
+
+  // --- Тени от фар.
+  //
+  // ДРУГАЯ ЗАДАЧА, чем тень от солнца, а не та же с другим вектором.
+  // Солнце бесконечно далеко: его тень — перенос силуэта, она запечена в
+  // меш. Фара стоит внутри сцены и едет с кораблём: её тень расходится
+  // веером, меняется каждый кадр, а от здания ВЫШЕ лампы уходит в
+  // бесконечность. Поэтому она считается на пиксель, а в шейдер уезжает
+  // два десятка коробок — те, что реально могут перекрыть луч.
+  //
+  // Проверяется ГЛАВНОЕ: тень падает ровно от того, обо что разбиваются.
+  // Эталон — марш по лучу с вопросом cityBlocked, то есть та самая
+  // функция столкновений; сойтись с ней геометрия обязана, и ошибка в
+  // знаке, повороте или высоте коробки разносит совпадение в клочья.
+  {
+    const A = new Float32Array(SHADE_MAX * 4);
+    const B = new Float32Array(SHADE_MAX * 4);
+    // Луч вниз-вперёд и широкий — общий конус обеих фар у снижающегося
+    // корабля (js/game/lamps.js, lampCone).
+    const cone = { x: 0.43, y: -0.87, z: 0.24, cos: Math.cos(50 * Math.PI / 180) };
+    // Лампа над самым плотным местом и ВЫШЕ крыш: ниже крыш ближняя
+    // башня кладёт тень на всё пятно разом, и проверка на такой сцене
+    // ничего не проверяет — там всё тёмное и без арифметики.
+    const lamp = { x: 0, y: 0.6, z: 0 };
+    const n = shadeBoxes(c.plan, lamp, cone, LAMP.range, c.groundR, A, B);
+    ok(n > 0 && n <= SHADE_MAX, `под фарой отобрано ${n} построек из ${c.plan.boxes.length}`);
+
+    // Числа коробок — ТЕ ЖЕ, по которым считаются столкновения, а не
+    // их копия «для картинки». Иначе тень и стена разъедутся.
+    {
+      let same = 0;
+      for (let i = 0; i < n; i++) {
+        for (const b of c.plan.boxes) {
+          // Сравнение через float32: в uniform-ы числа уезжают одинарной
+          // точностью, и «то же самое» здесь значит именно это.
+          const f = Math.fround;
+          if (f(b.x) === A[i * 4] && f(b.z) === A[i * 4 + 1] && f(b.hw) === A[i * 4 + 2]
+            && f(b.hd) === A[i * 4 + 3] && f(b.h) === B[i * 4 + 1]
+            && f(b.c) === B[i * 4 + 2] && f(b.s) === B[i * 4 + 3]) { same++; break; }
+        }
+      }
+      ok(same === n, `коробки теней — те же, что у столкновений: ${same} из ${n}`);
+    }
+
+    // Эталон: шагаем от точки к лампе и спрашиваем столкновения.
+    const march = (p) => {
+      const dx = lamp.x - p.x, dy = lamp.y - p.y, dz = lamp.z - p.z;
+      const steps = Math.ceil(Math.hypot(dx, dy, dz) / 0.002);
+      for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        const x = p.x + dx * t, y = p.y + dy * t, z = p.z + dz * t;
+        if (cityBlocked(c.plan, x, y - cityDrop(c, x, z), z)) return true;
+      }
+      return false;
+    };
+    // Точки берутся и на грунте, и на высоте стен: тень от фары обязана
+    // ложиться и на соседний дом — этого запечённая тень не умеет вовсе.
+    const lit = [];
+    for (let ix = -20; ix <= 20; ix++) {
+      for (let iz = -20; iz <= 20; iz++) {
+        for (const h of [0, 0.05]) {
+          const x = lamp.x + ix * 0.025, z = lamp.z + iz * 0.025;
+          if (cityBlocked(c.plan, x, h + 0.001, z)) continue;   // внутри дома
+          const p = { x, y: cityDrop(c, x, z) + h, z };
+          // Только освещённое: вне конуса шейдер о тени и не спросит.
+          const ex = p.x - lamp.x, ey = p.y - lamp.y, ez = p.z - lamp.z;
+          const el = Math.hypot(ex, ey, ez);
+          if ((ex * cone.x + ey * cone.y + ez * cone.z) / el < cone.cos) continue;
+          lit.push(p);
+        }
+      }
+    }
+    let mine = 0, ref = 0, both = 0;
+    for (const p of lit) {
+      const a = shadeHit(A, B, n, p, lamp);
+      const b = march(p);
+      if (a) mine++;
+      if (b) ref++;
+      if (a && b) both++;
+    }
+    ok(ref > lit.length * 0.2 && both > ref * 0.95 && mine - both < ref * 0.02,
+      `тень от фары сходится со столкновениями: ${both} из ${ref} затенённых точек `
+      + `(${lit.length} в пятне), ложных ${mine - both}`);
+
+    // СТОРОНА. Лампа с другой стороны — и тень уезжает на другую
+    // сторону: ошибка знака даёт тень, идущую к лампе, а на картинке
+    // это читается как «свет откуда-то не оттуда», а не как поломка.
+    {
+      const back = { x: lamp.x - 1.2, y: lamp.y, z: lamp.z - 0.6 };
+      const cone2 = { x: -cone.x, y: cone.y, z: -cone.z, cos: cone.cos };
+      const A2 = new Float32Array(SHADE_MAX * 4), B2 = new Float32Array(SHADE_MAX * 4);
+      const n2 = shadeBoxes(c.plan, back, cone2, LAMP.range, c.groundR, A2, B2);
+      let moved = 0, same = 0;
+      for (const p of lit) {
+        const a = shadeHit(A, B, n, p, lamp);
+        const b = shadeHit(A2, B2, n2, p, back);
+        if (a !== b) moved++; else if (a) same++;
+      }
+      ok(moved > same, `лампу перенесли — тень ушла: ${moved} точек сменили свет, `
+        + `${same} остались в тени обеих ламп`);
+    }
+
+    // Постройка не затеняет САМА СЕБЯ. Без этого каждое здание было бы
+    // чёрным целиком: луч от точки на стене выходит изнутри коробки, и
+    // плиты честно сообщают о пересечении. Проверяется на ОДНОЙ коробке
+    // — чтобы в ответе не было чужих теней.
+    {
+      const a1 = A.subarray(0, 4), b1 = B.subarray(0, 4);
+      const hw = a1[2], hd = a1[3], cs = b1[2], sn = b1[3];
+      let dark = 0, tested = 0;
+      for (const [ox, oz] of [[hw, 0], [-hw, 0], [0, hd], [0, -hd], [0, 0]]) {
+        for (const k of [1 / 3, 2 / 3, 1]) {
+          // Поворот тот же, что в cityBlocked, только обратный: из осей
+          // коробки в оси города.
+          const x = a1[0] + ox * cs + oz * sn;
+          const z = a1[1] - ox * sn + oz * cs;
+          tested++;
+          if (shadeHit(a1, b1, 1, { x, y: b1[0] + b1[1] * k, z }, lamp)) dark++;
+        }
+      }
+      ok(tested === 15 && dark === 0,
+        `постройка не затеняет сама себя: ${tested} точек на её стенах и крыше, `
+        + `в собственной тени ${dark}`);
+    }
+
+    // Фары выключены или город далеко — коробок ноль, и весь блок в
+    // шейдере пропускается одним сравнением.
+    {
+      const far = { x: 0, y: 200, z: 0 };
+      ok(shadeBoxes(c.plan, far, cone, LAMP.range, c.groundR, A, B) === 0,
+        'с высоты, куда луч не достаёт, теней не строим вовсе');
     }
   }
 

@@ -29,6 +29,14 @@ final class Auth
         if (Db::one('SELECT `id` FROM `player` WHERE `login`=?', [$login]) !== null) {
             throw ApiError::denied('login_taken', 'такой логин уже занят');
         }
+        // Имя приходит с формы регистрации, то есть из чужих рук. Режется
+        // по тридцати двум знакам не ради красоты: в столбец VARCHAR(64)
+        // более длинное не влезает вовсе, и вместо учётной записи человек
+        // получил бы ошибку базы. Управляющие знаки убираются по той же
+        // причине, по какой имя вообще проверяется: его видят другие
+        // игроки в списке и рядом с кораблём.
+        $name = trim(preg_replace('/[\x00-\x1f\x7f]+/u', ' ', $name));
+        $name = mb_substr($name, 0, 32);
 
         return Db::tx(function () use ($login, $pass, $name) {
             $playerId = Players::create($login, password_hash($pass, PASSWORD_DEFAULT), $name ?: $login);

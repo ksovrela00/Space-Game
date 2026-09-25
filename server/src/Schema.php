@@ -37,8 +37,12 @@ final class Schema
      * `shield_regen`, `shield_delay` и `hold_t` у `ship_type` снесены,
      * их числа теперь у модулей в `equipment_type` (см. Loadout).
      * 7 — наземные города: таблица `city`.
+     * 8 — место в полёте хранится В ОСЯХ ТЕЛА: `anchor_body`,
+     *     `anchor_pose`. Мировых координат одних мало: время мира
+     *     идёт и без игрока, и при входе записанная точка указывала бы
+     *     внутрь планеты (js/game/anchor.js).
      */
-    public const VERSION = 7;
+    public const VERSION = 8;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -272,6 +276,13 @@ final class Schema
                 `landed_body` INT NULL,
                 `landed_pose` TEXT NULL,
                 `landed_secured` TINYINT(1) NOT NULL DEFAULT 0,
+                -- Место в полёте — в осях тела захвата, рядом с которым
+                -- корабль вышел из игры. Почему не мировые: время мира общее
+                -- и идёт без игрока, а грунт на экваторе идёт сотни метров
+                -- в секунду: за час мировая точка оказывается в сотнях
+                -- километров от того места, где игрок вышел (js/game/anchor.js).
+                `anchor_body` INT NULL,
+                `anchor_pose` TEXT NULL,
                 -- План полёта: выбранная цель, отмеченная система варпа,
                 -- последний порт и вид камеры. Это не «настройки», а
                 -- состояние игры: выбрал цель, отложил, вернулся — цель
@@ -440,6 +451,11 @@ final class Schema
             ],
             'ship' => [
                 'hit_at' => 'DATETIME NULL',
+            ],
+            // Версия 8: место в полёте в осях тела.
+            'player' => [
+                'anchor_body' => 'INT NULL',
+                'anchor_pose' => 'TEXT NULL',
             ],
         ];
     }

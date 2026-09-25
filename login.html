@@ -41,9 +41,19 @@
                spellcheck="false" required></label>
       <label class="field"><span id="lbPass"></span>
         <input id="pass" name="pass" type="password" autocomplete="current-password" required></label>
+      <!-- Два поля ниже показываются только при регистрации. Повтор
+           пароля здесь не обряд: восстановить его нечем, сервер хранит
+           один хеш, и опечатка в единственном поле означала бы учётную
+           запись, в которую никто никогда не войдёт. -->
+      <label class="field" id="rowPass2" style="display:none"><span id="lbPass2"></span>
+        <input id="pass2" name="pass2" type="password" autocomplete="new-password"></label>
+      <label class="field" id="rowName" style="display:none"><span id="lbName"></span>
+        <input id="name" name="name" autocomplete="nickname" maxlength="32"
+               autocapitalize="off" spellcheck="false"></label>
       <p class="err" id="err"></p>
       <button class="btn" id="go" type="submit"></button>
     </form>
+    <p class="sub"><button class="btn ghost" id="swap"></button></p>
 
     <div id="have" style="display:none">
       <p class="who" id="whoLine"></p>
@@ -69,16 +79,34 @@ const $ = (id) => document.getElementById(id);
 
 // Подписи собирает скрипт: держать страницу входа в двух видах значило бы
 // править её дважды при каждой мелкой правке.
+// Вход и регистрация — ОДНА форма в двух видах, а не две страницы:
+// поля у них те же, разница в двух строках и в том, куда уходит запрос.
+let mode = 'login';
+
 function paint() {
-  $('subTitle').textContent = L('вход пилота');
+  const reg = mode === 'register';
+  $('subTitle').textContent = reg ? L('новый пилот') : L('вход пилота');
   $('lbLogin').textContent = L('ЛОГИН');
   $('lbPass').textContent = L('ПАРОЛЬ');
-  $('go').textContent = L('ВОЙТИ');
+  $('lbPass2').textContent = L('ПАРОЛЬ ЕЩЁ РАЗ');
+  $('lbName').textContent = L('ИМЯ В ИГРЕ (НЕОБЯЗАТЕЛЬНО)');
+  $('go').textContent = reg ? L('ЗАВЕСТИ ПИЛОТА') : L('ВОЙТИ');
+  $('swap').textContent = reg ? L('У МЕНЯ УЖЕ ЕСТЬ УЧЁТНАЯ ЗАПИСЬ')
+    : L('ЗАВЕСТИ НОВОГО ПИЛОТА');
   $('play').textContent = L('В ИГРУ');
   $('out').textContent = L('ВЫЙТИ');
-  $('note').innerHTML = L('Регистрации здесь нет: учётную запись заводят командой')
-    + ' <b>php server/cli/player.php add &lt;логин&gt; &lt;пароль&gt;</b>. '
-    + L('Играть без сервера —')
+  $('rowPass2').style.display = reg ? '' : 'none';
+  $('rowName').style.display = reg ? '' : 'none';
+  // Обязательность снимается вместе с полем: браузер не даёт
+  // отправить форму с required у спрятанного поля и ничего не показывает.
+  $('pass2').required = reg;
+  // Браузеру важно, старый это пароль или новый: иначе он подставит
+  // сохранённый пароль в форму регистрации и не предложит запомнить новый.
+  $('pass').autocomplete = reg ? 'new-password' : 'current-password';
+  $('note').innerHTML = (reg
+    ? L('Пароль восстановить будет нечем: сервер хранит только его хеш.')
+    : L('Учётной записи нет? Заведите её здесь же.'))
+    + ' ' + L('Играть без сервера —')
     + ' <a href="index.html?offline=1" style="color:#4fb3e0">' + L('автономно') + '</a>.';
   for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
     $(id).classList.toggle('on', getLang() === code);
@@ -119,6 +147,7 @@ whoAmI().then((me) => {
     return;
   }
   form.style.display = 'none';
+  $('swap').parentNode.style.display = 'none';
   $('have').style.display = '';
   $('note').style.display = 'none';
   $('whoLine').textContent = L('ВХОД ВЫПОЛНЕН: ') + (me.name || me.login)
@@ -130,13 +159,35 @@ whoAmI().then((me) => {
   });
 });
 
+$('swap').addEventListener('click', () => {
+  mode = mode === 'login' ? 'register' : 'login';
+  fail('');
+  paint();
+  $('login').focus();
+});
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  const reg = mode === 'register';
+  // Единственная проверка на месте — совпадение паролей: о втором
+  // поле сервер не знает и знать не должен. А длина пароля и вид логина —
+  // его дело: повторить эти правила здесь значило бы завести второй,
+  // расходящийся ответ на вопрос «какой пароль годится».
+  if (reg && $('pass').value !== $('pass2').value) {
+    fail(L('пароли не совпадают'));
+    $('pass2').value = '';
+    $('pass2').focus();
+    return;
+  }
   const btn = $('go');
   btn.disabled = true;
   fail('');
   try {
-    await api.login($('login').value.trim(), $('pass').value);
+    if (reg) {
+      await api.register($('login').value.trim(), $('pass').value, $('name').value.trim());
+    } else {
+      await api.login($('login').value.trim(), $('pass').value);
+    }
     toGame();
   } catch (ex) {
     // Сообщение сервера показываем как есть: оно написано для человека,
@@ -144,6 +195,7 @@ form.addEventListener('submit', async (e) => {
     fail(ex.message);
     btn.disabled = false;
     $('pass').value = '';
+    $('pass2').value = '';
     $('pass').focus();
   }
 });

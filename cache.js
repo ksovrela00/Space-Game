@@ -42,7 +42,7 @@
       'sound', 'vec3'
     ],
     'game/': [
-      'audio', 'bodyinfo', 'clock', 'docking', 'dust', 'entry', 'flow',
+      'anchor', 'audio', 'bodyinfo', 'clock', 'docking', 'dust', 'entry', 'flow',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
       'warp', 'weapons', 'world'
@@ -64,7 +64,7 @@
       'camera', 'clip', 'planetview', 'renderer', 'starfield'
     ],
     'ui/': [
-      'debug', 'hud', 'map', 'menu', 'panels', 'screens', 'theme',
+      'debug', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'theme',
       'touch'
     ]
   };

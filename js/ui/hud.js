@@ -1239,7 +1239,12 @@ function drawLink(ctx, game) {
 
   let text;
   if (live) {
+    // Сколько пилотов в игре — здесь же, одной строкой с задержкой: это тот
+    // же вопрос «что с сетью». Список имён — по клавише P
+    // (js/ui/pilots.js): в углу экрана должно стоять число, а не столбец.
+    const n = l.roster ? l.roster.length : 0;
     text = (l.ping === null ? L('— мс') : Math.round(l.ping) + L(' мс'))
+      + (n ? L('  В СЕТИ ') + n : '')
       + (l.loss > 0.05 ? L('  ПОТЕРИ ') + Math.round(l.loss * 100) + '%' : '');
   } else {
     text = l.api === 'offline' ? L('АВТОНОМНО')

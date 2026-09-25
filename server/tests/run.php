@@ -162,6 +162,23 @@ denies('login_taken', fn() => Api::call('auth.register', ['login' => 'pilot', 'p
 denies('auth', fn() => Api::call('auth.login', ['login' => 'pilot', 'pass' => 'nope']),
     'неверный пароль не пускает');
 
+// Имя теперь приходит с формы регистрации, то есть из чужих рук. Длинное
+// в столбец не влезает вовсе: без обрезки человек получил бы на форме
+// ошибку базы вместо учётной записи.
+$longName = Api::call('auth.register', ['login' => 'longname', 'pass' => 'secret',
+    'name' => str_repeat('А', 80) . "\n\t\x07"]);
+$longState = Players::state($longName['player_id']);
+ok(mb_strlen($longState['player']['name']) === 32
+    && !preg_match('/[\x00-\x1f]/', $longState['player']['name']),
+    'длинное имя обрезано до 32 знаков и без управляющих: «'
+    . $longState['player']['name'] . '»');
+
+// Имя пропустили — в игре видно логин, а не пустота. Форма регистрации
+// держит имя необязательным именно поэтому.
+$noName = Api::call('auth.register', ['login' => 'noname', 'pass' => 'secret', 'name' => '  ']);
+ok(Players::state($noName['player_id'])['player']['name'] === 'noname',
+    'без имени пилота зовут по логину');
+
 $again = Api::call('auth.login', ['login' => 'pilot', 'pass' => 'secret']);
 ok($again['player_id'] === $pid && $again['token'] !== $token, 'вход выдаёт новый токен тому же игроку');
 
@@ -266,6 +283,33 @@ $after = Api::call('player.state', [], $token);
 ok(abs($after['position']['pos']['x'] - 1000) < 1e-9 && $after['position']['dockedBody'] === null
     && $after['ship']['hull'] === $hullWas && $after['player']['stats']['docks'] === 2,
     'полёт сохранён: место и статистика, корпус не тронут');
+
+// Место в полёте хранится В ОСЯХ ТЕЛА, рядом с которым корабль вышел из
+// игры. Мировых координат мало: время мира идёт и без игрока, а грунт на
+// экваторе идёт сотни метров в секунду — за час записанная точка
+// оказывается в сотнях километров от того места, где игрок вышел, и у
+// самой поверхности это гибель корабля при входе.
+$anchor = ['id' => 7,
+    'pos' => ['x' => 1.5, 'y' => 20.25, 'z' => -3.5],
+    'fwd' => ['x' => 0, 'y' => -1, 'z' => 0],
+    'up' => ['x' => 0, 'y' => 0, 'z' => 1]];
+Api::call('player.save', ['system' => 0, 'anchor' => $anchor], $token);
+$after = Api::call('player.state', [], $token);
+$got = $after['position']['anchorPose'];
+ok($after['position']['anchorBody'] === 7
+    && abs($got['pos']['y'] - 20.25) < 1e-9 && abs($got['pos']['z'] + 3.5) < 1e-9
+    && abs($got['fwd']['y'] + 1) < 1e-9 && abs($got['up']['z'] - 1) < 1e-9,
+    'место в полёте вернулось в осях тела: девять чисел и номер тела');
+
+denies('bad_request', fn() => Api::call('player.save',
+    ['system' => 0, 'anchor' => array_merge($anchor, ['id' => 9999])], $token),
+    'якорь у тела не из этой системы отвергается');
+
+// Взлетел в космос — якоря больше нет, и место снова мировое.
+Api::call('player.save', ['system' => 0, 'anchor' => null], $token);
+$after = Api::call('player.state', [], $token);
+ok($after['position']['anchorBody'] === null && $after['position']['anchorPose'] === null,
+    'без тела рядом якорь снимается');
 
 denies('bad_request', fn() => Api::call('player.save', ['system' => 999], $token),
     'система не из каталога отвергается');

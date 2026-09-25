@@ -99,6 +99,25 @@ final class Hub
         return $out;
     }
 
+    /**
+     * Разослать СОСТАВ СЕТИ: кто в игре и в какой системе.
+     *
+     * В тик этот список НЕ кладётся, хотя места бы хватило: тик идёт
+     * пять раз в секунду и несёт то, что меняется каждый раз — координаты
+     * соседей. Состав же меняется раз в несколько минут: вошёл, ушёл,
+     * сменил систему. Три события на весь вечер против пяти
+     * повторов в секунду на каждого.
+     */
+    private function sendRoster(): void
+    {
+        $list = $this->online();
+        foreach ($this->peers as $p) {
+            if ($p['player'] !== null) {
+                $this->send($p['conn'], ['t' => 'roster', 'list' => $list]);
+            }
+        }
+    }
+
     public function open($conn, float $now): void
     {
         $this->peers[$this->key($conn)] = [
@@ -145,6 +164,9 @@ final class Hub
             // ждём тика: корабль, исчезающий с задержкой, читается как
             // подвисание.
             $this->broadcast($peer['sys'], ['t' => 'leave', 'id' => $peer['player']], $peer['player']);
+            // Ушедший пропадает из состава у всех, а не только у соседей
+            // по системе: список пилотов общий на всю галактику.
+            $this->sendRoster();
             $this->say('ушёл ' . $peer['name']);
         }
     }
@@ -209,6 +231,11 @@ final class Hub
                 if ($wasSys !== null && $peer['player'] !== null
                     && ($wasSys !== $peer['sys'] || ($wasHere && self::between($peer)))) {
                     $this->broadcast($wasSys, ['t' => 'leave', 'id' => $peer['player']], $peer['player']);
+                }
+                // Смена системы видна в списке пилотов у ВСЕХ: ради этого
+                // список и нужен — видеть, кто куда ушёл.
+                if ($wasSys !== $peer['sys']) {
+                    $this->sendRoster();
                 }
                 return;
 
@@ -297,7 +324,12 @@ final class Hub
             'tick' => self::TICK,
             'wt' => Clock::worldTime(),
             'peers' => $this->peersOf($peer['sys'], $playerId, $now),
+            // Состав сети целиком — вошедшему он нужен сразу, а не после
+            // первого чужого входа.
+            'roster' => $this->online(),
         ]);
+        // А остальным — обновлённый состав с новичком в нём.
+        $this->sendRoster();
         $this->say('вошёл ' . $peer['name'] . ' (система ' . ($peer['sys'] ?? '—') . ')');
     }
 

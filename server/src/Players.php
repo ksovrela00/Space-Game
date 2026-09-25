@@ -253,6 +253,8 @@ final class Players
                 'landedBody' => $p['landed_body'] === null ? null : (int) $p['landed_body'],
                 'landedPose' => $p['landed_pose'] === null ? null : json_decode($p['landed_pose'], true),
                 'landedSecured' => (bool) $p['landed_secured'],
+                'anchorBody' => $p['anchor_body'] === null ? null : (int) $p['anchor_body'],
+                'anchorPose' => $p['anchor_pose'] === null ? null : json_decode($p['anchor_pose'], true),
             ],
             'ship' => [
                 'id' => $shipId,
@@ -354,6 +356,31 @@ final class Players
                 $set['landed_body'] = null;
                 $set['landed_pose'] = null;
                 $set['landed_secured'] = 0;
+            }
+        }
+        // Место в полёте — в осях тела захвата, рядом с которым корабль
+        // вышел из игры. Складывается рядом с landed и по той же причине:
+        // мировая точка через час указывает в пустоту. Числа раскладываются
+        // поштучно, а не кладутся строкой от игры: в базе должны лежать
+        // девять чисел, а не что угодно, что пришло с чужой машины.
+        if (array_key_exists('anchor', $in)) {
+            $a = $in['anchor'];
+            $vec = static function ($v) use ($num) {
+                if (!is_array($v)) {
+                    return null;
+                }
+                return ['x' => $num($v['x'] ?? null), 'y' => $num($v['y'] ?? null),
+                    'z' => $num($v['z'] ?? null)];
+            };
+            $pos = is_array($a) ? $vec($a['pos'] ?? null) : null;
+            $fwd = is_array($a) ? $vec($a['fwd'] ?? null) : null;
+            $up = is_array($a) ? $vec($a['up'] ?? null) : null;
+            if ($pos !== null && $fwd !== null && $up !== null && isset($a['id'])) {
+                $set['anchor_body'] = $bodyIn($a['id']);
+                $set['anchor_pose'] = json_encode(['pos' => $pos, 'fwd' => $fwd, 'up' => $up]);
+            } else {
+                $set['anchor_body'] = null;
+                $set['anchor_pose'] = null;
             }
         }
         if (array_key_exists('target', $in)) {

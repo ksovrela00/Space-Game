@@ -1995,7 +1995,7 @@ console.log('\n== мок GL: путь отрисовки ==');
   const { GlScene } = await import('../js/gl/scene.js');
   const { buildCobra } = await import('../js/models/ships.js');
   const { stationMesh } = await import('../js/models/stations.js');
-  const { cityTris, MOVE_KM } = await import('../js/gl/citymesh.js');
+  const { cityTris, MOVE_KM, SHADE_MAX } = await import('../js/gl/citymesh.js');
   const { makeShip, placeShip } = await import('../js/game/ship.js');
 
   const cam = new Camera();
@@ -3090,6 +3090,32 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(drawn === 1 && scene.city.builds === builds0,
       `город рисуется одним вызовом и не пересобирается на месте (${scene.city.builds - builds0} `
       + 'сборок за 60 кадров)');
+
+    // Тени от фар. Коробки ближайших построек уезжают в шейдер тем же
+    // проходом, что и сами фары: ими грунт, стены и корабль решают,
+    // достаёт ли до них луч. Без них фонарь светит СКВОЗЬ дома.
+    {
+      const view0 = game.state.view;
+      // От третьего лица: в кабине фары гасятся отдельным проходом, и
+      // последним значением uniform-а оказался бы ноль от него.
+      game.state.view = 'chase';
+      // Нос корабля — на город: фара светит туда, куда он смотрит, и с
+      // произвольным разворотом луч ушёл бы мимо застройки.
+      lookAlong(ship.basis, normalize(v3(
+        city.pos.x - ship.pos.x, city.pos.y - ship.pos.y, city.pos.z - ship.pos.z)));
+      game.ship.lights = false;
+      scene.render(game);
+      ok(state.ints.uShadeN === 0, 'фары выключены — коробок теней в шейдере нет');
+
+      game.ship.lights = true;
+      scene.render(game);
+      ok(state.ints.uShadeN > 0 && state.ints.uShadeN <= SHADE_MAX
+        && Array.isArray(state.vecName.uCityOrg) && state.vecName.uCityOrg.length === 3,
+        `под фарами в шейдер уехало ${state.ints.uShadeN} построек и начало осей города`);
+
+      game.ship.lights = false;
+      game.state.view = view0;
+    }
 
     // Перелетели на другую окраину — подробности переехали. Это и есть
     // весь смысл двух уровней: настоящие модели там, где корабль.

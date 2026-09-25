@@ -64,6 +64,15 @@ html, body {
 .panel {
   min-width: 340px; max-width: min(760px, 92vw);
   max-height: 90vh; overflow-y: auto;
+  /* У страницы всё сенсорное поведение выключено (touch-action: none у
+     body), иначе джойстик и камера не работают. Панели это исключение
+     возвращает: пальцем её тянут вверх-вниз, и только её — страница
+     под ней по-прежнему не едет (overscroll-behavior). */
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  /* Полоса прокрутки видна намеренно: без неё длинный экран выглядит
+     обрезанным, и о том, что там есть продолжение, никто не догадается. */
+  scrollbar-width: thin; scrollbar-color: #1d5f86 transparent;
   padding: 22px 26px;
   border: 1px solid #1d5f86;
   background: rgba(2, 12, 20, .92);
@@ -89,6 +98,12 @@ html, body {
 .rows { width: 100%; font-size: 13px; border-collapse: collapse; margin: 6px 0 16px; }
 .rows td { padding: 3px 10px 3px 0; color: #8fc7e6; }
 .rows td.v { color: #d8f2ff; }
+/* Заголовки групп в таблице клавиш. Список управления вырос до четырёх
+   десятков строк, и сплошной стеной в нём не найти ничего: разбивка по
+   смыслу (полёт, цель, экраны) — единственное, что делает его списком, а
+   не простынёй. colspan на две ячейки, поэтому и выравнивать нечего. */
+.rows td.grp { color: #ffcc66; letter-spacing: 3px; padding: 16px 0 4px; }
+.rows tr:first-child td.grp { padding-top: 4px; }
 
 .btn {
   display: inline-block;
@@ -101,6 +116,13 @@ html, body {
 .btn:hover { background: #7fd4ff; }
 .btn.ghost { background: transparent; color: #7fb6d4; border: 1px solid #1d5f86; }
 .btn.ghost:hover { color: #d8f2ff; border-color: #4fb3e0; }
+.panel::-webkit-scrollbar { width: 10px; }
+.panel::-webkit-scrollbar-thumb { background: #1d5f86; }
+.panel::-webkit-scrollbar-thumb:hover { background: #4fb3e0; }
+/* Рамка фокуса на самой панели не нужна: фокус ей дан ради прокрутки
+   клавишами, а не для того, чтобы её «нажимали». */
+.panel:focus { outline: none; }
+
 /* Выбор языка. Выбранный подсвечен: две одинаковые кнопки не говорят,
    на каком языке игра сейчас, — а это первое, что хочется знать. */
 .langs { margin: 0 0 14px; }

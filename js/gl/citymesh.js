@@ -200,6 +200,168 @@ export const SHADOW_RGB = [0.42 * SHADOW_DARK, 0.435 * SHADOW_DARK, 0.455 * SHAD
 export const sunCasts = (sun) => !!sun && sun.y > SHADOW_MIN
   && Math.hypot(sun.x, sun.z) > 1e-4;
 
+// --- Тени от фар -----------------------------------------------------------
+//
+// ЭТО ДРУГАЯ ЗАДАЧА, а не солнечная тень с другим вектором. Солнце
+// бесконечно далеко: тень от него — перенос силуэта, она одинакова для
+// всего города и живёт в меше. Фара стоит ВНУТРИ сцены, едет вместе с
+// кораблём и светит конусом: тень от неё расходится веером, меняется
+// каждый кадр, а от здания ВЫШЕ лампы уходит в бесконечность. Класть
+// такую в меш — пересобирать город шестьдесят раз в секунду.
+//
+// Поэтому она считается НА ПИКСЕЛЬ: фрагмент спрашивает, свободен ли
+// луч до лампы, и спрашивает по ТЕМ ЖЕ КОРОБКАМ, по которым считаются
+// столкновения (js/models/city.js). Заодно получается то, чего
+// запечённая тень не умеет вовсе: дом закрывает свет не только на
+// грунте, но и на соседней стене, и на корабле.
+//
+// Коробок в городе тысячи, а в uniform-ы влезают десятки — поэтому в
+// шейдер уезжают не все, а те, что реально могут перекрыть луч
+// (shadeBoxes).
+
+/** Сколько построек участвует в тенях от фар за кадр. */
+export const SHADE_MAX = 24;
+
+/**
+ * Запас вокруг коробки, в котором точка считается «на ней самой», км.
+ *
+ * Без него каждая стена затеняла бы сама себя: луч от точки на стене
+ * выходит изнутри коробки, и плиточная проверка честно сообщает о
+ * пересечении. Два метра — больше ошибки float32 на километровых
+ * расстояниях и меньше, чем видно на картинке.
+ */
+export const SHADE_SKIN = 0.002;
+
+/**
+ * Какие постройки отдать шейдеру в тени от фар.
+ *
+ * Отбор — ПО УГЛОВОМУ РАЗМЕРУ со стороны лампы (радиус, делённый на
+ * расстояние), и по той же причине, по какой так же устроен выбор
+ * подробностей: именно он говорит, сколько луча постройка способна
+ * съесть. Ближний сарай перекрывает пятно целиком, дальняя башня — нет.
+ *
+ * Конус берётся ОБЩИЙ для всех ламп (js/game/lamps.js, lampCone): у
+ * корабля их две и расходятся они на десятки градусов, а проверять
+ * каждую отдельно — это второй такой же набор коробок в uniform-ах.
+ *
+ * @param lamp {x,y,z} лампа в осях города (y — над грунтом)
+ * @param cone {x,y,z,cos} общий конус фар в осях города
+ * @param groundR радиус грунта под городом, км (0 — плоский)
+ * @param outA (x, z, hw, hd) на коробку
+ * @param outB (низ, высота, cos, sin) на коробку
+ * @returns сколько коробок положено
+ */
+export function shadeBoxes(plan, lamp, cone, range, groundR, outA, outB) {
+  const r2 = groundR * groundR;
+  const drop = groundR > 0
+    ? (x, z) => Math.sqrt(Math.max(0, r2 - x * x - z * z)) - groundR
+    : () => 0;
+  // Лучшие по угловому размеру, вставкой: коробок тысячи, мест два
+  // десятка, и сортировать весь город каждый кадр незачем.
+  const best = [];
+  for (const box of plan.boxes) {
+    const dx = box.x - lamp.x, dz = box.z - lamp.z;
+    const dy = box.h * 0.5 - lamp.y;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    const r = Math.hypot(Math.hypot(box.ax, box.az), box.h * 0.5);
+    if (d2 > (range + r) * (range + r)) continue;
+    const d = Math.sqrt(d2) || 1e-6;
+    // Угловой радиус коробки — поправка к конусу: постройка, до которой
+    // луч достаёт краем, тень всё равно кладёт.
+    const k = Math.min(1, r / d);
+    if ((dx * cone.x + dy * cone.y + dz * cone.z) / d < cone.cos - k) continue;
+    if (best.length === SHADE_MAX && k <= best[best.length - 1].k) continue;
+    let i = best.length;
+    while (i > 0 && best[i - 1].k < k) i--;
+    best.splice(i, 0, { k, box });
+    if (best.length > SHADE_MAX) best.length = SHADE_MAX;
+  }
+  for (let i = 0; i < best.length; i++) {
+    const b = best[i].box;
+    outA[i * 4] = b.x; outA[i * 4 + 1] = b.z; outA[i * 4 + 2] = b.hw; outA[i * 4 + 3] = b.hd;
+    outB[i * 4] = drop(b.x, b.z); outB[i * 4 + 1] = b.h;
+    outB[i * 4 + 2] = b.c; outB[i * 4 + 3] = b.s;
+  }
+  return best.length;
+}
+
+/**
+ * Перекрыта ли постройкой прямая от точки до лампы. Оси города, км.
+ *
+ * ЭТО ЗЕРКАЛО ШЕЙДЕРА (SHADE_GLSL ниже) — построчное, как DETAIL_GLSL у
+ * мелкого рельефа. Здесь оно нужно проверкам: на GPU тень не измерить
+ * ничем, а геометрию — можно.
+ */
+export function shadeHit(a, b, n, p, lamp) {
+  for (let i = 0; i < n; i++) {
+    const hw = a[i * 4 + 2], hd = a[i * 4 + 3];
+    const hy = b[i * 4 + 1] * 0.5;
+    const c = b[i * 4 + 2], s = b[i * 4 + 3];
+    // В оси коробки — ТЕМ ЖЕ поворотом, что в cityBlocked: тень обязана
+    // совпадать с тем, обо что разбиваются.
+    const dx = p.x - a[i * 4], dz = p.z - a[i * 4 + 1];
+    const ox = dx * c - dz * s, oz = dx * s + dz * c;
+    const oy = p.y - b[i * 4] - hy;
+    if (Math.abs(ox) < hw + SHADE_SKIN && Math.abs(oz) < hd + SHADE_SKIN
+      && Math.abs(oy) < hy + SHADE_SKIN) continue;
+    const ex = lamp.x - p.x, ez = lamp.z - p.z;
+    const vx = ex * c - ez * s, vz = ex * s + ez * c, vy = lamp.y - p.y;
+    // Плиты: отрезок [0, 1] от точки до лампы против трёх пар граней.
+    let t0 = 0, t1 = 1, out = false;
+    for (let k = 0; k < 3 && !out; k++) {
+      const o = k === 0 ? ox : (k === 1 ? oy : oz);
+      const v = k === 0 ? vx : (k === 1 ? vy : vz);
+      const h = k === 0 ? hw : (k === 1 ? hy : hd);
+      if (Math.abs(v) < 1e-9) { out = Math.abs(o) > h; continue; }
+      const ta = (-h - o) / v, tb = (h - o) / v;
+      t0 = Math.max(t0, Math.min(ta, tb));
+      t1 = Math.min(t1, Math.max(ta, tb));
+      out = t0 > t1;
+    }
+    if (!out) return true;
+  }
+  return false;
+}
+
+/**
+ * То же самое во фрагментном шейдере. Всё — в осях города: точка и
+ * лампа приезжают в осях камеры и переводятся одним поворотом.
+ */
+export const SHADE_GLSL = `
+uniform int uShadeN;
+uniform vec3 uCityOrg;      // начало города в осях камеры
+uniform mat3 uCityAxes;     // столбцы — оси города в осях камеры
+uniform vec4 uShadeA[${SHADE_MAX}];   // x, z, полуширина, полуглубина
+uniform vec4 uShadeB[${SHADE_MAX}];   // низ, высота, cos, sin
+
+bool shadeHit(vec3 pCam, vec3 lampCam) {
+  vec3 p = (pCam - uCityOrg) * uCityAxes;
+  vec3 e = (lampCam - uCityOrg) * uCityAxes - p;
+  for (int i = 0; i < ${SHADE_MAX}; i++) {
+    if (i >= uShadeN) break;
+    vec4 A = uShadeA[i], B = uShadeB[i];
+    float c = B.z, s = B.w;
+    float hy = B.y * 0.5;
+    vec2 d = p.xz - A.xy;
+    vec3 o = vec3(d.x * c - d.y * s, p.y - B.x - hy, d.x * s + d.y * c);
+    vec3 v = vec3(e.x * c - e.z * s, e.y, e.x * s + e.z * c);
+    vec3 hs = vec3(A.z, hy, A.w);
+    // Точка на самой коробке своей же тени не отбрасывает.
+    if (all(lessThan(abs(o), hs + ${SHADE_SKIN}))) continue;
+    float t0 = 0.0, t1 = 1.0;
+    bool out_ = false;
+    for (int k = 0; k < 3; k++) {
+      if (abs(v[k]) < 1e-9) { out_ = abs(o[k]) > hs[k]; if (out_) break; continue; }
+      float ta = (-hs[k] - o[k]) / v[k], tb = (hs[k] - o[k]) / v[k];
+      t0 = max(t0, min(ta, tb));
+      t1 = min(t1, max(ta, tb));
+      if (t0 > t1) { out_ = true; break; }
+    }
+    if (!out_) return true;
+  }
+  return false;
+}`;
+
 /** Сколько полос у коробки: одна на полсотни метров, но не больше шести. */
 const bandsOf = (h) => Math.max(1, Math.min(6, Math.round(h / 0.05)));
 const proxyTris = (h) => bandsOf(h) * 8 + 2;
