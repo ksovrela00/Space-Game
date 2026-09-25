@@ -138,6 +138,12 @@ const el = (id) => ({
   listeners: {},
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
   appendChild() {},
+  // Фокус и прокрутка: настоящий узел умеет и то и другое, а экраны
+  // этим пользуются — длинную справку прокручивают клавишами, и панель
+  // берёт фокус при открытии (js/ui/screens.js).
+  tabIndex: 0, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+  focus() {},
+  closest: () => null,
   getContext: () => ctx,
   width: 0, height: 0,
 });

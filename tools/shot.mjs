@@ -220,6 +220,11 @@ const el = (id) => ({
   listeners: {},
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
   appendChild() {}, getContext: () => ctx, width: 0, height: 0,
+  // Фокус и прокрутка: настоящий узел умеет и то и другое, а экраны этим
+  // пользуются — длинную справку прокручивают клавишами, и панель берёт
+  // фокус при открытии (js/ui/screens.js).
+  tabIndex: 0, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+  focus() {}, closest: () => null,
 });
 const nodes = { screen: el('screen'), overlay: el('overlay'), panel: el('panel'), boot: el('boot'), bootBtn: el('bootBtn') };
 globalThis.document = { getElementById: (i) => nodes[i] || el(i), createElement: (t) => el(t) };
