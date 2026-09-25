@@ -1,6 +1,6 @@
 {
- "version": 1,
- "generatedAt": "2026-09-24T13:22:30.708Z",
+ "version": 2,
+ "generatedAt": "2026-09-25T06:54:50.585Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
@@ -625,6 +625,23 @@
      "isHomeWorld": false,
      "landable": false
     }
+   ],
+   "cities": [
+    {
+     "localId": "c7",
+     "bodyLocalId": 7,
+     "name": "Xeisis City",
+     "seed": 1082838363,
+     "layout": "spread",
+     "radiusKm": 18.293,
+     "pads": 4,
+     "dir": {
+      "x": -0.727851454,
+      "y": -0.490355809,
+      "z": -0.479357321
+     },
+     "groundH": 0.005938939
+    }
    ]
   },
   {
@@ -1067,7 +1084,8 @@
      "isHomeWorld": false,
      "landable": false
     }
-   ]
+   ],
+   "cities": []
   },
   {
    "id": 2,
@@ -1538,7 +1556,8 @@
      "isHomeWorld": false,
      "landable": false
     }
-   ]
+   ],
+   "cities": []
   },
   {
    "id": 3,
@@ -1980,7 +1999,8 @@
      "isHomeWorld": false,
      "landable": true
     }
-   ]
+   ],
+   "cities": []
   },
   {
    "id": 4,
@@ -2480,7 +2500,8 @@
      "isHomeWorld": false,
      "landable": true
     }
-   ]
+   ],
+   "cities": []
   },
   {
    "id": 5,
@@ -2980,7 +3001,8 @@
      "isHomeWorld": false,
      "landable": false
     }
-   ]
+   ],
+   "cities": []
   },
   {
    "id": 6,
@@ -3422,7 +3444,8 @@
      "isHomeWorld": false,
      "landable": false
     }
-   ]
+   ],
+   "cities": []
   }
  ]
 }

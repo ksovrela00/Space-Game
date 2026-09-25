@@ -120,7 +120,8 @@ try {
     $n = Seeder::all($catalog, $has('--market') || $has('--reset'));
     $say(sprintf('содержимое: товаров %d, типов кораблей %d, модулей %d',
         $n['commodity'], $n['ship_type'], $n['equipment_type']));
-    $say(sprintf('каталог: систем %d, тел %d', $n['star_system'], $n['body']));
+    $say(sprintf('каталог: систем %d, тел %d, городов %d',
+        $n['star_system'], $n['body'], $n['city'] ?? 0));
     $say(sprintf('порты: %d со свойствами, %d позиций на складах',
         $n['station'], $n['market']));
 

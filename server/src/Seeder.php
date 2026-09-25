@@ -109,7 +109,7 @@ final class Seeder
     /** Системы и тела. */
     public static function catalog(array $catalog): array
     {
-        $n = ['star_system' => 0, 'body' => 0];
+        $n = ['star_system' => 0, 'body' => 0, 'city' => 0];
 
         foreach ($catalog['systems'] as $s) {
             Db::run(
@@ -155,6 +155,27 @@ final class Seeder
                     ]
                 );
                 $n['body']++;
+            }
+
+            // Города: сносим и заливаем заново, а не обновляем на месте.
+            // У города нет ничего своего, что накопилось бы в базе
+            // (рынка и миссий у него пока нет), зато сам набор городов
+            // меняется — правило отбора тел ещё будет двигаться, и
+            // город, исчезнувший из каталога, обязан исчезнуть и здесь.
+            Db::run('DELETE FROM `city` WHERE `system_id`=?', [$s['id']]);
+            foreach ($s['cities'] ?? [] as $c) {
+                Db::run(
+                    'INSERT INTO `city`
+                       (`system_id`,`local_id`,`body_local_id`,`name`,`seed`,`layout`,
+                        `radius_km`,`pads`,`dir_x`,`dir_y`,`dir_z`,`ground_h`)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    [
+                        $s['id'], $c['localId'], $c['bodyLocalId'], $c['name'], $c['seed'],
+                        $c['layout'], $c['radiusKm'], $c['pads'],
+                        $c['dir']['x'], $c['dir']['y'], $c['dir']['z'], $c['groundH'],
+                    ]
+                );
+                $n['city']++;
             }
         }
 

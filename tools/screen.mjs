@@ -159,7 +159,12 @@ const SCENES = {
     title: 'наземный город: вид с воздуха',
     run: `
       liftoff();
-      showCity(1.1, 3.6);
+      // Отход считается от РАЗМЕРА ГОРОДА, а не в километрах: города
+      // бывают и по четыре километра, и по семьдесят, и постоянные
+      // «три километра назад» для одного вид с окраины, для другого —
+      // вид на одну улицу.
+      const R = GAME.world.cities[0].radius;
+      showCity(R * 0.5, R * 0.95);
       GAME.state.view = 'cockpit';
     `,
   },
@@ -178,8 +183,12 @@ const SCENES = {
     title: 'город сверху: расчищенная площадка в рельефе',
     run: `
       liftoff();
-      showCity(9, 0.8);
+      const R = GAME.world.cities[0].radius;
+      showCity(R * 1.8, R * 0.15);
       GAME.state.view = 'cockpit';
+      // Отладочный слой: с такой высоты город — горсть точек, и
+      // «его не видно» имеет две разные причины (не собран или не
+      // нарисован). Различить их иначе нечем.
     `,
   },
   citynight: {
@@ -187,7 +196,8 @@ const SCENES = {
     title: 'город ночью: окна и огни порта',
     run: `
       liftoff();
-      showCity(1.1, 3.6, 'night');
+      const R = GAME.world.cities[0].radius;
+      showCity(R * 0.35, R * 0.6, 'night');
       GAME.ship.lights = true;
       GAME.state.view = 'cockpit';
     `,
@@ -649,6 +659,26 @@ try {
   }
 
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  // Отчёт о городе перед снимком: CITYDBG=1 node tools/screen.mjs --scene=city
+  //
+  // «Города не видно» имеет три разные причины — не собран, не нарисован
+  // или слился с грунтом по цвету, — и по картинке они неразличимы. Один
+  // раз на этом уже потеряли полчаса: город оказался и собран, и
+  // нарисован, а не видно его было потому, что крыши вышли той же
+  // яркости, что бетон плиты.
+  if (process.env.CITYDBG) {
+    const info = await run(cdp, `
+      const c = GAME.world.cities[0];
+      const p = GAME.ship.pos;
+      return JSON.stringify({
+        cities: GAME.world.cities.length,
+        radius: c && c.radius,
+        stats: GAME.renderStats && GAME.renderStats.city,
+        dist: c ? Math.hypot(c.pos.x - p.x, c.pos.y - p.y, c.pos.z - p.z) : null,
+      });
+    `);
+    console.log('город:', info);
+  }
   writeFileSync(out, Buffer.from(shot.data, 'base64'));
   console.log(`снимок: ${out}  (${W}×${H}, сцена «${scene.title}»)`);
   cdp.close();

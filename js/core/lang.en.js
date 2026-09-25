@@ -348,6 +348,12 @@ export const EN = {
   'ГРУНТ': 'GROUND',
   'ГОРОД': 'CITY',
   'ПЛОЩАДКИ': 'LANDING PADS',
+  'ПЛАНИРОВКА': 'LAYOUT',
+  // Схемы расселения города (js/models/city.js, CITY_KINDS).
+  'решётка': 'grid',
+  'кольцевой': 'ring road',
+  'линейный': 'ribbon',
+  'россыпь': 'scattered',
   'РАЗМЕР': 'SIZE',
   'Наземный город на выровненной плите. Садиться можно на ':
     'A surface city on a levelled plate. You may land on ',

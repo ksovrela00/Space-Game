@@ -25,7 +25,7 @@ import {
 import { skyFor, skyUniforms, SKY_GAIN } from './nebula.js';
 import {
   detailUniforms, tileDetailUniforms, makeDetailLoad, updateDetailLoad,
-  FW_TARGET_GPU, FW_TARGET_CPU, FW_MAX,
+  plateUniforms, FW_TARGET_GPU, FW_TARGET_CPU, FW_MAX,
 } from './detail.js';
 import { terrainOf } from './terrain.js';
 import { edgeAngle } from './icosphere.js';
@@ -33,6 +33,7 @@ import { Baker, createBlankTexture, createSkyTexture, CUBE_FACES } from './bake.
 import { TileSet } from './tiles.js';
 import { tileKey, tileTexelAngle } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
+import { cityLocal } from '../game/city.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
 import { ENTRY } from '../game/entry.js';
@@ -142,6 +143,11 @@ const WARP_AMBIENT = 0.55;
 // секунды. Белая подложка (0.35) нужна, чтобы у красного карлика тоннель
 // не выродился в один оранжевый канал и не потерял объём.
 const _tint = new Float32Array(3);
+// Куда попадает камера в осях города: пересчитывается каждый кадр, и
+// заводить под это объект каждый раз незачем.
+const _cityAt = { x: 0, y: 0, z: 0 };
+// Направление на звезду в осях города: по нему кладутся тени.
+const _citySun = { x: 0, y: 0, z: 0 };
 function starTint(sys) {
   const c = sys && sys.cls ? sys.cls.color : [255, 226, 168];
   for (let i = 0; i < 3; i++) _tint[i] = 0.35 + 0.65 * (c[i] / 255);
@@ -588,10 +594,7 @@ export class GlScene {
     // Площадка наземного города (js/gl/terrain.js): на ней мелкого
     // рельефа нет. Нулевой радиус означает «площадки нет» — так тела без
     // города не платят за неё ничем.
-    const pl = u.plate;
-    gl.uniform4f(prog.loc('uPlate'),
-      pl ? pl.x : 0, pl ? pl.y : 0, pl ? pl.z : 0, pl ? pl.d0 : 0);
-    gl.uniform1f(prog.loc('uPlateRim'), pl ? pl.d1 : 1);
+    plateUniforms(gl, prog, u.plate);
   }
 
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
@@ -1124,7 +1127,24 @@ export class GlScene {
       if (d < nd) { nd = d; near = c; }
     }
     this.cityNear = nd;
-    this.city.update(nd < near.radius * 100 ? near : null);
+    if (nd >= near.radius * 100) { this.city.update(null); return; }
+    // Где камера в осях города: от этого зависит, какие постройки
+    // показывать настоящими моделями, а какие коробками
+    // (js/gl/citymesh.js). Камера, а не корабль: смотрят камерой, и с
+    // вида от третьего лица подробности должны быть там же.
+    cityLocal(near, cam.pos, _cityAt);
+    // Куда светит звезда в осях города: по этому кладутся тени построек
+    // (js/gl/citymesh.js). Направление, а не положение: до звезды
+    // миллионы километров, и на размере города луч параллелен.
+    const sun = world.star.pos;
+    let sx = sun.x - near.pos.x, sy = sun.y - near.pos.y, sz = sun.z - near.pos.z;
+    const sl = Math.hypot(sx, sy, sz) || 1;
+    sx /= sl; sy /= sl; sz /= sl;
+    const bs = near.basis;
+    _citySun.x = sx * bs.right.x + sy * bs.right.y + sz * bs.right.z;
+    _citySun.y = sx * bs.up.x + sy * bs.up.y + sz * bs.up.z;
+    _citySun.z = sx * bs.fwd.x + sy * bs.fwd.y + sz * bs.fwd.z;
+    this.city.update(near, _cityAt, _citySun);
   }
 
   /**

@@ -384,13 +384,60 @@ const rampAt = (ramp, t, out) => {
 /** Бетон площадки. Светлее грунта — это видно и с орбиты. */
 export const PLATE_RGB = [0.42, 0.435, 0.455];
 
+/**
+ * Излом края плиты: во сколько раз её радиус в этом направлении больше
+ * или меньше среднего. Три гармоники по углу вокруг местной вертикали.
+ *
+ * Возвращается КВАДРАТ множителя: сравнивают всё равно квадраты хорд, а
+ * радиус в квадрате — это множитель в квадрате. Арктангенса здесь нет и
+ * быть не может: косинусы кратных углов считаются из косинуса и синуса
+ * первого тремя умножениями каждый, а atan2 в функции, которую зовут
+ * миллионы раз за кадр, стоил бы дороже всего рельефа.
+ *
+ * Слово в слово повторено в шейдере — js/gl/detail.js, dPlate().
+ */
+function plateWobble(p, dx, dy, dz) {
+  const u = dx * p.ax + dy * p.ay + dz * p.az;
+  const v = dx * p.bx + dy * p.by + dz * p.bz;
+  const r = Math.sqrt(u * u + v * v);
+  if (r < 1e-12) return 1;
+  const c = u / r, si = v / r;
+  const c2 = c * c - si * si, s2 = 2 * c * si;
+  const c3 = c2 * c - s2 * si, s3 = s2 * c + c2 * si;
+  const f = 1 + p.k1c * c + p.k1s * si + p.k2c * c2 + p.k2s * s2 + p.k3c * c3 + p.k3s * s3;
+  return f * f;
+}
+
 /** Вес площадки в точке: 1 на плите, 0 за краем перехода. */
 export function plateAt(plate, x, y, z) {
   const dx = x - plate.x, dy = y - plate.y, dz = z - plate.z;
   const d2 = dx * dx + dy * dy + dz * dz;
-  if (d2 >= plate.d1) return 0;
-  if (d2 <= plate.d0) return 1;
-  return 1 - smooth01((d2 - plate.d0) / (plate.d1 - plate.d0));
+  if (d2 >= plate.dMax) return 0;
+  const w2 = plateWobble(plate, dx, dy, dz);
+  const d0 = plate.d0 * w2, d1 = plate.d1 * w2;
+  if (d2 >= d1) return 0;
+  if (d2 <= d0) return 1;
+  return 1 - smooth01((d2 - d0) / (d1 - d0));
+}
+
+/**
+ * Доля бетона в цвете грунта.
+ *
+ * Отдельно от выравнивания, и вот почему: ровной обязана быть вся
+ * плита — под городом в семьдесят километров иначе не построить, — а
+ * СЕРОЙ она быть не обязана. Сплошной бетонный круг такого размера
+ * выглядит не городом, а карьером. Поэтому тонируется ядро, а дальше
+ * остаётся просто выровненный грунт своего цвета.
+ */
+export function plateTint(plate, x, y, z) {
+  const dx = x - plate.x, dy = y - plate.y, dz = z - plate.z;
+  const d2 = dx * dx + dy * dy + dz * dz;
+  if (d2 >= plate.dMax) return 0;
+  const w2 = plateWobble(plate, dx, dy, dz);
+  const t0 = plate.t0 * w2, t1 = plate.t1 * w2;
+  if (d2 <= t0) return 1;
+  if (d2 >= t1) return 0;
+  return 1 - smooth01((d2 - t0) / (t1 - t0));
 }
 
 export const terrainOf = (body) => body._terrain || (body._terrain = makeTerrain(body));
@@ -507,9 +554,13 @@ export function makeTerrain(body) {
       rgb[1] = clamp01(rgb[1] * k);
       rgb[2] = clamp01(rgb[2] * k);
       if (pw > 0) {
-        rgb[0] += (PLATE_RGB[0] - rgb[0]) * pw;
-        rgb[1] += (PLATE_RGB[1] - rgb[1]) * pw;
-        rgb[2] += (PLATE_RGB[2] - rgb[2]) * pw;
+        // Ядро города — бетон, окраина плиты — чуть подсветлённый
+        // грунт: по светлому пятну город находят с воздуха раньше, чем
+        // различимы дома, и терять эту подсказку нельзя.
+        const tw = 0.18 * pw + 0.82 * plateTint(body.plate, x, y, z);
+        rgb[0] += (PLATE_RGB[0] - rgb[0]) * tw;
+        rgb[1] += (PLATE_RGB[1] - rgb[1]) * tw;
+        rgb[2] += (PLATE_RGB[2] - rgb[2]) * tw;
       }
     }
     return h;

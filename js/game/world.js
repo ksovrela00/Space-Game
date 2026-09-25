@@ -452,6 +452,25 @@ export const HOME_LAYOUT = [
  * где галактики нет вовсе — в проверках и, в будущем, на сервере, где
  * список систем придёт извне.
  */
+/**
+ * На каких телах системы стоят города.
+ *
+ * ОТДЕЛЬНОЙ ФУНКЦИЕЙ НАРОЧНО. Правило отбора — это решение про игру, а
+ * не про генератор, и менять его будут именно здесь: сегодня один город
+ * в родной системе, завтра — по городу на каждом обжитом мире. Всё
+ * остальное — выгрузка в базу, загрузка при входе в систему,
+ * отрисовка — уже умеет работать с любым их числом.
+ *
+ * Правило обязано быть ДЕТЕРМИНИРОВАННЫМ: мир лежит слепком в базе и в
+ * сохранениях пилотов.
+ */
+export function cityHosts(planets, seed) {
+  if (seed !== HOME_SEED) return [];
+  const host = planets.find((p) => canHostCity(p) && p.kind === 'rock')
+    || planets.find((p) => canHostCity(p));
+  return host ? [host] : [];
+}
+
 export function makeSystem(spec = HOME_SEED) {
   const sys = (spec && typeof spec === 'object') ? spec : systemBySeed(spec);
   const seed = sys.seed;
@@ -595,13 +614,9 @@ export function makeSystem(spec = HOME_SEED) {
   //
   // Правило детерминированное, поэтому город остаётся на том же месте
   // между запусками и в чужих сохранениях.
-  if (seed === HOME_SEED) {
-    const host = planets.find((p) => canHostCity(p) && p.kind === 'rock')
-      || planets.find((p) => canHostCity(p));
-    if (host) {
-      host.city = makeCity(host, 'c' + host.id);
-      world.cities.push(host.city);
-    }
+  for (const host of cityHosts(planets, seed)) {
+    host.city = makeCity(host, 'c' + host.id);
+    world.cities.push(host.city);
   }
 
   // Гравитация: масса из плотности и радиуса, радиус захвата — из массы

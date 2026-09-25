@@ -31,7 +31,7 @@ import {
   updateDockingComputer, DOCK_RANGE,
 } from './game/docking.js';
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
-import { cityCrash, cityPadUnder } from './game/city.js';
+import { cityCrash, cityPadUnder, applyCities } from './game/city.js';
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
@@ -68,7 +68,7 @@ import {
 } from './net/session.js';
 import { net, connect as netConnect, shoot, reportHit, reportImpact }
   from './net/socket.js';
-import { impact as apiImpact } from './net/api.js';
+import { impact as apiImpact, system as apiSystem } from './net/api.js';
 import { linkState } from './net/quality.js';
 import { makePeers, ingestPeers, peerPoses, dropPeer } from './game/peers.js';
 import {
@@ -192,8 +192,33 @@ const _sun = v3();
 const _camDir = v3();
 const _camRight = v3();
 const _tmp = v3();
+// Куда уехало несущее тело за шаг мира: замер до и после updateWorld.
+const _carried = v3();
 
 // --- смена звёздной системы --------------------------------------------------
+
+/**
+ * Забрать у сервера города системы.
+ *
+ * Хозяин мира — сервер: где стоит город и как он зовётся, решает он, а
+ * не клиент (js/game/city.js, applyCities). Клиент при этом собирает
+ * систему сам и СРАЗУ — ответа он не ждёт: офлайн игра обязана работать
+ * целиком, а генератор один и тот же, так что чаще всего ответ ничего
+ * не меняет.
+ *
+ * Прицел сбрасывается только если набор городов ДЕЙСТВИТЕЛЬНО другой:
+ * иначе ответ, пришедший через секунду после входа, сбивал бы уже
+ * выбранную цель.
+ */
+function syncCities(target, forWorld) {
+  if (netMode !== 'online') return;
+  const was = forWorld.cities.map((c) => c.id).join(',');
+  apiSystem(target.id).then((r) => {
+    if (world !== forWorld || !r || !Array.isArray(r.cities)) return;
+    applyCities(world, r.cities);
+    if (world.cities.map((c) => c.id).join(',') !== was) game.nav = makeNav(world);
+  }).catch(() => { /* сети нет — остаётся то, что клиент собрал сам */ });
+}
 
 /**
  * Перейти в другую систему: старую выгрузить целиком, новую собрать.
@@ -254,6 +279,7 @@ function enterSystem(target) {
   // ставим его немедленно: иначе первый кадр после прыжка покажет орбиты
   // на момент рождения вселенной.
   if (worldAim !== null) updateWorld(world, worldAim);
+  syncCities(target, world);
   return world;
 }
 
@@ -1250,7 +1276,26 @@ function step(dt) {
   const st = game.state;
   // Время мира подводится к серверному прямо в ходе, а не рывком: рывок
   // на стыковке увёл бы станцию из-под носа (js/game/clock.js).
-  updateWorld(world, clockStep(world.time, worldAim, dt));
+  //
+  // ШАГ МИРА НЕ РАВЕН ШАГУ КАДРА, и это главное, что здесь надо помнить.
+  // Часы подводятся ходом (до четверти быстрее или медленнее), а после
+  // спящей вкладки — рывком на десятки секунд. Всё, что должно ехать
+  // ВМЕСТЕ С ТЕЛАМИ, обязано ехать на этот шаг, а не на кадровый.
+  const dtWorld = clockStep(world.time, worldAim, dt);
+  // Куда уедет несущее тело — замеряем, а не считаем по скорости: на
+  // рывке в минуту скорость на время даёт хорду вместо дуги, а замер
+  // верен при любом шаге и не стоит ничего. Тело берём прошлого кадра:
+  // захват пересчитывается ниже, уже по новым положениям.
+  const carrier = game.capture;
+  if (carrier) {
+    _carried.x = carrier.pos.x; _carried.y = carrier.pos.y; _carried.z = carrier.pos.z;
+  }
+  updateWorld(world, dtWorld);
+  if (carrier) {
+    _carried.x = carrier.pos.x - _carried.x;
+    _carried.y = carrier.pos.y - _carried.y;
+    _carried.z = carrier.pos.z - _carried.z;
+  }
   // Часы пилота идут в любом режиме: срок задания не останавливается
   // оттого, что корабль стоит в порту.
   updatePlayer(game.player, dt);
@@ -1288,8 +1333,14 @@ function step(dt) {
   // Гравитационный захват: внутри сферы действия тела корабль
   // переносится вместе с ним (см. js/game/gravity.js). Без этого
   // «зависнуть над точкой» нельзя — поверхность уезжает из-под корабля.
+  const wasCarrier = carrier;
   game.capture = captureBody(world, ship.pos);
-  if (game.capture && st.mode === ST.FLIGHT) carryShip(ship, game.capture, dt);
+  if (game.capture && st.mode === ST.FLIGHT) {
+    // Замеренное смещение годится, только если тело то же самое: сменился
+    // захват — считаем по скорости, шаг там всё равно кадровый.
+    carryShip(ship, game.capture, dtWorld,
+      game.capture === wasCarrier ? _carried : null);
+  }
 
   if (st.mode === ST.DOCKED) {
     // Корабль стоит в порту и едет вместе со станцией.
@@ -2016,9 +2067,17 @@ function frame(now) {
     } else if (netMode === 'offline' && session.mode === 'online') {
       say(game.state, L('СВЯЗЬ ВОССТАНОВЛЕНА'), '#78e08f', 3);
     } else if (session.mode === 'none' && netMode !== 'none') {
+      // Связи нет — города остаются те, что собрал клиент. Спорить не с
+      // кем, а мир без них был бы беднее того, в котором игрок только
+      // что летал.
       say(game.state, L('ВХОД ПРОСРОЧЕН · СОХРАНЕНИЕ ТОЛЬКО МЕСТНОЕ'), '#ff7a66', 6);
     }
+    const wasMode = netMode;
     netMode = session.mode;
+    // Связь появилась уже после входа в систему (обычный случай:
+    // система собирается раньше, чем проходит вход) — спрашиваем города
+    // сейчас.
+    if (netMode === 'online' && wasMode !== 'online') syncCities(sys, world);
   }
 
   updateMessages(game.state, dt);

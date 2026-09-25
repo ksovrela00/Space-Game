@@ -36,8 +36,9 @@ final class Schema
      * 6 — щит и трюм переехали к модулям: столбцы `shield_max`,
      * `shield_regen`, `shield_delay` и `hold_t` у `ship_type` снесены,
      * их числа теперь у модулей в `equipment_type` (см. Loadout).
+     * 7 — наземные города: таблица `city`.
      */
-    public const VERSION = 6;
+    public const VERSION = 7;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -141,6 +142,46 @@ final class Schema
                 CONSTRAINT `station_body` FOREIGN KEY (`body_id`)
                     REFERENCES `body` (`id`) ON DELETE CASCADE,
                 CONSTRAINT `station_system` FOREIGN KEY (`system_id`)
+                    REFERENCES `star_system` (`id`) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // Наземный город. Отдельной таблицей, а не полем у `body`,
+            // по той же причине, что и станция: городов на теле может не
+            // быть ни одного, а может стать несколько, и рынок с
+            // миссиями потом сядут именно сюда.
+            //
+            // ПЛАНИРОВКИ ЗДЕСЬ НЕТ И НЕ БУДЕТ. Пять тысяч построек
+            // собираются из `seed` за миллисекунду и побайтово
+            // одинаково у сервера и у клиента (js/models/city.js); класть
+            // их в базу значило бы хранить мегабайты того, что и так
+            // выводится из одного числа. В базе лежит ровно то, чего из
+            // семени не вывести: какое тело выбрано, как город назван и
+            // где именно на теле он стоит.
+            'city' => "CREATE TABLE `city` (
+                `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                `system_id` INT NOT NULL,
+                -- Номер города внутри системы: он лежит в сохранении
+                -- игрока как цель и обязан пережить пересборку каталога.
+                `local_id` VARCHAR(24) NOT NULL,
+                `body_local_id` INT NOT NULL,
+                `name` VARCHAR(96) NOT NULL,
+                -- Семя планировки: из него город собирается целиком.
+                `seed` BIGINT UNSIGNED NOT NULL,
+                -- Схема расселения: решётка, кольцевой, линейный,
+                -- россыпь. Выводится из семени, но лежит столбцом —
+                -- чтобы по ней можно было искать, не собирая город.
+                `layout` VARCHAR(12) NOT NULL,
+                `radius_km` DOUBLE NOT NULL,
+                `pads` TINYINT NOT NULL DEFAULT 0,
+                -- Где на теле: единичный вектор в осях тела.
+                `dir_x` DOUBLE NOT NULL,
+                `dir_y` DOUBLE NOT NULL,
+                `dir_z` DOUBLE NOT NULL,
+                -- Высота выровненной плиты, долей радиуса тела.
+                `ground_h` DOUBLE NOT NULL,
+                UNIQUE KEY `in_system` (`system_id`, `local_id`),
+                KEY `on_body` (`system_id`, `body_local_id`),
+                CONSTRAINT `city_system` FOREIGN KEY (`system_id`)
                     REFERENCES `star_system` (`id`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 

@@ -21,7 +21,7 @@
 // при входе. Подписи, не подтверждённой числом из мира, в карточке нет.
 
 import { fmtDist, fmtTime } from './hud.js';
-import { CITY } from '../models/city.js';
+import { CITY_KINDS } from '../models/city.js';
 import {
   KIND_INFO, kindLabel, massOf, escapeSpeed, dayLength, atmosphereOf,
   temperatureOf, toCelsius, EARTH_MASS, starDistance,
@@ -624,7 +624,11 @@ export function objectCard(game, obj) {
     card.desc = L('Наземный город на выровненной плите. Садиться можно на ') +
       L('его площадки — они ровные и обозначены, в отличие от дикого грунта.');
     rows.push([L('ТЕЛО'), obj.body.name]);
-    rows.push([L('ПЛОЩАДКИ'), String(CITY.pads)]);
+    // Схема расселения и число площадок — у каждого города свои: города
+    // генерируются, а не ставятся по одному образцу, и карточка обязана
+    // это показывать, иначе они все на одно лицо и в ней.
+    rows.push([L('ПЛАНИРОВКА'), L(CITY_KINDS[obj.layout] || '')]);
+    rows.push([L('ПЛОЩАДКИ'), String(obj.plan.pads.length)]);
     rows.push([L('РАЗМЕР'), fmtDist(obj.radius * 2)]);
     range();
   } else if (obj.isStation) {

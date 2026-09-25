@@ -1995,7 +1995,7 @@ console.log('\n== мок GL: путь отрисовки ==');
   const { GlScene } = await import('../js/gl/scene.js');
   const { buildCobra } = await import('../js/models/ships.js');
   const { stationMesh } = await import('../js/models/stations.js');
-  const { cityTris } = await import('../js/gl/citymesh.js');
+  const { cityTris, MOVE_KM } = await import('../js/gl/citymesh.js');
   const { makeShip, placeShip } = await import('../js/game/ship.js');
 
   const cam = new Camera();
@@ -3055,25 +3055,32 @@ console.log('\n== мок GL: путь отрисовки ==');
 
   // --- Наземный город ---------------------------------------------------------
   //
-  // Город — самый крупный меш в игре (сто тысяч граней), и собирается он
-  // порциями. Здесь проверяется то, чего не видно ни в планировке, ни на
-  // снимке: что он вообще доходит до видеокарты, что собирается ОДИН раз
-  // и что его не тащат в кадр с другого конца системы.
+  // Город — самый крупный меш в игре, и собирается он порциями и С ДВУМЯ
+  // УРОВНЯМИ ПОДРОБНОСТИ: рядом с кораблём настоящие модели, дальше
+  // коробки. Здесь проверяется то, чего не видно ни в планировке, ни на
+  // снимке: что он доходит до видеокарты, что стоя на месте не
+  // пересобирается, что подробности ЕДУТ ЗА КОРАБЛЁМ и что издалека за
+  // него не платят ничем.
   {
     const city = world.cities[0];
-    const toCity = (alt) => {
-      const u = city.basis.up;
+    // Точка над городом со смещением в его осях: так можно встать над
+    // серединой, а можно — над дальней окраиной.
+    const over = (alt, dx = 0, dz = 0) => {
+      const bs = city.basis;
       const at = v3(
-        city.pos.x + u.x * alt, city.pos.y + u.y * alt, city.pos.z + u.z * alt);
+        city.pos.x + bs.up.x * alt + bs.right.x * dx + bs.fwd.x * dz,
+        city.pos.y + bs.up.y * alt + bs.right.y * dx + bs.fwd.y * dz,
+        city.pos.z + bs.up.z * alt + bs.right.z * dx + bs.fwd.z * dz);
       placeShip(ship, at, null);
       lookAt(at, city.pos);
     };
 
-    toCity(2);
+    over(1);
     let frames = 0;
     while (!scene.city.mesh && frames < 400) { scene.render(game); frames++; }
     const built = scene.city.mesh ? scene.city.mesh.faces : 0;
-    ok(scene.city.mesh && built === cityTris(city.plan) && frames < 200,
+    const want = cityTris(city.plan, scene.city.anchor, scene.city.sun);
+    ok(scene.city.mesh && built === want && frames < 200,
       `город собран за ${frames} кадров: ${built} треугольников`);
 
     scene.render(game);
@@ -3081,12 +3088,56 @@ console.log('\n== мок GL: путь отрисовки ==');
     const builds0 = scene.city.builds;
     for (let i = 0; i < 60; i++) scene.render(game);
     ok(drawn === 1 && scene.city.builds === builds0,
-      `город рисуется одним вызовом и не пересобирается (${scene.city.builds - builds0} ` +
-      'сборок за 60 кадров)');
+      `город рисуется одним вызовом и не пересобирается на месте (${scene.city.builds - builds0} `
+      + 'сборок за 60 кадров)');
 
-    // Ушли из системы — память отдана. Сто тысяч граней на теле, которого
-    // больше нет в кадре, это десять мегабайт в драйвере ни за что.
-    toCity(city.radius * 200);
+    // Перелетели на другую окраину — подробности переехали. Это и есть
+    // весь смысл двух уровней: настоящие модели там, где корабль.
+    {
+      const before = scene.city.anchor;
+      const far = Math.min(city.radius * 0.8, 6);
+      over(1, far, 0);
+      for (let i = 0; i < 400 && scene.city.builds === builds0; i++) scene.render(game);
+      const moved = scene.city.anchor;
+      ok(scene.city.builds > builds0 && moved && before
+        && Math.hypot(moved.x - before.x, moved.z - before.z) > 1,
+        `подробности переехали за кораблём на ${far.toFixed(1)} км `
+        + `(${scene.city.builds - builds0} пересборка)`);
+    }
+
+    // ЭТО БЫЛО СЛОМАНО: порог пересборки один и большой. Корабль,
+    // пролетевший чуть меньше порога и вставший, оставался с якорем за
+    // километры — и дома в трёхстах метрах так и стояли коробками,
+    // сколько ни жди. Проверяется именно этот случай: сместились МЕНЬШЕ
+    // порога хода и замерли.
+    {
+      const before = scene.city.anchor;
+      const builds2 = scene.city.builds;
+      over(1, Math.min(city.radius * 0.8, 6) + MOVE_KM * 0.7, 0);
+      for (let i = 0; i < 400 && scene.city.builds === builds2; i++) scene.render(game);
+      const now = scene.city.anchor;
+      ok(scene.city.builds > builds2 && now && before
+        && Math.hypot(now.x - before.x, now.z - before.z) > MOVE_KM * 0.5,
+        `вставший корабль догнал подробности сместившись на ${(MOVE_KM * 0.7).toFixed(2)} км `
+        + `— меньше порога хода ${MOVE_KM} км (${scene.city.builds - builds2} пересборка)`);
+    }
+
+    // Высоко над городом подробностей не разобрать, и их не собирают:
+    // подлёт с орбиты не должен стоить ни кадра.
+    {
+      const builds1 = scene.city.builds;
+      over(60);
+      for (let i = 0; i < 400; i++) scene.render(game);
+      const cheap = scene.city.mesh ? scene.city.mesh.faces : 0;
+      ok(scene.city.anchor === null && cheap < built && scene.cityDraws === 1,
+        `с высоты город собран коробками и нарисован: ${cheap} треугольников против ${built} `
+        + `вблизи, вызовов ${scene.cityDraws} (${scene.city.builds - builds1} пересборка)`);
+    }
+
+    // Ушли из системы — память отдана. Сотни тысяч граней на теле,
+    // которого больше нет в кадре, это десятки мегабайт в драйвере ни за
+    // что.
+    over(city.radius * 200);
     for (let i = 0; i < 4; i++) scene.render(game);
     ok(!scene.city.mesh && scene.cityDraws === 0,
       'издалека город не держат в памяти и не рисуют');

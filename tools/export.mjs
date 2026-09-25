@@ -18,6 +18,7 @@ import { dirname } from 'node:path';
 import { galaxy } from '../js/game/galaxy.js';
 import { makeSystem } from '../js/game/world.js';
 import { isLandable } from '../js/game/surface.js';
+import { cityRecord } from '../js/game/city.js';
 import { HULL_SIZE } from '../js/models/ships.js';
 
 const out = process.argv[2] || 'server/data/catalog.json';
@@ -70,6 +71,17 @@ for (const sys of g.systems) {
     if (p.station) bodies.push(bodyRow(p.station, 'station', p.id));
   }
 
+  // Города. В базу уходит ЗАПИСЬ, а не планировка: из семени те же
+  // пять тысяч построек собираются за миллисекунду и побайтово
+  // одинаково, а мегабайты в базе не нужны никому. Зато хозяином того,
+  // ГДЕ стоит город и как он зовётся, становится сервер — и это то же
+  // правило, по которому в базе лежат планеты.
+  const cities = world.cities.map((c) => {
+    const r = cityRecord(c);
+    return { ...r, radiusKm: num(r.radiusKm, 3), groundH: num(r.groundH, 9),
+      dir: { x: num(r.dir.x, 9), y: num(r.dir.y, 9), z: num(r.dir.z, 9) } };
+  });
+
   systems.push({
     id: sys.id,
     seed: sys.seed,
@@ -82,11 +94,12 @@ for (const sys of g.systems) {
     habitableKm: num(sys.hab, 3),
     pos: { x: num(sys.pos.x, 4), y: num(sys.pos.y, 4), z: num(sys.pos.z, 4) },
     bodies,
+    cities,
   });
 }
 
 const catalog = {
-  version: 1,
+  version: 2,
   generatedAt: new Date().toISOString(),
   galaxySeed: g.seed,
   // ГАБАРИТЫ корпуса, и только они: остальные числа корабля — урон,
@@ -108,6 +121,7 @@ writeFileSync(out, JSON.stringify(catalog, null, 1), 'utf8');
 
 const bodies = systems.reduce((a, s) => a + s.bodies.length, 0);
 const stations = systems.reduce((a, s) => a + s.bodies.filter((b) => b.kind === 'station').length, 0);
+const cityN = systems.reduce((a, s) => a + s.cities.length, 0);
 console.log(`каталог выгружен: ${out}`);
-console.log(`  систем ${systems.length}, тел ${bodies} (станций ${stations}),`
+console.log(`  систем ${systems.length}, тел ${bodies} (станций ${stations}), городов ${cityN},`
   + ` габаритов корпусов ${catalog.shipTypes.length}`);

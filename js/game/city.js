@@ -70,17 +70,20 @@ function tangents(d, u, v) {
  * насыпать по краям. Заодно возвращается средняя высота — по ней плиту
  * и кладут, чтобы выемка и насыпь были примерно равны.
  */
-export function siteSpan(body, dir) {
+export function siteSpan(body, dir, plateKm) {
   const t = terrainOf(body);
-  const span = CITY.plate / body.radius;
+  const span = plateKm / body.radius;
   tangents(dir, _u, _v);
   let lo = Infinity, hi = -Infinity, sum = 0, n = 0;
-  for (let i = 0; i < 9; i++) {
+  // Два кольца проб, а не одно: город бывает в семьдесят километров, и
+  // по одному кольцу по краю кратер посреди плиты остался бы незамечен.
+  for (let i = 0; i < 17; i++) {
     let du = 0, dv = 0;
     if (i > 0) {
-      const a = ((i - 1) / 8) * Math.PI * 2;
-      du = Math.cos(a) * span;
-      dv = Math.sin(a) * span;
+      const ring = i <= 8 ? 0.55 : 1;
+      const a = (((i - 1) % 8) / 8) * Math.PI * 2;
+      du = Math.cos(a) * span * ring;
+      dv = Math.sin(a) * span * ring;
     }
     _probe.x = dir.x + _u.x * du + _v.x * dv;
     _probe.y = dir.y + _u.y * du + _v.y * dv;
@@ -104,7 +107,7 @@ export function siteSpan(body, dir) {
  * Широты у полюсов исключены намеренно: там сходятся меридианы, и любая
  * прямоугольная планировка на них выглядит перекошенной.
  */
-export function citySite(body, seed) {
+export function citySite(body, seed, plateKm) {
   const rng = makeRng(seed);
   let best = null;
   for (let i = 0; i < 10; i++) {
@@ -112,7 +115,7 @@ export function citySite(body, seed) {
     const lon = rng.range(0, Math.PI * 2);
     const c = Math.sqrt(Math.max(0, 1 - lat * lat));
     const d = v3(Math.cos(lon) * c, lat, Math.sin(lon) * c);
-    const s = siteSpan(body, d);
+    const s = siteSpan(body, d, plateKm);
     if (!best || s.span < best.span) best = { dir: d, span: s.span, mean: s.mean };
   }
   return best;
@@ -127,24 +130,74 @@ let nextCityId = 1;
  * функции, но ПОСЛЕ того, как высота места измерена: иначе плита мерила
  * бы саму себя.
  */
-export function makeCity(body, id = null) {
+export function makeCity(body, id = null, rec = null) {
   const seed = citySeed(body.name + '#' + body.id + '/city');
-  const site = citySite(body, seed);
   const rng = makeRng(seed ^ 0x5bf03635);
-  const name = makeName(rng) + ' City';
+  // Имя вытягивается из потока ВСЕГДА, даже когда берётся из записи
+  // сервера: следом за ним из того же потока идут гармоники излома
+  // плиты, и пропустить имя значило бы получить у сервера и у клиента
+  // разный край площадки. Расхождение это не увидеть ни в одном числе —
+  // только глазами и только на краю.
+  const grown = makeName(rng) + ' City';
+  const name = rec ? rec.name : grown;
+
+  // Планировка считается ПЕРВОЙ: от неё зависит размер плиты, а от
+  // размера плиты — то, насколько ровное место под неё искать. Город в
+  // семьдесят километров и город в четыре ищут себе разные места.
+  //
+  // Предел размера ставит тело: плита — это срезанный грунт, и плита на
+  // пол-луны означала бы срезанную луну. Три с половиной сотых радиуса
+  // — это два градуса дуги: с орбиты такое пятно ещё читается как
+  // площадка, а не как форма самого тела.
+  const plan = cityPlan(
+    rec ? rec.seed >>> 0 : (seed ^ 0x9e3779b9) >>> 0,
+    Math.min(CITY.rMax, body.radius * 0.035));
+  // Место: из записи сервера, если она есть. Хозяин мира — сервер, и
+  // спорить с ним клиенту не о чем; сам же рельеф считается одинаково у
+  // обоих, поэтому запись содержит только направление и высоту, а не
+  // всю площадку.
+  const site = rec
+    ? { dir: v3(rec.dir.x, rec.dir.y, rec.dir.z), span: 0, mean: rec.groundH }
+    : citySite(body, seed, plan.plate);
 
   // Угловые радиусы плиты и перехода — в косинусах? Нет: в КВАДРАТАХ
   // ХОРДЫ. Рельеф считается миллионы раз за кадр, и арккосинус в этом
   // месте стоил бы дороже самого рельефа, а квадрат расстояния между
   // концами двух единичных векторов монотонен по углу и даётся тремя
   // умножениями.
-  const th0 = CITY.plate / body.radius;
-  const th1 = (CITY.plate + CITY.rim) / body.radius;
+  const th0 = plan.plate / body.radius;
+  const th1 = (plan.plate + CITY.rim) / body.radius;
+  // Край плиты ИЗЛОМАН. Идеальный круг ровного грунта в семьдесят
+  // километров виден с орбиты как штамп: в природе таких не бывает, и
+  // город на нём выглядит поставленным на блюдце. Излом — три гармоники
+  // по углу вокруг местной вертикали; считается он тремя умножениями и
+  // повторён слово в слово в шейдере (js/gl/detail.js, dPlate).
+  const amp = [
+    rng.range(0.30, 0.50) * CITY.wobble,
+    rng.range(0.25, 0.45) * CITY.wobble,
+    rng.range(0.15, 0.35) * CITY.wobble,
+  ];
+  const ph = [rng.range(0, Math.PI * 2), rng.range(0, Math.PI * 2), rng.range(0, Math.PI * 2)];
+  const sum = amp[0] + amp[1] + amp[2];
+  tangents(site.dir, _u, _v);
   body.plate = {
     x: site.dir.x, y: site.dir.y, z: site.dir.z,
     d0: 2 - 2 * Math.cos(th0),
     d1: 2 - 2 * Math.cos(th1),
+    // Самый дальний край излома: по нему идёт быстрая отсечка, и без
+    // неё пришлось бы считать гармоники для каждой точки планеты.
+    dMax: (2 - 2 * Math.cos(th1)) * (1 + sum) * (1 + sum),
     h: site.mean,
+    ax: _u.x, ay: _u.y, az: _u.z,
+    bx: _v.x, by: _v.y, bz: _v.z,
+    k1c: amp[0] * Math.cos(ph[0]), k1s: amp[0] * Math.sin(ph[0]),
+    k2c: amp[1] * Math.cos(ph[1]), k2s: amp[1] * Math.sin(ph[1]),
+    k3c: amp[2] * Math.cos(ph[2]), k3s: amp[2] * Math.sin(ph[2]),
+    // Бетон кладётся не на всю плиту: серый круг в семьдесят
+    // километров — это уже не город, а котлован. Тонируется ядро, а к
+    // краю остаётся только выровненный грунт.
+    t0: (2 - 2 * Math.cos(th0)) * 0.10,
+    t1: (2 - 2 * Math.cos(th0)) * 0.55,
   };
 
   const city = {
@@ -155,11 +208,14 @@ export function makeCity(body, id = null) {
     body,
     parent: body,
     dir: site.dir,
-    plan: cityPlan(seed ^ 0x9e3779b9),
+    plan,
+    // Схема расселения: её показывает карточка цели, и по ней сразу
+    // видно, что города разные.
+    layout: plan.kind,
     plate: body.plate,
     // Габарит: по нему город берут в прицел и по нему считают, что он
     // уже «под носом». Радиус застройки, а не плиты: плита — это грунт.
-    radius: CITY.bound,
+    radius: plan.radius,
     // Радиус поверхности на плите, км от центра тела. Он постоянен —
     // плита ровная, в этом весь её смысл.
     groundR: body.radius * (1 + site.mean),
@@ -170,6 +226,57 @@ export function makeCity(body, id = null) {
   };
   updateCity(city);
   return city;
+}
+
+/**
+ * Запись города для сервера: всё, из чего он собирается заново.
+ *
+ * Планировка НЕ ВЫГРУЖАЕТСЯ. Пять тысяч построек — это мегабайты на
+ * город, и они ни о чём не говорят: из семени те же пять тысяч
+ * собираются за миллисекунду и побайтово одинаково. В базе лежит то,
+ * чего из семени не вывести, — какое тело выбрано, как город назван и
+ * где именно на теле стоит.
+ */
+export function cityRecord(city) {
+  return {
+    localId: city.id,
+    bodyLocalId: city.body.id,
+    name: city.name,
+    seed: city.plan.seed,
+    layout: city.plan.kind,
+    radiusKm: city.radius,
+    pads: city.plan.pads.length,
+    dir: { x: city.dir.x, y: city.dir.y, z: city.dir.z },
+    groundH: city.plate.h,
+  };
+}
+
+/**
+ * Заменить города системы на присланные сервером.
+ *
+ * Зовётся при входе в систему, когда игра в сети. Сервер — хозяин мира:
+ * если он говорит, что город стоит на другом теле или зовётся иначе,
+ * прав он, а не клиент. Офлайн список пуст, и остаётся то, что клиент
+ * собрал сам, — одинаково у всех, потому что генератор один.
+ *
+ * @returns сколько городов встало
+ */
+export function applyCities(world, rows) {
+  if (!Array.isArray(rows)) return 0;
+  const byId = new Map();
+  for (const p of world.planets) {
+    byId.set(p.id, p);
+    for (const m of p.moons) byId.set(m.id, m);
+  }
+  for (const b of byId.values()) b.city = null;
+  world.cities.length = 0;
+  for (const r of rows) {
+    const body = byId.get(r.bodyLocalId);
+    if (!body || !canHostCity(body)) continue;
+    body.city = makeCity(body, r.localId, r);
+    world.cities.push(body.city);
+  }
+  return world.cities.length;
 }
 
 const _frame = makeBasis();
@@ -211,11 +318,46 @@ export function updateCity(city) {
   return city;
 }
 
+/**
+ * Насколько грунт уходит вниз от касательной плоскости города, км.
+ *
+ * ГОРОД — ЖЁСТКОЕ ТЕЛО, А ПЛИТА — КУСОК СФЕРЫ, и на больших городах это
+ * расходится по-настоящему. Оси города — касательная плоскость в его
+ * середине; плита же выровнена по ПОСТОЯННОМУ РАДИУСУ, то есть загибается
+ * вниз. На четырёх километрах разница была меньше метра, и её никто не
+ * замечал; на восемнадцати это шестьдесят четыре метра, на тридцати пяти —
+ * двести тридцать. Дома на окраине висели бы в воздухе, а корабль садился
+ * бы сквозь их фундаменты.
+ *
+ * Возвращается ОТРИЦАТЕЛЬНОЕ число: грунт ниже плоскости. Им опускается
+ * геометрия при сборке (js/gl/citymesh.js) и им же поправляется высота в
+ * cityLocal — тогда вся остальная арифметика города, от столкновений до
+ * площадок, остаётся плоской и не знает про кривизну вовсе.
+ */
+export function cityDrop(city, x, z) {
+  const r = city.groundR;
+  const d2 = x * x + z * z;
+  if (d2 <= 0) return 0;
+  return Math.sqrt(Math.max(0, r * r - d2)) - r;
+}
+
 const _local = v3();
 
-/** Точка мира в осях города (километры, y — высота над плитой). */
+/** Точка мира в осях города (километры, y — высота НАД ГРУНТОМ). */
 export function cityLocal(city, pos, out = _local) {
-  return toLocal(city.basis, city.pos, pos, out);
+  toLocal(city.basis, city.pos, pos, out);
+  out.y -= cityDrop(city, out.x, out.z);
+  return out;
+}
+
+/** Обратное к cityLocal: точка осей города в мире. */
+export function cityWorld(city, x, y, z, out = v3()) {
+  const b = city.basis;
+  const h = y + cityDrop(city, x, z);
+  out.x = city.pos.x + b.right.x * x + b.up.x * h + b.fwd.x * z;
+  out.y = city.pos.y + b.right.y * x + b.up.y * h + b.fwd.y * z;
+  out.z = city.pos.z + b.right.z * x + b.up.z * h + b.fwd.z * z;
+  return out;
 }
 
 /**

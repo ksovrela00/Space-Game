@@ -51,6 +51,27 @@ final class Galaxy
         foreach (Db::all('SELECT * FROM `body` WHERE `system_id`=? ORDER BY `local_id`', [$id]) as $b) {
             $bodies[] = self::bodyOut($b);
         }
+        // Города системы уходят вместе с телами: игра спрашивает
+        // систему один раз, при входе в неё, и второй запрос ради
+        // одного-двух городов был бы лишним кругом по сети.
+        $cities = [];
+        foreach (Db::all('SELECT * FROM `city` WHERE `system_id`=? ORDER BY `local_id`', [$id]) as $c) {
+            $cities[] = [
+                'localId' => $c['local_id'],
+                'bodyLocalId' => (int) $c['body_local_id'],
+                'name' => $c['name'],
+                'seed' => (int) $c['seed'],
+                'layout' => $c['layout'],
+                'radiusKm' => (float) $c['radius_km'],
+                'pads' => (int) $c['pads'],
+                'dir' => [
+                    'x' => (float) $c['dir_x'],
+                    'y' => (float) $c['dir_y'],
+                    'z' => (float) $c['dir_z'],
+                ],
+                'groundH' => (float) $c['ground_h'],
+            ];
+        }
         return [
             'id' => (int) $s['id'],
             'seed' => (int) $s['seed'],
@@ -60,6 +81,7 @@ final class Galaxy
             'home' => (bool) $s['is_home'],
             'pos' => ['x' => (float) $s['pos_x'], 'y' => (float) $s['pos_y'], 'z' => (float) $s['pos_z']],
             'bodies' => $bodies,
+            'cities' => $cities,
         ];
     }
 

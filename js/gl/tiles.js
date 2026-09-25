@@ -13,7 +13,7 @@ import { terrainOf } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
 import { tileBuilder, geoFromTransfer, BUILD_CHUNK } from './tilegeo.js';
 import { TilePool } from './tilepool.js';
-import { bakeUniforms } from './detail.js';
+import { bakeUniforms, plateUniforms } from './detail.js';
 import { createBakeTexture, CUBE_FACES } from './bake.js';
 import {
   TILE_TEX, TILE_MAX_LEVEL, tileBounds, tileKey,
@@ -341,10 +341,7 @@ export class TileSet {
       // Сверху окно не обрезано: в текстуру пишется вся поверхность.
       gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw);
       gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
-      const pl = u.plate;
-      gl.uniform4f(prog.loc('uPlate'),
-        pl ? pl.x : 0, pl ? pl.y : 0, pl ? pl.z : 0, pl ? pl.d0 : 0);
-      gl.uniform1f(prog.loc('uPlateRim'), pl ? pl.d1 : 1);
+      plateUniforms(gl, prog, u.plate);
       gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
       this.quad.draw();
     });

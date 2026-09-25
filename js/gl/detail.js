@@ -146,6 +146,26 @@ export function detailWindow(terrain, meshCell, fw) {
  * пишется вся поверхность, а не добавка к сетке), масштабов — сколько
  * есть. Это считается один раз на тексель.
  */
+/**
+ * Uniform'ы площадки города: одни и те же у мелкого рельефа и у
+ * запекания плиток.
+ *
+ * Общей функцией, а не двумя списками по месту: их было два, и когда у
+ * плиты появился излом, второй список о нём бы не узнал — плитки
+ * запеклись бы с тенями кратеров по краю, которого уже нет. Такую
+ * ошибку не видно ни в одном числе, только глазами и только на
+ * контражуре.
+ */
+export function plateUniforms(gl, prog, pl) {
+  gl.uniform4f(prog.loc('uPlate'),
+    pl ? pl.x : 0, pl ? pl.y : 0, pl ? pl.z : 0, pl ? pl.d0 : 0);
+  gl.uniform1f(prog.loc('uPlateRim'), pl ? pl.d1 : 1);
+  gl.uniform3f(prog.loc('uPlateA'), pl ? pl.ax : 0, pl ? pl.ay : 0, pl ? pl.az : 0);
+  gl.uniform3f(prog.loc('uPlateB'), pl ? pl.bx : 0, pl ? pl.by : 0, pl ? pl.bz : 0);
+  gl.uniform3f(prog.loc('uPlateKc'), pl ? pl.k1c : 0, pl ? pl.k2c : 0, pl ? pl.k3c : 0);
+  gl.uniform3f(prog.loc('uPlateKs'), pl ? pl.k1s : 0, pl ? pl.k2s : 0, pl ? pl.k3s : 0);
+}
+
 export function bakeUniforms(terrain) {
   const p = terrain.shaderParams();
   return {
@@ -247,6 +267,14 @@ uniform float uBakeFw;
 // (js/gl/terrain.js, plateAt — та же арифметика).
 uniform vec4 uPlate;
 uniform float uPlateRim;    // квадрат хорды внешнего края перехода
+// Излом края: две касательные оси плиты и амплитуды трёх гармоник
+// (косинусные и синусные). Идеальный круг ровного грунта виден с орбиты
+// как штамп, и ради этого излома шейдер повторяет арифметику
+// js/gl/terrain.js, plateWobble() слово в слово.
+uniform vec3 uPlateA;
+uniform vec3 uPlateB;
+uniform vec3 uPlateKc;
+uniform vec3 uPlateKs;
 
 const float D_GAIN = ${f(GAIN)};
 const float D_LAC = ${f(LAC)};
@@ -288,7 +316,17 @@ uint dHash(int seed, ivec3 c) {
 float dPlate(vec3 dir) {
   if (uPlate.w <= 0.0) return 0.0;
   vec3 q = dir - uPlate.xyz;
-  return 1.0 - smoothstep(uPlate.w, uPlateRim, dot(q, q));
+  float u = dot(q, uPlateA), v = dot(q, uPlateB);
+  float r = sqrt(u * u + v * v);
+  float f = 1.0;
+  if (r > 1e-12) {
+    float c = u / r, si = v / r;
+    float c2 = c * c - si * si, s2 = 2.0 * c * si;
+    float c3 = c2 * c - s2 * si, s3 = s2 * c + c2 * si;
+    f = 1.0 + dot(uPlateKc, vec3(c, c2, c3)) + dot(uPlateKs, vec3(si, s2, s3));
+  }
+  float w2 = f * f;
+  return 1.0 - smoothstep(uPlate.w * w2, uPlateRim * w2, dot(q, q));
 }
 
 float dFade(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }

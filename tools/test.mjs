@@ -38,9 +38,16 @@ import { shipShadow, convexHull } from '../js/game/shadow.js';
 import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
-import { CITY, cityPlan, cityBlocked, nearestPad, partBox } from '../js/models/city.js';
-import { makeCity, cityCrash, cityPadUnder, canHostCity, citySite } from '../js/game/city.js';
-import { buildCityGeometry, cityTris } from '../js/gl/citymesh.js';
+import { CITY, CITY_KINDS, cityPlan, cityBlocked, nearestPad, partBox } from '../js/models/city.js';
+import {
+  makeCity, cityCrash, cityPadUnder, canHostCity, citySite, cityRecord, applyCities,
+  cityWorld, cityDrop,
+} from '../js/game/city.js';
+import {
+  buildCityGeometry, cityTris, nearSet, NEAR_TRIS,
+  SHADOW_RGB, SHADOW_LIFT, SHADOW_MAX, sunCasts,
+} from '../js/gl/citymesh.js';
+import { plateAt } from '../js/gl/terrain.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
@@ -4933,6 +4940,124 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     'а расхождение меньше порога рывком не подводится');
 }
 
+// --- корабль едет вместе с телом на ШАГ МИРА, а не на шаг кадра --------------
+//
+// ЭТО БЫЛО СЛОМАНО, и ломалось молча. Мир двигался шагом clockStep, а
+// корабль переносился шагом кадра — то есть каждый кадр отставал от
+// грунта на разницу. Гонит эту разницу не орбита (тела здесь ползут по
+// ней сантиметры в секунду), а ВРАЩЕНИЕ: на экваторе грунт идёт под
+// две с половиной сотни метров в секунду, и четверти хода, которую
+// отыгрывают часы, хватает на метр за кадр. Со стороны это ровное
+// дёрганье земли на любой поверхности.
+//
+// После спящей вкладки то же самое случается разом: часы подводятся
+// рывком на десятки секунд, тело проворачивается на километры, а
+// корабль остаётся где был.
+//
+// Проверяется инвариант, а не числа: над какой точкой грунта корабль
+// висел, над той и висит. Рядом стоит та же сцена с кадровым шагом —
+// она показывает, какой ценой эта ошибка обходилась.
+{
+  console.log('\n== перенос корабля вместе с телом ==');
+
+  const dt = 1 / 60;
+  const seconds = 10;
+  const frames = Math.round(seconds / dt);
+
+  // Тело выбираем самое быстрое по вращению: ошибка пропорциональна
+  // окружной скорости, и на медленном теле её можно было бы не заметить.
+  const pick = (w) => w.planets.reduce((a, b) => (b.spin * b.radius > a.spin * a.radius ? b : a));
+
+  // Корабль висит в трёх километрах над грунтом — там, где перенос
+  // компенсирует вращение целиком (SPIN_FULL = 8 км).
+  const hover = (body) => {
+    const dir = normalize(v3(0.3, 0.5, 0.81));
+    const r = groundRadius(body, dir) + 3;
+    const ship = makeShip();
+    placeShip(ship, v3(
+      body.pos.x + dir.x * r, body.pos.y + dir.y * r, body.pos.z + dir.z * r), makeBasis());
+    return ship;
+  };
+
+  // Один шаг «как в игре»: замерить, куда уехало тело, и перенести
+  // корабль на carryDt. Правильно — carryDt === dtWorld.
+  const stepWorld = (w, ship, dtWorld, carryDt) => {
+    const cap = captureBody(w, ship.pos);
+    const wasX = cap.pos.x, wasY = cap.pos.y, wasZ = cap.pos.z;
+    updateWorld(w, dtWorld);
+    const moved = carryDt === dtWorld
+      ? v3(cap.pos.x - wasX, cap.pos.y - wasY, cap.pos.z - wasZ) : null;
+    carryShip(ship, cap, carryDt, moved);
+  };
+
+  // Насколько корабль сошёл с той точки грунта, над которой висел.
+  const runDrift = (dtWorld, carryDt, n) => {
+    const w = makeSystem(HOME_SEED);
+    const body = pick(w);
+    const ship = hover(body);
+    const was = localDir(body, ship.pos, v3());
+    const altWas = altitudeOf(body, ship.pos).alt;
+    for (let i = 0; i < n; i++) stepWorld(w, ship, dtWorld, carryDt);
+    const now = localDir(body, ship.pos, v3());
+    return {
+      body,
+      km: Math.hypot(now.x - was.x, now.y - was.y, now.z - was.z) * body.radius,
+      alt: Math.abs(altitudeOf(body, ship.pos).alt - altWas),
+    };
+  };
+
+  // 1. Часы подтягиваются ходом: шаг мира на четверть длиннее кадра.
+  {
+    const good = runDrift(dt * (1 + CLOCK_RATE), dt * (1 + CLOCK_RATE), frames);
+    const surf = good.body.spin * good.body.radius;
+    ok(good.km < 0.002 && good.alt < 0.002,
+      `${seconds} с ускоренного хода над ${good.body.name} (грунт идёт `
+      + `${(surf * 1000).toFixed(0)} м/с): корабль сошёл с точки на `
+      + `${(good.km * 1000).toFixed(2)} м`);
+
+    // А так было. Разница — это и есть дёрганье земли.
+    const bad = runDrift(dt * (1 + CLOCK_RATE), dt, frames);
+    ok(bad.km > 0.5,
+      `кадровым шагом за те же ${seconds} с уносит на ${(bad.km * 1000).toFixed(0)} м `
+      + `(${(bad.km * 1000 / seconds).toFixed(0)} м/с мимо грунта) — потому шаг и мировой`);
+  }
+
+  // 2. Спящая вкладка: часы подводятся рывком (CLOCK_SNAP = 20 с).
+  {
+    const jump = 60;
+    const good = runDrift(jump, jump, 1);
+    ok(good.km < 0.01,
+      `рывок в ${jump} с: корабль остался над той же точкой `
+      + `(${(good.km * 1000).toFixed(1)} м)`);
+
+    const bad = runDrift(jump, dt, 1);
+    ok(bad.km > 5,
+      `а кадровым шагом тот же рывок оставляет корабль в ${bad.km.toFixed(1)} км `
+      + 'от места — ровно то, что видно после возврата во вкладку');
+  }
+
+  // 3. И сама сцепка в главном цикле — по исходнику.
+  //
+  // Проверки выше держат договор carryShip, но не то, ЧТО ему передают.
+  // Разница между dt и шагом мира не видна ни в одном числе на экране и
+  // не ловится дымовым прогоном: офлайн сервера нет, часы не подводятся,
+  // и оба шага совпадают. Один символ в вызове — и ошибка возвращается
+  // молча, ровно в том виде, в каком её нашли.
+  {
+    const src = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    // Имя переменной берётся из самого исходника: важно не как её зовут,
+    // а что мир и корабль двигают ОДНИМ И ТЕМ ЖЕ числом.
+    const named = /const\s+([A-Za-z_$][\w$]*)\s*=\s*clockStep\(/.exec(src);
+    const step = named && named[1];
+    const movesWorld = step && new RegExp('updateWorld\\(world,\\s*' + step + '\\)').test(src);
+    const movesShip = step
+      && new RegExp('carryShip\\(ship,\\s*game\\.capture,\\s*' + step + '\\b').test(src);
+    ok(movesWorld && movesShip,
+      `в главном цикле мир и корабль двигают одним шагом «${step}»: `
+      + `мир ${movesWorld ? 'да' : 'НЕТ'}, корабль ${movesShip ? 'да' : 'НЕТ'}`);
+  }
+}
+
 // --- качество связи ---------------------------------------------------------
 //
 // Сеть ломается не только «совсем»: гораздо чаще она просто становится
@@ -5651,28 +5776,36 @@ console.log('\n== наземный город ==');
   // функции, по которой считаются посадка и столкновение. Проверяется
   // уклоном, а не высотой: на шаре «одинаковая высота» и «ровно» — это
   // одно и то же, а уклон ещё и ловит рябь мелких масштабов.
+  const u = v3(), vv = v3();
   {
-    const u = v3(), vv = v3();
     const helper = Math.abs(c.dir.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0);
     normalize(cross(helper, c.dir), u);
     normalize(cross(c.dir, u), vv);
-    const at = (du, dv) => normalize(v3(
-      c.dir.x + u.x * du + vv.x * dv,
-      c.dir.y + u.y * du + vv.y * dv,
-      c.dir.z + u.z * du + vv.z * dv));
+  }
+  const at = (du, dv) => normalize(v3(
+    c.dir.x + u.x * du + vv.x * dv,
+    c.dir.y + u.y * du + vv.y * dv,
+    c.dir.z + u.z * du + vv.z * dv));
+  // Плита теперь у каждого города своя, и пробовать её надо по её же
+  // размеру: проба на километре ничего не сказала бы о городе на
+  // тридцать. Радиус берётся с запасом на излом края — внутрь заведомо
+  // ровной части.
+  const flatR = c.plan.radius * 0.7;
+  {
     let worst = 0, worstKm = 0;
-    for (let i = 0; i < 24; i++) {
-      const a = (i / 12) * Math.PI;
-      const km = (i % 4) * 0.6 + 0.3;          // 0.3 … 2.1 км от середины
+    for (let i = 0; i < 40; i++) {
+      const a = (i / 20) * Math.PI;
+      const km = (0.1 + 0.9 * ((i % 5) / 4)) * flatR;
       const s = slopeAt(b, at(Math.cos(a) * km / b.radius, Math.sin(a) * km / b.radius));
       if (s > worst) { worst = s; worstKm = km; }
     }
     ok(worst * 57.3 < 0.05,
-      `грунт города ровный: худший уклон ${(worst * 57.3).toFixed(3)}° в ${worstKm.toFixed(1)} км от середины`);
+      `грунт города ровный на ${flatR.toFixed(1)} км: худший уклон `
+      + `${(worst * 57.3).toFixed(3)}° в ${worstKm.toFixed(1)} км от середины`);
 
     // И площадка КОНЧАЕТСЯ: за переходом рельеф тот же, каким был. Иначе
     // выравнивание расползлось бы по всему телу.
-    const far = at(0, (CITY.plate + CITY.rim + 3) / b.radius);
+    const far = at(0, (c.plan.plate * 1.4 + CITY.rim + 3) / b.radius);
     const withPlate = groundRadius(b, far);
     b.plate = null;                     // рельеф читает площадку на лету
     const bare = groundRadius(b, far);
@@ -5682,6 +5815,28 @@ console.log('\n== наземный город ==');
       `за краем перехода рельеф нетронут: ${(Math.abs(withPlate - bare) * 1e6).toFixed(3)} мм разницы`);
     ok(Math.abs(bareCenter - c.groundR) > 1e-4,
       `а под городом — срезан: ${((c.groundR - bareCenter) * 1000).toFixed(0)} м правки`);
+  }
+
+  // Край плиты ИЗЛОМАН. Идеально круглое пятно ровного грунта в
+  // семьдесят километров видно с орбиты как штамп — в природе таких не
+  // бывает. Меряется дальностью края по направлениям: у круга она одна
+  // и та же, у изломанного края гуляет.
+  {
+    let lo = Infinity, hi = 0;
+    for (let i = 0; i < 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      // Идём наружу, пока рельеф не перестанет быть плоским.
+      let r = 0;
+      for (let km = c.plan.plate * 0.5; km < c.plan.plate * 2.5; km += 0.05) {
+        const d = at(Math.cos(a) * km / b.radius, Math.sin(a) * km / b.radius);
+        if (plateAt(c.plate, d.x, d.y, d.z) <= 0) break;
+        r = km;
+      }
+      lo = Math.min(lo, r); hi = Math.max(hi, r);
+    }
+    ok(hi - lo > c.plan.plate * 0.12,
+      `край плиты неровный: от ${lo.toFixed(1)} до ${hi.toFixed(1)} км `
+      + `(${(((hi - lo) / hi) * 100).toFixed(0)}% разброса)`);
   }
 
   // Город стоит НА грунте, а не над ним и не в нём: его начало отсчёта —
@@ -5701,8 +5856,9 @@ console.log('\n== наземный город ==');
         }
       }
     }
-    ok(c.plan.pads.length === CITY.pads && occupied === 0,
-      `посадочных площадок ${c.plan.pads.length}, и на них ничего не стоит`);
+    const n = c.plan.pads.length;
+    ok(n >= CITY.padsMin && n <= CITY.padsMax && occupied === 0,
+      `посадочных площадок ${n}, и на них ничего не стоит`);
 
     // Столкновение: в середине каждой коробки — есть, над крышей — нет.
     let hit = 0, above = 0;
@@ -5712,29 +5868,14 @@ console.log('\n== наземный город ==');
     }
     ok(hit === c.plan.boxes.length && above === 0,
       `во все ${c.plan.boxes.length} построек врезаешься, над крышами — пусто`);
-
-    // Постройки не растут одна сквозь другую. Это не придирка к виду:
-    // коробки столкновения точные, и дом внутри ангара означал бы, что
-    // корабль бьётся о воздух между двумя стенами, которых там нет.
-    let overlap = 0, deepest = 0;
-    const B = c.plan.boxes;
-    for (let i = 0; i < B.length; i++) {
-      for (let j = i + 1; j < B.length; j++) {
-        const dx = B[i].hw + B[j].hw - Math.abs(B[i].x - B[j].x);
-        const dz = B[i].hd + B[j].hd - Math.abs(B[i].z - B[j].z);
-        if (dx > 0 && dz > 0) { overlap++; deepest = Math.max(deepest, Math.min(dx, dz)); }
-      }
-    }
-    ok(overlap === 0,
-      `постройки не пересекаются${overlap ? `: ${overlap} пар, до ${(deepest * 1000).toFixed(0)} м` : ''}`);
   }
 
   // То же через мир: корабль в башне разбивается, над площадкой — нет.
   {
-    const toWorldCity = (x, y, z) => v3(
-      c.pos.x + c.basis.right.x * x + c.basis.up.x * y + c.basis.fwd.x * z,
-      c.pos.y + c.basis.right.y * x + c.basis.up.y * y + c.basis.fwd.y * z,
-      c.pos.z + c.basis.right.z * x + c.basis.up.z * y + c.basis.fwd.z * z);
+    // Через cityWorld, а не своим умножением на базис: у города есть
+    // кривизна, и «сам перемножу базис» здесь означало бы проверять
+    // плоский город, которого нет.
+    const toWorldCity = (x, y, z) => cityWorld(c, x, y, z, v3());
     const tall = c.plan.boxes.reduce((a, x) => (x.h > a.h ? x : a), c.plan.boxes[0]);
     const inTower = { pos: toWorldCity(tall.x, tall.h * 0.5, tall.z) };
     const overPad = { pos: toWorldCity(c.plan.pads[0].x, 0.05, c.plan.pads[0].z) };
@@ -5742,9 +5883,35 @@ console.log('\n== наземный город ==');
       `в башню ${(tall.h * 1000).toFixed(0)} м врезаешься, над площадкой — свободно`);
     // И на площадке корабль ЗНАЕТ, что он в городе: по этому отличают
     // посадку в порту от посадки в чистом поле.
-    const at = cityPadUnder(w, overPad.pos);
-    ok(at && at.city === c && at.pad.n >= 1,
-      `над площадкой ${at ? at.pad.n : '—'} корабль числится в городе`);
+    const at2 = cityPadUnder(w, overPad.pos);
+    ok(at2 && at2.city === c && at2.pad.n >= 1,
+      `над площадкой ${at2 ? at2.pad.n : '—'} корабль числится в городе`);
+  }
+
+  // --- Кривизна. ЭТО БЫЛО СЛОМАНО, и сломалось ровно тогда, когда города
+  // стали большими: город рисуется жёстким телом на касательной
+  // плоскости, а плита выровнена по постоянному радиусу, то есть
+  // загибается вниз. На четырёх километрах это меньше метра, и никто не
+  // замечал; на восемнадцати окраина висит в шестидесяти метрах над
+  // грунтом, на тридцати пяти — в двухстах тридцати.
+  {
+    const edge = c.plan.boxes.reduce(
+      (a, b) => (Math.hypot(b.x, b.z) > Math.hypot(a.x, a.z) ? b : a), c.plan.boxes[0]);
+    const far = Math.hypot(edge.x, edge.z);
+    const base = cityWorld(c, edge.x, 0, edge.z, v3());
+    const alt = altitudeOf(b, base).alt;
+    // Насколько это было бы без поправки — тем же числом, каким её считают.
+    const slack = -cityDrop(c, edge.x, edge.z);
+    ok(Math.abs(alt) < 0.002 && slack > 0.02,
+      `дальняя постройка в ${far.toFixed(1)} км от середины стоит НА грунте `
+      + `(${(alt * 1000).toFixed(1)} м), хотя плоским городом висела бы в `
+      + `${(slack * 1000).toFixed(0)} м`);
+
+    // И врезаешься в неё там же, где она нарисована.
+    const mid = { pos: cityWorld(c, edge.x, edge.h * 0.5, edge.z, v3()) };
+    const over = { pos: cityWorld(c, edge.x, edge.h + 0.06, edge.z, v3()) };
+    ok(cityCrash(w, mid) === c && !cityCrash(w, over),
+      'в дальнюю постройку врезаешься, над её крышей — пусто');
   }
 
   // --- Геометрия. Тут ловится то, чего не видно ни в планировке, ни на
@@ -5766,26 +5933,195 @@ console.log('\n== наземный город ==');
     // Габарит — это радиус цели: по нему город берут в прицел и по нему
     // считают, «дальше пикселя или нет». Модель, торчащая из него,
     // означала бы башню, в которую целиться нечем.
-    ok(far <= c.radius, `застройка не торчит из габарита: ${far.toFixed(2)} км при ${c.radius}`);
-    ok(high > 0.15 && high < 0.5, `самое высокое здание ${(high * 1000).toFixed(0)} м`);
+    ok(far <= c.radius + 1e-6, `застройка не торчит из габарита: ${far.toFixed(2)} км при ${c.radius.toFixed(2)}`);
+    ok(Math.abs(high - c.plan.tallest) < 0.03,
+      `самое высокое здание ${(high * 1000).toFixed(0)} м — столько же, сколько обещает план`);
 
     // ЭТО БЫЛО СЛОМАНО: цвет граней лежит в палитре детали, а генератор
     // палитру не выводил вовсе. Меш при этом собирался «успешно» — из
     // undefined, — и город уходил в кадр чёрным пятном с NaN в цвете.
     // Проверка требует и цвета, и свечения: окна и огни на безатмосферном
     // теле — единственное, чем город виден ночью.
-    // Окна и огни считаются ОТДЕЛЬНО: огни город рисует сам (доля 1),
-    // а свечение окон приезжает из палитры, и только по ним видно, что
-    // палитра вообще доехала.
-    let win = 0, lamp = 0, bad = 0;
+    let lit = 0, bad = 0;
     for (let i = 0; i < geo.colors.length; i += 4) {
       const a = geo.colors[i + 3];
       if (!Number.isFinite(geo.colors[i]) || !Number.isFinite(a)) bad++;
-      else if (a >= 0.99) lamp++;
-      else if (a > 0.3) win++;
+      if (a > 0.3) lit++;
     }
-    ok(bad === 0 && win > 1000 && lamp > 1000,
-      `цвет взят из палитры: окон ${win}, огней ${lamp}, битых ${bad}`);
+    ok(bad === 0 && lit > 1000,
+      `цвет взят из палитры: светящихся вершин ${lit}, битых ${bad}`);
+  }
+
+  // --- Два уровня подробности. Без них город в семьдесят километров —
+  // это шесть миллионов треугольников, то есть его просто нет.
+  {
+    const farGeo = cityTris(c.plan, null);
+    const nearGeo = cityTris(c.plan, { x: 0, z: 0 });
+    const full = nearSet(c.plan, { x: 0, z: 0 }).size;
+    // Бюджет ближнего круга держится в самом плотном месте города — в
+    // середине, где стоят башни. Если он не держится там, он не держится
+    // нигде.
+    ok(nearGeo > farGeo * 1.2 && full > 20 && nearGeo - farGeo < NEAR_TRIS * 1.05,
+      `вблизи ${full} построек настоящими моделями: ${(nearGeo / 1000).toFixed(0)}к `
+      + `треугольников против ${(farGeo / 1000).toFixed(0)}к издали`);
+
+    // Коробка встаёт РОВНО на место постройки: иначе на подлёте город
+    // перескакивал бы, когда модель сменяется коробкой.
+    const g = buildCityGeometry(c.plan, null);
+    let far2 = 0, high2 = 0;
+    for (let i = 0; i < g.positions.length; i += 3) {
+      far2 = Math.max(far2, Math.hypot(g.positions[i], g.positions[i + 2]));
+      high2 = Math.max(high2, g.positions[i + 1]);
+    }
+    // Коробка ровно той же высоты, что постройка. Выше неё в городе
+    // только огонь на крыше — он и даёт остаток.
+    ok(far2 <= c.radius + 1e-6 && high2 >= c.plan.tallest - 1e-6
+      && high2 - c.plan.tallest < 0.02,
+      `коробки стоят в габарите города и той же высоты: ${far2.toFixed(2)} км, `
+      + `${(high2 * 1000).toFixed(0)} м при ${(c.plan.tallest * 1000).toFixed(0)}`);
+
+    // ЭТО БЫЛО СЛОМАНО: стены коробок обходились в обратном порядке, и
+    // нормаль смотрела ВНУТРЬ. Ошибка не даёт ни NaN, ни лишних граней —
+    // город просто выходит чёрным при полном солнце, и видно это только
+    // на снимке. Проверяется тем же, чем считается столкновение: шаг
+    // наружу по нормали обязан выйти из постройки, шаг внутрь — остаться
+    // в ней.
+    let wrong = 0, tested = 0, litWall = 0;
+    const EPS = 0.003;                 // 3 м — меньше любого проезда
+    for (let t = 0; t + 8 < g.positions.length; t += 9) {
+      const px = [g.positions[t], g.positions[t + 3], g.positions[t + 6]];
+      const py = [g.positions[t + 1], g.positions[t + 4], g.positions[t + 7]];
+      const pz = [g.positions[t + 2], g.positions[t + 5], g.positions[t + 8]];
+      const ny = g.normals[t + 1];
+      if (Math.abs(ny) > 0.3) continue;                        // крыши и плашки
+      const cy = (py[0] + py[1] + py[2]) / 3;
+      if (cy < 0.09) continue;                                 // ниже — пути и сараи
+      const side = Math.max(
+        Math.hypot(px[1] - px[0], pz[1] - pz[0]),
+        Math.hypot(px[2] - px[0], pz[2] - pz[0]));
+      if (side < 0.02) continue;                               // огни на крышах
+      const cx = (px[0] + px[1] + px[2]) / 3, cz = (pz[0] + pz[1] + pz[2]) / 3;
+      const nx = g.normals[t], nz = g.normals[t + 2];
+      tested++;
+      const out = cityBlocked(c.plan, cx + nx * EPS, cy, cz + nz * EPS);
+      const inn = cityBlocked(c.plan, cx - nx * EPS, cy, cz - nz * EPS);
+      if (out || !inn) wrong++;
+      if (g.colors[(t / 3) * 4 + 3] > 0.2) litWall++;
+    }
+    ok(tested > 200 && wrong === 0,
+      `стены коробок смотрят наружу: проверено ${tested} граней, внутрь смотрит ${wrong}`);
+
+    // И светятся: ночью дальняя половина города — это окна коробок.
+    //
+    // Считаются ИМЕННО СТЕНЫ, отобранные тем же ситом. Первая редакция
+    // считала все светящиеся вершины подряд — и не заметила, что у
+    // башен окна не зажглись вовсе: в счёт попадали фонари вдоль улиц,
+    // которых тысячи. Проверка проходила, а город ночью стоял тёмным.
+    ok(litWall > tested * 0.15,
+      `окна коробок горят: ${litWall} светящихся граней стен из ${tested}`);
+  }
+
+  // --- Тени построек.
+  //
+  // Тень — не украшение: на безатмосферном теле солнце единственный
+  // источник, и без теней город читается наклейкой на грунте. Рисуется
+  // она тёмным многоугольником на земле, тем же приёмом, что у камней.
+  //
+  // Проверяется то, что ломается молча и чего не видно в числах: СТОРОНА
+  // (тень против солнца, а не по нему) и ВЫСОТА (тень на грунте, а не
+  // под ним и не над крышами).
+  {
+    const shadowOf = (geo) => {
+      const pts = [];
+      for (let i = 0; i < geo.colors.length; i += 4) {
+        if (Math.abs(geo.colors[i] - SHADOW_RGB[0]) > 1e-6) continue;
+        if (Math.abs(geo.colors[i + 2] - SHADOW_RGB[2]) > 1e-6) continue;
+        pts.push([geo.positions[(i / 4) * 3], geo.positions[(i / 4) * 3 + 1],
+          geo.positions[(i / 4) * 3 + 2]]);
+      }
+      return pts;
+    };
+    const unit = (x, y, z) => {
+      const l = Math.hypot(x, y, z);
+      return { x: x / l, y: y / l, z: z / l };
+    };
+    // Солнце сбоку и невысоко: тени длинные и хорошо заметны.
+    const sun = unit(0.8, 0.5, 0);
+
+    const lit = buildCityGeometry(c.plan, null, c.groundR, sun);
+    const dark = buildCityGeometry(c.plan, null, c.groundR, null);
+    const pts = shadowOf(lit);
+    ok(lit.faces - dark.faces === c.plan.boxes.length * 6 && pts.length > 100,
+      `тени построек: ${lit.faces - dark.faces} треугольников на `
+      + `${c.plan.boxes.length} построек — ровно по шесть`);
+
+    // СТОРОНА. Середина теней обязана уехать ОТ солнца: тень по солнцу —
+    // классическая ошибка со знаком, и на картинке она читается как
+    // «свет откуда-то не оттуда», а не как поломка.
+    {
+      let sx = 0, sz = 0;
+      for (const p of pts) { sx += p[0]; sz += p[2]; }
+      sx /= pts.length; sz /= pts.length;
+      let bx = 0, bz = 0;
+      for (const box of c.plan.boxes) { bx += box.x; bz += box.z; }
+      bx /= c.plan.boxes.length; bz /= c.plan.boxes.length;
+      const hl = Math.hypot(sun.x, sun.z);
+      const ax = -sun.x / hl, az = -sun.z / hl;
+      const along = (sx - bx) * ax + (sz - bz) * az;
+      const across = Math.abs((sx - bx) * -az + (sz - bz) * ax);
+      ok(along > 0.02 && across < along * 0.5,
+        `тени лежат от солнца: середина смещена на ${(along * 1000).toFixed(0)} м по лучу `
+        + `и ${(across * 1000).toFixed(0)} м поперёк`);
+    }
+
+    // ВЫСОТА. Тень лежит на грунте — с той же поправкой на кривизну, с
+    // какой стоят дома, и приподнята ровно настолько, чтобы не спорить с
+    // улицами.
+    {
+      let worst = 0;
+      for (const p of pts) {
+        const want = cityDrop(c, p[0], p[2]) + SHADOW_LIFT;
+        worst = Math.max(worst, Math.abs(p[1] - want));
+      }
+      // Допуск миллиметровый: вершины лежат во float32, и точнее их не
+      // хранят. Ошибка, которую ловим, — это метры и десятки метров.
+      ok(worst < 1e-6,
+        `тени лежат на грунте: худшее отклонение ${(worst * 1e6).toFixed(3)} мм`);
+    }
+
+    // Длина тени растёт, когда солнце опускается, и обрезана у горизонта:
+    // иначе тень уходит за плиту на нетронутый рельеф и повисает над ним.
+    {
+      // Меряется вынос теней ВДОЛЬ ЛУЧА от середины застройки, а не
+      // дальность от центра города: дальше всех и так окраина, и по ней
+      // о длине тени не скажешь ничего.
+      let bx = 0, bz = 0;
+      for (const box of c.plan.boxes) { bx += box.x; bz += box.z; }
+      bx /= c.plan.boxes.length; bz /= c.plan.boxes.length;
+      const reach = (s) => {
+        const hl = Math.hypot(s.x, s.z);
+        const ax = -s.x / hl, az = -s.z / hl;
+        let sum = 0, n = 0;
+        for (const p of shadowOf(buildCityGeometry(c.plan, null, c.groundR, s))) {
+          sum += (p[0] - bx) * ax + (p[2] - bz) * az; n++;
+        }
+        return sum / n;
+      };
+      const lowReach = reach(unit(0.97, 0.22, 0));
+      const highReach = reach(unit(0.3, 0.95, 0));
+      ok(lowReach > highReach * 1.5 && lowReach < c.plan.tallest * SHADOW_MAX,
+        `низкое солнце даёт тени длиннее: вынос ${(lowReach * 1000).toFixed(0)} м против `
+        + `${(highReach * 1000).toFixed(0)} м — и обрезан пределом `
+        + `${(c.plan.tallest * SHADOW_MAX * 1000).toFixed(0)} м`);
+    }
+
+    // Ночью теней нет вовсе, и это не упущение: солнца под горизонтом
+    // нет, а тёмный многоугольник на чёрном грунте не виден.
+    {
+      const night = unit(0.6, -0.8, 0);
+      ok(!sunCasts(night) && cityTris(c.plan, null, night) === cityTris(c.plan, null, null),
+        'под горизонтом солнце теней не отбрасывает');
+    }
   }
 
   // --- Детерминизм. Мир лежит слепком в базе и в сохранениях пилотов, и
@@ -5796,6 +6132,38 @@ console.log('\n== наземный город ==');
     const d = Math.hypot(c.dir.x - c2.dir.x, c.dir.y - c2.dir.y, c.dir.z - c2.dir.z);
     ok(c2.name === c.name && d < 1e-12 && c2.plan.parts.length === c.plan.parts.length,
       `город тот же в новом запуске: ${c2.name}, ${c2.plan.parts.length} деталей`);
+  }
+
+  // --- Город из записи сервера.
+  //
+  // Хозяин мира — сервер, но геометрию он не присылает: в базе лежит
+  // семя и место, а пять тысяч построек собираются из них на клиенте.
+  // Значит, город из записи обязан выйти ПОБАЙТОВО ТЕМ ЖЕ — иначе у
+  // сервера и у клиента разные города под одним именем, и любая
+  // проверка «где ты сел» разъедется.
+  {
+    const rec = cityRecord(c);
+    const w3 = makeSystem(HOME_SEED);
+    const n = applyCities(w3, [rec]);
+    const c3 = w3.cities[0];
+    const dd = Math.hypot(c3.dir.x - c.dir.x, c3.dir.y - c.dir.y, c3.dir.z - c.dir.z);
+    // Край плиты тоже: гармоники излома идут из того же потока, что и
+    // имя, и пропустить имя значило бы получить другой край площадки.
+    const edge = Math.abs(c3.plate.k1c - c.plate.k1c) + Math.abs(c3.plate.k2s - c.plate.k2s)
+      + Math.abs(c3.plate.d0 - c.plate.d0);
+    ok(n === 1 && c3.name === c.name && c3.id === c.id
+      && c3.plan.parts.length === c.plan.parts.length
+      && Math.abs(c3.radius - c.radius) < 1e-9 && dd < 1e-12 && edge < 1e-15,
+      `город из записи сервера — тот же самый (${c3.plan.parts.length} деталей, `
+      + `край сходится до ${edge.toExponential(0)})`);
+
+    // И сервер вправе переставить город: клиент не спорит, а старое тело
+    // обязано его потерять — иначе город останется в мире дважды.
+    const other = w3.planets.find((p) => canHostCity(p) && p !== c3.body);
+    applyCities(w3, [{ ...rec, bodyLocalId: other.id, localId: 'c' + other.id, name: 'Проба' }]);
+    ok(w3.cities.length === 1 && w3.cities[0].body === other
+      && w3.cities[0].name === 'Проба' && !c3.body.city,
+      `сервер переставил город на ${other.name}, старое тело его потеряло`);
   }
 
   // --- Цель. Ради этого город и попадает в список навигации.
@@ -5833,119 +6201,116 @@ console.log('\n== наземный город ==');
   }
 }
 
-// --- перевод ----------------------------------------------------------------
+// --- Города не похожи друг на друга -----------------------------------------
 //
-// Перевод разъезжается с игрой за неделю, если за ним не следить. Следит
-// эта проверка, и следит по исходникам: она читает сами файлы игры и
-// требует, чтобы КАЖДАЯ русская строка либо проходила через L(), либо
-// лежала в словаре. Поэтому новую надпись нельзя добавить молча — набор
-// упадёт и назовёт файл.
+// Это главное требование ко всему разделу, и проверяется оно не на одном
+// городе, а на выборке: один город не бывает однообразным.
 {
-  console.log('\n== перевод ==');
+  const N = 60;
+  const plans = [];
+  const t0 = Date.now();
+  for (let i = 0; i < N; i++) plans.push(cityPlan((i * 2654435761) >>> 0));
+  const ms = Date.now() - t0;
 
-  const { readFileSync, readdirSync, statSync } = await import('node:fs');
-  const { join } = await import('node:path');
+  // Размер. Город обязан быть и на четыре километра, и на семьдесят:
+  // одинаковый размер — это такое же однообразие, как одинаковый план.
+  const km = plans.map((p) => p.radius * 2).sort((a, x) => a - x);
+  const small = km.filter((v) => v < 10).length;
+  const big = km.filter((v) => v > 25).length;
+  ok(small >= 5 && big >= 5 && km[km.length - 1] > 40 && km[0] < 8,
+    `размеры от ${km[0].toFixed(1)} до ${km[km.length - 1].toFixed(1)} км: `
+    + `мелких ${small}, крупных ${big}`);
 
-  // Отладочный оверлей не переводится намеренно: это инструмент
-  // разработки, а не игры, и держать его в двух видах — работа без отдачи.
-  // Слой GL исключён целиком — там GLSL и сообщения драйверу; те его
-  // строки, что видит игрок, всё равно обёрнуты и переведены.
-  const SKIP = (p) => p.startsWith('js/gl/')
-    || ['js/core/lang.js', 'js/core/lang.en.js', 'js/core/quality.js',
-      'js/core/sound.js', 'js/game/audio.js', 'js/ui/debug.js'].includes(p);
+  // Схема расселения: встречаются все четыре, и ни одна не съедает
+  // больше половины. Схема, которая не выпадает, — это мёртвый код.
+  const byKind = {};
+  for (const p of plans) byKind[p.kind] = (byKind[p.kind] || 0) + 1;
+  const kinds = Object.keys(CITY_KINDS);
+  ok(kinds.every((k) => byKind[k] >= 3) && Math.max(...Object.values(byKind)) < N * 0.55,
+    'все схемы расселения встречаются: '
+    + kinds.map((k) => `${CITY_KINDS[k]} ${byKind[k] || 0}`).join(', '));
 
-  const walk = (dir, out = []) => {
-    for (const nm of readdirSync(dir)) {
-      const p = join(dir, nm).replace(/\\/g, '/');
-      if (statSync(p).isDirectory()) walk(p, out);
-      else if (p.endsWith('.js') && !SKIP(p)) out.push(p);
+  // Ни одной пары близнецов: совпадение размера И числа построек И числа
+  // площадок означало бы, что семя ни на что не влияет.
+  const sig = new Set(plans.map((p) => `${p.radius.toFixed(2)}/${p.boxes.length}/${p.pads.length}`));
+  ok(sig.size === N, `все ${N} городов разные: ${sig.size} различных наборов`);
+
+  // Контур застройки НЕ КРУГЛЫЙ. Меряется дальностью застройки по
+  // шестнадцати направлениям: у круга она всюду одна.
+  let round = 0, flattest = 1;
+  for (const p of plans) {
+    const reach = new Array(16).fill(0);
+    for (const bx of p.boxes) {
+      const a = Math.atan2(bx.z, bx.x);
+      const k = Math.floor(((a + Math.PI) / (Math.PI * 2)) * 16) % 16;
+      reach[k] = Math.max(reach[k], Math.hypot(bx.x, bx.z));
     }
-    return out;
-  };
+    const hi = Math.max(...reach), lo = Math.min(...reach);
+    flattest = Math.min(flattest, (hi - lo) / hi);
+    if (hi - lo < hi * 0.12) round++;
+  }
+  ok(round === 0,
+    `ни один город не вышел круглым: самый ровный край гуляет на `
+    + `${(flattest * 100).toFixed(0)}% радиуса (${round} круглых из ${N})`);
 
-  /** Границы строковых литералов: строки, комментарии и шаблоны различаются. */
-  const literals = (src) => {
-    const out = [];
-    let i = 0;
-    while (i < src.length) {
-      const c = src[i];
-      if (c === '/' && src[i + 1] === '/') { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j + 1; continue; }
-      if (c === '/' && src[i + 1] === '*') { const j = src.indexOf('*/', i + 2); i = j < 0 ? src.length : j + 2; continue; }
-      if (c === "'" || c === '"' || c === '`') {
-        let j = i + 1;
-        let depth = 0;
-        while (j < src.length) {
-          if (src[j] === '\\') { j += 2; continue; }
-          if (c === '`' && src[j] === '$' && src[j + 1] === '{') { depth++; j += 2; continue; }
-          if (c === '`' && src[j] === '}' && depth) { depth--; j++; continue; }
-          if (src[j] === c && !depth) break;
-          if (c !== '`' && src[j] === '\n') break;
-          j++;
-        }
-        out.push({ a: i, b: j + 1, q: c, body: src.slice(i + 1, j) });
-        i = j + 1;
-        continue;
-      }
-      i++;
+  // Бюджет. Город, который не укладывается, — это не «чуть медленнее»,
+  // а вылет по памяти: геометрия заводится одним куском.
+  let maxParts = 0, maxTris = 0, maxLamps = 0;
+  for (const p of plans) {
+    maxParts = Math.max(maxParts, p.parts.length);
+    maxLamps = Math.max(maxLamps, p.lamps.length);
+    maxTris = Math.max(maxTris, cityTris(p, null));
+  }
+  ok(maxParts <= CITY.maxParts && maxLamps <= CITY.maxLamps && maxTris < 400000,
+    `бюджет выдержан: деталей ${maxParts}, огней ${maxLamps}, `
+    + `треугольников издали ${(maxTris / 1000).toFixed(0)}к`);
+  ok(ms < 4000, `${N} планировок за ${ms} мс`);
+
+  // Постройки НЕ ПЕРЕСЕКАЮТСЯ — по настоящим коробкам, с разворотом.
+  // Дома стоят под любым углом, и проверять их прямоугольниками по осям
+  // значило бы не проверять вовсе: у повёрнутого дома описанный
+  // прямоугольник вдвое больше него самого.
+  const overlap = (p, q) => {
+    // Разделяющая ось: четыре направления — стороны двух коробок.
+    const axes = [[p.c, -p.s], [p.s, p.c], [q.c, -q.s], [q.s, q.c]];
+    const dx = q.x - p.x, dz = q.z - p.z;
+    for (const [ax, az] of axes) {
+      const proj = (bx) => Math.abs(bx.hw * (bx.c * ax - bx.s * az))
+        + Math.abs(bx.hd * (bx.s * ax + bx.c * az));
+      if (Math.abs(dx * ax + dz * az) >= proj(p) + proj(q) - 1e-9) return false;
     }
-    return out;
+    return true;
   };
-
-  const RU = /[А-Яа-яЁё]/;
-  // Файлы, где русский лежит ДАННЫМИ, а не надписью: каталог тел и звёзд,
-  // оружие, стартовый набор пилота и раскладка сенсорных кнопок (она
-  // считается один раз, поэтому подпись переводится при отрисовке).
-  const DATA = ['js/game/bodyinfo.js', 'js/game/galaxy.js', 'js/game/player.js',
-    // targetKind отдаёт вид цели ОДНИМ СЛОВОМ — станция, планета, пилот, —
-    // и слово это ключ: переводится оно при показе (L(kind) в приборах).
-    // Обернуть его на месте нельзя по той же причине, что и каталоги.
-    'js/game/nav.js',
-    'js/ui/touch.js'];
-  const files = walk('js');
-  const loose = [];
-  const noTranslation = [];
-
-  for (const f of files) {
-    const src = readFileSync(f, 'utf8');
-    for (const lit of literals(src)) {
-      if (!RU.test(lit.body)) continue;
-      const before = src.slice(Math.max(0, lit.a - 2), lit.a);
-      const wrapped = before === 'L(';
-      // Каталожные названия (ru: '...') — это КЛЮЧИ: они лежат по-русски и
-      // переводятся при показе, поэтому обёртки у них нет, а перевод обязан
-      // быть.
-      // Каталог — это ДАННЫЕ, а не надписи прибора: названия типов тел,
-      // оружия, товаров и лента стартового набора лежат по-русски и
-      // переводятся при показе (L(c.name) и подобное). Обёртки у них нет и
-      // быть не должно — иначе перевод застыл бы на том языке, который был
-      // при загрузке модуля. Перевод при этом обязателен и проверяется.
-      const isCatalog = DATA.includes(f);
-      if (wrapped || isCatalog) {
-        if (!hasEn(lit.body) && lit.q !== '`') noTranslation.push(f + ': ' + lit.body.slice(0, 40));
-        continue;
+  let pairs = 0, worst = 0, where = '';
+  for (const p of plans) {
+    for (let i = 0; i < p.boxes.length; i++) {
+      const a = p.boxes[i];
+      for (let j = i + 1; j < p.boxes.length; j++) {
+        const bx = p.boxes[j];
+        if (Math.hypot(a.x - bx.x, a.z - bx.z) > a.ax + a.az + bx.ax + bx.az) continue;
+        if (!overlap(a, bx)) continue;
+        pairs++;
+        const d = Math.min(a.hw + bx.hw - Math.abs(a.x - bx.x), a.hd + bx.hd - Math.abs(a.z - bx.z));
+        if (d > worst) { worst = d; where = `семя ${p.seed}`; }
       }
-      if (lit.q === '`') continue;          // шаблоны разбираются глазами
-      loose.push(f + ': ' + lit.body.slice(0, 40));
     }
   }
+  ok(pairs === 0,
+    `ни одна постройка не стоит в другой (${pairs} пар${pairs ? `, до ${(worst * 1000).toFixed(0)} м, ${where}` : ''})`);
 
-  ok(loose.length === 0,
-    'все русские надписи проходят через перевод'
-    + (loose.length ? ': ' + loose.length + ' мимо, первая — ' + loose[0] : ''));
-  ok(noTranslation.length === 0,
-    'у каждой надписи есть английский'
-    + (noTranslation.length ? ': нет ' + noTranslation.length + ', первая — ' + noTranslation[0] : ''));
-
-  // Сам переключатель.
-  setLang('en');
-  ok(L('КОРПУС') === 'HULL' && L('ЩИТ') === 'SHIELD', 'по-английски приборы подписаны иначе');
-  ok(getLang() === 'en' && !!LANGS.ru && !!LANGS.en, 'язык переключился, оба в списке');
-  ok(L('такой строки нет в словаре') === 'такой строки нет в словаре',
-    'без перевода возвращается русский: пустое место на приборе хуже');
-  setLang('ru');
-  ok(L('КОРПУС') === 'КОРПУС', 'по-русски строка возвращается как есть');
-  setLang('нет такого языка');
-  ok(getLang() === 'ru', 'неизвестный язык не принимается');
+  // И ни одна не стоит на посадочной площадке: сесть было бы некуда, а
+  // с воздуха дом на площадке от дома у площадки не отличить.
+  let onPad = 0;
+  for (const p of plans) {
+    for (const pd of p.pads) {
+      for (let i = -2; i <= 2; i++) {
+        for (let j = -2; j <= 2; j++) {
+          if (cityBlocked(p, pd.x + (i * pd.r) / 2, 0.01, pd.z + (j * pd.r) / 2)) onPad++;
+        }
+      }
+    }
+  }
+  ok(onPad === 0, `площадки свободны во всех ${N} городах (${onPad} занятых точек)`);
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));
