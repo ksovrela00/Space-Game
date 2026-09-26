@@ -1974,6 +1974,22 @@ function render() {
   st.rocks = scene && scene.rocks
     ? { count: scene.rocks.count, builds: scene.rocks.builds, drawn: scene.rockDraws || 0 }
     : null;
+  // Растительность — по тем же причинам, что и город: «деревьев не
+  // видно» бывает и «поле не собрано», и «собрано, но не нарисовано», и
+  // «нарисовано, да не выросло здесь ничего». По картинке они
+  // неразличимы (js/gl/flora.js).
+  st.flora = scene && scene.flora
+    ? {
+      count: scene.flora.count,
+      builds: scene.flora.builds,
+      drawn: scene.floraDraws || 0,
+      faces: scene.flora.mesh ? (scene.flora.mesh.faces || 0) : 0,
+      // Ячейка грунта, на которую уложено поле, и та, которой грунт
+      // рисуется сейчас: разошлись — значит растения под землёй.
+      cell: scene.flora.cell,
+      want: scene.floraCell || 0,
+    }
+    : null;
   st.dust = game.dust ? game.dust.list.length : 0;
   // Наземный город: собран ли он и рисуется ли. Собирается он порциями и
   // сто тысяч граней, поэтому «города не видно» имеет две разные причины

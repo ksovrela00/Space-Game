@@ -289,6 +289,16 @@ export class SurfacePatch {
   get levels() { return this.cur ? this.cur.meshes.length : 0; }
 
   /**
+   * Самая мелкая ячейка нынешнего набора, рад. По ней камни и
+   * растительность ложатся на ту поверхность, которая НАРИСОВАНА
+   * (js/gl/scene.js, surfaceCell).
+   */
+  get cellAngle() {
+    const m = this.cur && this.cur.meshes;
+    return m && m.length ? (m[m.length - 1].cellAngle || 0) : 0;
+  }
+
+  /**
    * Раз в кадр: решить, нужны ли заплатки, и достроить их за отведённое
    * время. Возвращает тело, для которого заплатки готовы, или null.
    */

@@ -13,7 +13,7 @@ import { terrainOf } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
 import { tileBuilder, geoFromTransfer, BUILD_CHUNK } from './tilegeo.js';
 import { TilePool } from './tilepool.js';
-import { bakeUniforms, plateUniforms } from './detail.js';
+import { bakeUniforms, plateUniforms, mountUniforms } from './detail.js';
 import { createBakeTexture, CUBE_FACES } from './bake.js';
 import {
   TILE_TEX, TILE_MAX_LEVEL, tileBounds, tileKey,
@@ -342,6 +342,7 @@ export class TileSet {
       gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw);
       gl.uniform1i(prog.loc('uMaxCs'), u.maxCs);
       plateUniforms(gl, prog, u.plate);
+      mountUniforms(gl, prog, u);
       gl.uniform1i(prog.loc('uMaxOct'), u.maxOct);
       this.quad.draw();
     });
@@ -379,6 +380,17 @@ export class TileSet {
       if (!e || !e.mesh) return false;
     }
     return true;
+  }
+
+  /**
+   * Самый подробный уровень из нарисованных. По нему камни и
+   * растительность ложатся на нарисованную поверхность
+   * (js/gl/scene.js, surfaceCell).
+   */
+  get finestLevel() {
+    let lv = 0;
+    for (const t of this.draw) if (t.level > lv) lv = t.level;
+    return lv;
   }
 
   get stats() {

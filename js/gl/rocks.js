@@ -168,7 +168,7 @@ const vertsPerRock = SHAPES[0].faces.length * 3 + 8 * 3;
  * Порциями, потому что на каждый камень приходится выборка рельефа:
  * поле целиком — это десяток миллисекунд, а кадр длится шестнадцать.
  */
-export function rockBuilder(body, rocks, sun = null) {
+export function rockBuilder(body, rocks, sun = null, detail = null) {
   const terrain = terrainOf(body);
   const R = body.radius;
   const n = rocks.length;
@@ -231,10 +231,14 @@ export function rockBuilder(body, rocks, sun = null) {
 
   const one = (r) => {
     const d = r.dir;
-    // Высота грунта под камнем — та же функция, по которой считают
-    // посадку: камень обязан лежать на земле, а не парить над ней.
-    const h = 1 + terrain.displace(d.x, d.y, d.z);
-    terrain.color(d.x, d.y, d.z, rgb);
+    // Высота грунта под камнем — с ТОЙ ЖЕ детализацией, с какой грунт
+    // РИСУЕТСЯ. Полная высота не годится: сетка передаёт рельеф с
+    // ошибкой «уклон × ячейка», и на горном склоне (уклон в треть) это
+    // метры — камень, положенный на полную высоту, повисает в воздухе.
+    // На безатмосферных телах разницы нет вовсе: там уклон три десятых
+    // процента, и ошибка — полсантиметра.
+    const h = 1 + terrain.displace(d.x, d.y, d.z, detail);
+    terrain.color(d.x, d.y, d.z, rgb, detail);
     // Камень темнее грунта: это скол породы, а не пыль, которой засыпано
     // всё вокруг. Разброс по камням и по граням — чтобы россыпь не
     // выглядела набором одинаковых серых пятен.
@@ -312,8 +316,8 @@ export function rockBuilder(body, rocks, sun = null) {
 }
 
 /** Поле целиком, одним заходом. Этим пользуются проверки. */
-export function buildRockGeometry(body, rocks, sun = null) {
-  const b = rockBuilder(body, rocks, sun);
+export function buildRockGeometry(body, rocks, sun = null, detail = null) {
+  const b = rockBuilder(body, rocks, sun, detail);
   while (!b.step(1e9)) { /* один заход */ }
   return b.result;
 }
@@ -330,6 +334,7 @@ export class RockField {
     this.body = null;
     this.center = null;        // направление, вокруг которого собрано поле
     this.radius = 0;
+    this.cell = 0;             // ячейка грунта, на которую уложено поле
     this.count = 0;
     this.builds = 0;
     this.job = null;           // незаконченная сборка
@@ -341,7 +346,11 @@ export class RockField {
    * @param alt  высота камеры над поверхностью, км
    * @returns меш поля или null
    */
-  update(body, dir, alt, sun = null) {
+  /**
+   * @param cell угловой размер ячейки сетки, которой рисуется грунт:
+   *        по ней камни ложатся ровно на нарисованную поверхность
+   */
+  update(body, dir, alt, sun = null, cell = 0) {
     if (!body || !dir || !(alt >= 0) || alt > ROCKS.maxAlt || terrainOf(body).isFlat) {
       this.clear();
       return null;
@@ -353,6 +362,9 @@ export class RockField {
     // так переезд не мигает пустым грунтом.
     if (!this.job) {
       const moved = !this.center || this.body !== body
+        // Сменилась подробность нарисованного грунта — камни надо
+        // переложить (см. js/gl/scene.js, surfaceCell).
+        || (cell > 0 && Math.abs(cell - this.cell) > this.cell * 0.2)
         || Math.acos(Math.max(-1, Math.min(1,
           dir.x * this.center.x + dir.y * this.center.y + dir.z * this.center.z)))
           * body.radius > radius * 0.33
@@ -362,7 +374,9 @@ export class RockField {
           body,
           center: { x: dir.x, y: dir.y, z: dir.z },
           radius,
-          builder: rockBuilder(body, scatterRocks(body, dir, radius), sun),
+          cell,
+          builder: rockBuilder(body, scatterRocks(body, dir, radius), sun,
+            cell > 0 ? terrainOf(body).detailForCell(cell) : null),
         };
       }
     }
@@ -375,6 +389,7 @@ export class RockField {
       this.body = this.job.body;
       this.center = this.job.center;
       this.radius = this.job.radius;
+      this.cell = this.job.cell;
       this.count = geo.count;
       this.builds++;
       this.job = null;

@@ -31,6 +31,7 @@ import {
   CRATER_DMAX, CRATER_DK, CRATER_DREF,
   CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W,
   CRATER_MARE_FROM, CRATER_MARE_TO,
+  MOUNT_K, MOUNT_B, MOUNT_RISE, MOUNT_MAX_OCT,
 } from './terrain.js';
 
 // Бюджет на пиксель. Каждый масштаб кратеров — это 27 ячеек решётки,
@@ -136,9 +137,30 @@ export function detailWindow(terrain, meshCell, fw) {
   return {
     octFrom: from.oct,
     csFrom: from.cs,
+    moctFrom: from.moct,
     octTo: Math.max(from.oct, Math.min(to.oct, from.oct + DETAIL_MAX_OCT)),
     csTo: Math.max(from.cs, Math.min(to.cs, from.cs + DETAIL_MAX_CS)),
+    moctTo: Math.max(from.moct, Math.min(to.moct, from.moct + DETAIL_MAX_OCT)),
   };
+}
+
+/**
+ * Uniform'ы горного слоя — одни и те же у мелкого рельефа и у
+ * запекания, поэтому одной функцией, а не двумя списками по месту
+ * (ровно по той же причине, что и plateUniforms: второй список
+ * когда-нибудь отстал бы от первого, и разница была бы видна только
+ * глазами и только на стыке плиток).
+ *
+ * Нулевая амплитуда означает «гор на теле нет»: шейдер тогда
+ * пропускает весь слой целиком.
+ */
+export function mountUniforms(gl, prog, u) {
+  const m = u.mount;
+  gl.uniform1i(prog.loc('uMSeed'), m ? m.seed : 0);
+  gl.uniform4f(prog.loc('uMount'),
+    m ? m.amp : 0, m ? m.freq : 1, m ? m.thr : 0, m ? m.soft : 1);
+  gl.uniform1f(prog.loc('uMSpread'), m ? m.spread : 1);
+  gl.uniform1i(prog.loc('uMOctFrom'), u.mOctFrom || 0);
 }
 
 /**
@@ -178,6 +200,13 @@ export function bakeUniforms(terrain) {
     craterW: p.craterW,
     octFrom: 0,
     csFrom: 0,
+    // Горы при запекании считаются С НУЛЕВОЙ ОКТАВЫ, как и шум: в
+    // текстуру пишется вся поверхность целиком, а не добавка к сетке.
+    // Заодно это единственное место, где шейдер знает АБСОЛЮТНУЮ
+    // высоту, — и значит, может срезать горы у воды ровно так же, как
+    // это делает terrain.js.
+    mount: p.mount,
+    mOctFrom: 0,
     maxCs: BAKE_MAX_CS,
     maxOct: BAKE_MAX_OCT,
     // Сверху окно не обрезано: в текстуру пишется вся поверхность.
@@ -212,6 +241,8 @@ export function detailUniforms(terrain, meshCell, budget = 1) {
     craterW: p.craterW,
     octFrom: d.oct,
     csFrom: d.cs,
+    mount: p.mount,
+    mOctFrom: d.moct,
     bakeFw: 0,
     plate: p.plate || null,
   };
@@ -254,6 +285,13 @@ uniform float uRidge;
 uniform float uCraterW;
 uniform int uOctFrom;       // октавы, уже вошедшие в геометрию
 uniform int uCsFrom;        // масштабы кратеров, уже вошедшие в геометрию
+// Горный слой (js/gl/terrain.js, «Горы»): своя частота, своя амплитуда
+// и своя лестница октав. uMount = (амплитуда, частота, порог пояса,
+// ширина перехода); нулевая амплитуда — гор на теле нет.
+uniform int uMSeed;
+uniform vec4 uMount;
+uniform float uMSpread;
+uniform int uMOctFrom;      // октавы хребтов, уже вошедшие в геометрию
 uniform int uMaxCs;         // предел на масштабы кратеров (цена кадра)
 uniform int uMaxOct;        // предел на октавы шума
 // Угловой размер текселя запечённой текстуры, если она под этим
@@ -302,6 +340,11 @@ const float D_FIT = ${f(2 / Math.min(CRATER_STEP ** -maxCs, LAC ** maxOct))};
 const int D_CRATER_SEED = ${CRATER_SEED};
 const float D_MARE_FROM = ${f(CRATER_MARE_FROM)};
 const float D_MARE_TO = ${f(CRATER_MARE_TO)};
+const float D_MOUNT_K = ${f(MOUNT_K)};
+const float D_MOUNT_B = ${f(MOUNT_B)};
+const float D_MOUNT_RISE = ${f(MOUNT_RISE)};
+const int D_MOUNT_MAX_OCT = ${MOUNT_MAX_OCT};
+const int D_MAX_MOCT = ${maxOct};
 
 // Тот же хеш, что в js/gl/terrain.js: imul в JS и умножение uint здесь
 // дают одни и те же 32 бита.
@@ -422,6 +465,61 @@ float dNoiseSum(vec3 p, int octTo, float fw) {
   return sum * (1.0 - D_GAIN) * (uRidge > 0.5 ? 1.6 : 1.0);
 }
 
+/**
+ * Пояс гор: 0 на равнине, 1 в горах. Та же маска, что на CPU
+ * (js/gl/terrain.js, belt) — три октавы низкой частоты.
+ */
+float dBelt(vec3 p) {
+  float n = dNoiseRaw(uMSeed + 17, p * uMSpread, 3);
+  float t = clamp((n - uMount.z) / uMount.w, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+/**
+ * Октавы хребтов мельче тех, что уже в сетке. Слово в слово ridged()
+ * из js/gl/terrain.js, только со своей лестницей и с весом появления.
+ */
+float dMountSum(vec3 p, int moctTo, float fw) {
+  float sum = 0.0;
+  float amp = pow(D_GAIN, float(uMOctFrom));
+  float fq = uMount.y * pow(D_LAC, float(uMOctFrom));
+  for (int o = 0; o < D_MAX_MOCT; o++) {
+    int oi = uMOctFrom + o;
+    if (oi >= moctTo) break;
+    float w = dWeight(1.0 / fq, fw);
+    if (w > 0.001) {
+      float n = 1.0 - abs(dPerlin(uMSeed + oi * 7919, p * fq));
+      sum += w * amp * (n * n - 0.5);
+    }
+    amp *= D_GAIN;
+    fq *= D_LAC;
+  }
+  return sum * (1.0 - D_GAIN) * 1.6;
+}
+
+/**
+ * Высота гор в долях радиуса.
+ *
+ * land — доля суши: горы начинаются не у самой кромки воды, а выше
+ * (MOUNT_RISE), иначе хребет обрывался бы у берега стеной. Считать её
+ * может только тот, кто знает АБСОЛЮТНУЮ высоту, то есть запекание;
+ * на пиксель приходит единица, а воду там гасит признак по цвету
+ * вершины (js/gl/shaders.js, wet) — ровно так же, как у кратеров.
+ *
+ * Сдвиг D_MOUNT_B добавляется ОДИН РАЗ, вместе с нулевой октавой: это
+ * постоянная слоя, а не часть суммы, и в хвосте её быть не должно —
+ * иначе на каждом уровне LOD гора подрастала бы на одну и ту же
+ * величину.
+ */
+float dMount(vec3 p, int moctTo, float fw, float land) {
+  if (uMount.x <= 0.0 || moctTo <= uMOctFrom || land <= 0.0) return 0.0;
+  float w = dBelt(p);
+  if (w <= 0.0) return 0.0;
+  float t = D_MOUNT_K * dMountSum(p, moctTo, fw)
+    + (uMOctFrom == 0 ? D_MOUNT_B : 0.0);
+  return uMount.x * w * land * t;
+}
+
 float dCraterDepth(float rc) {
   return min(${f(CRATER_DMAX)}, ${f(CRATER_DK)} * sqrt(${f(CRATER_DREF)} / rc)) * rc;
 }
@@ -533,10 +631,13 @@ float dMare(vec3 p) {
 
 // Докуда имеет смысл считать при данном угловом следе (пикселя при
 // рисовании, текселя при запекании). Повторяет terrain.detailForCell.
-void dLimits(float fw, out int octTo, out int csTo) {
+void dLimits(float fw, out int octTo, out int csTo, out int moctTo) {
   float lim = max(D_FADE_LO * fw, D_MIN_SCALE);
   octTo = 1 + int(floor(log(1.0 / (uFreq * lim)) / log(D_LAC)));
   csTo = 1 + int(floor(log(lim / D_C0) / log(D_STEP)));
+  moctTo = uMount.x > 0.0
+    ? clamp(1 + int(floor(log(1.0 / (uMount.y * lim)) / log(D_LAC))), 0, D_MOUNT_MAX_OCT)
+    : 0;
 }
 
 /**
@@ -559,8 +660,8 @@ void dDetail(vec3 p, vec3 U, vec3 V, float fwIn, out float hn, out vec2 g, out f
   // только сглаженная, — ровно как более крупный мип. Соседние уровни
   // тогда отличаются резкостью, а не наклоном, и стык не виден.
   float fw = max(fwIn, uBakeFw * D_FIT);
-  int octTo, csTo;
-  dLimits(fw, octTo, csTo);
+  int octTo, csTo, moctTo;
+  dLimits(fw, octTo, csTo, moctTo);
   float dens = dMare(p);
 
   vec2 gc = vec2(0.0);
@@ -568,14 +669,19 @@ void dDetail(vec3 p, vec3 U, vec3 V, float fwIn, out float hn, out vec2 g, out f
   dCraters(p, U, V, csTo, fw, dens, cr, gc);
 
   float k = uAmp / max(uSpan, 1e-6);
-  float n0 = dNoiseSum(p, octTo, fw) * k;
+  // Горы идут в ТОТ ЖЕ отсчёт, что и шум: наклон у них общий, а значит
+  // и конечные разности берутся разом — три выборки на точку вместо
+  // шести. Суша здесь единица: абсолютной высоты на пиксель нет
+  // (см. dMount).
+  float n0 = dNoiseSum(p, octTo, fw) * k + dMount(p, moctTo, fw, 1.0);
   vec2 gn = vec2(0.0);
-  if (octTo > uOctFrom) {
-    // Наклон шума — конечными разностями шагом в пиксель: он же
-    // сглаживает деталь на пределе разрешения.
+  if (octTo > uOctFrom || moctTo > uMOctFrom) {
+    // Наклон — конечными разностями шагом в пиксель: он же сглаживает
+    // деталь на пределе разрешения.
     float eps = max(1.5 * fw, 1e-7);
-    float nu = dNoiseSum(normalize(p + U * eps), octTo, fw) * k;
-    float nv = dNoiseSum(normalize(p + V * eps), octTo, fw) * k;
+    vec3 pu = normalize(p + U * eps), pv = normalize(p + V * eps);
+    float nu = dNoiseSum(pu, octTo, fw) * k + dMount(pu, moctTo, fw, 1.0);
+    float nv = dNoiseSum(pv, octTo, fw) * k + dMount(pv, moctTo, fw, 1.0);
     gn = vec2(nu - n0, nv - n0) / eps;
   }
 

@@ -248,10 +248,15 @@ out vec4 outColor;
 // Высота поверхности над сферой в долях радиуса. Ниже уровня моря
 // поверхность ровная, поэтому clamp применяется к КАЖДОМУ отсчёту: так
 // наклон в воде выходит нулевым сам, без отдельной проверки.
-float bakeLand(vec3 p, int octTo) {
+float bakeLand(vec3 p, int octTo, int moctTo) {
   float raw = dNoiseSum(p, octTo, uTexel);       // окно с нулевой октавы
   float sea = 1.0 - uSpan;
-  return clamp((raw - sea) / uSpan, 0.0, 1.0) * uAmp;
+  float h = clamp((raw - sea) / uSpan, 0.0, 1.0) * uAmp;
+  // Горы кладутся поверх и только на сушу. Доля суши считается по
+  // абсолютной высоте — здесь она известна, потому что окно начинается
+  // с нулевой октавы (js/gl/detail.js, dMount).
+  float land = clamp((raw - sea) / D_MOUNT_RISE, 0.0, 1.0);
+  return h + dMount(p, moctTo, uTexel, land * land * (3.0 - 2.0 * land));
 }
 
 void main() {
@@ -269,8 +274,8 @@ void main() {
   vec3 U = normalize(cross(helper, dir));
   vec3 V = cross(dir, U);
 
-  int octTo, csTo;
-  dLimits(uTexel, octTo, csTo);
+  int octTo, csTo, moctTo;
+  dLimits(uTexel, octTo, csTo, moctTo);
 
   // Кратеры: высота и наклон за один проход, с маской «морей».
   float cr = 0.0;
@@ -281,9 +286,9 @@ void main() {
   // Наклон шума — конечными разностями шагом в тексель: это же и
   // сглаживание на пределе разрешения текстуры.
   float eps = max(1.5 * uTexel, 1e-7);
-  float h0 = bakeLand(dir, octTo);
-  float hu = bakeLand(normalize(dir + U * eps), octTo);
-  float hv = bakeLand(normalize(dir + V * eps), octTo);
+  float h0 = bakeLand(dir, octTo, moctTo);
+  float hu = bakeLand(normalize(dir + U * eps), octTo, moctTo);
+  float hv = bakeLand(normalize(dir + V * eps), octTo, moctTo);
   vec2 g = vec2(hu - h0, hv - h0) / eps + gc;
 
   // Площадка города: там поверхность ровная, и в текстуру обязана

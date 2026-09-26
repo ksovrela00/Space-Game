@@ -48,14 +48,14 @@
       'warp', 'weapons', 'world'
     ],
     'gl/': [
-      'bake', 'citymesh', 'context', 'detail', 'gputime', 'icosphere', 'mat4',
-      'mesh', 'nebula', 'patches', 'planetmesh', 'program', 'quadtree',
+      'bake', 'citymesh', 'context', 'detail', 'flora', 'gputime', 'icosphere',
+      'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program', 'quadtree',
       'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
       'tiles', 'tileworker'
     ],
     'models/': [
-      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'ships',
-      'station.parts', 'stations'
+      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data',
+      'nature.parts', 'ships', 'station.parts', 'stations'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'

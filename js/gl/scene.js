@@ -25,13 +25,13 @@ import {
 import { skyFor, skyUniforms, SKY_GAIN } from './nebula.js';
 import {
   detailUniforms, tileDetailUniforms, makeDetailLoad, updateDetailLoad,
-  plateUniforms, FW_TARGET_GPU, FW_TARGET_CPU, FW_MAX,
+  plateUniforms, mountUniforms, FW_TARGET_GPU, FW_TARGET_CPU, FW_MAX,
 } from './detail.js';
 import { terrainOf } from './terrain.js';
 import { edgeAngle } from './icosphere.js';
 import { Baker, createBlankTexture, createSkyTexture, CUBE_FACES } from './bake.js';
 import { TileSet } from './tiles.js';
-import { tileKey, tileTexelAngle } from './quadtree.js';
+import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
 import { cityLocal } from '../game/city.js';
 
@@ -50,8 +50,9 @@ import { icosphere } from './icosphere.js';
 import {
   requestPlanetMesh, pumpBuilds, pendingBuilds, planetLevel, disposePlanetMeshes,
 } from './planetmesh.js';
-import { SurfacePatch } from './patches.js';
+import { SurfacePatch, PATCH } from './patches.js';
 import { RockField } from './rocks.js';
+import { FloraField } from './flora.js';
 import { CityField, SHADE_MAX, shadeBoxes } from './citymesh.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
 import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
@@ -339,6 +340,10 @@ export class GlScene {
     // Камни у самой поверхности: предметы известного размера, по которым
     // глаз и меряет высоту (см. js/gl/rocks.js).
     this.rocks = new RockField(gl, this.meshLocs);
+    // Растительность: деревья, кусты, трава (js/gl/flora.js). Поле
+    // отдельное от камней, потому что видно его в пять раз дальше и
+    // пересобирается оно по своим порогам.
+    this.flora = new FloraField(gl, this.meshLocs);
     // Наземный город: сто тысяч граней, собираемых порциями и один раз
     // (js/gl/citymesh.js). Рисуется как обычный предмет — со своим
     // положением и базисом, а не в долях радиуса тела.
@@ -655,6 +660,9 @@ export class GlScene {
     gl.uniform1i(prog.loc('uOctFrom'), u.octFrom);
     gl.uniform1i(prog.loc('uCsFrom'), u.csFrom);
     gl.uniform1f(prog.loc('uBakeFw'), u.bakeFw || 0);
+    // Горный слой (js/gl/terrain.js, «Горы»): общей функцией, чтобы два
+    // списка uniform'ов не разъехались.
+    mountUniforms(gl, prog, u);
     // Площадка наземного города (js/gl/terrain.js): на ней мелкого
     // рельефа нет. Нулевой радиус означает «площадки нет» — так тела без
     // города не платят за неё ничем.
@@ -687,6 +695,7 @@ export class GlScene {
     this.tris = 0;
     this.draws = 0;
     this.rockDraws = 0;
+    this.floraDraws = 0;
     this.cityDraws = 0;
     this.streamDraws = 0;
     this.moteDraws = 0;
@@ -1137,9 +1146,11 @@ export class GlScene {
   forgetSystem(world) {
     if (this.tiles) this.tiles.clear();
     if (this.rocks) this.rocks.clear();
+    if (this.flora) this.flora.clear();
     if (this.city) this.city.clear();
     this.tileBody = null;
     this.rockBody = null;
+    this.floraBody = null;
     this.skySeed = null;         // небо чужой системы печётся заново
     return world ? disposePlanetMeshes(world.bodies) : 0;
   }
@@ -1161,16 +1172,22 @@ export class GlScene {
 
   updatePatches(game) {
     const body = this.nearestSurface(game.world);
-    this.updateRocks(body, game.world.star.pos);
-    this.updateCity(game.world);
+    // Поверхность — ПЕРВОЙ, и это важно. Камни и растительность кладутся
+    // на ту сетку, которая нарисована (surfaceCell), а её размер ячейки
+    // известен только после того, как набор заплаток или плиток на этот
+    // кадр уже выбран. В обратном порядке первое же поле собиралось по
+    // ячейке «на глазок» — и уходило под грунт на полсотни метров.
     if (this.tilesOn) {
       this.updateTiles(body);
       this.patchBody = null;
-      return;
+    } else {
+      this.patchBody = body
+        ? this.patch.update(body, this.camera.pos, body._glLevel || 0, PATCH_MS)
+        : this.patch.update(null, null, 0, 0);
     }
-    this.patchBody = body
-      ? this.patch.update(body, this.camera.pos, body._glLevel || 0, PATCH_MS)
-      : this.patch.update(null, null, 0, 0);
+    this.updateRocks(body, game.world.star.pos);
+    this.updateFlora(body);
+    this.updateCity(game.world);
   }
 
   /**
@@ -1212,6 +1229,32 @@ export class GlScene {
   }
 
   /**
+   * Самая мелкая ячейка, до которой доходит нынешний способ рисовать
+   * поверхность. По ней камни и растительность кладутся на грунт.
+   *
+   * Зачем не «полная высота». Сетка передаёт рельеф с ошибкой примерно
+   * «уклон × ячейка». У горного мира уклон — треть, и на заплатках
+   * (самая мелкая ячейка 20 м) это сорок метров: камни и деревья,
+   * положенные на полную высоту, висят над склоном. Положенные на ту же
+   * детализацию, какой грунт РИСУЕТСЯ, они стоят на нём ровно.
+   *
+   * Берётся самая мелкая ячейка ИЗ НЫНЕШНЕГО НАБОРА, а не предельная
+   * для способа рисования: у заплаток размер ячейки зависит от высоты
+   * (js/gl/patches.js, cellOfAlt), и с трёхсот метров она вчетверо
+   * крупнее, чем у земли. Пока здесь стоял предел, деревья на этой
+   * высоте уходили под грунт на полсотни метров — поле было собрано,
+   * нарисовано и невидимо.
+   */
+  surfaceCell(body) {
+    if (!body) return 0;
+    if (this.tilesOn) {
+      const lv = this.tiles ? this.tiles.finestLevel : 0;
+      return lv > 0 ? tileCellAngle(lv) : tileCellAngle(TILE_MAX_LEVEL);
+    }
+    return (this.patch && this.patch.cellAngle) || PATCH.minCellKm / body.radius;
+  }
+
+  /**
    * Поле камней под камерой. Работает одинаково для обоих способов
    * рисовать поверхность: камни лежат в осях тела и к плиткам не
    * привязаны.
@@ -1227,8 +1270,23 @@ export class GlScene {
     toLocal(fr, body.pos, sunPos, this._rsun || (this._rsun = { x: 0, y: 0, z: 0 }));
     const sl = Math.hypot(this._rsun.x, this._rsun.y, this._rsun.z) || 1;
     this._rsun.x /= sl; this._rsun.y /= sl; this._rsun.z /= sl;
-    this.rocks.update(body, dir, info.alt, this._rsun);
+    this.rocks.update(body, dir, info.alt, this._rsun, this.surfaceCell(body));
     this.rockBody = this.rocks.mesh ? body : null;
+    // Солнце и точка под камерой те же, что у камней, — растительность
+    // берёт их готовыми, чтобы не считать второй раз за кадр.
+    this._floraDir = dir;
+    this._floraAlt = info.alt;
+  }
+
+  /**
+   * Поле растительности под камерой. Считается после камней и по их же
+   * числам: тело, точка под камерой, высота и солнце у них общие.
+   */
+  updateFlora(body) {
+    if (!body || !this._floraDir) { this.flora.clear(); this.floraBody = null; return; }
+    this.floraCell = this.surfaceCell(body);
+    this.flora.update(body, this._floraDir, this._floraAlt, this._rsun, this.floraCell);
+    this.floraBody = this.flora.mesh ? body : null;
   }
 
   /**
@@ -1488,6 +1546,17 @@ export class GlScene {
       bodyBasis(this.rockBody, this.basisTmp);
       this.drawObject(prog, this.rocks.mesh, this.rockBody.pos, this.basisTmp,
         this.rockBody.radius, sunPos);
+    }
+
+    // Растительность. В отличие от камней рисуется как ПРЕДМЕТ — со
+    // своим началом координат на грунте и в километрах (js/gl/flora.js):
+    // в долях радиуса трава короче шага float32 и схлопывается.
+    if (this.floraBody && this.flora.mesh) {
+      this.floraDraws++;
+      bodyBasis(this.floraBody, this.basisTmp);
+      toWorld(this.basisTmp, this.floraBody.pos, this.flora.origin,
+        this._floraPos || (this._floraPos = { x: 0, y: 0, z: 0 }));
+      this.drawObject(prog, this.flora.mesh, this._floraPos, this.basisTmp, 1, sunPos);
     }
 
     // Наземный город. После грунта и камней, но до станций: он ближе

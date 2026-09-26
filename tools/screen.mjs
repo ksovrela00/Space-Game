@@ -21,6 +21,17 @@
 //   node tools/screen.mjs --size=1920x1080 --hud=1.2
 //   node tools/screen.mjs --do="GAME.ship.hull = 12" произвольная правка
 //
+// Снимок ГРУНТА просят с заплатками: node tools/screen.mjs --scene=…
+//   --url='http://localhost/space_game/?offline=1&surface=clipmap'
+// Плитки считаются на видеокарте, а в headless её нет — за отведённое
+// время успевает три штуки, и вместо рельефа в кадре гладкий шар. У
+// городских сцен это уже зашито в сцену (scene.url).
+//
+// Числа по грунту перед снимком: SURFDBG=1 node tools/screen.mjs …
+// Показывает поле камней, поле растительности и ячейку сетки — по ним
+// «деревьев не видно» разбирается на «не собрано», «не нарисовано» и
+// «ушло под грунт».
+//
 // Игру отдаёт тот же сервер, что и обычно (XAMPP, http://localhost/…).
 // Без сервера сцена не соберётся: числа корабля приходят из бэкенда.
 
@@ -264,6 +275,52 @@ const SCENES = {
     plain: 'login.html?offline=1',
     title: 'страница входа: регистрация',
     run: "document.getElementById('swap').click();",
+  },
+  // Горы и лес живут на атмосферном мире (пока это Lave II) и занимают
+  // малую долю шара, поэтому обе сцены СНАЧАЛА ИЩУТ место: гору повыше
+  // или лес погуще. Заплатки (surface=clipmap) — потому что плитки
+  // считает видеокарта, а в headless её нет.
+  mountains: {
+    url: '&surface=clipmap',
+    title: 'горный хребет атмосферного мира',
+    run: `
+      liftoff();
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => t.mountainAt(d.x, d.y, d.z), 1.2, 26, 92, 4)
+        .then(() => { GAME.state.view = 'cockpit'; frames(8); });
+    `,
+  },
+  forest: {
+    url: '&surface=clipmap',
+    title: 'лес на грунте: деревья, кусты, трава',
+    run: `
+      liftoff();
+      // Лес ищем НА РОВНОМ МЕСТЕ, и уклон меряется честно — разностью
+      // высот по касательной. Не придирка к виду: у самой земли корабль
+      // доворачивается по склону, и снимок леса на косогоре выходит с
+      // горизонтом наискось и половиной кадра в земле. Так и вышло на
+      // первых трёх попытках этой сцены.
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          // Уклон меряется только у густых мест: выборка рельефа — самая
+          // дорогая функция в игре, а кандидатов двадцать четыре тысячи.
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        // Сто метров, а не тридцать, и это не вкус. Заплатки под
+        // кораблём рисуют грунт с точностью до своей ячейки (десятки
+        // метров), а высота корабля считается по ПОЛНОЙ высоте рельефа:
+        // с тридцати метров камера оказывается под нарисованной землёй,
+        // и кадр выходит чёрным. Так и вышло на четвёртой попытке.
+        0.1, 30, 110, 22)
+        .then(() => {
+          GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+          // Из кабины, а не от третьего лица: свой корабль с этой высоты
+          // занимает низ кадра и закрывает ровно то, ради чего снимок.
+          GAME.state.view = 'cockpit';
+          frames(12);
+        });
+    `,
   },
   surface: {
     title: 'у самого грунта: отметка земли и посадочные условия',
@@ -541,6 +598,93 @@ const HELPERS = `
   };
   // Зависнуть над телом на высоте alt, носом ПО ГОРИЗОНТУ.
   //
+  // Встать там, где на теле ЕСТЬ ЧТО СНИМАТЬ, и при дневном свете.
+  //
+  // Нужен потому, что и горы, и лес занимают малую долю шара: попасть в
+  // них наугад нельзя, а снимок пустой равнины ничего не говорит.
+  // Отбор (pick) получает направление в осях тела и возвращает число —
+  // берётся направление с наибольшим, из тех, где солнце стоит на
+  // заданной высоте.
+  //
+  // Возвращает обещание: рельеф и растительность — модули игры, а
+  // импорт в странице асинхронный.
+  const standWhere = async (b, pick, alt, elev, az, pitch) => {
+    const T = await import('./js/gl/terrain.js');
+    const F = await import('./js/gl/flora.js');
+    const S = window.__surf;
+    const t = T.terrainOf(b);
+    const sun = GAME.world.star;
+    const nz = (v) => { const l = Math.hypot(v.x, v.y, v.z) || 1; v.x /= l; v.y /= l; v.z /= l; return v; };
+    const sw = nz({ x: sun.pos.x - b.pos.x, y: sun.pos.y - b.pos.y, z: sun.pos.z - b.pos.z });
+    // Солнце в осях тела: рельеф считается в них же.
+    const sl = S.localDir(b, { x: b.pos.x + sw.x * 1e6, y: b.pos.y + sw.y * 1e6, z: b.pos.z + sw.z * 1e6 });
+    const lo = Math.sin((elev - 9) * Math.PI / 180), hi = Math.sin((elev + 9) * Math.PI / 180);
+    let best = null;
+    for (let i = 0; i < 24000; i++) {
+      const u = -1 + 2 * (i / 23999), a = i * 2.399963, s2 = Math.sqrt(Math.max(0, 1 - u * u));
+      const d = { x: s2 * Math.cos(a), y: u, z: s2 * Math.sin(a) };
+      const e = d.x * sl.x + d.y * sl.y + d.z * sl.z;
+      if (e < lo || e > hi) continue;
+      if (Math.abs(d.y) > 0.55) continue;            // мимо полярных шапок
+      const v = pick(t, F, b, d);
+      if (!best || v > best.v) best = { v, d };
+    }
+    if (!best) return false;
+    const d = best.d;
+    const p = GAME.ship.pos;
+    S.worldPoint(b, d, S.groundRadius(b, d) + alt, p);
+    const up = nz({ x: p.x - b.pos.x, y: p.y - b.pos.y, z: p.z - b.pos.z });
+    GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+    GAME.ship.speed = 0; GAME.ship.throttle = 0;
+    // Смотрим вдоль горизонта, отвернувшись от солнца на az и опустив
+    // нос на pitch: с сотен метров земля впереди уходит под панель.
+    const dd = up.x * sw.x + up.y * sw.y + up.z * sw.z;
+    const fs = nz({ x: sw.x - up.x * dd, y: sw.y - up.y * dd, z: sw.z - up.z * dd });
+    const rt = { x: up.y * fs.z - up.z * fs.y, y: up.z * fs.x - up.x * fs.z, z: up.x * fs.y - up.y * fs.x };
+    const A = az * Math.PI / 180, P = pitch * Math.PI / 180;
+    const f = nz({
+      x: fs.x * Math.cos(A) + rt.x * Math.sin(A),
+      y: fs.y * Math.cos(A) + rt.y * Math.sin(A),
+      z: fs.z * Math.cos(A) + rt.z * Math.sin(A),
+    });
+    const fp = nz({
+      x: f.x * Math.cos(P) - up.x * Math.sin(P),
+      y: f.y * Math.cos(P) - up.y * Math.sin(P),
+      z: f.z * Math.cos(P) - up.z * Math.sin(P),
+    });
+    window.__lookAlong(GAME.ship.basis, fp, up);
+    frames(30);
+    // Корабль висит без опоры: за секунды ожидания он успел бы и сесть,
+    // и завалиться на бок. Держим и место, и разворот — иначе горизонт
+    // в кадре оказывается наискось (так и вышло на первом снимке).
+    window.__hold = () => {
+      GAME.ship.vel.x = GAME.ship.vel.y = GAME.ship.vel.z = 0;
+      GAME.ship.speed = 0;
+      S.worldPoint(b, d, S.groundRadius(b, d) + alt, GAME.ship.pos);
+      window.__lookAlong(GAME.ship.basis, fp, up);
+    };
+    return true;
+  };
+  const atmoWorld = () => GAME.world.planets.find((p) => p.kind === 'ocean');
+  // Уклон в точке: наибольший перепад высоты на сто метров по двум
+  // касательным, в долях (0.02 — два метра на сто).
+  const flat = (t, b, d) => {
+    const hp = Math.abs(d.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    let ux = hp.y * d.z - hp.z * d.y, uy = hp.z * d.x - hp.x * d.z, uz = hp.x * d.y - hp.y * d.x;
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    const vx = d.y * uz - d.z * uy, vy = d.z * ux - d.x * uz, vz = d.x * uy - d.y * ux;
+    const k = 0.1 / b.radius;
+    const h0 = t.displace(d.x, d.y, d.z);
+    let worst = 0;
+    for (const [ax, ay, az] of [[ux, uy, uz], [vx, vy, vz]]) {
+      const q = { x: d.x + ax * k, y: d.y + ay * k, z: d.z + az * k };
+      const l = Math.hypot(q.x, q.y, q.z);
+      worst = Math.max(worst, Math.abs(t.displace(q.x / l, q.y / l, q.z / l) - h0) / k);
+    }
+    return worst;
+  };
+
   // Нужен отдельно от aimAt: тот наводит нос на центр тела, то есть у
   // самой земли — прямо в грунт, и корабль честно в него влетает. У
   // поверхности смотреть надо вдоль, а не вниз.
@@ -752,6 +896,23 @@ try {
   // раз на этом уже потеряли полчаса: город оказался и собран, и
   // нарисован, а не видно его было потому, что крыши вышли той же
   // яркости, что бетон плиты.
+  // Отчёт о поверхности: SURFDBG=1 node tools/screen.mjs …
+  //
+  // «Деревьев не видно» имеет те же три причины, что и у города, и по
+  // снимку они неразличимы: поле не собрано, собрано и не нарисовано,
+  // или выросло пусто. Числа различают их сразу.
+  if (process.env.SURFDBG) {
+    const info = await run(cdp, `
+      const st = GAME.renderStats;
+      return JSON.stringify({
+        alt: GAME.hud && GAME.hud.alt,
+        flora: st.flora, rocks: st.rocks, patches: st.patches,
+        tiles: st.tiles && { drawn: st.tiles.drawn, level: st.tiles.level },
+        polys: st.polys, items: st.items,
+      });
+    `);
+    console.log('поверхность:', info);
+  }
   if (process.env.CITYDBG) {
     const info = await run(cdp, `
       const c = GAME.world.cities[0];

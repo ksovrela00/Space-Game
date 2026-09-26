@@ -11,7 +11,9 @@ import {
   CRATER_C0, CRATER_STEP, CRATER_SEED, CRATER_RIM, CRATER_RMIN, CRATER_RSPAN,
   CRATER_REACH, CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W, CRATER_FRESH_MIN,
   CRATER_MAX_SCALES, CRATER_MARE_FROM, CRATER_MARE_TO, mareWeight,
+  ridged, MOUNT_MAX_OCT,
 } from '../js/gl/terrain.js';
+import { growth, scatterFlora, buildFloraGeometry, strideFor, FLORA } from '../js/gl/flora.js';
 import {
   detailWindow, detailUniforms, tileDetailUniforms, DETAIL_GLSL,
   DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
@@ -452,6 +454,288 @@ console.log('\n== кратеры ==');
     any += Math.abs(ocean.craterAt(Math.cos(a) * 0.6, 0.5, Math.sin(a) * 0.6));
   }
   ok(any === 0, 'у мира с атмосферой и океаном кратеров нет');
+}
+
+// --- 8b2. Горы атмосферных миров ---------------------------------------------
+// Горный слой (js/gl/terrain.js, «Горы») — это второй рельеф со своей
+// частотой и своей лестницей октав. Проверяется в нём ровно то, из-за
+// чего он был бы неправильным: что горы есть и что они КРУТЫЕ (иначе
+// это холмы), что в воде их нет, что шейдер добавляет ровно хвост, и —
+// главное — что сетка способна донести слой целиком. Последнее не
+// придирка: на этом и погорела первая сборка, когда камни и деревья
+// повисли над склоном.
+console.log('\n== горы ==');
+{
+  const worldM = makeSystem(0x1a7e);
+  const sea = worldM.planets.find((p) => p.kind === 'ocean');
+  const moonM = worldM.bodies.find((b) => b.kind === 'moon');
+  const tm = makeTerrain(sea);
+  const tmoon = makeTerrain(moonM);
+  const R = sea.radius;
+
+  ok(tm.hasMountains && !tmoon.hasMountains,
+    `горы у ${sea.name} (${sea.kind}) есть, у ${moonM.name} (${moonM.kind}) нет`);
+
+  // Пояса: не голый шар и не сплошная тёрка.
+  let belt = 0, n = 0, hiMount = 0, wet = 0;
+  const dirsM = [];
+  for (let i = 0; i < 12000; i++) {
+    const u = -1 + 2 * (i / 11999);
+    const a = i * 2.399963;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+    dirsM.push(d);
+    n++;
+    if (tm.mountBelt(d.x, d.y, d.z) > 0.5) belt++;
+    const hm = tm.mountainAt(d.x, d.y, d.z);
+    hiMount = Math.max(hiMount, hm);
+    // Под водой гор быть не должно: хребет посреди океана — это конус
+    // без берега (см. MOUNT_RISE).
+    if (tm.heightNorm(d.x, d.y, d.z) < 0.2 && hm > 0) wet++;
+  }
+  ok(belt > n * 0.1 && belt < n * 0.6 && wet === 0,
+    `пояс гор занимает ${(belt / n * 100).toFixed(0)}% шара, в воде гор нет`);
+  ok(hiMount * R > 3 && hiMount <= tm.ampUp,
+    `высшая гора ${(hiMount * R).toFixed(1)} км (предел слоя ${(tm.ampUp * R).toFixed(1)} км)`);
+
+  // Крутизна. Ради неё всё и затевалось: перепад в километры на
+  // ДЕСЯТКАХ километров — это холмы, горы начинаются с уклона в разы
+  // больше. Меряем по хорде в километр вдоль касательной.
+  let slope = 0;
+  const best = dirsM.reduce((a, d) =>
+    (tm.mountainAt(d.x, d.y, d.z) > tm.mountainAt(a.x, a.y, a.z) ? d : a), dirsM[0]);
+  {
+    const hp = Math.abs(best.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const tx = hp.y * best.z - hp.z * best.y;
+    const ty = hp.z * best.x - hp.x * best.z;
+    const tz = hp.x * best.y - hp.y * best.x;
+    const tl = Math.hypot(tx, ty, tz);
+    const step = 1 / R;                       // километр по касательной
+    for (let k = 0; k < 40; k++) {
+      const a = k * step, b = (k + 1) * step;
+      const pa = normalize(v3(best.x + tx / tl * a, best.y + ty / tl * a, best.z + tz / tl * a));
+      const pb = normalize(v3(best.x + tx / tl * b, best.y + ty / tl * b, best.z + tz / tl * b));
+      slope = Math.max(slope, Math.abs(tm.displace(pb.x, pb.y, pb.z)
+        - tm.displace(pa.x, pa.y, pa.z)) * R);
+    }
+  }
+  ok(slope > 0.15,
+    `склон у вершины ${(slope * 100).toFixed(0)} м на километр ` +
+    `(холмы дают единицы метров)`);
+
+  // Хвост октав хребтов — ровно разность двух лестниц. Ошибка здесь
+  // означала бы двойные или потерянные горы там, где сетка кончается и
+  // начинается шейдер (js/gl/detail.js, dMountSum).
+  {
+    const P = normalize(v3(0.31, 0.67, 0.675));
+    const tail = (seed, from, to, freq) => {
+      let sum = 0, amp = GAIN ** from, f = freq * LAC ** from;
+      for (let o = from; o < to; o++) {
+        const nn = 1 - Math.abs(perlin3(seed + o * 7919, P.x * f, P.y * f, P.z * f));
+        sum += amp * (nn * nn - 0.5);
+        amp *= GAIN; f *= LAC;
+      }
+      return sum * (1 - GAIN) * 1.6;
+    };
+    let worstM = 0;
+    for (const [from, to] of [[1, 4], [3, 7], [0, 8], [2, 8]]) {
+      const diff = ridged(555, P.x, P.y, P.z, to, 900) - ridged(555, P.x, P.y, P.z, from, 900);
+      worstM = Math.max(worstM, Math.abs(diff - tail(555, from, to, 900)));
+    }
+    ok(worstM < 1e-12,
+      `хвост октав хребтов совпадает с разностью сумм (ошибка ${worstM.toExponential(1)})`);
+  }
+
+  // ГЛАВНОЕ. Сетка обязана доносить горный слой ЦЕЛИКОМ — иначе всё, что
+  // стоит на грунте, расходится с нарисованной поверхностью. Предел
+  // лестницы (MOUNT_MAX_OCT) для того и введён: на подробной плитке
+  // расхождение обязано быть нулевым, а не «почти».
+  {
+    const fine = tm.detailForCell(tileCellAngle(15));
+    const gapFine = tm.detailGap(fine) * R * 1000;
+    let worstReal = 0;
+    for (const d of dirsM) {
+      worstReal = Math.max(worstReal,
+        Math.abs(tm.displace(d.x, d.y, d.z) - tm.displace(d.x, d.y, d.z, fine)));
+    }
+    // Сравнивается ДЕЛО, а не граница: на границе стоят юбки заплаток,
+    // и там запас только на пользу, а на грунт садятся корабль, камни и
+    // деревья — им важно, насколько нарисованная земля отличается от
+    // той, по которой считают.
+    ok(fine.moct >= MOUNT_MAX_OCT && worstReal * R * 1000 < 1,
+      `на плитке 15 уровня (${(tileCellAngle(15) * R * 1000).toFixed(1)} м) горный слой ` +
+      `учтён целиком: октав ${fine.moct} из ${MOUNT_MAX_OCT}, расхождение с полной ` +
+      `высотой ${(worstReal * R * 1000).toFixed(2)} м (граница ${gapFine.toFixed(2)} м)`);
+  }
+
+  // И наоборот: грубая сетка обязана ЧЕСТНО заявлять своё расхождение —
+  // по нему строятся юбки заплаток и выбирается уровень плиток.
+  {
+    let bad = 0, worstRatio = 0;
+    for (const cell of [1e-3, 3e-4, 1e-4, 3e-5, 1e-5]) {
+      const det = tm.detailForCell(cell);
+      const gap = tm.detailGap(det);
+      for (const d of dirsM) {
+        const diff = Math.abs(tm.displace(d.x, d.y, d.z) - tm.displace(d.x, d.y, d.z, det));
+        if (diff > gap) bad++;
+        worstRatio = Math.max(worstRatio, diff / gap);
+      }
+    }
+    ok(bad === 0,
+      `граница detailGap держится и с горами (худший случай — ` +
+      `${(worstRatio * 100).toFixed(0)}% от заявленной)`);
+  }
+}
+
+// --- 8b3. Растительность ------------------------------------------------------
+// Деревья, кусты и трава (js/gl/flora.js). Проверяется то, что по
+// картинке видно плохо: где лес растёт, стоит ли он на земле, не
+// переставляется ли на снижении и влезает ли в бюджет.
+console.log('\n== растительность ==');
+{
+  const worldF = makeSystem(0x1a7e);
+  const sea = worldF.planets.find((p) => p.kind === 'ocean');
+  const moonF = worldF.bodies.find((b) => b.kind === 'moon');
+  const tf = makeTerrain(sea);
+  const R = sea.radius;
+
+  ok(tf.hasFlora && !makeTerrain(moonF).hasFlora,
+    `растительность у ${sea.name} есть, у безвоздушной ${moonF.name} нет`);
+
+  // Где растёт. В воде, на камне и на снегу — нигде.
+  let grow = 0, sum = 0, nF = 0, inWater = 0, onRock = 0;
+  const dirsF = [];
+  for (let i = 0; i < 12000; i++) {
+    const u = -1 + 2 * (i / 11999);
+    const a = i * 2.399963;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+    dirsF.push(d);
+    nF++;
+    const g = growth(sea, tf, d.x, d.y, d.z);
+    if (g > 0) {
+      grow++; sum += g;
+      const soil = tf.soil(d.x, d.y, d.z);
+      if (soil < 0.22) inWater++;
+      if (soil > 0.7) onRock++;
+    }
+  }
+  const dens = sum / Math.max(grow, 1);
+  ok(grow > nF * 0.05 && grow < nF * 0.45 && inWater === 0 && onRock === 0,
+    `лес занимает ${(grow / nF * 100).toFixed(0)}% поверхности, средняя густота ` +
+    `${dens.toFixed(2)}; ни в воде, ни на камне его нет`);
+  ok(Math.abs(dens - FLORA.dens) < 0.12,
+    `заявленная густота ${FLORA.dens} совпадает с измеренной ${dens.toFixed(2)} — ` +
+    `по ней считается шаг прореживания`);
+
+  // Место для поля: самая густая точка.
+  const spot = dirsF.reduce((a, d) =>
+    (growth(sea, tf, d.x, d.y, d.z) > growth(sea, tf, a.x, a.y, a.z) ? d : a), dirsF[0]);
+
+  // Бюджет и ярусы.
+  {
+    const low = scatterFlora(sea, spot, 0.05);
+    const mid = scatterFlora(sea, spot, 0.5);
+    const kinds = (list) => list.reduce((m, p) => (m[p.kind] = (m[p.kind] || 0) + 1, m), {});
+    const kl = kinds(low), km = kinds(mid);
+    ok(low.length <= FLORA.max && mid.length <= FLORA.max
+      && kl.blade > 0 && kl.bush > 0 && kl.tree > 0
+      && !km.blade && km.tree > 0,
+      `у земли ${low.length} растений (деревьев ${kl.tree}, кустов ${kl.bush}, ` +
+      `травы ${kl.blade}), с полукилометра ${mid.length} (только деревья ${km.tree}) — ` +
+      `предел ${FLORA.max}`);
+  }
+
+  // Расстановка не зависит от того, откуда смотрят: сдвиг центра поля
+  // не двигает деревья. Иначе лес плыл бы за кораблём.
+  {
+    const hp = Math.abs(spot.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const tx = hp.y * spot.z - hp.z * spot.y;
+    const ty = hp.z * spot.x - hp.x * spot.z;
+    const tz = hp.x * spot.y - hp.y * spot.x;
+    const tl = Math.hypot(tx, ty, tz);
+    const k = 0.05 / R;                       // сдвиг на 50 метров
+    const spot2 = normalize(v3(spot.x + tx / tl * k, spot.y + ty / tl * k, spot.z + tz / tl * k));
+    const a = scatterFlora(sea, spot, 0.05);
+    const b = scatterFlora(sea, spot2, 0.05);
+    const key = (p) => p.dir.x.toFixed(9) + '|' + p.dir.y.toFixed(9) + '|' + p.model.from;
+    const setB = new Map(b.map((p) => [key(p), p]));
+    let common = 0, moved = 0;
+    for (const p of a) {
+      const q = setB.get(key(p));
+      if (!q) continue;
+      common++;
+      if (q.height !== p.height || q.spin !== p.spin) moved++;
+    }
+    ok(common > a.length * 0.5 && moved === 0,
+      `после сдвига поля на 50 м те же ${common} растений стоят на прежних местах ` +
+      `той же породы и высоты`);
+  }
+
+  // Прореживание на высоте — ПОДМНОЖЕСТВО густой решётки: на снижении
+  // деревья появляются, а не переставляются.
+  {
+    const L = FLORA.layers[0];
+    const rNear = L.radiusOf(0.05), rFar = L.radiusOf(1.2);
+    const sNear = strideFor(L, rNear), sFar = strideFor(L, rFar);
+    const near = scatterFlora(sea, spot, 0.05).filter((p) => p.kind === 'tree');
+    const far = scatterFlora(sea, spot, 1.2).filter((p) => p.kind === 'tree');
+    const key = (p) => p.dir.x.toFixed(9) + '|' + p.dir.y.toFixed(9);
+    const setN = new Set(near.map(key));
+    // Берём только те дальние деревья, что попали бы и в ближнее поле.
+    // Только внутри ближнего поля И вне его КРОМКИ: по краю лес
+    // намеренно редеет (scatterFlora, fade), и редеет он по радиусу
+    // поля — то есть у ближнего и дальнего края разные. Совпадать там
+    // ничего и не должно.
+    const inRange = far.filter((p) => Math.acos(Math.max(-1, Math.min(1,
+      p.dir.x * spot.x + p.dir.y * spot.y + p.dir.z * spot.z))) * R < rNear * 0.6);
+    const kept = inRange.filter((p) => setN.has(key(p))).length;
+    ok(sFar > sNear && inRange.length > 0 && kept === inRange.length,
+      `с высоты шаг решётки ${sNear} -> ${sFar}, и все ${kept} дальних деревьев ` +
+      `в пределах ближнего поля стоят там же — это подмножество, а не новая расстановка`);
+  }
+
+  // Геометрия: растения стоят НА ГРУНТЕ той детализации, которой он
+  // рисуется, и считаются в километрах от центра поля (иначе трава
+  // короче шага float32 и схлопывается).
+  {
+    const cell = tileCellAngle(15);
+    const det = tf.detailForCell(cell);
+    const list = scatterFlora(sea, spot, 0.05);
+    const geo = buildFloraGeometry(sea, list, spot, spot, det);
+    const o = geo.origin;
+    let maxAbs = 0, above = -1e9, below = 1e9;
+    const pos = geo.positions;
+    for (let i = 0; i < pos.length; i += 3) {
+      maxAbs = Math.max(maxAbs, Math.abs(pos[i]), Math.abs(pos[i + 1]), Math.abs(pos[i + 2]));
+      const x = pos[i] + o.x, y = pos[i + 1] + o.y, z = pos[i + 2] + o.z;
+      const r = Math.hypot(x, y, z);
+      const g = (1 + tf.displace(x / r, y / r, z / r, det)) * R;
+      above = Math.max(above, (r - g) * 1000);
+      below = Math.min(below, (r - g) * 1000);
+    }
+    // Шаг float32 у координаты: на единичном радиусе это полметра, в
+    // километрах от центра поля — сотые доли миллиметра.
+    const stepMm = maxAbs * 1.1920929e-7 * 1e6;
+    ok(maxAbs < 3 && stepMm < 1 && below > -3 && above < 30,
+      `поле в ${maxAbs.toFixed(2)} км от своего начала: шаг float32 ${stepMm.toFixed(3)} мм ` +
+      `(в долях радиуса был бы ${(1.1920929e-7 * R * 1000).toFixed(2)} м), ` +
+      `растения от ${below.toFixed(1)} до ${above.toFixed(1)} м над грунтом`);
+    ok(geo.faces > 1000 && geo.faces < 200000,
+      `граней в поле ${geo.faces} (у города их полмиллиона)`);
+  }
+
+  // Город расчищен: на перроне не растёт ничего.
+  {
+    const city = worldF.cities[0];
+    if (city && city.body.plate) {
+      const p = city.body.plate;
+      const g = growth(city.body, makeTerrain(city.body), p.x, p.y, p.z);
+      ok(g === 0, `на площадке города (${city.name}) растительности нет`);
+    } else {
+      ok(true, 'города с площадкой в системе нет — проверять нечего');
+    }
+  }
 }
 
 // --- 8c. Бюджет детализации -------------------------------------------------
