@@ -110,6 +110,7 @@ export function buildIndexedMesh(gl, locs, data) {
   if (data.normals) add(locs.aNormal, data.normals, 3);
   if (data.colors) add(locs.aColor, data.colors, 4);
   if (data.uv) add(locs.aUv, data.uv, 2);
+  if (data.grain) add(locs.aGrain, data.grain, 2);
   if (data.t) add(locs.aT, data.t, 1);
 
   const ib = gl.createBuffer();

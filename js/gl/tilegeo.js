@@ -9,6 +9,7 @@
 import { terrainOf } from './terrain.js';
 import { computeNormals } from './icosphere.js';
 import { TILE_GRID, faceDir, tileBounds, tileCellAngle } from './quadtree.js';
+import { GROUND, grainPerUnit } from './ground.js';
 
 export const BUILD_CHUNK = 512;             // вершин за один заход
 
@@ -31,6 +32,11 @@ export function tileBuilder(body, t) {
   const normals = new Float32Array((gridVerts + ring) * 3);
   const colors = new Float32Array((gridVerts + ring) * 4);
   const uv = new Float32Array((gridVerts + ring) * 2);
+  // Координата фотографии грунта — В ПЛИТКАХ ЗЕРНА и ОТ УГЛА ЭТОЙ
+  // ПЛИТКИ (js/gl/ground.js). Не от центра планеты: там числа за
+  // миллион, и float32 потерял бы всё, что мельче метра.
+  const grain = new Float32Array((gridVerts + ring) * 2);
+  const gk = grainPerUnit(body.radius, GROUND.grain.sizeKm);
   // Вершин меньше 65536, поэтому индексы короткие: на плитку это 13 КБ
   // вместо 26, а плиток в кэше сотни.
   const indices = new Uint16Array((g * g + ring) * 6);
@@ -64,6 +70,8 @@ export function tileBuilder(body, t) {
         colors[i * 4 + 3] = 0;
         uv[i * 2] = ix / g;
         uv[i * 2 + 1] = iy / g;
+        grain[i * 2] = (su - b.u0) * gk;
+        grain[i * 2 + 1] = (sv - b.v0) * gk;
       }
       if (i < gridVerts) return false;
 
@@ -96,6 +104,8 @@ export function tileBuilder(body, t) {
         for (let c2 = 0; c2 < 4; c2++) colors[s * 4 + c2] = colors[src * 4 + c2];
         uv[s * 2] = uv[src * 2];
         uv[s * 2 + 1] = uv[src * 2 + 1];
+        grain[s * 2] = grain[src * 2];
+        grain[s * 2 + 1] = grain[src * 2 + 1];
       }
       for (let k = 0; k < path.length; k++) {
         const a = path[k], b2 = path[(k + 1) % path.length];
@@ -105,7 +115,7 @@ export function tileBuilder(body, t) {
       }
 
       result = {
-        positions, normals, colors, uv,
+        positions, normals, colors, uv, grain,
         indices: indices.subarray(0, o),
         faces: o / 3,
         level: t.level,
@@ -141,6 +151,7 @@ export function geoToTransfer(geo) {
     normals: geo.normals.buffer,
     colors: geo.colors.buffer,
     uv: geo.uv.buffer,
+    grain: geo.grain.buffer,
     indices: geo.indices.buffer,
     indexCount: geo.indices.length,
     faces: geo.faces,
@@ -155,6 +166,7 @@ export function geoFromTransfer(m) {
     normals: new Float32Array(m.normals),
     colors: new Float32Array(m.colors),
     uv: new Float32Array(m.uv),
+    grain: new Float32Array(m.grain),
     indices: new Uint16Array(m.indices, 0, m.indexCount),
     faces: m.faces,
     level: m.level,

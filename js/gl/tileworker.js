@@ -22,7 +22,8 @@ export function runJob(msg) {
 
 /** Буферы, которые уезжают без копирования. */
 export const transferList = (out) => [
-  out.geo.positions, out.geo.normals, out.geo.colors, out.geo.uv, out.geo.indices,
+  out.geo.positions, out.geo.normals, out.geo.colors, out.geo.uv, out.geo.grain,
+  out.geo.indices,
 ];
 
 // В обычном модуле self отсутствует — файл просто импортируется как

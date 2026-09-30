@@ -285,8 +285,14 @@ const SCENES = {
     title: 'горный хребет атмосферного мира',
     run: `
       liftoff();
+      // Снимок С РАВНИНЫ, за сорок километров от вершины, а не с самой
+      // вершины. Горный массив у этого мира в полтораста километров
+      // поперёк, и с его макушки видно только пологий купол под
+      // ногами: первый снимок вышел ровным полем, хотя камера стояла на
+      // десятикилометровой горе. Размер горы виден со стороны — как и
+      // в жизни.
       return standWhere(atmoWorld(),
-        (t, F, b, d) => t.mountainAt(d.x, d.y, d.z), 1.2, 26, 92, 4)
+        (t, F, b, d) => t.mountainAt(d.x, d.y, d.z), 1.0, 26, 0, 1, 40)
         .then(() => { GAME.state.view = 'cockpit'; frames(8); });
     `,
   },
@@ -320,6 +326,72 @@ const SCENES = {
           GAME.state.view = 'cockpit';
           frames(12);
         });
+    `,
+  },
+  ground: {
+    url: '&surface=clipmap',
+    title: 'грунт с восьмидесяти метров: зерно и цвет земли',
+    run: `
+      liftoff();
+      // Место ГОЛОЕ и РОВНОЕ: трава закрыла бы ровно то, ради чего
+      // снимок, а уклон увёл бы половину кадра в горизонт.
+      //
+      // Восемьдесят метров, а не двадцать: заплатки рисуют грунт с
+      // точностью до своей ячейки (двадцать метров), а высота корабля
+      // считается по полной высоте рельефа — с двадцати метров камера
+      // оказывается под нарисованной землёй (та же беда, что у сцены
+      // forest).
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          // Суша, а не море. Самое ровное и голое место океанического
+          // мира — это ДНО, и первый снимок вышел именно таким: ровная
+          // синь с камнями до горизонта.
+          if (window.__surf.groundRadius(b, d) - b.radius < 0.02) return 0;
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g > 0.2 ? 0 : (flat(t, b, d) < 0.03 ? 1 : 0.05);
+        },
+        0.08, 20, 25, 40)
+        .then(() => { GAME.state.view = 'cockpit'; frames(12); });
+    `,
+  },
+  woods: {
+    url: '&surface=clipmap',
+    title: 'лес с шести километров: пятна леса до горизонта',
+    run: `
+      liftoff();
+      // Смотреть надо ОТТУДА, откуда деревьев уже нет: их рисуют в
+      // паре километров вокруг корабля, а лес виден с сотен — он
+      // живёт в цвете грунта (js/gl/terrain.js, FOREST). Снимок ровно
+      // про это: с шести километров в кадре не деревья, а лес.
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => t.floraAt(d.x, d.y, d.z),
+        6, 28, 20, 9)
+        .then(() => { GAME.state.view = 'cockpit'; frames(10); });
+    `,
+  },
+  gravel: {
+    url: '&surface=clipmap',
+    title: 'грунт с двадцати пяти метров: то самое зерно',
+    run: `
+      liftoff();
+      // Пара к сцене ground, и не ради красоты: зерно фотографии — это
+      // крошка мельче двадцати сантиметров, и с восьмидесяти метров её
+      // не видно ВОВСЕ (так и задумано, иначе плитка в три метра
+      // читается решёткой). Значит смотреть на неё надо оттуда, откуда
+      // она работает, — иначе проверить нечего.
+      //
+      // Двадцать пять метров — предел: ниже камера уходит под
+      // нарисованную землю, потому что заплатка рисует её с точностью
+      // до своей ячейки в двадцать метров. Место поэтому берётся самое
+      // ровное, какое нашлось.
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          if (window.__surf.groundRadius(b, d) - b.radius < 0.02) return 0;
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g > 0.2 ? 0 : (flat(t, b, d) < 0.01 ? 1 : 0.02);
+        },
+        0.025, 20, 25, 55)
+        .then(() => { GAME.state.view = 'cockpit'; frames(12); });
     `,
   },
   surface: {
@@ -608,7 +680,11 @@ const HELPERS = `
   //
   // Возвращает обещание: рельеф и растительность — модули игры, а
   // импорт в странице асинхронный.
-  const standWhere = async (b, pick, alt, elev, az, pitch) => {
+  // off — отойти от найденного места на столько километров и смотреть
+  // НА НЕГО. Нужно горам: с вершины стокилометрового массива не видно
+  // ничего, кроме пологого купола под ногами, — гора читается только со
+  // стороны. Отходим туда, где pick наименьший, то есть на равнину.
+  const standWhere = async (b, pick, alt, elev, az, pitch, off = 0) => {
     const T = await import('./js/gl/terrain.js');
     const F = await import('./js/gl/flora.js');
     const S = window.__surf;
@@ -630,7 +706,32 @@ const HELPERS = `
       if (!best || v > best.v) best = { v, d };
     }
     if (!best) return false;
-    const d = best.d;
+    let d = best.d;
+    let look = null;
+    if (off > 0) {
+      const hp = Math.abs(d.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      const u = nz({ x: hp.y * d.z - hp.z * d.y, y: hp.z * d.x - hp.x * d.z, z: hp.x * d.y - hp.y * d.x });
+      const v = { x: d.y * u.z - d.z * u.y, y: d.z * u.x - d.x * u.z, z: d.x * u.y - d.y * u.x };
+      const r = off / b.radius;
+      let low = null;
+      for (let k = 0; k < 32; k++) {
+        const a = k / 32 * 2 * Math.PI, c = Math.cos(a) * r, s2 = Math.sin(a) * r;
+        const q = nz({ x: d.x + u.x * c + v.x * s2, y: d.y + u.y * c + v.y * s2, z: d.z + u.z * c + v.z * s2 });
+        // Солнце должно остаться ЗА СПИНОЙ: если встать не с той
+        // стороны, гора выходит чёрным силуэтом против света, а кадр —
+        // засвеченным небом. Так и вышло на первой попытке.
+        const qd = q.x * d.x + q.y * d.y + q.z * d.z;
+        const to = nz({ x: d.x - q.x * qd, y: d.y - q.y * qd, z: d.z - q.z * qd });
+        const qs = q.x * sl.x + q.y * sl.y + q.z * sl.z;
+        const sh = nz({ x: sl.x - q.x * qs, y: sl.y - q.y * qs, z: sl.z - q.z * qs });
+        if (to.x * sh.x + to.y * sh.y + to.z * sh.z > -0.3) continue;
+        const val = pick(t, F, b, q);
+        if (!low || val < low.val) low = { val, q };
+      }
+      if (!low) return false;
+      look = d;
+      d = low.q;
+    }
     const p = GAME.ship.pos;
     S.worldPoint(b, d, S.groundRadius(b, d) + alt, p);
     const up = nz({ x: p.x - b.pos.x, y: p.y - b.pos.y, z: p.z - b.pos.z });
@@ -642,11 +743,22 @@ const HELPERS = `
     const fs = nz({ x: sw.x - up.x * dd, y: sw.y - up.y * dd, z: sw.z - up.z * dd });
     const rt = { x: up.y * fs.z - up.z * fs.y, y: up.z * fs.x - up.x * fs.z, z: up.x * fs.y - up.y * fs.x };
     const A = az * Math.PI / 180, P = pitch * Math.PI / 180;
-    const f = nz({
-      x: fs.x * Math.cos(A) + rt.x * Math.sin(A),
-      y: fs.y * Math.cos(A) + rt.y * Math.sin(A),
-      z: fs.z * Math.cos(A) + rt.z * Math.sin(A),
-    });
+    let f;
+    if (look) {
+      // Нос — на оставленную точку, но ПО ГОРИЗОНТУ: наклон задаётся
+      // отдельно (pitch), иначе кадр уезжает в небо вместе с вершиной.
+      const lp = { x: 0, y: 0, z: 0 };
+      S.worldPoint(b, look, S.groundRadius(b, look), lp);
+      const to = nz({ x: lp.x - p.x, y: lp.y - p.y, z: lp.z - p.z });
+      const td = to.x * up.x + to.y * up.y + to.z * up.z;
+      f = nz({ x: to.x - up.x * td, y: to.y - up.y * td, z: to.z - up.z * td });
+    } else {
+      f = nz({
+        x: fs.x * Math.cos(A) + rt.x * Math.sin(A),
+        y: fs.y * Math.cos(A) + rt.y * Math.sin(A),
+        z: fs.z * Math.cos(A) + rt.z * Math.sin(A),
+      });
+    }
     const fp = nz({
       x: f.x * Math.cos(P) - up.x * Math.sin(P),
       y: f.y * Math.cos(P) - up.y * Math.sin(P),
@@ -904,8 +1016,27 @@ try {
   if (process.env.SURFDBG) {
     const info = await run(cdp, `
       const st = GAME.renderStats;
+      // Куда смотрит нос относительно горизонта. Без этого числа
+      // «грунта не видно» и «камера задрана в небо» по снимку
+      // неразличимы: и там и там кадр ровного цвета.
+      const p = GAME.ship.pos;
+      let near = null;
+      for (const b of GAME.world.bodies) {
+        const d = Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z) - b.radius;
+        if (!near || d < near.d) near = { d, b };
+      }
+      const u = near && (() => {
+        const b = near.b;
+        const l = Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z) || 1;
+        return { x: (p.x - b.pos.x) / l, y: (p.y - b.pos.y) / l, z: (p.z - b.pos.z) / l };
+      })();
+      const f = GAME.ship.basis.fwd;
       return JSON.stringify({
         alt: GAME.hud && GAME.hud.alt,
+        near: near && near.b.name,
+        overKm: near && +near.d.toFixed(3),
+        lookDeg: u && +(Math.asin(Math.max(-1, Math.min(1,
+          f.x * u.x + f.y * u.y + f.z * u.z))) * 180 / Math.PI).toFixed(1),
         flora: st.flora, rocks: st.rocks, patches: st.patches,
         tiles: st.tiles && { drawn: st.tiles.drawn, level: st.tiles.level },
         polys: st.polys, items: st.items,

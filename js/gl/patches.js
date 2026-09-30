@@ -27,6 +27,7 @@ import { terrainOf } from './terrain.js';
 import { edgeAngle, computeNormals } from './icosphere.js';
 import { buildIndexedMesh } from './mesh.js';
 import { localDir, altitudeOf } from '../game/surface.js';
+import { GROUND, grainPerUnit, faceOf, faceCoords } from './ground.js';
 
 export const PATCH = {
   res: 32,           // ячеек по стороне (кратно 4: по границе выреза)
@@ -120,6 +121,31 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
   const colors = new Float32Array((gridVerts + skirtVerts) * 4);
   const indices = new Uint32Array((gridQuads + skirtQuads) * 6);
 
+  // Координата фотографии грунта (js/gl/ground.js). Заплатка
+  // центрирована на камере, своей клетки на кубе у неё нет — поэтому
+  // грань берётся ОДНА, по центру набора, и продолжается за свои 45°:
+  // так узор не рвётся на ребре куба и совпадает с плиточным.
+  //
+  // Отсчёт идёт ОТ ЦЕНТРА заплатки, а не от центра планеты: у грани
+  // куба числа доходят до миллиона плиток зерна, и float32 потерял бы
+  // на них всё, что мельче метра, — то есть само зерно.
+  const grain = new Float32Array((gridVerts + skirtVerts) * 2);
+  const gFace = faceOf(center.x, center.y, center.z);
+  const gOrg = faceCoords(gFace, center.x, center.y, center.z);
+  const gk = grainPerUnit(body.radius, GROUND.grain.sizeKm);
+  // Размах координаты по набору нужен сцене: на слишком крупном меше
+  // зерно считать нельзя (js/gl/ground.js, GRAIN_MAX_SPAN), и меряется
+  // это по тому, что вышло, а не по угловому размеру заплатки.
+  let gSpan = 0;
+  const grainAt = (idx, d) => {
+    const c = faceCoords(gFace, d.x, d.y, d.z);
+    if (!c) return;
+    const a = (c.su - gOrg.su) * gk, b2 = (c.sv - gOrg.sv) * gk;
+    grain[idx * 2] = a;
+    grain[idx * 2 + 1] = b2;
+    gSpan = Math.max(gSpan, Math.abs(a), Math.abs(b2));
+  };
+
   const U = { x: 0, y: 0, z: 0 }, V = { x: 0, y: 0, z: 0 };
   tangentFrame(center, U, V);
 
@@ -173,6 +199,7 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
           positions[idx * 3] = dir.x;
           positions[idx * 3 + 1] = dir.y;
           positions[idx * 3 + 2] = dir.z;
+          grainAt(idx, dir);
           continue;
         }
         const h = vertex(i, j, dir);
@@ -180,6 +207,7 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
         positions[idx * 3] = dir.x * r;
         positions[idx * 3 + 1] = dir.y * r;
         positions[idx * 3 + 2] = dir.z * r;
+        grainAt(idx, dir);
         colors[idx * 4] = rgb[0];
         colors[idx * 4 + 1] = rgb[1];
         colors[idx * 4 + 2] = rgb[2];
@@ -221,6 +249,8 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
           colors[s * 4 + 1] = colors[src * 4 + 1];
           colors[s * 4 + 2] = colors[src * 4 + 2];
           colors[s * 4 + 3] = 0;
+          grain[s * 2] = grain[src * 2];
+          grain[s * 2 + 1] = grain[src * 2 + 1];
         }
         for (let k = 0; k < path.length; k++) {
           const a = path[k], b = path[(k + 1) % path.length];
@@ -247,11 +277,12 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
       }
 
       result = {
-        positions, normals, colors,
+        positions, normals, colors, grain,
         indices: indices.subarray(0, o),
         faces: o / 3,
         half, cell: 2 * half / res, levelsHole: holeFrac,
         center: { x: center.x, y: center.y, z: center.z },
+        grainFace: gFace, grainOrg: gOrg, grainSpan: gSpan,
       };
       return true;
     },
@@ -386,7 +417,16 @@ export class SurfacePatch {
       meshes.push(mesh);
     }
     if (this.cur) for (const m of this.cur.meshes) m.dispose();
-    this.cur = { plan: N.plan, center: N.center, meshes };
+    // Грань и начало отсчёта у всех уровней общие (центр один), поэтому
+    // держим их на наборе: сцене они нужны одним uniform-ом на весь
+    // набор, а не на каждую заплатку.
+    const g0 = N.done[0];
+    this.cur = {
+      plan: N.plan, center: N.center, meshes,
+      grainFace: g0 ? g0.grainFace : 0,
+      grainOrg: g0 ? g0.grainOrg : null,
+      grainSpan: N.done.reduce((m, g) => Math.max(m, g.grainSpan), 0),
+    };
     this.next = null;
   }
 }

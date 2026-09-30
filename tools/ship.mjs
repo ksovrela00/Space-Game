@@ -47,7 +47,17 @@ const TARGET_LENGTH = 0.065;
 
 const exists = async (p) => { try { await access(p); return true; } catch { return false; } };
 
-// --- PNG (8 бит, RGB/RGBA, без интерлейса) ----------------------------------
+// --- PNG (8 и 16 бит, серый/RGB/RGBA, без интерлейса) -----------------------
+//
+// Шестнадцать бит и серые картинки понадобились не кораблю, а грунту:
+// у фотограмметрии Poly Haven (tools/ground.mjs) карта затенения лежит
+// серой восьмибитной, а цвет и нормаль аэрофото — шестнадцатибитными.
+// Старший байт от шестнадцати берётся сразу: наружу всё равно уходит
+// восьмибитная картинка, а младший байт теряется при уменьшении в
+// четыре раза, которое всё равно делается следом.
+//
+// @returns {w, h, bpp, px} — bpp здесь ЧИСЛО КАНАЛОВ (1, 2, 3 или 4),
+//          px — байты по каналу на пиксель.
 function decodePng(buf) {
   if (buf.readUInt32BE(0) !== 0x89504e47) throw new Error('не PNG');
   let w = 0, h = 0, depth = 0, type = 0;
@@ -60,23 +70,25 @@ function decodePng(buf) {
     if (tag === 'IHDR') {
       w = data.readUInt32BE(0); h = data.readUInt32BE(4);
       depth = data[8]; type = data[9];
-      if (depth !== 8 || (type !== 2 && type !== 6) || data[12] !== 0) {
-        throw new Error(`нужен PNG 8 бит RGB/RGBA без интерлейса (глубина ${depth}, тип ${type})`);
+      if ((depth !== 8 && depth !== 16) || type === 3 || data[12] !== 0) {
+        throw new Error(`нужен PNG 8/16 бит без палитры и интерлейса (глубина ${depth}, тип ${type})`);
       }
     } else if (tag === 'IDAT') idat.push(data);
     else if (tag === 'IEND') break;
     o += 12 + len;
   }
-  const bpp = type === 6 ? 4 : 3;
+  const ch = type === 6 ? 4 : type === 4 ? 2 : type === 2 ? 3 : 1;
+  const step = depth >> 3;                 // байт на отсчёт
+  const bpp = ch * step;                   // байт на пиксель — шаг фильтра
   const raw = inflateSync(Buffer.concat(idat));
   const stride = w * bpp;
-  const px = Buffer.alloc(h * stride);
+  const line = Buffer.alloc(h * stride);
   // Развёртка фильтров PNG: каждая строка предсказана по соседям.
   for (let y = 0; y < h; y++) {
     const f = raw[y * (stride + 1)];
     const src = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-    const cur = px.subarray(y * stride, (y + 1) * stride);
-    const prev = y ? px.subarray((y - 1) * stride, y * stride) : null;
+    const cur = line.subarray(y * stride, (y + 1) * stride);
+    const prev = y ? line.subarray((y - 1) * stride, y * stride) : null;
     for (let i = 0; i < stride; i++) {
       const a = i >= bpp ? cur[i - bpp] : 0;
       const b = prev ? prev[i] : 0;
@@ -92,7 +104,10 @@ function decodePng(buf) {
       cur[i] = v & 0xff;
     }
   }
-  return { w, h, bpp, px };
+  if (step === 1) return { w, h, bpp: ch, px: line };
+  const px = Buffer.alloc(w * h * ch);
+  for (let i = 0; i < w * h * ch; i++) px[i] = line[i * 2];
+  return { w, h, bpp: ch, px };
 }
 
 // --- OBJ --------------------------------------------------------------------

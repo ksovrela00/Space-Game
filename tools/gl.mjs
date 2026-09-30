@@ -11,15 +11,19 @@ import {
   CRATER_C0, CRATER_STEP, CRATER_SEED, CRATER_RIM, CRATER_RMIN, CRATER_RSPAN,
   CRATER_REACH, CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W, CRATER_FRESH_MIN,
   CRATER_MAX_SCALES, CRATER_MARE_FROM, CRATER_MARE_TO, mareWeight,
-  ridged, MOUNT_MAX_OCT,
+  ridged, MOUNT_MAX_OCT, FOREST, canopyTint,
 } from '../js/gl/terrain.js';
-import { growth, scatterFlora, buildFloraGeometry, strideFor, FLORA } from '../js/gl/flora.js';
+import {
+  growth, scatterFlora, buildFloraGeometry, strideFor, FLORA, tintOf,
+} from '../js/gl/flora.js';
 import {
   detailWindow, detailUniforms, tileDetailUniforms, DETAIL_GLSL,
   DETAIL_MAX_CS, DETAIL_MAX_OCT, DETAIL_MIN_SCALE, DETAIL_FADE_LO, DETAIL_FADE_HI,
   makeDetailLoad, updateDetailLoad, FW_MAX, FW_TARGET_GPU, FW_TARGET_CPU,
 } from '../js/gl/detail.js';
-import { MESH_FS, MESH_FS_DETAIL, ATMO_FS, PLUME_VS, WARPTUN_FS } from '../js/gl/shaders.js';
+import {
+  MESH_VS, MESH_FS, MESH_FS_DETAIL, ATMO_FS, AIR_GLSL, PLUME_VS, WARPTUN_FS,
+} from '../js/gl/shaders.js';
 import { shockGeometry } from '../js/gl/mesh.js';
 import { altitudeOf } from '../js/game/surface.js';
 import { buildCobra } from '../js/models/ships.js';
@@ -41,6 +45,13 @@ import { makeSystem, bodyBasis } from '../js/game/world.js';
 import { makeGalaxy } from '../js/game/galaxy.js';
 import { makeWarp, startWarp, updateWarp, warpPower } from '../js/game/warp.js';
 import { pendingBuilds } from '../js/gl/planetmesh.js';
+
+import {
+  GROUND, GRAIN_GLSL, GRAIN_MAX_SPAN, GRAIN_BUMP, GRAIN_TONE, TINT_K, TINT_WIDE,
+  grainPerUnit, grainOrigin, faceCoords, loadGround,
+} from '../js/gl/ground.js';
+import { decodePng } from './ship.mjs';
+import { readFileSync, existsSync } from 'node:fs';
 
 import { loadSpecsFromDisk } from './specs.mjs';
 
@@ -498,30 +509,115 @@ console.log('\n== горы ==');
   ok(hiMount * R > 3 && hiMount <= tm.ampUp,
     `высшая гора ${(hiMount * R).toFixed(1)} км (предел слоя ${(tm.ampUp * R).toFixed(1)} км)`);
 
-  // Крутизна. Ради неё всё и затевалось: перепад в километры на
-  // ДЕСЯТКАХ километров — это холмы, горы начинаются с уклона в разы
-  // больше. Меряем по хорде в километр вдоль касательной.
-  let slope = 0;
+  // Крутизна и РАЗМЕР — две разные беды, и слой успел побывать в обеих.
+  // Пологий вал на полсотни километров — это не гора; но и крутизна
+  // сама по себе не спасает: первая сборка была круче нынешней вдвое, а
+  // на снимке вышла тёрка — одинаковые зубцы каждые восемь километров,
+  // потому что крупнее восемнадцати километров в слое не было НИЧЕГО.
+  //
+  // Поэтому меряется и то, и другое: уклон по хорде в километр у самой
+  // вершины — и РАССТОЯНИЕ МЕЖДУ ВЕРШИНАМИ, то есть тот самый размер
+  // горы (ниже, отдельным блоком).
   const best = dirsM.reduce((a, d) =>
     (tm.mountainAt(d.x, d.y, d.z) > tm.mountainAt(a.x, a.y, a.z) ? d : a), dirsM[0]);
-  {
+  // Профиль от вершины в сторону ang. Сторон несколько нарочно: один
+  // разрез через гору — это одна случайная линия, и любое число по нему
+  // пляшет от семени. Проверки ниже усредняют по шести.
+  const along = (() => {
     const hp = Math.abs(best.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
-    const tx = hp.y * best.z - hp.z * best.y;
-    const ty = hp.z * best.x - hp.x * best.z;
-    const tz = hp.x * best.y - hp.y * best.x;
-    const tl = Math.hypot(tx, ty, tz);
-    const step = 1 / R;                       // километр по касательной
-    for (let k = 0; k < 40; k++) {
-      const a = k * step, b = (k + 1) * step;
-      const pa = normalize(v3(best.x + tx / tl * a, best.y + ty / tl * a, best.z + tz / tl * a));
-      const pb = normalize(v3(best.x + tx / tl * b, best.y + ty / tl * b, best.z + tz / tl * b));
-      slope = Math.max(slope, Math.abs(tm.displace(pb.x, pb.y, pb.z)
-        - tm.displace(pa.x, pa.y, pa.z)) * R);
-    }
+    const u = normalize(v3(hp.y * best.z - hp.z * best.y,
+      hp.z * best.x - hp.x * best.z, hp.x * best.y - hp.y * best.x));
+    const w2 = v3(best.y * u.z - best.z * u.y, best.z * u.x - best.x * u.z,
+      best.x * u.y - best.y * u.x);
+    return (km, ang = 0) => {                 // точка в km от вершины
+      const a = km / R, c = Math.cos(ang), s = Math.sin(ang);
+      return normalize(v3(best.x + (u.x * c + w2.x * s) * a,
+        best.y + (u.y * c + w2.y * s) * a, best.z + (u.z * c + w2.z * s) * a));
+    };
+  })();
+  const SIDES = [0, 0.52, 1.05, 1.57, 2.09, 2.62];   // шесть сторон, полкруга
+  let slope = 0;
+  for (let k = 0; k < 40; k++) {
+    const pa = along(k), pb = along(k + 1);
+    slope = Math.max(slope, Math.abs(tm.displace(pb.x, pb.y, pb.z)
+      - tm.displace(pa.x, pa.y, pa.z)) * R);
   }
   ok(slope > 0.15,
-    `склон у вершины ${(slope * 100).toFixed(0)} м на километр ` +
-    `(холмы дают единицы метров)`);
+    `склон у вершины ${(slope * 100).toFixed(0)}% — ${(slope * 1000).toFixed(0)} м на ` +
+    `километр (холмы дают единицы метров)`);
+
+  {
+    // Размер меряется РАССТОЯНИЕМ МЕЖДУ ВЕРШИНАМИ, и вершина считается
+    // по относительной высоте (prominence) — так же, как её считают
+    // альпинисты: бугор на склоне горой не становится. Метрика нужна
+    // именно такая, потому что «сколько максимумов на профиле» зависит
+    // от шага выборки и ничего не доказывает.
+    //
+    // Числа на этом же мире: у старого слоя вершины выше километра шли
+    // через ТРИ километра (восемьдесят штук на профиль), у нынешнего —
+    // через сорок (девять). Это и есть разница между тёркой и хребтом.
+    const STEP = 0.5, N = 800;                // 400 км через вершину
+    const gaps = [];
+    let count = 0;
+    for (const ang of SIDES) {
+      const hs = [];
+      for (let k = 0; k <= N; k++) {
+        const q = along((k - N / 2) * STEP, ang);
+        hs.push(tm.displace(q.x, q.y, q.z) * R);
+      }
+      const tops = [];
+      for (let k = 1; k < N; k++) {
+        if (!(hs[k] > hs[k - 1] && hs[k] >= hs[k + 1])) continue;
+        let l = k, r = k;
+        while (l > 0 && hs[l - 1] <= hs[k]) l--;
+        while (r < N && hs[r + 1] <= hs[k]) r++;
+        let lm = hs[k], rm = hs[k];
+        for (let i = l; i <= k; i++) lm = Math.min(lm, hs[i]);
+        for (let i = k; i <= r; i++) rm = Math.min(rm, hs[i]);
+        if (hs[k] - Math.max(lm, rm) >= 1) tops.push(k * STEP);
+      }
+      count += tops.length;
+      for (let i = 1; i < tops.length; i++) gaps.push(tops[i] - tops[i - 1]);
+    }
+    gaps.sort((a, b) => a - b);
+    const med = gaps.length ? gaps[gaps.length >> 1] : 400;
+    ok(med >= 15 && count >= SIDES.length,
+      `вершины выше километра идут через ${med.toFixed(0)} км ` +
+      `(${count} на шести разрезах по четыреста); тёрка давала три`);
+  }
+
+  // ФОРМА СПЕКТРА: круто на километре, полого на полусотне метров.
+  //
+  // Жалоба со снимка: «почему такие чёрные кляксы? при подлёте они
+  // пропадают». Замер цвета по кадру показал грунт, освещённый одним
+  // рассеянным светом, — то есть честную тень. Рваной её делал ИЗЛОМ
+  // ridged на мелких октавах: складка размером с тексель, которую
+  // запечённая нормаль передать не может никак (см. MOUNT_GAIN в
+  // js/gl/terrain.js).
+  //
+  // Меряется поэтому сама форма спектра — уклон на двух базах. Крупная
+  // должна остаться крутой (это гора), мелкая обязана быть положе (это
+  // осыпь под гребнем, и это же снимает кляксы). Числа на этом мире,
+  // усреднённо по шести разрезам: при спаде 0.5 было 21% и 41%, при
+  // нынешнем 0.42 — 13% и 21%. Гора при этом не убавилась: высшая даже
+  // подросла (10.8 против 10.4 км), вершины идут через те же 44 км.
+  {
+    const rms = (base) => {
+      let s2 = 0, n = 0;
+      for (const ang of SIDES) for (let k = 0; k < 60; k++) {
+        const x = 20 + k * base * 3;
+        const a = along(x, ang), b2 = along(x + base, ang);
+        const d = (tm.displace(b2.x, b2.y, b2.z) - tm.displace(a.x, a.y, a.z)) * R / base;
+        s2 += d * d; n++;
+      }
+      return Math.sqrt(s2 / n);
+    };
+    const wide = rms(1), fine = rms(0.05);
+    ok(wide > 0.12 && fine < 0.32,
+      `уклон на километре ${(wide * 100).toFixed(0)}% (гора), на полусотне метров ` +
+      `${(fine * 100).toFixed(0)}% (осыпь); со спадом 0.5 было 21% и 41% — ` +
+      `мелкая складка и давала кляксы`);
+  }
 
   // Хвост октав хребтов — ровно разность двух лестниц. Ошибка здесь
   // означала бы двойные или потерянные горы там, где сетка кончается и
@@ -627,6 +723,61 @@ console.log('\n== растительность ==');
   ok(Math.abs(dens - FLORA.dens) < 0.12,
     `заявленная густота ${FLORA.dens} совпадает с измеренной ${dens.toFixed(2)} — ` +
     `по ней считается шаг прореживания`);
+
+  // ЛЕС ВИДЕН ЗАДОЛГО ДО ДЕРЕВА, и это не вкус, а оптика: дерево в
+  // пятнадцать метров занимает пиксель уже с десяти километров, а
+  // пятно леса — это десятки километров. Поэтому лес живёт в ЦВЕТЕ
+  // ГРУНТА, а деревья к нему добавляются вблизи.
+  //
+  // Проверяется тут самое хрупкое: что цвет и деревья считаются по
+  // ОДНОЙ маске и красятся ОДНОЙ формулой. Разъедутся — и лес в цвете
+  // окажется не там, где стоят деревья, или сменит оттенок ровно на
+  // краю поля, где вместо пятна проступают стволы.
+  {
+    const rgb = [0, 0, 0], leaf = [0, 0, 0];
+    let nGreen = 0, nBare = 0, worstMask = 0, worstTint = 0;
+    const cG = [0, 0, 0], cB = [0, 0, 0];
+    for (const d of dirsF) {
+      const g = tf.floraAt(d.x, d.y, d.z);
+      // Одна маска на двоих: вне городской плиты растения спрашивают
+      // ровно то же число, которым покрашен грунт.
+      worstMask = Math.max(worstMask, Math.abs(g - growth(sea, tf, d.x, d.y, d.z)));
+      tf.color(d.x, d.y, d.z, rgb);
+      if (g > 0.6) { nGreen++; for (let c = 0; c < 3; c++) cG[c] += rgb[c]; }
+      else if (g === 0 && rgb[1] > rgb[2]) { nBare++; for (let c = 0; c < 3; c++) cB[c] += rgb[c]; }
+      // Одна формула на двоих: листва дерева и грунт под лесом.
+      tintOf(1, rgb, [0, 0, 0], leaf);
+      const want = canopyTint(rgb[0], rgb[1], rgb[2], [0, 0, 0]);
+      for (let c = 0; c < 3; c++) worstTint = Math.max(worstTint, Math.abs(leaf[c] - want[c]));
+    }
+    const G = cG.map((v) => v / Math.max(nGreen, 1) * 255);
+    const B = cB.map((v) => v / Math.max(nBare, 1) * 255);
+    // Лес обязан быть заметно темнее и зеленее голой земли: иначе с
+    // высоты его нет вовсе, а ради этого всё и затевалось.
+    const darker = (G[0] + G[1] + G[2]) / (B[0] + B[1] + B[2]);
+    const greener = (G[1] / (G[0] + 1e-6)) / (B[1] / (B[0] + 1e-6));
+    ok(worstMask < 1e-12 && worstTint < 1e-12 && darker < 0.8 && greener > 1.1,
+      `лес виден в цвете грунта: под пологом ${G.map((v) => v.toFixed(0)).join('/')} ` +
+      `против ${B.map((v) => v.toFixed(0)).join('/')} на голой земле ` +
+      `(в ${(1 / darker).toFixed(1)} раза темнее, зеленее в ${greener.toFixed(2)}), ` +
+      'маска и формула цвета у деревьев и грунта одни');
+  }
+
+  // РАЗМЕР ПЯТНА ЛЕСА против размера дерева. Это и есть причина, по
+  // которой лес рисуется цветом: пятно видно с сотен километров, дерево
+  // — с десяти. Если частоту пятен когда-нибудь поднимут до размера
+  // дерева, лес издали превратится в ровную зелень, и поймать это
+  // можно только счётом.
+  {
+    const TAU = Math.PI * 2;
+    const wide = TAU * R / FOREST.freq, fine = TAU * R / FOREST.fine;
+    // Дерево в пятнадцать метров занимает пиксель на таком расстоянии
+    // (фокус 667 пикселей — 68° по вертикали при окне в 900).
+    const treeKm = 0.015 * 667;
+    ok(fine > treeKm * 1.5 && wide > fine * 3,
+      `пятна леса ${wide.toFixed(0)} и ${fine.toFixed(0)} км — видны и с орбиты, ` +
+      `а дерево в 15 м занимает пиксель уже с ${treeKm.toFixed(0)} км`);
+  }
 
   // Место для поля: самая густая точка.
   const spot = dirsF.reduce((a, d) =>
@@ -1469,12 +1620,17 @@ console.log('\n== плитки поверхности ==');
       enableVertexAttribArray() {},
       vertexAttribPointer(loc, size) { bound.set(loc, { size, data: cur && cur.data }); },
     };
-    const locs = { aPos: 0, aNormal: 1, aColor: 2, aUv: 3, aT: 4 };
+    const locs = { aPos: 0, aNormal: 1, aColor: 2, aUv: 3, aT: 4, aGrain: 5 };
     buildIndexedMesh(fake, locs, geo);
     const uv = bound.get(locs.aUv);
-    ok(bound.size === 4 && uv && uv.size === 2 && uv.data === geo.uv &&
+    // Координата фотографии болеет тем же и так же незаметно: без неё
+    // вся плитка выберет ОДИН тексель зерна — то есть получит ровную
+    // подкраску вместо гравия (js/gl/ground.js).
+    const gr = bound.get(locs.aGrain);
+    ok(bound.size === 5 && uv && uv.size === 2 && uv.data === geo.uv &&
+       gr && gr.size === 2 && gr.data === geo.grain &&
        bound.get(locs.aPos).data === geo.positions,
-      `у плитки привязаны все ${bound.size} атрибута, включая uv ` +
+      `у плитки привязаны все ${bound.size} атрибута, включая uv и зерно ` +
       `(${uv ? uv.size : 0} числа на вершину)`);
   }
 
@@ -1486,6 +1642,205 @@ console.log('\n== плитки поверхности ==');
     while (!bld.step(512)) steps++;
     ok(Date.now() - t0 < 400 && steps > 2,
       `сборка плитки: ${Date.now() - t0} мс за ${steps + 1} порций`);
+  }
+}
+
+// --- 8e2. Фотография грунта ---------------------------------------------------
+// Две ступени ниже процедурного предела (js/gl/ground.js): зерно в три
+// метра и цветные пятна в девяносто. Глазами видно только «стало
+// зернисто»; числами проверяется то, чего не видно совсем, — что плитка
+// ложится НАСТОЯЩИМ размером, что узор не рвётся на стыке мешей и что
+// вдали фотография исчезает бесследно.
+console.log('\n== фотография грунта ==');
+{
+  const worldG = makeSystem(0x1a7e);
+  const bodyG = worldG.home;
+  const R = bodyG.radius;
+  const terrG = makeTerrain(bodyG);
+
+  // РАЗМЕР. Всё держится на том, что плитка ложится на грунт тем самым
+  // куском, который сняли: разъедется — и гравий станет размером с дом,
+  // а заметить это можно будет только глазами.
+  {
+    const k = grainPerUnit(R, GROUND.grain.sizeKm);
+    const a = faceDir(0, 0, 0, {});
+    const b = faceDir(0, 1 / k, 0, {});
+    const arcM = Math.acos(Math.min(1, dot(a, b))) * R * 1000;
+    const want = GROUND.grain.sizeKm * 1000;
+    ok(Math.abs(arcM - want) < want * 0.002,
+      `плитка зерна ложится на грунт ${arcM.toFixed(3)}-метровой (снято ${want} м), ` +
+      `пятен — ${(arcM * GROUND.tint.sizeKm / GROUND.grain.sizeKm).toFixed(0)} м`);
+  }
+
+  // ШОВ МЕЖДУ МЕШАМИ. Координата отсчитывается от УГЛА меша, а целые
+  // плитки остаются на процессоре — значит у соседей она обязана
+  // сойтись с точностью до целого. Не сойдётся — по границе каждой
+  // плитки пойдёт разрыв узора, решёткой квадродерева на всю планету.
+  //
+  // Считается это по НАСТОЯЩИМ сборщикам, а не по формуле: формула и
+  // так верна, а перепутать в сборщике угол с центром — обычное дело, и
+  // в формуле этого не видно.
+  {
+    const lv = 8, tx = 100, ty = 60;
+    const build = (t) => { const b = tileBuilder(bodyG, t); while (!b.step(4096)); return b.result; };
+    const geoA = build({ face: 0, level: lv, tx, ty });
+    const geoB = build({ face: 0, level: lv, tx: tx + 1, ty });
+    const bA = tileBounds(lv, tx, ty), bB = tileBounds(lv, tx + 1, ty);
+    const oA = grainOrigin(R, bA.u0, bA.v0), oB = grainOrigin(R, bB.u0, bB.v0);
+    const n = TILE_GRID + 1;
+    const step = GROUND.grain.sizeKm / GROUND.tint.sizeKm;
+    const off = (d) => Math.abs(d - Math.round(d));
+    // Все три выборки разом: зерно, пятна и широкая (повёрнутая) выборка
+    // пятен. У последней и поворот, и свой шаг — перепутать там знак
+    // проще всего, а видно это будет только швом на равнине.
+    let worst = 0, worstT = 0, worstW = 0;
+    for (let j = 0; j <= TILE_GRID; j += 8) {
+      const ia = j * n + TILE_GRID, ib = j * n;     // правый край A и левый B
+      const ax = geoA.grain[ia * 2], ay = geoA.grain[ia * 2 + 1];
+      const bx = geoB.grain[ib * 2], by = geoB.grain[ib * 2 + 1];
+      worst = Math.max(worst, off(oA[0] + ax - oB[0] - bx));
+      worstT = Math.max(worstT, off(oA[2] + ax * step - oB[2] - bx * step));
+      worstW = Math.max(worstW, off(
+        oA[4] + ay * step / TINT_WIDE - oB[4] - by * step / TINT_WIDE));
+    }
+    // Допуск — тексель картинки (1/256 плитки): мельче него шва не
+    // видно, да float32 в атрибуте точнее и не даст.
+    ok(worst < 1 / 256 && worstT < 1 / 256 && worstW < 1 / 256,
+      `на стыке плиток узор сходится: расхождение ${(worst * 256).toFixed(2)} текселя ` +
+      `по зерну, ${(worstT * 256).toFixed(2)} по пятнам и ` +
+      `${(worstW * 256).toFixed(2)} по широкой выборке`);
+  }
+
+  // ЗАПЛАТКИ И ПЛИТКИ — РАЗНЫЕ МЕШИ, УЗОР ОДИН. Заплатка центрирована
+  // на камере, своей клетки на кубе у неё нет, и грань ей выбирается
+  // отдельно. Выберется иначе, чем плитке, — на одном и том же месте
+  // выйдет другой узор, а видно это будет только там, где заплатки
+  // кончаются.
+  {
+    const c = faceDir(0, 0.13, -0.07, {});
+    const pb = patchBuilder(bodyG, c, 0.0008, 0, terrG.FULL, terrG.FULL, 0.0008);
+    while (!pb.step(4096));
+    const geoP = pb.result;
+    const oP = grainOrigin(R, geoP.grainOrg.su, geoP.grainOrg.sv);
+    const mid = (PATCH.res / 2) * (PATCH.res + 1) + PATCH.res / 2;   // центр сетки
+    const fc = faceCoords(0, c.x, c.y, c.z);
+    const kT = grainPerUnit(R, GROUND.grain.sizeKm);
+    const lv = 9, n2 = 1 << lv;
+    const bT = tileBounds(lv, Math.floor((fc.su + 1) / 2 * n2), Math.floor((fc.sv + 1) / 2 * n2));
+    const oT = grainOrigin(R, bT.u0, bT.v0);
+    const uvP = oP[0] + geoP.grain[mid * 2];
+    const uvT = oT[0] + (fc.su - bT.u0) * kT;
+    const d = Math.abs((uvP - uvT) - Math.round(uvP - uvT));
+    ok(geoP.grainFace === 0 && Math.abs(geoP.grain[mid * 2]) < 1e-6 && d < 1 / 256,
+      `заплатка и плитка кладут узор одинаково: расхождение ${(d * 256).toFixed(2)} текселя ` +
+      `(грань ${geoP.grainFace}, размах набора ${geoP.grainSpan.toFixed(0)} плиток)`);
+  }
+
+  // ТОЧНОСТЬ. Координата уезжает в шейдер как float32, и у размаха в
+  // миллион плиток дробной части не остаётся вовсе — узор пошёл бы
+  // квадратами. Поэтому у крупных мешей слой выключается, и граница
+  // обязана лежать там, где зерна и так не видно.
+  {
+    const k = grainPerUnit(R, GROUND.grain.sizeKm);
+    const span = (lv) => 2 / (1 << lv) * k;
+    let on = 0;
+    while (on < TILE_MAX_LEVEL && span(on) > GRAIN_MAX_SPAN) on++;
+    const km = 2 / (1 << on) * R * Math.PI / 4;
+    const err = span(on) * 6e-8 * 256;
+    ok(on > 0 && on <= TILE_MAX_LEVEL - 4 && err < 1,
+      `зерно включается с ${on}-го уровня плиток (сторона ${km.toFixed(1)} км): ` +
+      `ошибка float32 ${err.toFixed(2)} текселя, выше — квадраты`);
+  }
+
+  // САМИ КАРТИНКИ. Средний тексель обязан быть нейтральным: вдали
+  // выборка уходит в верхний мип, а верхний мип — это среднее.
+  // Уедет среднее — и планета из космоса поменяет цвет вся разом.
+  {
+    let bad = '';
+    const sizes = [];
+    for (const key of ['grain', 'tint']) {
+      const path = new URL('../' + GROUND[key].file, import.meta.url);
+      if (!existsSync(path)) { bad += ` нет ${GROUND[key].file};`; continue; }
+      const img = decodePng(readFileSync(path));
+      const m = [0, 0, 0];
+      for (let i = 0; i < img.w * img.h; i++) {
+        for (let c = 0; c < 3; c++) m[c] += img.px[i * img.bpp + c];
+      }
+      for (let c = 0; c < 3; c++) m[c] /= img.w * img.h;
+      sizes.push(`${key} ${img.w}×${img.h}, среднее ${m.map((v) => v.toFixed(0)).join('/')}`);
+      const px = GROUND[key].px;
+      if (img.w !== px || img.h !== px) bad += ` ${key}: размер ${img.w}×${img.h} вместо ${px};`;
+      for (let c = 0; c < 3; c++) {
+        if (Math.abs(m[c] - 128) > 2) bad += ` ${key}: канал ${c} в среднем ${m[c].toFixed(1)};`;
+      }
+    }
+    ok(!bad, `фотографии на месте и в среднем нейтральны (${sizes.join('; ')})${bad}`);
+  }
+
+  // ЧТО ОСТАЁТСЯ ОТ ЗЕРНА ИЗДАЛИ. Вдали выборка уходит в верхние
+  // мип-уровни, и если в них хоть что-то есть, это «что-то»
+  // повторяется вместе с плиткой — через три метра. В кадре с
+  // восьмидесяти метров так и вышло: ровная косая решётка на всю
+  // землю, и сделала её не решётка мешей, а сама фотография.
+  //
+  // Поэтому у зерна отрезаны низкие частоты (tools/ground.mjs), и
+  // проверяется здесь ровно это: в среднем по клетке 38 см от картинки
+  // не должно остаться почти ничего, а вблизи (полный размер) — должно
+  // остаться много. Одно без другого бессмысленно: вычесть всё
+  // целиком тоже «убирает решётку».
+  {
+    const img = decodePng(readFileSync(
+      new URL('../' + GROUND.grain.file, import.meta.url)));
+    const dev = (cells) => {
+      const k = img.w / cells;
+      const acc = new Float64Array(cells * cells * 3);
+      for (let y = 0; y < img.w; y++) {
+        for (let x = 0; x < img.w; x++) {
+          for (let c = 0; c < 3; c++) {
+            acc[(((y / k) | 0) * cells + ((x / k) | 0)) * 3 + c] +=
+              (img.px[(y * img.w + x) * img.bpp + c] - 128) / (k * k);
+          }
+        }
+      }
+      let s2 = 0;
+      for (let i = 0; i < acc.length; i++) s2 += acc[i] * acc[i];
+      return Math.sqrt(s2 / acc.length);
+    };
+    const far = dev(8), near = dev(img.w);
+    ok(far < 5 && near > 12,
+      `вдали от зерна не остаётся решётки: в среднем по клетке ` +
+      `${(GROUND.grain.sizeKm * 1000 / 8 * 100).toFixed(0)} см размах ${far.toFixed(1)} ` +
+      `байта из ${near.toFixed(1)} вблизи`);
+  }
+
+  // Без картинок сцена обязана работать так же: файла может не быть,
+  // сети может не быть, выборку может запретить браузер.
+  {
+    const made = [];
+    const glFake = {
+      TEXTURE_2D: 1, RGBA: 2, UNSIGNED_BYTE: 3, REPEAT: 4, LINEAR: 5,
+      TEXTURE_WRAP_S: 6, TEXTURE_WRAP_T: 7, TEXTURE_MIN_FILTER: 8, TEXTURE_MAG_FILTER: 9,
+      createTexture: () => ({ id: made.length }),
+      bindTexture() {}, texImage2D() { made.push(1); },
+      texParameteri() {}, generateMipmap() {}, pixelStorei() {},
+    };
+    const g = loadGround(glFake, (src, on, fail) => fail());
+    ok(g.grain && g.tint && g.failed === 2 && made.length === 2,
+      'без картинок текстуры остаются нейтральными, а не пустыми');
+  }
+
+  // Текст шейдера: без вызова весь слой — мёртвый код, и ни одна
+  // проверка выше этого не заметит.
+  {
+    ok(MESH_FS.includes(GRAIN_GLSL) && MESH_FS_DETAIL.includes(GRAIN_GLSL) &&
+       MESH_VS.includes('in vec2 aGrain') && MESH_VS.includes('vGrain = aGrain'),
+      'кусок фотографии и её координата есть в обоих вариантах шейдера меша');
+    ok(MESH_FS.includes('groundPhoto(dirG, vGrain, uNormalMat, gw, n, albedo)') &&
+       MESH_FS.includes('if (uGrainOn > 0.5)') &&
+       (GRAIN_GLSL.match(/texture\(uTintTex/g) || []).length === 2 &&
+       GRAIN_GLSL.includes(String(GROUND.grain.sizeKm / GROUND.tint.sizeKm)),
+      `фотография зовётся из шейдера: ступени ${GROUND.grain.sizeKm * 1000} м ` +
+      `и ${GROUND.tint.sizeKm * 1000} м, сила ${GRAIN_BUMP}/${GRAIN_TONE}/${TINT_K}`);
   }
 }
 
@@ -1604,9 +1959,14 @@ console.log('\n== небо системы ==');
 // скачков.
 console.log('\n== атмосфера вдоль луча ==');
 {
-  // Построчный двойник ATMO_FS: те же пересечения, тот же цикл.
+  // Построчный двойник airAlong (js/gl/shaders.js, AIR_GLSL): тот же
+  // цикл, те же шаги.
+  //
+  // Конец отрезка задаётся СНАРУЖИ и не угадывается никакой сферой —
+  // ровно как в шейдере. Землю знает тот, кто её рисует: у грунта это
+  // расстояние до собственного фрагмента, у неба земли нет вовсе.
   const STEPS = 16;
-  const column = (r, d, ground, top, H, floorR = ground) => {
+  const column = (r, d, ground, top, H, tEnd = Infinity) => {
     const C = { x: 0, y: -r, z: 0 };                  // центр тела от камеры
     const b = d.x * C.x + d.y * C.y + d.z * C.z;
     const cc = r * r;
@@ -1614,15 +1974,7 @@ console.log('\n== атмосфера вдоль луча ==');
     if (disc <= 0) return 0;
     const sq = Math.sqrt(disc);
     const t0 = Math.max(b - sq, 0);
-    let t1 = b + sq;
-    // Луч обрывается по грунту ПОД КАМЕРОЙ, а сфера дополнительно
-    // опускается до самой камеры, если та ниже (см. ATMO_FS).
-    const gr = Math.min(floorR, Math.sqrt(cc) - 0.002);
-    const discG = b * b - (cc - gr * gr);
-    if (discG > 0) {
-      const tg = b - Math.sqrt(discG);
-      if (tg >= 0) t1 = Math.min(t1, tg);
-    }
+    const t1 = Math.min(b + sq, tEnd);
     if (t1 <= t0) return 0;
     const dt = (t1 - t0) / STEPS;
     let sum = 0;
@@ -1632,6 +1984,17 @@ console.log('\n== атмосфера вдоль луча ==');
       sum += Math.exp(-Math.max(alt, 0) / H);
     }
     return sum * dt / H;                              // в долях вертикального
+  };
+  // Где луч упирается в сферу радиуса g — этим пользуется ВЗГЛЯД
+  // СНАРУЖИ: оттуда в кадре вся полусфера сразу, и средняя сфера тела —
+  // лучшее, что можно сказать про рельеф с такого расстояния.
+  const toSphere = (r, d, g) => {
+    const C = { x: 0, y: -r, z: 0 };
+    const b = d.x * C.x + d.y * C.y + d.z * C.z;
+    const disc = b * b - (r * r - g * g);
+    if (disc <= 0) return Infinity;
+    const t = b - Math.sqrt(disc);
+    return t >= 0 ? t : Infinity;
   };
 
   const world7 = makeSystem(0x1a7e);
@@ -1644,6 +2007,12 @@ console.log('\n== атмосфера вдоль луча ==');
   const glow = (alt, d) => 1 - Math.exp(-tauOf(alt, d) * ATMO_GLOW);
   // Луч под углом к надиру — им проверяется вид на грунт сверху.
   const slant = (deg) => ({ x: Math.sin(deg * Math.PI / 180), y: -Math.cos(deg * Math.PI / 180), z: 0 });
+  // Луч под углом к ГОРИЗОНТУ: 90 — зенит, 0 — горизонт, минус — вниз.
+  const elev = (deg) => ({ x: Math.cos(deg * Math.PI / 180), y: Math.sin(deg * Math.PI / 180), z: 0 });
+  // Дымка на грунте: воздух от камеры до точки на расстоянии dist.
+  // Это и считает шейдер грунта — расстояние до своего фрагмента.
+  const hazeTo = (alt, d, dist) =>
+    1 - Math.exp(-ATMO_THICK * column(R + alt, d, R, top, H, dist));
   const UP = { x: 0, y: 1, z: 0 }, SIDE = { x: 1, y: 0, z: 0 }, DOWN = { x: 0, y: -1, z: 0 };
 
   // Плотность в шейдере и плотность, по которой греется обшивка, — одна
@@ -1681,6 +2050,44 @@ console.log('\n== атмосфера вдоль луча ==');
     `у горизонта воздуха в ${(tangent / vert).toFixed(1)} раз больше, чем в зените ` +
     `(аналитика даёт ${expect.toFixed(1)})`);
 
+  // ПОЛОСА НА ГОРИЗОНТЕ.
+  //
+  // Жалоба со снимка: «сфера атмосферы съехала на пару градусов» — по
+  // всему горизонту тёмная полоса с резкой кромкой, сквозь которую
+  // видно космос. Причина была не в сфере ВОЗДУХА, а в сфере ГРУНТА:
+  // небо обрывало свой луч о землю под камерой, а у мира с горами эта
+  // земля у горизонта выше настоящей на километры. Луч, честно уходящий
+  // над равниной в космос, набирал впятеро меньше воздуха, чем сосед на
+  // полградуса выше.
+  //
+  // Теперь небо про землю не знает ничего, и проверяется ровно это:
+  // столб неба обязан МОНОТОННО густеть от зенита к горизонту. Любая
+  // сфера грунта даёт на этом пути провал — он и был полосой. Заодно
+  // видно, во сколько раз она была: замер до правки — 51%.
+  {
+    let dip = 0, at = 0, prev = null;
+    for (let deg = 90; deg >= -0.5; deg -= 0.02) {
+      const a = alpha(2.1, elev(deg));
+      if (prev !== null && prev - a > dip) { dip = prev - a; at = deg; }
+      prev = a;
+    }
+    ok(dip < 1e-6,
+      `небо от зенита к горизонту только густеет: наибольший провал ` +
+      `${(dip * 100).toFixed(3)}% на ${at.toFixed(1)}° (сфера грунта давала 51%)`);
+  }
+
+  // И с другой стороны той же кромки: дымка на ГРУНТЕ у горизонта
+  // обязана сойтись с небом над ним. Разойдись они — на кромке была бы
+  // ступень: или светлая (земля тонет в молоке), или тёмная (полоса).
+  {
+    const alt = 2.1;
+    const hor = alpha(alt, SIDE);                       // небо у горизонта
+    const far = hazeTo(alt, elev(-0.5), 300);           // земля за 300 км
+    ok(far > hor * 0.8,
+      `земля у горизонта в дымке наравне с небом: ${(far * 100).toFixed(0)}% против ` +
+      `${(hor * 100).toFixed(0)}% — ступени на кромке нет`);
+  }
+
   // ГЛАВНОЕ: у верха атмосферы неба практически нет, иначе это и есть
   // та самая резкая граница. Меряем на 0.9 верха — там, где был сделан
   // скриншот с жалобой (134 км из 147): ровно на границе касательный луч
@@ -1711,16 +2118,20 @@ console.log('\n== атмосфера вдоль луча ==');
       `наибольший шаг ${(s.up * 100).toFixed(2)}% на высоте ${s.at.toFixed(0)} км`);
   }
   // Вниз всё наоборот, и это не исключение из правила, а то же правило:
-  // столб считается от глаза, а при снижении воздуха ПОД кораблём
-  // остаётся всё меньше. На грунте под ногами его нет вовсе.
+  // воздух считается ДО ЗЕМЛИ, а при снижении её всё ближе. На грунте
+  // под ногами воздуха нет вовсе.
   {
-    const s = sweep(DOWN);
-    // На грунте под ногами воздуха практически нет: остаются десятки
-    // метров от запаса на точность float32 (см. ATMO_EPS в ATMO_FS),
-    // то есть сотые доли процента.
-    ok(s.up < 0.03 && Math.abs(s.down) < 0.03 && s.last < 1e-3,
-      `вниз: столб под кораблём тает без скачков и на грунте почти пуст ` +
-      `(${(s.last * 100).toFixed(3)}%, последний шаг ${(s.down * 100).toFixed(2)}%)`);
+    let up = 0, down = 0, prev = null, last = 0;
+    for (let i = 0; i <= 600; i++) {
+      const alt = R * ENTRY.top * 1.5 * (1 - i / 600);
+      // Земля прямо под кораблём — на расстоянии своей высоты.
+      const a = hazeTo(alt, DOWN, Math.max(alt, 0));
+      if (prev !== null) { up = Math.max(up, a - prev); down = Math.min(down, a - prev); }
+      prev = a; last = a;
+    }
+    ok(up < 0.03 && Math.abs(down) < 0.03 && last < 1e-3,
+      `вниз: дымка на земле под кораблём тает без скачков и на грунте пуста ` +
+      `(${(last * 100).toFixed(3)}%, наибольший шаг ${(Math.max(up, -down) * 100).toFixed(2)}%)`);
   }
 
   // СВЕЧЕНИЕ И ГАШЕНИЕ — разные числа, и вот зачем. Связав их одним,
@@ -1728,8 +2139,14 @@ console.log('\n== атмосфера вдоль луча ==');
   // орбиты залита молоком. Второе и случилось, когда толщину подняли
   // ради неба.
   {
-    const downOccl = alpha(R * ENTRY.top * 0.9, slant(0));
-    const slantOccl = alpha(R * ENTRY.top * 0.9, slant(60));
+    // Сверху луч упирается в грунт, и издали это средняя сфера тела —
+    // ровно то, чем пользуется взгляд СНАРУЖИ атмосферы.
+    const fromTop = (deg) => {
+      const r = R + R * ENTRY.top * 0.9, d = slant(deg);
+      return 1 - Math.exp(-ATMO_THICK * column(r, d, R, top, H, toSphere(r, d, R)));
+    };
+    const downOccl = fromTop(0);
+    const slantOccl = fromTop(60);
     ok(downOccl < 0.25 && slantOccl < 0.45,
       `с верха атмосферы грунт под собой виден: гашение ${(downOccl * 100).toFixed(0)}% ` +
       `в надир и ${(slantOccl * 100).toFixed(0)}% под 60°`);
@@ -1742,7 +2159,11 @@ console.log('\n== атмосфера вдоль луча ==');
     // грунт под собой с орбиты обязан оставаться видимым: при слишком
     // ярком свечении диск планеты заливало ровной синевой, и это было
     // первым, что бросилось в глаза.
-    const horizonGlow = glow(0, SIDE), fromSpace = glow(R * ENTRY.top * 1.4, slant(0));
+    const horizonGlow = glow(0, SIDE);
+    // С орбиты луч упирается в грунт — издали это средняя сфера тела.
+    const rOrb = R + R * ENTRY.top * 1.4;
+    const fromSpace = 1 - Math.exp(-ATMO_THICK * ATMO_GLOW
+      * column(rOrb, slant(0), R, top, H, toSphere(rOrb, slant(0), R)));
     ok(horizonGlow > 0.9 && fromSpace < 0.45,
       `у горизонта небо плотное (${(horizonGlow * 100).toFixed(0)}%), а с орбиты в надир ` +
       `остаётся дымкой (${(fromSpace * 100).toFixed(0)}%), сквозь которую виден грунт`);
@@ -1781,92 +2202,67 @@ console.log('\n== атмосфера вдоль луча ==');
       `на ±0.5 км против ${(near * 100).toFixed(2)}% на ±0.125 км) — это крутизна, а не разрыв`);
   }
 
-  // НИЗИНА. Рельеф ниже уровня моря — обычное дело: дно океана на этом
-  // теле лежит на 12 км ниже средней сферы, и корабль там оказывается
-  // ниже неё. Луч вниз обязан упираться в грунт под собой, а не уходить
-  // сквозь планету: иначе в низине кадр заливает молоком, хотя до земли
-  // метры. Замер до правки: столб в надир 58 против 0.01 над средней
-  // сферой.
+  // ЗЕМЛЯ ПОД НОГАМИ И РЕЛЬЕФ. Раньше здесь стояла целая машинерия:
+  // луч обрывался о сферу «грунт под камерой», и её приходилось то
+  // опускать до самой камеры (в низине дно океана на 12 км ниже средней
+  // сферы, и луч вниз уходил сквозь планету — кадр заливало молоком),
+  // то сверять со средней сферой (на возвышенности в сотню метров луч
+  // вбок уходил до неё за десятки километров — земля перед носом тонула
+  // в дымке).
+  //
+  // Сферы больше нет. Грунт считает дымку до СВОЕЙ точки, и проверяется
+  // не машинерия, а то, ради чего она была: земля рядом чистая, дальняя
+  // в дымке, и между ними всё растёт монотонно — на любом рельефе.
   {
-    const deep = -10.9;                    // 1.1 км над грунтом на 12 км ниже
-    const down = ATMO_THICK * column(R + deep, DOWN, R, top, H);
-    const flat = ATMO_THICK * column(R + 1.1, DOWN, R, top, H);
-    ok(down < 0.05 && Math.abs(down - flat) < 0.05,
-      `в низине вниз смотрится так же, как над средней сферой: столб ${down.toFixed(3)} ` +
-      `против ${flat.toFixed(3)}`);
-    // А вбок из низины воздуха, наоборот, БОЛЬШЕ: корабль ниже, слой
-    // над ним толще. Это не ошибка, это тот же интеграл.
-    const side = ATMO_THICK * column(R + deep, SIDE, R, top, H);
-    ok(side > ATMO_THICK * column(R + 1.1, SIDE, R, top, H),
-      `вбок из низины воздуха больше (${side.toFixed(2)} против ` +
-      `${(ATMO_THICK * column(R + 1.1, SIDE, R, top, H)).toFixed(2)})`);
-    // И никакого скачка на самой средней сфере — переход через неё
-    // ничем не отмечен.
-    let worst = 0;
-    for (const deg of [0, 45, 80]) {
-      const d = slant(deg);
-      const hi = ATMO_THICK * column(R + 0.5, d, R, top, H);
-      const lo2 = ATMO_THICK * column(R - 0.5, d, R, top, H);
-      worst = Math.max(worst, Math.abs((1 - Math.exp(-hi)) - (1 - Math.exp(-lo2))));
+    const spots = [['в низине', -10.2], ['на равнине', 1.8], ['на нагорье', 31.8]];
+    let worstNear = 0, notGrowing = 0, worstNadir = 0;
+    for (const [, alt] of spots) {
+      worstNear = Math.max(worstNear, hazeTo(alt, elev(-1), 0.5));
+      worstNadir = Math.max(worstNadir, hazeTo(alt, DOWN, 0.1));
+      let prev = -1;
+      for (const dist of [0.5, 2, 10, 50, 200, 600]) {
+        const h = hazeTo(alt, elev(-1), dist);
+        if (h < prev - 1e-9) notGrowing++;
+        prev = h;
+      }
     }
-    ok(worst < 0.02,
-      `переход через уровень средней сферы не виден: наибольшая разница ` +
-      `${(worst * 100).toFixed(2)}%`);
-  }
-
-  // ЗЕМЛЯ ПОД НОГАМИ. Рельеф отходит от средней сферы на километры, и
-  // если обрывать луч о неё, то с возвышенности в сотню метров луч вбок
-  // уходит до средней сферы за десятки километров плотного воздуха —
-  // близкая земля прямо перед носом тонет в дымке. Это и был «туман на
-  // десяти метрах высоты».
-  {
-    const hill = R + 0.1;                      // грунт на 100 м выше средней
-    const eye = hill + 0.01;                   // и корабль в 10 м над ним
-    // Смотрим полого вниз — так и видно землю перед собой: под 1° это
-    // полкилометра, под четвертью градуса — два с лишним.
-    const haze = (deg, floorR) => {
-      const a = deg * Math.PI / 180;
-      const d = { x: Math.cos(a), y: -Math.sin(a), z: 0 };
-      return 1 - Math.exp(-ATMO_THICK * column(eye, d, R, top, H, floorR) * ATMO_GLOW);
-    };
-    ok(haze(1, hill) < 0.02 && haze(1, R) > 0.05,
-      `земля в полукилометре перед носом чистая: дымка ${(haze(1, hill) * 100).toFixed(1)}% ` +
-      `по грунту под камерой против ${(haze(1, R) * 100).toFixed(0)}% по средней сфере`);
-    ok(haze(0.25, hill) < 0.1 && haze(0.25, R) > 0.5,
-      `и в двух километрах тоже: ${(haze(0.25, hill) * 100).toFixed(1)}% против ` +
-      `${(haze(0.25, R) * 100).toFixed(0)}% — по средней сфере луч там уходил в касательную`);
+    ok(worstNear < 0.02 && notGrowing === 0,
+      `земля в полукилометре перед носом чистая на любом рельефе ` +
+      `(худшая дымка ${(worstNear * 100).toFixed(1)}%), и с расстоянием дымка только растёт`);
+    ok(worstNadir < 0.01,
+      `в низине взгляд вниз не заливает кадр молоком: ${(worstNadir * 100).toFixed(2)}% ` +
+      `на сотне метров (сфера грунта давала 100%)`);
     // А горизонт с той же высоты обязан остаться в дымке: там луч идёт
     // вдоль слоёв сотни километров, и это не ошибка, а воздух.
-    const hor = 1 - Math.exp(-ATMO_THICK * column(eye, SIDE, R, top, H, hill));
-    ok(hor > 0.85,
-      `горизонт с той же высоты по-прежнему в дымке (${(hor * 100).toFixed(0)}%)`);
+    const hor = alpha(1.8, SIDE);
+    ok(hor > 0.85, `горизонт с той же высоты по-прежнему в дымке (${(hor * 100).toFixed(0)}%)`);
   }
 
-  // Луч в грунт короче касательного: за поверхностью воздуха не видно.
-  ok(column(R + 50, DOWN, R, top, H) < column(R + 50, SIDE, R, top, H),
+  // Луч до земли короче касательного: за поверхностью воздуха не видно.
+  ok(column(R + 50, DOWN, R, top, H, 50) < column(R + 50, SIDE, R, top, H),
     'луч, упирающийся в грунт, обрывается на нём');
   // И на самой поверхности взгляд вниз не даёт ничего: между глазом и
-  // грунтом воздуха нет. Строгое сравнение здесь складывало воздух
-  // через всю планету и заливало кадр небом на посадке.
-  ok(column(R, DOWN, R, top, H) < 3e-3 && column(R + 0.05, DOWN, R, top, H) < 0.01,
-    'на грунте взгляд вниз даёт практически пустой столб');
+  // грунтом воздуха нет.
+  ok(column(R, DOWN, R, top, H, 0) === 0 && hazeTo(0.05, DOWN, 0.05) < 1e-3,
+    'на грунте взгляд вниз даёт пустой столб');
 
-  // Текст шейдера — тот же, что у двойника выше.
-  ok(ATMO_FS.includes('exp(-max(alt, 0.0) / uScaleH)')
-    && ATMO_FS.includes('const int STEPS = ' + STEPS)
-    && ATMO_FS.includes('1.0 - exp(-tau)')
-    // Сравнение с грунтом именно НЕстрогое — на этом был баг.
-    && ATMO_FS.includes('if (tg >= 0.0) t1 = min(t1, tg);'),
-    'ATMO_FS считает тот же интеграл теми же шагами и так же обрывается о грунт');
+  // ОДИН ИНТЕГРАЛ НА ДВОИХ. Небо и грунт обязаны считать воздух одним и
+  // тем же кодом: разойдись они хоть в шаге, на кромке горизонта пошёл
+  // бы шов — ровно там, где его никто не простит.
+  ok(AIR_GLSL.includes('exp(-max(alt, 0.0) / uAir.z)')
+    && AIR_GLSL.includes('const int AIR_STEPS = ' + STEPS)
+    && AIR_GLSL.includes('1.0 - exp(-tau)')
+    && MESH_FS.includes(AIR_GLSL) && ATMO_FS.includes(AIR_GLSL)
+    && ATMO_FS.includes('airAlong(d, t0, t1, uSunDir)'),
+    'небо и грунт считают один и тот же интеграл теми же шагами');
+  ok(MESH_FS.includes('airAlong(normalize(vViewPos), 0.0, length(vViewPos), uSunDir)'),
+    'грунт считает дымку до СВОЕГО фрагмента — расстояние там точное, и рельеф угадывать нечем');
+  // А небо — до верха атмосферы. Сфера грунта осталась только для
+  // взгляда СНАРУЖИ (uFloor > 0): оттуда в кадре вся полусфера сразу.
+  ok(ATMO_FS.includes('if (uFloor > 0.0)') && !ATMO_FS.includes('uFloorLow'),
+    'небо обрывает луч о грунт только снаружи; изнутри земли для него нет вовсе');
   ok(!ATMO_FS.includes('uDensity') && !ATMO_FS.includes('vNormal'),
     'от свечения по кромке (нормаль сферы и uDensity) не осталось следов');
-  // Луч обрывается о ПОЛ (грунт под камерой), а плотность считается от
-  // СРЕДНЕГО радиуса: перепутать их значит либо утопить близкую землю в
-  // дымке, либо сбить профиль плотности на высоту рельефа (а это
-  // километры).
-  ok(ATMO_FS.includes('float ground = min(uFloor, sqrt(cc) - ATMO_EPS);')
-    && ATMO_FS.includes('float alt = length(d * (t0 + (float(i) + 0.5) * dt) - uCenter) - uGround;'),
-    'обрыв луча идёт по uFloor, а плотность — по uGround');
   // Запас в зажиме — АБСОЛЮТНЫЙ и маленький. Доля радиуса тут выходит
   // боком: 10⁻⁵ от 4200 км — это 42 м, больше самой высоты полёта у
   // земли, и такой зажим опускает землю ниже, чем она есть.
@@ -2211,6 +2607,10 @@ console.log('\n== мок GL: путь отрисовки ==');
       if (!loc) return;
       state.ints[loc.name] = v;
     },
+    // Воздух уезжает четвёркой и тройкой чисел (js/gl/scene.js, setAir),
+    // и проверкам нужны они целиком.
+    uniform4f: (loc, ...v) => { if (loc) state.vecName[loc.name] = v; },
+    uniform3f: (loc, ...v) => { if (loc) state.vecName[loc.name] = v; },
     uniform1f: (loc, v) => {
       if (!loc) return;
       if (state.orderOn) state.order.push(loc.name);
@@ -2525,18 +2925,21 @@ console.log('\n== мок GL: путь отрисовки ==');
           `ближняя сторона сферы проецируется ПО часовой (${nearCW} граней из ${nearCW + nearCCW}) ` +
           '— в этом движке она задняя');
 
-        // Пол, на котором обрывается луч. Изнутри это грунт ПОД
-        // КАМЕРОЙ, снаружи — средний радиус тела. По средней сфере
-        // изнутри близкая земля тонула в дымке (см. ATMO_FS).
+        // Пол, на котором небо обрывает свой луч. ИЗНУТРИ его нет
+        // вовсе: небо рисует только те пиксели, где земли нет, а дымку
+        // на земле считает сам грунт по своему точному расстоянию
+        // (js/gl/shaders.js, «Воздух вдоль луча»). Пока пол стоял и
+        // изнутри, он у горизонта оказывался выше настоящей земли — и
+        // по горизонту шла тёмная полоса с космосом на просвет.
         delete state.uni.uFloor;
-        delete state.uni.uGround;
+        delete state.vecName.uAir;
         at(2);
         const inCull = state.cull;
-        const floorIn = state.uni.uFloor, meanIn = state.uni.uGround;
-        const realGround = altitudeOf(air, cam.pos, { dir: v3() }).groundR;
-        ok(Math.abs(floorIn - realGround) < 1e-6 && Math.abs(floorIn - meanIn) > 0.01,
-          `изнутри луч обрывается о грунт под камерой: ${floorIn.toFixed(3)} км против ` +
-          `средних ${meanIn.toFixed(3)} (рельеф ${((floorIn - meanIn) * 1000).toFixed(0)} м)`);
+        const airIn = state.vecName.uAir;
+        ok(state.uni.uFloor === 0 && airIn && airIn[3] > 0
+          && Math.abs(airIn[0] - air.radius) < 1e-6,
+          `изнутри небо не обрывается о грунт вовсе (пол ${state.uni.uFloor}), а плотность ` +
+          `считает от средней сферы ${airIn ? airIn[0].toFixed(0) : '?'} км`);
 
         delete state.uni.uFloor;
         at(air.radius * ENTRY.top + 5);
@@ -2565,17 +2968,57 @@ console.log('\n== мок GL: путь отрисовки ==');
         const savedCam = game.camera;
         game.camera = camA;
         // Проверяем не «drawAir умеет», а что его ЗОВЁТ обычный кадр:
-        // uThick доходит до шейдера только из прохода воздуха.
-        delete state.uni.uThick;
+        // толщина воздуха (uAir.w) доходит до шейдера только оттуда.
+        delete state.vecName.uAir;
         const before = state.draws;
         fresh.render(game);
         const first = state.draws - before;
-        const drawn = 'uThick' in state.uni;
+        const drawn = !!(state.vecName.uAir && state.vecName.uAir[3] > 0);
         game.camera = savedCam;
         ok(first > 0 && drawn,
           `на ПЕРВОМ же кадре после перезагрузки в атмосфере воздух рисуется ` +
           `(${first} вызовов в кадре)`);
       }
+    }
+
+    // ФОТОГРАФИЯ ГРУНТА доезжает до шейдера только отсюда, из кадра.
+    // Проверяется не картинка (её отсюда не видно), а контракт: у
+    // земли слой включён и начало отсчёта — ДРОБНОЕ (целые плитки
+    // остаются на процессоре, в этом вся соль), а с орбиты слой
+    // выключен вовсе.
+    {
+      const air = world.bodies.find((b) => b.atmo);
+      const save = { x: cam.pos.x, y: cam.pos.y, z: cam.pos.z };
+      // Заплатками, а не плитками: плитка у самой земли доходит до
+      // нужного уровня за сотни кадров (она печётся на видеокарте, а её
+      // здесь нет), и в моке до включения зерна дело не дошло бы вовсе.
+      const wasTiles = scene.tilesOn;
+      scene.tilesOn = false;
+      const at = (alt, frames) => {
+        cam.pos.x = air.pos.x;
+        cam.pos.y = air.pos.y + air.radius + alt;
+        cam.pos.z = air.pos.z;
+        lookAlong(cam.basis, normalize(v3(0, -1, 0)));
+        delete state.uni.uGrainOn;
+        delete state.vecName.uGrainOrg;
+        delete state.vec2.uTintOrg2;
+        for (let i = 0; i < frames; i++) scene.render(game);
+        return {
+          on: state.uni.uGrainOn,
+          org: state.vecName.uGrainOrg,
+          org2: state.vec2.uTintOrg2,
+        };
+      };
+      const near = at(0.2, 60);
+      const far = at(air.radius * 30, 4);
+      scene.tilesOn = wasTiles;
+      cam.pos.x = save.x; cam.pos.y = save.y; cam.pos.z = save.z;
+      const frac = near.org && near.org.every((v) => v >= 0 && v < 1)
+        && near.org2 && near.org2.every((v) => v >= 0 && v < 1);
+      ok(near.on === 1 && frac && !(far.on > 0),
+        'у земли фотография включена, начало отсчёта дробное ' +
+        `(${near.org ? near.org.map((v) => v.toFixed(3)).join(', ') : 'нет'}), ` +
+        `с ${(air.radius * 30).toFixed(0)} км выключена вовсе`);
     }
 
     // И стоит оно ровно один вызов отрисовки: выборка из готовой карты.

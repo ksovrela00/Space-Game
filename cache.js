@@ -48,9 +48,9 @@
       'warp', 'weapons', 'world'
     ],
     'gl/': [
-      'bake', 'citymesh', 'context', 'detail', 'flora', 'gputime', 'icosphere',
-      'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program', 'quadtree',
-      'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
+      'bake', 'citymesh', 'context', 'detail', 'flora', 'gputime', 'ground',
+      'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
+      'quadtree', 'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
       'tiles', 'tileworker'
     ],
     'models/': [
@@ -73,7 +73,7 @@
   // таблицы импортов нет как явления. Его файлы обновляются иначе — см.
   // ниже.
   var INWORKER = [
-    'gl/bake', 'gl/icosphere', 'gl/quadtree', 'gl/terrain',
+    'gl/bake', 'gl/ground', 'gl/icosphere', 'gl/quadtree', 'gl/terrain',
     'gl/tilegeo', 'gl/tileworker'
   ];
 

@@ -287,6 +287,9 @@ export class TileSet {
     // собранные в потоке, разошлись бы с тем, по чему считается посадка.
     const spec = {
       kind: body.kind, name: body.name, id: body.id,
+      // Радиус нужен координате фотографии грунта (js/gl/ground.js): она
+      // считается в метрах, а плитка живёт в долях радиуса.
+      radius: body.radius,
       plate: body.plate || null,
     };
     while (this.pool.free && this.wanted.length) {

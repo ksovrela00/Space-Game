@@ -31,6 +31,7 @@ import { terrainOf } from './terrain.js';
 import { edgeAngle } from './icosphere.js';
 import { Baker, createBlankTexture, createSkyTexture, CUBE_FACES } from './bake.js';
 import { TileSet } from './tiles.js';
+import { loadGround, grainOrigin, grainPerUnit, GROUND, GRAIN_MAX_SPAN } from './ground.js';
 import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtree.js';
 import { shipShadow } from '../game/shadow.js';
 import { cityLocal } from '../game/city.js';
@@ -250,6 +251,7 @@ export class GlScene {
       aNormal: this.pMesh.attrib('aNormal'),
       aColor: this.pMesh.attrib('aColor'),
       aUv: this.pMesh.attrib('aUv'),
+      aGrain: this.pMesh.attrib('aGrain'),
     };
     this.atmoLocs = { aPos: this.pAtmo.attrib('aPos') };
     this.ringLocs = { aPos: this.pRing.attrib('aPos'), aT: this.pRing.attrib('aT') };
@@ -336,6 +338,19 @@ export class GlScene {
     this.cabinBasis = makeBasis();
     this.cabinPos = { x: 0, y: 0, z: 0 };
     this.blankTex = createBlankTexture(gl);
+
+    // Ручки в адресной строке (см. README, «Ручки в адресной строке»).
+    const q = new URLSearchParams(
+      typeof location !== 'undefined' ? location.search : '');
+
+    // Фотография грунта (js/gl/ground.js). Возвращается сразу, пустая:
+    // до земли ещё лететь, и ждать картинок в первом кадре незачем.
+    //
+    // `?photo=0` оставляет текстуры нейтральными — это тот же кадр без
+    // фотографии, снятый той же сборкой. Иначе сравнивать «с ней и без
+    // неё» пришлось бы правкой кода, а значит и другой сборкой.
+    this.ground = loadGround(gl,
+      q.get('photo') === '0' ? (src, on, fail) => fail() : undefined);
     this.patch = new SurfacePatch(gl, this.meshLocs);
     // Камни у самой поверхности: предметы известного размера, по которым
     // глаз и меряет высоту (см. js/gl/rocks.js).
@@ -354,8 +369,6 @@ export class GlScene {
     // разу на плитку и живут в кэше (js/gl/tiles.js). Прежний путь —
     // заплатки под кораблём с процедурной деталью на пиксель — остаётся
     // по `?surface=clipmap` для сравнения картинки.
-    const q = new URLSearchParams(
-      typeof location !== 'undefined' ? location.search : '');
     this.tilesOn = (q.get('surface') || 'tiles') === 'tiles';
     // Проход запекания общий: и у плиток поверхности, и у неба. Это один
     // кадровый буфер, поэтому держать их раздельно незачем.
@@ -945,6 +958,7 @@ export class GlScene {
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projCabin);
     gl.uniform1f(prog.loc('uAmbient'), CABIN_AMBIENT);
     // В кабине фар нет: лампы стоят в носу снаружи, и светить внутрь
@@ -1029,6 +1043,7 @@ export class GlScene {
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), WARP_AMBIENT);
     this.noLamps(prog);
@@ -1323,10 +1338,16 @@ export class GlScene {
     gl.uniform1f(prog.loc('uSurfMode'), 1);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.activeTexture(gl.TEXTURE0);
+    const gk = grainPerUnit(body.radius, GROUND.grain.sizeKm);
     let lastLevel = -1;
     for (const t of this.tiles.draw) {
       const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
       if (!e || !e.mesh) continue;
+      // Угол плитки на грани куба — тот же счёт, что в tileBounds, но
+      // без объекта: плиток в кадре сотни, и мусор здесь лишний.
+      const step = 2 / (1 << t.level);
+      this.setGrain(prog, body, t.face,
+        -1 + t.tx * step, -1 + t.ty * step, step * gk);
       if (this.detailOn && t.level !== lastLevel) {
         this.applyDetail(prog, tileDetailUniforms(terrain, tileTexelAngle(t.level)));
         lastLevel = t.level;
@@ -1335,6 +1356,7 @@ export class GlScene {
       this.drawObject(prog, e.mesh, body.pos, this.basisTmp, body.radius, sunPos);
     }
     gl.uniform1f(prog.loc('uSurfMode'), 0);
+    gl.uniform1f(prog.loc('uGrainOn'), 0);
     this.setDetail(prog, null, 0);
   }
 
@@ -1466,6 +1488,7 @@ export class GlScene {
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
@@ -1475,9 +1498,18 @@ export class GlScene {
     // Тени от фар — туда же и тем же проходом.
     this.cityShade = this.setCityShade(prog, game);
 
+    // Дымка на грунте: воздух между камерой и точкой поверхности.
+    // Получает её ТОЛЬКО тело, в чью атмосферу вошла камера, — у
+    // остальных uAir.w = 0, и блок в шейдере пропускается одним
+    // сравнением (js/gl/shaders.js, AIR_GLSL).
+    const airBody = this.airBodyOf(world);
+
     // Поверхность плитками: она полностью заменяет сферу этого тела,
     // поэтому ни трафарет, ни деталь на пиксель тут не нужны.
-    if (this.tileBody) this.drawTiles(prog, sunPos);
+    if (this.tileBody) {
+      this.setAir(prog, this.tileBody === airBody ? airBody : null);
+      this.drawTiles(prog, sunPos);
+    }
 
     // Подробные заплатки поверхности — первыми, с записью трафарета:
     // там, где легла подробная земля, грубая сфера не нужна.
@@ -1488,11 +1520,19 @@ export class GlScene {
       gl.stencilFunc(gl.ALWAYS, 1, 0xff);
       gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
       bodyBasis(this.patchBody, this.basisTmp);
+      this.setAir(prog, this.patchBody === airBody ? airBody : null);
+      // Грань и угол у всех уровней набора общие: центр один на всех.
+      const pc = this.patch.cur;
+      this.setGrain(prog, this.patchBody, pc && pc.grainFace,
+        pc && pc.grainOrg ? pc.grainOrg.su : 0,
+        pc && pc.grainOrg ? pc.grainOrg.sv : 0,
+        pc && pc.grainOrg ? pc.grainSpan : 0);
       for (const m of patchMeshes) {
         this.setDetail(prog, this.patchBody, m.cellAngle);
         this.drawObject(prog, m, this.patchBody.pos, this.basisTmp,
           this.patchBody.radius, sunPos);
       }
+      gl.uniform1f(prog.loc('uGrainOn'), 0);
       gl.stencilMask(0);
     }
 
@@ -1509,6 +1549,7 @@ export class GlScene {
       if (masked && level > 5) level = 5;
       const mesh = requestPlanetMesh(gl, this.meshLocs, body, level);
       bodyBasis(body, this.basisTmp);
+      this.setAir(prog, body === airBody ? airBody : null);
       if (masked) {
         gl.enable(gl.STENCIL_TEST);
         gl.stencilFunc(gl.EQUAL, 0, 0xff);
@@ -1527,11 +1568,15 @@ export class GlScene {
     }
     gl.disable(gl.STENCIL_TEST);
     this.setDetail(prog, null, 0);      // дальше — рукотворные объекты
+    // Дымки на них нет: корабли, камни и растительность стоят в сотнях
+    // метров от камеры, и воздуха между ними и глазом нет ни на глаз,
+    // ни в числах.
+    this.setAir(prog, null);
 
-    // Воздух над поверхностью — здесь, пока не нарисованы близкие
-    // предметы (почему именно здесь, см. drawAir). Глубину он не пишет:
-    // проверка глубины для него выключена, и запись сломала бы всё, что
-    // рисуется следом.
+    // Небо — здесь, пока не нарисованы близкие предметы (почему
+    // именно здесь, см. drawAir). Проверка глубины ему НУЖНА — ею оно и
+    // отделяется от земли, у которой своя дымка, — а вот глубину
+    // оно не пишет: запись сломала бы всё, что рисуется следом.
     gl.depthMask(false);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -1660,7 +1705,6 @@ export class GlScene {
         atmo.use();
         gl.uniformMatrix4fv(atmo.loc('uProj'), false, this.proj);
         gl.uniform1f(atmo.loc('uLogFC'), this.logFC);
-        gl.uniform1f(atmo.loc('uGlow'), ATMO_GLOW);
         // Ровно одно закрашивание пикселя: два сложили бы столб воздуха
         // дважды. Снаружи нужна ближняя сторона оболочки, изнутри —
         // дальняя, поэтому и отсекаются разные грани.
@@ -1676,38 +1720,116 @@ export class GlScene {
         // единственная видимая сторона.
         gl.enable(gl.CULL_FACE);
         gl.cullFace(inside ? gl.BACK : gl.FRONT);
-        if (inside) gl.disable(gl.DEPTH_TEST);
       }
-      gl.uniform3fv(atmo.loc('uColor'), new Float32Array([
-        body.atmo[0] / 255, body.atmo[1] / 255, body.atmo[2] / 255]));
-      gl.uniform3fv(atmo.loc('uCenter'), this.centerInCamera(body.pos));
-      gl.uniform1f(atmo.loc('uGround'), body.radius);
-      // Пол, на котором обрывается луч, — грунт ПОД КАМЕРОЙ. Изнутри
-      // атмосферы это принципиально: рельеф отходит от средней сферы на
-      // километры, и луч, обрывающийся о среднюю сферу, проходит лишние
-      // десятки километров плотного воздуха — близкая земля тонет в
-      // дымке (см. ATMO_FS). Снаружи брать нечего и незачем: там в кадре
-      // вся полусфера сразу, и средний радиус — лучшее приближение.
-      let floorR = body.radius;
-      if (inside) {
-        floorR = altitudeOf(body, this.camera.pos,
-          this._airInfo || (this._airInfo = { dir: { x: 0, y: 0, z: 0 } })).groundR;
-      }
-      gl.uniform1f(atmo.loc('uFloor'), floorR);
-      gl.uniform1f(atmo.loc('uTop'), top);
-      gl.uniform1f(atmo.loc('uScaleH'), body.radius * ENTRY.top / ENTRY.scales);
-      // Тонкий воздух и выглядеть должен тоньше: то же давление, что
-      // жжёт обшивку слабее (js/game/entry.js, airDensity).
-      gl.uniform1f(atmo.loc('uThick'),
-        ATMO_THICK * (body.press === undefined ? 1 : body.press));
+      this.setAir(atmo, body);
+      // Пол, на котором обрывается луч. СНАРУЖИ это средняя сфера тела:
+      // оттуда в кадре вся полусфера сразу, и лучшего приближения к
+      // рельефу с такого расстояния нет.
+      //
+      // ИЗНУТРИ пола нет вовсе — ноль. Эта оболочка рисует НЕБО, то есть
+      // пиксели, где земли нет; отделяет их проверка глубины (она здесь
+      // включена), а дымку на самой земле считает грунт своим шейдером и
+      // по своему точному расстоянию. Пока пол стоял и изнутри, он у
+      // горизонта оказывался выше настоящей земли на километры — и по
+      // всему горизонту шла тёмная полоса с космосом на просвет.
+      gl.uniform1f(atmo.loc('uFloor'), inside ? 0 : body.radius);
       bodyBasis(body, this.basisTmp);
       this.drawObject(atmo, this.atmoMesh, body.pos, this.basisTmp, top, sunPos);
     }
-    if (used) {
-      gl.disable(gl.CULL_FACE);
-      if (inside) gl.enable(gl.DEPTH_TEST);
-    }
+    if (used) gl.disable(gl.CULL_FACE);
     return used;
+  }
+
+  /**
+   * Uniform-ы воздуха для программы: и оболочке неба, и грунту.
+   *
+   * Считают они один и тот же интеграл (js/gl/shaders.js, AIR_GLSL),
+   * поэтому и числа у них обязаны быть одни. body === null — воздуха
+   * нет: так помечается всё, что дымки не получает (корабли, станции,
+   * камни, а для грунта — любое тело, кроме того, в чью атмосферу
+   * вошла камера).
+   */
+  setAir(prog, body) {
+    const gl = this.gl;
+    if (!body || !body.atmo) {
+      gl.uniform4f(prog.loc('uAir'), 1, 1, 1, 0);
+      return;
+    }
+    gl.uniform3fv(prog.loc('uAirCenter'), this.centerInCamera(body.pos));
+    gl.uniform4f(prog.loc('uAir'), body.radius, body.radius * (1 + ENTRY.top),
+      body.radius * ENTRY.top / ENTRY.scales,
+      // Тонкий воздух и выглядеть должен тоньше: то же давление, что
+      // жжёт обшивку слабее (js/game/entry.js, airDensity).
+      ATMO_THICK * (body.press === undefined ? 1 : body.press));
+    gl.uniform3f(prog.loc('uAirColor'),
+      body.atmo[0] / 255, body.atmo[1] / 255, body.atmo[2] / 255);
+    gl.uniform1f(prog.loc('uAirGlow'), ATMO_GLOW);
+  }
+
+  /**
+   * Сэмплеры фотографии грунта на весь проход: они всегда должны
+   * смотреть в готовую текстуру, даже когда слой выключен. Заодно
+   * выключается и сам слой — включают его только там, где рисуется
+   * земля.
+   */
+  useGround(prog) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.ground.grain);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.ground.tint);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1i(prog.loc('uGrainTex'), 1);
+    gl.uniform1i(prog.loc('uTintTex'), 2);
+    gl.uniform1f(prog.loc('uGrainOn'), 0);
+  }
+
+  /**
+   * Начало отсчёта фотографии для одного меша земли.
+   *
+   * Дробная часть считается в double здесь, на процессоре, — в этом вся
+   * соль (js/gl/ground.js): в шейдер уезжают доли плитки, а не миллионы
+   * плиток, и точности хватает на сантиметры.
+   *
+   * @param face грань куба, по осям которой уложена фотография
+   * @param su0,sv0 угол меша на этой грани
+   * @param span размах координаты меша в плитках зерна
+   */
+  setGrain(prog, body, face, su0, sv0, span) {
+    const gl = this.gl;
+    // Слишком крупный меш не считаем вовсе: на таком размахе у float32
+    // пропадает дробная часть, и узор пошёл бы квадратами. Такие плитки
+    // лежат далеко, зерна на них и так не видно (js/gl/ground.js).
+    if (!body || !(span > 0) || span > GRAIN_MAX_SPAN) {
+      gl.uniform1f(prog.loc('uGrainOn'), 0);
+      return false;
+    }
+    const o = grainOrigin(body.radius, su0, sv0, this.grainOrg
+      || (this.grainOrg = [0, 0, 0, 0, 0, 0]));
+    gl.uniform4f(prog.loc('uGrainOrg'), o[0], o[1], o[2], o[3]);
+    gl.uniform2f(prog.loc('uTintOrg2'), o[4], o[5]);
+    const f = CUBE_FACES[face];
+    gl.uniform3f(prog.loc('uGrainU'), f.U[0], f.U[1], f.U[2]);
+    gl.uniform3f(prog.loc('uGrainV'), f.V[0], f.V[1], f.V[2]);
+    gl.uniform1f(prog.loc('uGrainOn'), 1);
+    return true;
+  }
+
+  /**
+   * Тело, в чьей атмосфере сейчас камера, — его поверхность и получает
+   * дымку. Тем же условием пользуется drawAir: оболочка неба и дымка на
+   * грунте обязаны включаться ВМЕСТЕ, иначе на горизонте появится шов.
+   */
+  airBodyOf(world) {
+    for (const body of world.bodies) {
+      if (!body.atmo) continue;
+      const top = body.radius * (1 + ENTRY.top);
+      const dx = body.pos.x - this.camera.pos.x;
+      const dy = body.pos.y - this.camera.pos.y;
+      const dz = body.pos.z - this.camera.pos.z;
+      if (dx * dx + dy * dy + dz * dz < top * top) return body;
+    }
+    return null;
   }
 
   // Стойки шасси: каждая рисуется своим вызовом от точки крепления,

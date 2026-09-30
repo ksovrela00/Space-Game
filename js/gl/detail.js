@@ -31,7 +31,7 @@ import {
   CRATER_DMAX, CRATER_DK, CRATER_DREF,
   CRATER_BOWL, CRATER_RIM_AT, CRATER_RIM_W,
   CRATER_MARE_FROM, CRATER_MARE_TO,
-  MOUNT_K, MOUNT_B, MOUNT_RISE, MOUNT_MAX_OCT,
+  MOUNT_K, MOUNT_B, MOUNT_RISE, MOUNT_MAX_OCT, MOUNT_GAIN,
 } from './terrain.js';
 
 // Бюджет на пиксель. Каждый масштаб кратеров — это 27 ячеек решётки,
@@ -344,6 +344,10 @@ const float D_MOUNT_K = ${f(MOUNT_K)};
 const float D_MOUNT_B = ${f(MOUNT_B)};
 const float D_MOUNT_RISE = ${f(MOUNT_RISE)};
 const int D_MOUNT_MAX_OCT = ${MOUNT_MAX_OCT};
+// Спад амплитуды у гор свой, мельче общего: иначе складки ridged на
+// мелких октавах дают на запечённой нормали чёрные кляксы
+// (js/gl/terrain.js, MOUNT_GAIN).
+const float D_MOUNT_GAIN = ${f(MOUNT_GAIN)};
 const int D_MAX_MOCT = ${maxOct};
 
 // Тот же хеш, что в js/gl/terrain.js: imul в JS и умножение uint здесь
@@ -424,6 +428,25 @@ float dNoiseRaw(int seed, vec3 p, int oct) {
 }
 
 /**
+ * Низкочастотное ХРЕБТОВОЕ поле: слово в слово ridged() из
+ * js/gl/terrain.js, с той же лестницей и тем же сдвигом seed. Нужно
+ * маске поясов: у ridged гребни линейные, и пояс выходит цепью.
+ */
+float dRidgeRaw(int seed, vec3 p, int oct) {
+  float sum = 0.0;
+  float amp = 1.0;
+  float fq = 1.0;
+  for (int o = 0; o < 3; o++) {
+    if (o >= oct) break;
+    float n = 1.0 - abs(dPerlin(seed + o * 7919, p * fq));
+    sum += amp * (n * n - 0.5);
+    amp *= D_GAIN;
+    fq *= D_LAC;
+  }
+  return sum * (1.0 - D_GAIN) * 1.6;
+}
+
+/**
  * Вес масштаба детали.
  *
  * Снизу его обрезает след пикселя: то, что мельче него, дало бы рябь.
@@ -467,10 +490,12 @@ float dNoiseSum(vec3 p, int octTo, float fw) {
 
 /**
  * Пояс гор: 0 на равнине, 1 в горах. Та же маска, что на CPU
- * (js/gl/terrain.js, belt) — три октавы низкой частоты.
+ * (js/gl/terrain.js, belt) — три октавы низкой частоты через ridged:
+ * его гребни складываются в сеть линий, и пояс выходит цепью, а не
+ * пятном.
  */
 float dBelt(vec3 p) {
-  float n = dNoiseRaw(uMSeed + 17, p * uMSpread, 3);
+  float n = dRidgeRaw(uMSeed + 17, p * uMSpread, 3);
   float t = clamp((n - uMount.z) / uMount.w, 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
 }
@@ -481,7 +506,7 @@ float dBelt(vec3 p) {
  */
 float dMountSum(vec3 p, int moctTo, float fw) {
   float sum = 0.0;
-  float amp = pow(D_GAIN, float(uMOctFrom));
+  float amp = pow(D_MOUNT_GAIN, float(uMOctFrom));
   float fq = uMount.y * pow(D_LAC, float(uMOctFrom));
   for (int o = 0; o < D_MAX_MOCT; o++) {
     int oi = uMOctFrom + o;
@@ -491,10 +516,10 @@ float dMountSum(vec3 p, int moctTo, float fw) {
       float n = 1.0 - abs(dPerlin(uMSeed + oi * 7919, p * fq));
       sum += w * amp * (n * n - 0.5);
     }
-    amp *= D_GAIN;
+    amp *= D_MOUNT_GAIN;
     fq *= D_LAC;
   }
-  return sum * (1.0 - D_GAIN) * 1.6;
+  return sum * (1.0 - D_MOUNT_GAIN) * 1.6;
 }
 
 /**
