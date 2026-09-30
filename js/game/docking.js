@@ -4,7 +4,7 @@
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { toLocal, toWorld } from '../core/basis.js';
 import { SHIP } from './ship.js';
-import { aimAt, flyVelocity, levelRoll } from './pilot.js';
+import { aimAt, flyVelocity, levelRoll, rateCmd } from './pilot.js';
 import { SLOT } from '../models/stations.js';
 import { HULL_HALF } from '../models/ships.js';
 import { L } from '../core/lang.js';
@@ -119,7 +119,10 @@ const matchRoll = (ship, station, k = 2.0) => {
   // Вперёд подаём скорость вращения станции, иначе регулятор всё время
   // отстаёт от вращающегося порта.
   const feed = station.spinRate * (dot(station.basis.fwd, ship.basis.fwd) < 0 ? 1 : -1);
-  ship.control.roll = clamp((-err * k + feed) / SHIP.rollRate, -1, 1);
+  // Ошибка — по кривой торможения (js/game/pilot.js, rateCmd), вращение
+  // станции — прямой подачей.
+  const w = rateCmd(-err, SHIP.rollRate, SHIP.rollAccel, k) * SHIP.rollRate + feed;
+  ship.control.roll = clamp(w / SHIP.rollRate, -1, 1);
   return Math.abs(err);
 };
 

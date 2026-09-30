@@ -35,8 +35,10 @@ import { cityCrash, cityPadUnder, applyCities } from './game/city.js';
 import { captureBody, carryShip, gravityField } from './game/gravity.js';
 import { entryState } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
+import { makeChase, updateChase, placeChase, rotAround } from './game/chase.js';
 import { makeFlow, updateFlow } from './game/flow.js';
-import { makeYoke, updateYoke, buildCockpit } from './models/cockpit.js';
+import { makeYoke, updateYoke, buildCockpit, EYE } from './models/cockpit.js';
+import { makeDisplays, updateDisplays } from './ui/displays.js';
 import {
   Q, DEVICE, toggleFullscreen, fullscreenAvailable, isFullscreen as isFull,
 } from './core/quality.js';
@@ -132,11 +134,18 @@ const gearMesh = buildGear();
 // рисовать её нечем, и приборы там остаются по углам экрана, а стойки
 // фонаря — штрихами поверх кадра (js/ui/hud.js). Поэтому game.cockpit
 // значит ровно «в кадре есть настоящая кабина».
-const cockpitModel = scene ? buildCockpit() : null;
+const cockpitModel = scene ? buildCockpit(shipMesh) : null;
+// Экраны кабины — холсты с софтом мониторов (js/ui/displays.js). Их
+// картинка уходит текстурой на мониторы в кабине, поэтому они есть
+// только там же, где сама кабина.
+const cockpitScreens = cockpitModel
+  ? makeDisplays(cockpitModel, { density: Q.cabinDensity, atlasW: Q.cabinAtlas, rateK: Q.cabinRate })
+  : null;
 
 const game = {
   world, ship, shipMesh, stationMesh, gearMesh,
-  cockpit: cockpitModel,   // модель кабины: геометрия, штурвал, места приборов
+  cockpit: cockpitModel,   // модель кабины: геометрия, ручка и РУД, экраны
+  displays: cockpitScreens, // холсты экранов кабины (js/ui/displays.js)
   renderer: hud,
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : 'Canvas 2D' },
   nav: makeNav(world),
@@ -159,18 +168,14 @@ const game = {
   entryBuf: { dir: v3(), color: [0, 0, 0] },   // чтобы не сорить объектами
   dust: makeDust(),      // пыль из-под движков у самой земли
   flow: makeFlow(),      // пылинки за бортом: ими видно скорость и форсаж
-  yoke: makeYoke(),      // положение штурвала в кабине (вид от 1-го лица)
+  yoke: makeYoke(),      // положение ручки и РУДа в кабине (вид от 1-го лица)
   touch: makeTouch(),    // сенсорные органы: джойстик, тяга, кнопки
   capture: null,         // тело, в чьём гравитационном захвате корабль
   showPilots: false,     // показан ли список пилотов в сети (P)
   camOrbit: { yaw: 0, pitch: 0 },   // осмотр камерой из-за спины (ПКМ)
   // Камера из-за спины со своей инерцией: она догоняет корабль, а не
-  // сидит на нём намертво (см. updateChase).
-  chase: {
-    fwd: v3(0, 0, 1), up: v3(0, 1, 0),
-    acc: v3(), prevVel: v3(), sway: v3(),
-    near: 1, ready: false, wasRailed: false,
-  },
+  // сидит на нём намертво (js/game/chase.js).
+  chase: makeChase(),
   camera,                // та же камера, что у рендера: нужна приборам и проверкам
   landInfo: null,        // показания посадочного дисплея
   statusLine: null,
@@ -1629,16 +1634,6 @@ function prepareHud() {
 
 // --- отрисовка ---------------------------------------------------------------
 
-// Поворот вектора вокруг оси (формула Родрига).
-function rotAround(v, axis, ang, out) {
-  const c = Math.cos(ang), s = Math.sin(ang);
-  const d = axis.x * v.x + axis.y * v.y + axis.z * v.z;
-  out.x = v.x * c + (axis.y * v.z - axis.z * v.y) * s + axis.x * d * (1 - c);
-  out.y = v.y * c + (axis.z * v.x - axis.x * v.z) * s + axis.y * d * (1 - c);
-  out.z = v.z * c + (axis.x * v.y - axis.y * v.x) * s + axis.z * d * (1 - c);
-  return out;
-}
-
 // Осмотр камерой: правая кнопка зажата — крутим взгляд вокруг корабля,
 // отпущена — камера сама возвращается за спину.
 const LOOK = 0.0042;        // рад на пиксель
@@ -1722,121 +1717,8 @@ function updateFov(dt) {
   if (Math.abs(fovNow - camera.fov) > 1e-5) camera.setFov(fovNow);
 }
 
-// Камера сзади: ближе, чем кажется нужным.
-//
-// Раньше она стояла в 200 метрах позади и в 55 над кораблём — три его
-// длины. На орбите это незаметно, а у поверхности рушит чувство
-// масштаба: прибор показывает 32 метра высоты, а глаз видит землю с
-// точки, которая втрое выше, и читает «пара сотен». Теперь вынос
-// сравним с размером корабля, и высота на приборе совпадает с тем, что
-// видно.
-const CHASE_BACK = 0.105, CHASE_UP = 0.026;
-
-// Камера НЕ приклеена к корпусу.
-//
-// Пока она повторяла ориентацию корабля кадр в кадр, на развороте
-// вращался мир, а корабль стоял в кадре неподвижно — ровно так выглядит
-// модель на подставке, и отсюда шло «игрушечное» ощущение. Теперь
-// камера догоняет нос с запаздыванием: корабль успевает повернуться
-// ВНУТРИ кадра, и видно, что его ворочают, а не переставляют.
-//
-// Крен догоняется вдвое медленнее поворота: у него и угловая скорость
-// самая большая, и именно на нём запаздывание читается как вес.
-const CHASE_TURN = 7.0;        // 1/с — как быстро камера догоняет нос
-const CHASE_ROLL = 3.2;        // 1/с — то же для «верха» (крен)
-// Снос от ускорения: разгоняясь, корабль уходит от камеры вперёд.
-// Коэффициент подобран по форсажу — на полной тяге отставание выходит
-// около полутора корпусов, дальше упирается в предел.
-const CHASE_SWAY = 0.012;      // км на км/с²
-const CHASE_SWAY_MAX = 0.05;   // км
-// У самой земли камеру подтягивает к корпусу: чем ближе точка съёмки к
-// кораблю, тем вернее глаз читает высоту по его размеру.
-const CHASE_LOW = 0.4;         // км — ниже этого начинается подтягивание
-const CHASE_LOW_K = 0.62;      // во сколько раз ближе она встаёт у грунта
-
-const _chaseBasis = makeBasis();
-const _acc = v3();
-
-/**
- * Инерция камеры из-за спины. Считается по времени игрока, а не по шагам
- * физики: это свойство съёмки, а не корабля.
- */
-function updateChase(dt) {
-  const c = game.chase;
-  const b = ship.basis;
-  const settled = game.state.mode !== ST.FLIGHT;
-
-  // На рельсах квантового привода сноса нет вовсе.
-  //
-  // Снос — это модель камеры-преследователя с инерцией, и она про ТЯГУ
-  // корабля. В прыжке скорость задаётся профилем, и на торможении
-  // ускорение доходит до двенадцати тысяч км/с²: снос упирался в свой
-  // предел и держал камеру вплотную к кораблю все пять секунд выхода —
-  // со стороны это и выглядело как «камера уехала вперёд».
-  // «На рельсах» считается и один кадр ПОСЛЕ выхода: на самом выходе
-  // скорость падает с тысяч км/с до нуля за кадр, и разность скоростей
-  // даёт ускорение, которого не бывает. Именно этот единственный кадр и
-  // швырял камеру вперёд на пол-корпуса.
-  const onRails = !!((game.quantum && game.quantum.phase !== 'idle') ||
-    (game.warp && game.warp.phase === 'tunnel'));
-  const railed = onRails || c.wasRailed;
-  c.wasRailed = onRails;
-  if (railed) {
-    copy(c.prevVel, ship.vel);
-    c.acc.x = c.acc.y = c.acc.z = 0;
-    c.sway.x = c.sway.y = c.sway.z = 0;
-  }
-
-  // Ускорение корабля — по изменению его скорости. Отдельного «сколько
-  // дали тяги» тут не нужно: камере важно то, что произошло, а не то,
-  // что просили, и удар о грунт она обязана показать так же, как разгон.
-  if (!railed && dt > 1e-5) {
-    _acc.x = (ship.vel.x - c.prevVel.x) / dt;
-    _acc.y = (ship.vel.y - c.prevVel.y) / dt;
-    _acc.z = (ship.vel.z - c.prevVel.z) / dt;
-  }
-  if (!railed) {
-    copy(c.prevVel, ship.vel);
-    const ka = Math.min(1, dt * 6);
-    c.acc.x += (_acc.x - c.acc.x) * ka;
-    c.acc.y += (_acc.y - c.acc.y) * ka;
-    c.acc.z += (_acc.z - c.acc.z) * ka;
-  }
-
-  // Высота: у грунта камера ближе.
-  const alt = game.zone ? game.zone.alt : Infinity;
-  const want = alt >= CHASE_LOW ? 1
-    : CHASE_LOW_K + (1 - CHASE_LOW_K) * clamp(alt / CHASE_LOW, 0, 1);
-  c.near += (want - c.near) * Math.min(1, dt * 3);
-
-  if (!c.ready || settled || dt <= 0) {
-    // На стоянке и при перезапуске камера садится на место мгновенно:
-    // запаздывание — это про полёт, а не про то, как открылся экран.
-    copy(c.fwd, b.fwd);
-    copy(c.up, b.up);
-    c.acc.x = c.acc.y = c.acc.z = 0;
-    c.ready = true;
-  } else {
-    const kf = 1 - Math.exp(-CHASE_TURN * dt);
-    const ku = 1 - Math.exp(-CHASE_ROLL * dt);
-    c.fwd.x += (b.fwd.x - c.fwd.x) * kf;
-    c.fwd.y += (b.fwd.y - c.fwd.y) * kf;
-    c.fwd.z += (b.fwd.z - c.fwd.z) * kf;
-    c.up.x += (b.up.x - c.up.x) * ku;
-    c.up.y += (b.up.y - c.up.y) * ku;
-    c.up.z += (b.up.z - c.up.z) * ku;
-    normalize(c.fwd, c.fwd);
-    normalize(c.up, c.up);
-  }
-
-  // Снос камеры: она отстаёт от того, что разгоняется.
-  if (railed) return;
-  const am = Math.hypot(c.acc.x, c.acc.y, c.acc.z);
-  const k = am > 1e-9 ? -Math.min(CHASE_SWAY * am, CHASE_SWAY_MAX) / am : 0;
-  c.sway.x = c.acc.x * k;
-  c.sway.y = c.acc.y * k;
-  c.sway.z = c.acc.z * k;
-}
+// Нарисованный грунт для камеры (см. placeChase).
+const drawnGround = (body, dir) => scene.drawnGround(body, dir);
 
 function setupCamera() {
   const cam = camera;
@@ -1844,27 +1726,22 @@ function setupCamera() {
   cam.basis.up = { ...ship.basis.up };
   cam.basis.fwd = { ...ship.basis.fwd };
   if (game.state.view === 'chase') {
-    const c = game.chase;
-    // Своя ориентация камеры: она догоняет корабль, а не повторяет его.
-    lookAlong(_chaseBasis, c.fwd, c.up);
-    const b = _chaseBasis;
-    const o = game.camOrbit;
-    // Направление взгляда = нос корабля, повёрнутый на осмотр.
-    rotAround(b.fwd, b.up, o.yaw, _camDir);
-    rotAround(_camDir, rotAround(b.right, b.up, o.yaw, _camRight), o.pitch, _camDir);
-    lookAlong(cam.basis, _camDir, b.up);
-    const back = CHASE_BACK * c.near, up = CHASE_UP * c.near;
-    cam.pos.x = ship.pos.x - _camDir.x * back + b.up.x * up + c.sway.x;
-    cam.pos.y = ship.pos.y - _camDir.y * back + b.up.y * up + c.sway.y;
-    cam.pos.z = ship.pos.z - _camDir.z * back + b.up.z * up + c.sway.z;
+    // Где стоит камера и куда смотрит — js/game/chase.js. Грунт ей
+    // отдаётся ТАКИМ, КАК ОН НАРИСОВАН: сетка у земли бывает выше
+    // настоящего рельефа, и камера, поставленная по настоящему,
+    // оказалась бы под картинкой.
+    placeChase(game.chase, game, cam, scene ? drawnGround : null);
   } else {
-    // Кокпит: чуть впереди центра масс, на уровне фонаря. Это и есть
-    // глаз пилота — в той же точке стоит начало координат кабины
-    // (js/models/cockpit.js), поэтому её рисование сводится к повороту.
+    // Кокпит: глаз пилота — в РУБКЕ, под фонарём корабля
+    // (js/models/hulldetail.js, BRIDGE). Раньше он стоял в двенадцати
+    // метрах перед центром и в шести над ним — в девяти метрах над носом,
+    // снаружи корпуса, — и своего носа из кабины не было видно. В этой же
+    // точке начало координат кабины (js/models/cockpit.js).
     const b = ship.basis;
-    cam.pos.x = ship.pos.x + b.fwd.x * 0.012 + b.up.x * 0.006;
-    cam.pos.y = ship.pos.y + b.fwd.y * 0.012 + b.up.y * 0.006;
-    cam.pos.z = ship.pos.z + b.fwd.z * 0.012 + b.up.z * 0.006;
+    const ex = EYE.x / 1000, ey = EYE.y / 1000, ez = EYE.z / 1000;
+    cam.pos.x = ship.pos.x + b.right.x * ex + b.up.x * ey + b.fwd.x * ez;
+    cam.pos.y = ship.pos.y + b.right.y * ex + b.up.y * ey + b.fwd.y * ez;
+    cam.pos.z = ship.pos.z + b.right.z * ex + b.up.z * ey + b.fwd.z * ez;
     // Голова на шее: взгляд отворачивается от носа, а САМ ГЛАЗ остаётся
     // на месте. Поэтому кабина вокруг не съезжает, а поворачивается —
     // ровно то, ради чего она и нарисована геометрией.
@@ -1988,6 +1865,34 @@ function render() {
       // рисуется сейчас: разошлись — значит растения под землёй.
       cell: scene.flora.cell,
       want: scene.floraCell || 0,
+      // Гнёт ли их сейчас струя движков (js/gl/wash.js): «деревья не
+      // шевелятся» — это и «струи нет», и «струя не того тела».
+      wash: scene.washOn ? 1 : 0,
+    }
+    : null;
+  // Дальний лес (js/gl/forest.js): сколько кусков нужно, сколько готово и
+  // в работе, сколько силуэтов нарисовано и до какого расстояния.
+  st.forest = scene && scene.forest
+    ? {
+      want: scene.forest.want.length,
+      ready: scene.forest.chunks.size,
+      busy: scene.forest.inFlight.size,
+      drawn: scene.forestDraws || 0,
+      trees: scene.forestTrees || 0,
+      km: +(scene.forest.rGround || 0).toFixed(1),
+    }
+    : null;
+  // Кабина (js/gl/cabin.js): собралась ли, сколько вызовов, сколько
+  // экранов перерисовано и залито в атлас, есть ли тень и солнце в ней.
+  st.cabin = scene
+    ? {
+      error: scene.cabinError || null,
+      draws: scene.cabinDraws || 0,
+      screens: game.displays ? game.displays.draws : 0,
+      uploads: scene.cabin ? scene.cabin.uploads : 0,
+      shadow: scene.cabin ? scene.cabin.shadowPasses : 0,
+      sun: scene.cabin ? +scene.cabin.sunVis.toFixed(2) : 0,
+      paint: !!(scene.cabin && scene.cabin.paintReady),
     }
     : null;
   st.dust = game.dust ? game.dust.list.length : 0;
@@ -2137,10 +2042,13 @@ function frame(now) {
   // Поток за бортом — тоже картинка, и по той же причине идёт по
   // времени игрока: фаза копится в js/game/flow.js, рендер её читает.
   updateFlow(game.flow, game, dt);
-  // Штурвал ходит за ручками по времени игрока: это рука пилота, а не
-  // состояние корабля, и от шага физики зависеть не должна.
-  updateYoke(game.yoke, ship.control, dt);
-  updateChase(dt);
+  // Ручка и РУД ходят за органами управления по времени игрока: это
+  // рука пилота, а не состояние корабля, и от шага физики зависеть не
+  // должна.
+  updateYoke(game.yoke, ship.control, dt, ship.throttle);
+  // Камера садится на место мгновенно, когда корабль не летит: на
+  // стоянке и в порту запаздывание было бы про то, как открылся экран.
+  updateChase(game.chase, game, dt, game.state.mode !== ST.FLIGHT);
   updateFov(dt);
   // Звук идёт по времени игрока, а не по шагам физики: круизный
   // ускоритель множит перемещение, но не частоту кадров, и гул движков
@@ -2148,6 +2056,12 @@ function frame(now) {
   updateAudio(game.audio, game, dt);
   playAudio(game.audio, sound);
   if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) prepareHud();
+  // Софт мониторов — после приборов (он читает то же, что они), и только
+  // когда кабина в кадре: рисовать восемь холстов для вида снаружи незачем.
+  if (game.displays && game.state.view === 'cockpit'
+      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
+    updateDisplays(game.displays, game, now / 1000);
+  }
 
   render();
   input.endFrame();

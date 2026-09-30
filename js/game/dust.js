@@ -26,9 +26,10 @@ import { v3 } from '../core/vec3.js';
 import { makeBasis, toLocal } from '../core/basis.js';
 import { bodyBasis } from './world.js';
 import { isSolid } from './surface.js';
-import { SHIP } from './ship.js';
 import { makeRng } from '../core/rng.js';
 import { Q } from '../core/quality.js';
+import { terrainOf } from '../gl/terrain.js';
+import { engineLoad, washState, makeWash, airDensity, WASH } from './downwash.js';
 
 // Случайность у пыли своя и СЕЯНАЯ, как у всего остального в этом мире:
 // одинаковый заход даёт одинаковый веер. Без этого поведение эффекта
@@ -62,16 +63,44 @@ export const DUST = {
   // Насколько позади корабля бьёт струя маршевых, км (примерно длина
   // корпуса).
   mainBack: 0.07,
+
+  // --- В ВОЗДУХЕ всё иначе ------------------------------------------------
+  //
+  // Там пыль не летит сама: мелкая взвесь идёт вместе с воздухом (время
+  // её отклика — сотые доли секунды), а воздух у грунта гонит настильная
+  // струя (js/game/downwash.js). Поэтому пыль в воздухе — это ветер,
+  // который стало видно, и всё её поведение берётся из него:
+  //
+  //   * срывается она там, где ветер у грунта сильнее порога, — внутри
+  //     круга, чей радиус считается из тяги: wallK·√(T/ρ)/порог;
+  //   * уносится наружу и тормозит как 1/r, а на краю круга ветер уже
+  //     не держит её — и она ВИСИТ. Отсюда кольцо: оно не нарисовано,
+  //     а набирается из пыли, которой дальше лететь не на чем;
+  //   * поднимается она в слое настильной струи, чья толщина — десятая
+  //     часть расстояния от точки удара.
+  //
+  // Порог срыва — для сухого грунта: песок и пыль трогаются при ветре в
+  // пять-десять метров в секунду у земли, дёрн держит дольше.
+  airThreshold: 10,    // м/с
+  airRate: 34,         // частиц в секунду, пока грунт метёт
+  airFade: 5.5,        // с — взвесь висит дольше, чем летит баллистика
+  airLag: 0.35,        // с — за столько частица догоняет ветер
+  airSettle: 0.0004,   // км/с — оседание
+  airSize: 0.004,      // км — облачко при срыве
+  airGrow: 0.0035,     // км/с — растёт, пока его раздувает ветер
 };
 
 export function makeDust() {
-  return { list: [], body: null, spawn: 0 };
+  return { list: [], body: null, spawn: 0, air: false, ring: 0 };
 }
 
 const _frame = makeBasis();
 const _p = v3();
 const _back = v3();
 const _aft = v3();
+const _load = { lift: 0, main: 0 };
+const _wash = makeWash();
+const _rgb = [0, 0, 0];
 
 /**
  * Пересчитать пыль.
@@ -89,6 +118,10 @@ export function updateDust(dust, game, dt) {
   // Сменилось тело — прежняя пыль к нему отношения не имеет.
   if (body !== dust.body) { list.length = 0; dust.body = body || null; }
   if (!body || !isSolid(body)) { list.length = 0; return dust; }
+
+  // У тела с воздухом своя пыль: её несёт ветер, а не баллистика.
+  dust.air = airDensity(body) > 0;
+  if (dust.air) return updateAirDust(dust, game, dt);
 
   const frame = bodyBasis(body, _frame);
   const g = (body.g0 || 1) / 1000;             // км/с²
@@ -122,10 +155,9 @@ export function updateDust(dust, game, dt) {
   // (js/game/ship.js). Значит, вниз они дуют всегда, и пыль под ними
   // стоять обязана. Доля этой тяги выводится из модели: полный ход даёт
   // втрое больше веса, стало быть на зависание уходит треть.
-  const c = ship.control || {};
-  const hover = ship.gear && ship.gear.out ? 0 : 1 / SHIP.liftTWR;
-  const lift = Math.min(1, hover + Math.abs(c.lift || 0));
-  const main = Math.abs(ship.throttle || 0) * DUST.mainShare;
+  const load = engineLoad(ship, _load);
+  const lift = load.lift;
+  const main = load.main * DUST.mainShare;
   const power = Math.min(1, lift + main);
   const near = 1 - alt / DUST.maxAlt;
   const rate = DUST.rate * power * near * near;
@@ -190,6 +222,108 @@ export function updateDust(dust, game, dt) {
       age: 0,
       fade: 1,
       size: 0.6 + rng.range(0, 0.8),
+    });
+  }
+  if (list.length >= DUST.max) dust.spawn = 0;
+  return dust;
+}
+
+/**
+ * Пыль в воздухе: её несёт настильная струя (см. DUST, «в воздухе»).
+ *
+ * Частица держит свою скорость и тянется к скорости ветра в своей
+ * точке с отставанием airLag; ветер — радиальный от точки удара струи,
+ * убывает как 1/r и живёт в слое толщиной в десятую часть r. Над слоем
+ * воздух стоит, и поднятое туда облако только оседает.
+ */
+function updateAirDust(dust, game, dt) {
+  const list = dust.list;
+  const w = washState(game, _wash);
+  const rho = airDensity(dust.body);
+  const S = w.T > 0 ? Math.sqrt(w.T / rho) : 0;       // √(J/ρ), м²/с
+  const up = w.up;
+  const kLag = Math.min(1, dt / DUST.airLag);
+
+  for (let i = list.length - 1; i >= 0; i--) {
+    const p = list[i];
+    p.age += dt;
+    if (p.age > DUST.airFade) { list.splice(i, 1); continue; }
+    p.fade = 1 - p.age / DUST.airFade;
+    // Ветер в точке частицы.
+    let ax = 0, ay = 0, az = 0;
+    if (S > 0 && w.h < Infinity) {
+      const ex = p.x - w.hit.x, ey = p.y - w.hit.y, ez = p.z - w.hit.z;
+      const e = ex * up.x + ey * up.y + ez * up.z;
+      const hx = ex - up.x * e, hy = ey - up.y * e, hz = ez - up.z * e;
+      const r = Math.hypot(hx, hy, hz) || 1e-9;            // км
+      const u = S * Math.min(WASH.jetK / w.h, WASH.wallK / Math.max(r * 1000, 1)) / 1000;
+      // Высота частицы над грунтом, где её подняли, и толщина слоя.
+      const z = Math.hypot(p.x, p.y, p.z) - p.r0;
+      const layer = 0.1 * r + 0.002;
+      const inLayer = Math.exp(-(z / layer) * (z / layer));
+      const sp = u * inLayer;
+      ax = hx / r * sp + up.x * sp * 0.12;
+      ay = hy / r * sp + up.y * sp * 0.12;
+      az = hz / r * sp + up.z * sp * 0.12;
+    }
+    ax -= up.x * DUST.airSettle; ay -= up.y * DUST.airSettle; az -= up.z * DUST.airSettle;
+    p.vx += (ax - p.vx) * kLag;
+    p.vy += (ay - p.vy) * kLag;
+    p.vz += (az - p.vz) * kLag;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    // Облако раздувает тем сильнее, чем быстрее его несёт.
+    p.size += (DUST.airGrow * 0.3 + Math.hypot(p.vx, p.vy, p.vz) * 0.05) * dt;
+  }
+
+  // Срыв: только там, где ветер у грунта сильнее порога.
+  dust.ring = 0;
+  if (!w.on || !(S > 0) || !(w.h < Infinity)) { dust.spawn = 0; return dust; }
+  const uAxis = WASH.jetK * S / w.h;
+  if (uAxis < DUST.airThreshold) { dust.spawn = 0; return dust; }
+  const rIn = w.h * WASH.wallK / WASH.jetK;             // м — там струя ложится на грунт
+  const rOut = WASH.wallK * S / DUST.airThreshold;      // м — дальше ветер не срывает
+  dust.ring = rOut / 1000;
+  const terrain = terrainOf(dust.body);
+  const R = dust.body.radius;
+
+  // Касательные оси в точке удара.
+  const helper = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+  let tx = helper.y * up.z - helper.z * up.y;
+  let ty = helper.z * up.x - helper.x * up.z;
+  let tz = helper.x * up.y - helper.y * up.x;
+  const tl = Math.hypot(tx, ty, tz) || 1;
+  tx /= tl; ty /= tl; tz /= tl;
+  const bx = up.y * tz - up.z * ty, by = up.z * tx - up.x * tz, bz = up.x * ty - up.y * tx;
+
+  dust.spawn += DUST.airRate * dt;
+  while (dust.spawn >= 1 && list.length < DUST.max) {
+    dust.spawn -= 1;
+    // Равномерно по ПЛОЩАДИ круга, где метёт: большая часть пыли
+    // срывается у внешнего края — там и площадь, и туда же её сносит.
+    const lo = Math.min(rIn, rOut);
+    const r = Math.sqrt(lo * lo + rng.range(0, 1) * (rOut * rOut - lo * lo)) / 1000;   // км
+    const a = rng.range(0, Math.PI * 2);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const px = w.hit.x + (tx * ca + bx * sa) * r;
+    const py = w.hit.y + (ty * ca + by * sa) * r;
+    const pz = w.hit.z + (tz * ca + bz * sa) * r;
+    const pl = Math.hypot(px, py, pz) || 1;
+    const dx = px / pl, dy = py / pl, dz = pz / pl;
+    const g = 1 + terrain.displace(dx, dy, dz);
+    terrain.color(dx, dy, dz, _rgb);
+    // Цвет — самого грунта, посветлее: это поднятая пыль, а не тень. Над
+    // водой струя поднимает не пыль, а брызги, и они белые.
+    const wet = _rgb[2] - Math.max(_rgb[0], _rgb[1]) > 0.02;
+    const col = wet ? [0.86, 0.9, 0.94]
+      : [_rgb[0] * 0.7 + 0.28, _rgb[1] * 0.7 + 0.26, _rgb[2] * 0.7 + 0.22];
+    list.push({
+      x: dx * g * R, y: dy * g * R, z: dz * g * R,
+      vx: 0, vy: 0, vz: 0,
+      r0: g * R,
+      age: 0,
+      fade: 1,
+      size: DUST.airSize * (0.7 + rng.range(0, 0.6)),
+      col,
     });
   }
   if (list.length >= DUST.max) dust.spawn = 0;

@@ -618,6 +618,7 @@ export function settle(ship, zone) {
   ship.throttle = 0;
   ship.lift = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
+  if (ship.torq) ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
   updateLandedPose(ship);
   return ship.landedPose;
 }
@@ -650,6 +651,7 @@ export function takeoff(ship) {
   ship.throttle = 0;
   ship.speed = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
+  if (ship.torq) ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
   // Отрыв: подъёмные движки на полный ход на секунду (ship.liftHold).
   // Импульсом это делать нельзя — набранную скорость тут же съест
   // стабилизатор, как любой другой снос, и корабль осядет обратно.

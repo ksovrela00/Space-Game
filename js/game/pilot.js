@@ -17,12 +17,31 @@ const _axis = v3();
 const _f1 = v3();
 const _tmp = v3();
 
+/**
+ * Команда ручки по угловой ошибке a (рад): заданная угловая скорость в
+ * долях предельной.
+ *
+ * Скорость — наименьшая из трёх: предельная, та, с которой корабль ещё
+ * успевает затормозить к цели (кривая торможения √(2εa), с половиной
+ * момента в запасе на задержку маневровых), и линейная у самой цели. Её
+ * коэффициент ограничен тем, что успевает отработать регулятор угловой
+ * скорости (SHIP.rcsBand): прямой P-регулятор с большим коэффициентом на
+ * тяжёлом корабле уходит в раскачку — нос проскакивает цель, пока
+ * маневровые разворачивают момент.
+ */
+export function rateCmd(a, rate, accel, k) {
+  const m = Math.abs(a);
+  const kk = Math.min(k, 1 / (2.5 * (SHIP.rcsBand || 0.4)));
+  const w = Math.min(rate, Math.sqrt(accel * m), kk * m);
+  return clamp(Math.sign(a) * w / rate, -1, 1);
+}
+
 /** Навести нос по направлению. @returns угловая ошибка, рад */
 export function aimDir(ship, dir, k = 1.6) {
   const ang = aimAngles(ship.basis, dir);
   const c = ship.control;
-  c.pitch = clamp(ang.pitch * k / SHIP.pitchRate, -1, 1);
-  c.yaw = clamp(ang.yaw * k / SHIP.yawRate, -1, 1);
+  c.pitch = rateCmd(ang.pitch, SHIP.pitchRate, SHIP.pitchAccel, k);
+  c.yaw = rateCmd(ang.yaw, SHIP.yawRate, SHIP.yawAccel, k);
   return Math.hypot(ang.pitch, ang.yaw);
 }
 
@@ -45,9 +64,12 @@ export function flyVelocity(ship, vec, k = 1.6) {
   return sp;
 }
 
-/** Погасить остаточный крен. */
-export function levelRoll(ship, k = 2) {
-  ship.control.roll = clamp(-ship.rot.roll * k / SHIP.rollRate, -1, 1);
+/**
+ * Погасить остаточный крен: заданная скорость крена — ноль, остальное
+ * делает регулятор угловой скорости (js/game/ship.js, spinAxis).
+ */
+export function levelRoll(ship) {
+  ship.control.roll = 0;
 }
 
 /**
@@ -102,9 +124,9 @@ export function alignBasis(ship, fwdTarget, upTarget, k = 1.4) {
   // rotateBasis(pitch, yaw, roll) даёт угловую скорость
   // -pitch·right + yaw·up - roll·fwd, отсюда и знаки.
   const c = ship.control;
-  c.pitch = clamp(-dot(_w, b.right) * k / SHIP.pitchRate, -1, 1);
-  c.yaw = clamp(dot(_w, b.up) * k / SHIP.yawRate, -1, 1);
-  c.roll = clamp(-dot(_w, b.fwd) * k / SHIP.rollRate, -1, 1);
+  c.pitch = rateCmd(-dot(_w, b.right), SHIP.pitchRate, SHIP.pitchAccel, k);
+  c.yaw = rateCmd(dot(_w, b.up), SHIP.yawRate, SHIP.yawAccel, k);
+  c.roll = rateCmd(-dot(_w, b.fwd), SHIP.rollRate, SHIP.rollAccel, k);
   return Math.hypot(_w.x, _w.y, _w.z);
 }
 

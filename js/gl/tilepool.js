@@ -29,7 +29,19 @@ const WORKER_URL = new URL('./tileworker.js', import.meta.url);
 const MAX_WORKERS = Q.workers;
 
 export class TilePool {
-  constructor(max = MAX_WORKERS) {
+  /**
+   * @param url файл потока. По умолчанию — сборка плиток; дальний лес
+   *        (js/gl/forestworker.js) ходит через этот же пул со своим
+   *        файлом — очередь, запасной путь и ожидание свежих файлов у них
+   *        общие.
+   */
+  constructor(max = MAX_WORKERS, url = WORKER_URL) {
+    this.url = url;
+    // Очередь заданий, которые поток берёт сам, освободившись, — не
+    // дожидаясь кадра. Плиткам она не нужна (их выбор меняется каждый
+    // кадр), а дальнему лесу — очень: двести с лишним кусков по одному на
+    // поток за кадр растягивались бы на секунды.
+    this.queue = [];
     this.workers = [];
     this.idle = [];
     this.inFlight = new Map();     // поток -> задание
@@ -62,11 +74,12 @@ export class TilePool {
     if (this.dead) return;          // пул успели закрыть, пока мы ждали
     for (let i = 0; i < n; i++) {
       try {
-        const w = new Worker(WORKER_URL, { type: 'module' });
+        const w = new Worker(this.url, { type: 'module' });
         w.onmessage = (e) => {
           this.inFlight.delete(w);
           this.idle.push(w);
           this.done.push(e.data);
+          if (this.queue.length) this.post(this.queue.shift());
         };
         // Умерший поток не должен вешать плитку навсегда: задание
         // возвращается наверх, и TileSet снимет заглушку, чтобы плитку
@@ -85,6 +98,11 @@ export class TilePool {
   }
 
   get free() { return this.idle.length; }
+
+  /** Поставить задание в очередь: свободный поток возьмёт его сам. */
+  enqueue(job) {
+    if (!this.post(job)) this.queue.push(job);
+  }
   get busy() { return this.inFlight.size; }
 
   post(job) {
@@ -115,6 +133,7 @@ export class TilePool {
     this.idle.length = 0;
     this.inFlight.clear();
     this.done.length = 0;
+    this.queue.length = 0;
     this.ok = false;
   }
 }

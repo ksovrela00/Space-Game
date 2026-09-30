@@ -294,6 +294,7 @@ const { addMission } = await import('../js/game/player.js');
 const { net } = await import('../js/net/socket.js');
 const { setLang } = await import('../js/core/lang.js');
 const { Q } = await import('../js/core/quality.js');
+const { chaseRates } = await import('../js/game/chase.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -568,45 +569,100 @@ await step('сенсорное управление: джойстик, тяга,
   }
 });
 
-await step('кабина: приборы на доске, осмотр головой, штурвал за ручками', async () => {
+await step('кабина: софт мониторов, осмотр головой, ручка и РУД за органами управления', async () => {
   // Кабина есть только в объёмном рендере, а smoke идёт на Canvas-2D
-  // (WebGL здесь не подменить). Поэтому модель подставляем руками: нам
-  // важна не её отрисовка — её проверяет tools/gl.mjs, — а то, что HUD
-  // умеет класть приборы на экраны и не падает на этом.
-  const { buildCockpit } = await import('../js/models/cockpit.js');
-  const saved = game.cockpit;
-  game.cockpit = buildCockpit();
-  if (game.state.view !== 'cockpit') { key('KeyV'); frames(2); }
-  if (game.state.view !== 'cockpit') throw new Error('вид не переключился в кокпит');
-  frames(3);
+  // (WebGL здесь не подменить). Поэтому модель и холсты экранов
+  // подставляем руками: сама кабина и загрузка экранов в атлас — забота
+  // tools/gl.mjs, а здесь — то, что софт мониторов рисует на своих
+  // холстах настоящие показания и не падает на этом.
+  const { buildCockpit, YOKE } = await import('../js/models/cockpit.js');
+  const { makeDisplays } = await import('../js/ui/displays.js');
+  const { fmtSpeed } = await import('../js/ui/hud.js');
+  const saved = game.cockpit, savedD = game.displays;
+  // Корабль после шага — ровно там же и так же: проверка РУДа даёт полный
+  // газ, и без этого следующие шаги (подход, посадка) начинали бы на ходу.
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+  };
+  try {
+    game.cockpit = buildCockpit();
+    game.displays = makeDisplays(game.cockpit, { canvas: () => document.createElement('canvas') });
+    if (game.state.view !== 'cockpit') { key('KeyV'); frames(2); }
+    if (game.state.view !== 'cockpit') throw new Error('вид не переключился в кокпит');
 
-  // Осмотр головой: в кабине предел меньше, чем от третьего лица, —
-  // шея не поворачивается на 180°.
-  mouse('mousedown');
-  for (let i = 0; i < 4; i++) { mouse('mousemove', { movementX: 360 }); frames(1); }
-  const yaw = game.camOrbit.yaw;
-  if (!(yaw > 1.5 && yaw <= 1.93)) {
-    throw new Error('поворот головы в кабине вне допуска: ' + yaw.toFixed(2));
-  }
-  mouse('mouseup');
-  frames(45);
-  if (Math.abs(game.camOrbit.yaw) > 0.05) {
-    throw new Error('голова не вернулась прямо: ' + game.camOrbit.yaw.toFixed(2));
-  }
+    // Мониторы: за десяток кадров каждый экран перерисован хотя бы раз
+    // (самый редкий — четыре раза в секунду), и на них — показания.
+    texts = [];
+    const draws0 = game.displays.draws;
+    frames(20);
+    const seen = texts.map((t) => t.s);
+    texts = null;
+    const drawn = game.displays.draws - draws0;
+    if (drawn < game.displays.list.length) {
+      throw new Error(`экраны кабины не перерисованы: ${drawn} за 20 кадров`);
+    }
+    const speed = fmtSpeed(game.ship.speed).split(' ')[0];
+    const need = [speed, 'ДАЛЬН', 'КОРПУС', 'ШАССИ', 'ПОЛЁТ', 'КАРТА'];
+    const miss = need.filter((w) => !seen.some((t) => t.indexOf(w) >= 0));
+    if (miss.length) throw new Error('на мониторах нет: ' + miss.join(', '));
+    // Угловых панелей в кабине нет — их место заняли мониторы.
+    texts = [];
+    frames(1);
+    const hud = texts.filter((t) => t.s.indexOf('ФОРСАЖ') >= 0 && t.size > 9);
+    texts = null;
+    if (hud.length > 0 && game.displays.list.every((d) => d.next > 1e12)) {
+      throw new Error('в кабине остались угловые панели');
+    }
 
-  // Штурвал ходит за ручками: держим крен и смотрим, что он отклонился.
-  holdDown('KeyE'); frames(20);
-  const rolled = game.yoke.roll;
-  release('KeyE'); frames(30);
-  if (!(Math.abs(rolled) > 0.3)) {
-    throw new Error('штурвал не пошёл за ручкой: ' + rolled.toFixed(2));
-  }
-  if (Math.abs(game.yoke.roll) > 0.05) {
-    throw new Error('штурвал не вернулся в нейтраль: ' + game.yoke.roll.toFixed(2));
-  }
+    // Осмотр головой: в кабине предел меньше, чем от третьего лица, —
+    // шея не поворачивается на 180°.
+    mouse('mousedown');
+    for (let i = 0; i < 4; i++) { mouse('mousemove', { movementX: 360 }); frames(1); }
+    const yaw = game.camOrbit.yaw;
+    if (!(yaw > 1.5 && yaw <= 1.93)) {
+      throw new Error('поворот головы в кабине вне допуска: ' + yaw.toFixed(2));
+    }
+    mouse('mouseup');
+    frames(45);
+    if (Math.abs(game.camOrbit.yaw) > 0.05) {
+      throw new Error('голова не вернулась прямо: ' + game.camOrbit.yaw.toFixed(2));
+    }
 
-  game.cockpit = saved;
-  frames(2);
+    // Ручка ходит за органами управления: держим крен и смотрим, что она
+    // отклонилась почти до упора.
+    holdDown('KeyE'); frames(20);
+    const rolled = game.yoke.roll;
+    release('KeyE'); frames(30);
+    if (!(Math.abs(rolled) > YOKE.roll * 0.7)) {
+      throw new Error('ручка не пошла за креном: ' + rolled.toFixed(2));
+    }
+    if (Math.abs(game.yoke.roll) > 0.05) {
+      throw new Error('ручка не вернулась в нейтраль: ' + game.yoke.roll.toFixed(2));
+    }
+    // РУД — за заданной тягой: здесь проверяется только проводка (ход
+    // РУДа — в tools/test.mjs). Один кадр на половине тяги: полный газ
+    // клавишей разгонял корабль, и следующие шаги начинали не с того.
+    const thr0 = game.yoke.throttle;
+    sh.throttle = 0.5;
+    frames(1);
+    const thr1 = game.yoke.throttle;
+    sh.throttle = keep.throttle;
+    if (!(thr1 > thr0 + 1e-3)) {
+      throw new Error(`РУД не идёт за тягой: ${thr0.toFixed(3)} -> ${thr1.toFixed(3)}`);
+    }
+  } finally {
+    // Возвращаем как было, даже если проверка упала: иначе все
+    // следующие шаги шли бы «в кабине» без угловых панелей.
+    game.cockpit = saved;
+    game.displays = savedD;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    frames(2);
+  }
 });
 
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
@@ -622,7 +678,12 @@ await step('вид от 3-го лица (V) рисует свой корабль
 await step('камера из-за спины догоняет корабль, а не сидит на нём', () => {
   if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
   game.ship.throttle = 0;
-  frames(30);
+  // Сколько ждать, выводится из самой камеры: она догоняет крен с
+  // постоянной времени 1/roll (js/game/chase.js, «Вес»), и за пять таких
+  // постоянных от любой разницы остаётся меньше процента. Прежние
+  // полсекунды были посчитаны под камеру вдвое легче.
+  const rest = Math.ceil(5 / chaseRates().roll * 60);
+  frames(rest);
   const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1,
     a.x * b.x + a.y * b.y + a.z * b.z)));
   // В покое камера стоит ровно за кораблём.
@@ -631,14 +692,18 @@ await step('камера из-за спины догоняет корабль, �
   }
   // На крене «верх» камеры обязан отставать от корпуса: именно по этому
   // отставанию корабль и читается как тяжёлый.
+  // Держим крен столько, сколько корабль на него раскручивается (с
+  // задержкой маневровых): тяжёлый корабль за полсекунды только трогается.
+  const spinUp = SHIP.rollRate / SHIP.rollAccel + SHIP.rcsLag;
   holdDown('KeyQ');
-  frames(30);
+  frames(Math.ceil(spinUp * 60));
   const lag = ang(game.camera.basis.up, game.ship.basis.up);
   release('KeyQ');
   if (!(lag > 0.08)) throw new Error('камера не отстаёт на крене: ' + lag.toFixed(3));
   if (!(lag < 1.2)) throw new Error('камера отстала слишком сильно: ' + lag.toFixed(3));
-  // Перестали крутить — догнала.
-  frames(120);
+  // Перестали крутить — догнала: корабль гасит вращение, камера его
+  // догоняет, и на то и другое — те же пять постоянных.
+  frames(rest + Math.ceil((spinUp + 2 * SHIP.rcsBand) * 60));
   const settled = ang(game.camera.basis.up, game.ship.basis.up);
   if (!(settled < 0.02)) throw new Error('камера не догнала: ' + settled.toFixed(3));
   key('KeyV'); frames(2);
@@ -1151,7 +1216,9 @@ await step('меню пилота (I): разделы, живой мир, мёр
 
   // Закрытое меню возвращает управление — иначе проверка выше проходила
   // бы и на намертво отключённых клавишах.
-  holdDown('KeyD'); frames(30); release('KeyD');
+  // Полторы секунды: тяжёлый корабль трогается с задержкой, и за
+  // полсекунды рыскание успевает довернуть его на полградуса.
+  holdDown('KeyD'); frames(90); release('KeyD');
   const back = f0.x * game.ship.basis.fwd.x + f0.y * game.ship.basis.fwd.y + f0.z * game.ship.basis.fwd.z;
   if (back > 0.999) throw new Error('после закрытия меню корабль не слушается: dot ' + back.toFixed(5));
   } finally {
@@ -1160,6 +1227,9 @@ await step('меню пилота (I): разделы, живой мир, мёр
     game.menu.open = false;
     game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
     game.ship.speed = 0; game.ship.throttle = 0;
+    // Корабль по инерции ещё доворачивал бы секунды две.
+    game.ship.rot.pitch = game.ship.rot.yaw = game.ship.rot.roll = 0;
+    if (game.ship.torq) game.ship.torq.pitch = game.ship.torq.yaw = game.ship.torq.roll = 0;
     frames(2);
   }
 });
@@ -1169,7 +1239,7 @@ await step('меню пилота (I): разделы, живой мир, мёр
 // весь этот код не выполняется, и опечатка в нём живёт до первой встречи
 // в космосе (так и случилось: в подписи стояла переменная, которой в
 // этом файле нет).
-await step('чужие пилоты: число, отметка и метка с расстоянием', () => {
+await step('чужие пилоты: число, отметка и метка с расстоянием', async () => {
   if (game.state.mode !== 'flight') { key('Space'); frames(4); }
 
   // Кладём пилотов ТУДА, КУДА ИХ КЛАДЁТ СОКЕТ, и, как он, поднимаем
@@ -1223,9 +1293,31 @@ await step('чужие пилоты: число, отметка и метка с
     throw new Error('метка нарисована у пилота за спиной');
   }
 
-  const cockpit = seenIn('cockpit');
-  if (!cockpit.some((t) => t.indexOf('ПИЛОТОВ РЯДОМ 2') >= 0)) {
-    throw new Error('в кабине числа пилотов нет');
+  // В кабине — экран локатора на доске (js/ui/panels.js), а на
+  // запасном пути без кабины — та же угловая панель. Проверяем оба.
+  const cockpit2d = seenIn('cockpit');
+  if (!cockpit2d.some((t) => t.indexOf('ПИЛОТОВ РЯДОМ 2') >= 0)) {
+    throw new Error('в кабине без мониторов числа пилотов нет');
+  }
+  {
+    const { buildCockpit } = await import('../js/models/cockpit.js');
+    const { makeDisplays } = await import('../js/ui/displays.js');
+    const saved = game.cockpit, savedD = game.displays;
+    game.cockpit = buildCockpit();
+    game.displays = makeDisplays(game.cockpit, { canvas: () => document.createElement('canvas') });
+    try {
+      push();
+      texts = [];
+      frames(4);
+      const seen = texts.map((t) => t.s);
+      texts = null;
+      if (!seen.some((t) => t.indexOf('ПИЛОТОВ РЯДОМ 2') >= 0)) {
+        throw new Error('на локаторе в кабине числа пилотов нет');
+      }
+    } finally {
+      game.cockpit = saved;
+      game.displays = savedD;
+    }
   }
 
   net.peers = [];

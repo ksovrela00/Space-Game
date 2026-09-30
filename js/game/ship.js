@@ -51,6 +51,23 @@ const I_PITCH = HULL_HALF.y ** 2 + HULL_HALF.z ** 2;
 const I_YAW = HULL_HALF.x ** 2 + HULL_HALF.z ** 2;
 const I_ROLL = HULL_HALF.x ** 2 + HULL_HALF.y ** 2;
 
+// Плечо до самой дальней точки корпуса от каждой оси, км: нос и корма
+// для тангажа, концы крыльев для крена, углы крыльев для рыскания. На
+// них и приходится центростремительное ускорение ω²·r, которым
+// ограничено вращение (SHIP.tipAccel).
+export const TIP_ARM = {
+  pitch: Math.hypot(HULL_HALF.y, HULL_HALF.z),
+  yaw: Math.hypot(HULL_HALF.x, HULL_HALF.z),
+  roll: Math.hypot(HULL_HALF.x, HULL_HALF.y),
+};
+
+// Полоса регулятора угловой скорости в постоянных времени маневровых.
+// Регулятор даёт полный момент вдали от заданной скорости и
+// пропорциональный — вблизи; вместе с задержкой маневровых это звено
+// второго порядка, и при 3.2 постоянных его затухание 0.9: скорость
+// выходит на заданную без перелёта и без раскачки.
+const RCS_BAND = 3.2;
+
 /**
  * Принять лётную модель от бэкенда.
  *
@@ -74,6 +91,16 @@ export function applyShipSpec(spec) {
   // сам, и обещание «полторы секунды до предела» осталось верным.
   SHIP.boostAccel = (SHIP.maxSpeed * (SHIP.boostMax - 1)) / SHIP.boostRamp / SHIP.accel;
 
+  // Предельные угловые скорости — из размера корпуса: ω = √(a/r), где a —
+  // допустимое ускорение на оконечностях (tipAccel, м/с²), r — плечо до
+  // них. Старый сервер присылает сами скорости — тогда берутся они.
+  if (SHIP.tipAccel > 0) {
+    const a = SHIP.tipAccel / 1000;                    // км/с²
+    SHIP.pitchRate = Math.sqrt(a / TIP_ARM.pitch);
+    SHIP.yawRate = Math.sqrt(a / TIP_ARM.yaw);
+    SHIP.rollRate = Math.sqrt(a / TIP_ARM.roll);
+  }
+
   // Момент маневровых один на все оси: это одни и те же движки. Задан он
   // через крен (rotRamp), а угловые ускорения остальных осей из него и
   // выводятся — M = I·ε.
@@ -82,14 +109,36 @@ export function applyShipSpec(spec) {
   SHIP.pitchAccel = torque / I_PITCH;
   SHIP.yawAccel = torque / I_YAW;
 
+  // Задержка маневровых и полоса регулятора (см. RCS_BAND). Без задержки
+  // (старый сервер) — прежнее поведение: полный момент до самой цели.
+  SHIP.rcsLag = SHIP.rcsLag > 0 ? SHIP.rcsLag : 0;
+  SHIP.rcsBand = Math.max(RCS_BAND * SHIP.rcsLag, 1e-3);
+
   return SHIP;
 }
 
-// В какую сторону работают сопла: знак момента, который сейчас нужен.
-// Ноль, если угловая скорость уже та, которую просят, — тогда момент не
-// нужен вовсе.
-const torqueDir = (cur, target, step) =>
-  (Math.abs(target - cur) < step * 0.05 ? 0 : Math.sign(target - cur));
+/**
+ * Одна ось вращения: регулятор угловой скорости и маневровые с задержкой.
+ *
+ * Регулятор просит момент: полный, пока до заданной скорости далеко, и
+ * пропорциональный на подходе (полоса SHIP.rcsBand). Маневровые выходят
+ * на просимый момент с постоянной времени SHIP.rcsLag — это и есть
+ * задержка между рукой и поворотом: нажал — корабль трогается не сразу,
+ * отпустил — ещё какое-то время доворачивает, пока сопла не развернут
+ * момент против вращения.
+ *
+ * Сопла «работают» (ship.rcs — их видно и слышно), пока приложен заметный
+ * момент: на раскрутке и на остановке. Держать ровное вращение в пустоте
+ * не стоит ничего, и там они молчат.
+ */
+function spinAxis(ship, axis, target, accel, dt) {
+  const r = ship.rot, T = ship.torq;
+  const lagK = SHIP.rcsLag > 0 ? 1 - Math.exp(-dt / SHIP.rcsLag) : 1;
+  const u = clamp((target - r[axis]) / (accel * SHIP.rcsBand), -1, 1);
+  T[axis] += (u - T[axis]) * lagK;
+  r[axis] += T[axis] * accel * dt;
+  ship.rcs[axis] = Math.abs(T[axis]) > 0.12 ? Math.sign(T[axis]) : 0;
+}
 
 export function makeShip() {
   const s = {
@@ -107,6 +156,9 @@ export function makeShip() {
     boostPunch: 0,
     boostLock: false,   // заряд опустошён: ждём boostArm
     rot: { pitch: 0, yaw: 0, roll: 0 },
+    // Момент маневровых по осям в долях полного, −1..1: он отстаёт от
+    // просимого на задержку маневровых (SHIP.rcsLag).
+    torq: { pitch: 0, yaw: 0, roll: 0 },
     // Куда сейчас работают маневровые по каждой оси: -1, 0 или +1.
     // Это состояние МОДЕЛИ, а не картинки: сопла пыхают, когда момент
     // приложен, то есть на раскрутке и на остановке. Держать постоянное
@@ -226,20 +278,19 @@ export function updateShip(ship, dt, field = null) {
 
   const r = ship.rot;
   const q = ship.rcs;
+  if (!ship.torq) ship.torq = { pitch: 0, yaw: 0, roll: 0 };
   if (stunned) {
     const k = Math.max(0, 1 - SHIP.tumbleDamp * dt);
     r.pitch *= k; r.yaw *= k; r.roll *= k;
     q.pitch = q.yaw = q.roll = 0;       // управления нет — и сопла молчат
+    ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
   } else {
-    // Постоянный момент: угловая скорость набирается и гасится ровно,
-    // без рывка в первый кадр (см. rotRamp).
-    const wp = c.pitch * SHIP.pitchRate, wy = c.yaw * SHIP.yawRate, wr = c.roll * SHIP.rollRate;
-    q.pitch = torqueDir(r.pitch, wp, SHIP.pitchAccel * dt);
-    q.yaw = torqueDir(r.yaw, wy, SHIP.yawAccel * dt);
-    q.roll = torqueDir(r.roll, wr, SHIP.rollAccel * dt);
-    r.pitch = rampTo(r.pitch, wp, SHIP.pitchAccel * dt);
-    r.yaw = rampTo(r.yaw, wy, SHIP.yawAccel * dt);
-    r.roll = rampTo(r.roll, wr, SHIP.rollAccel * dt);
+    // Ручка задаёт угловую СКОРОСТЬ, маневровые дают МОМЕНТ — с
+    // задержкой и с регулятором, который доводит скорость до заданной
+    // (spinAxis).
+    spinAxis(ship, 'pitch', c.pitch * SHIP.pitchRate, SHIP.pitchAccel, dt);
+    spinAxis(ship, 'yaw', c.yaw * SHIP.yawRate, SHIP.yawAccel, dt);
+    spinAxis(ship, 'roll', c.roll * SHIP.rollRate, SHIP.rollAccel, dt);
   }
   rotateBasis(ship.basis, r.pitch * dt, r.yaw * dt, r.roll * dt);
 
@@ -460,4 +511,8 @@ export function placeShip(ship, pos, basis) {
   ship.damp = true;
   ship.lift = 0;
   ship.rot.pitch = ship.rot.yaw = ship.rot.roll = 0;
+  // И момент маневровых: он отстаёт от просимого (SHIP.rcsLag), и без
+  // этого сопла ещё секунду гасили бы вращение, которого уже нет.
+  if (ship.torq) ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
+  if (ship.rcs) ship.rcs.pitch = ship.rcs.yaw = ship.rcs.roll = 0;
 }

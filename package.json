@@ -18,6 +18,7 @@
     "city": "node tools/city.mjs",
     "nature": "node tools/nature.mjs",
     "ground": "node tools/ground.mjs",
+    "cabin": "node tools/cabin.mjs",
     "cityplan": "node tools/cityplan.mjs",
     "api:export": "node tools/export.mjs",
     "api:setup": "node tools/export.mjs && node tools/php.mjs server/cli/setup.php",

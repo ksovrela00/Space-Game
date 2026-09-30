@@ -42,19 +42,21 @@
       'sound', 'vec3'
     ],
     'game/': [
-      'anchor', 'audio', 'bodyinfo', 'clock', 'docking', 'dust', 'entry', 'flow',
+      'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
+      'entry', 'flow',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
       'warp', 'weapons', 'world'
     ],
     'gl/': [
-      'bake', 'citymesh', 'context', 'detail', 'flora', 'gputime', 'ground',
+      'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
+      'forestworker', 'gputime', 'ground',
       'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
       'quadtree', 'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
-      'tiles', 'tileworker'
+      'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [
-      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data',
+      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
       'nature.parts', 'ships', 'station.parts', 'stations'
     ],
     'net/': [
@@ -64,7 +66,7 @@
       'camera', 'clip', 'planetview', 'renderer', 'starfield'
     ],
     'ui/': [
-      'debug', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'theme',
+      'debug', 'displays', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'theme',
       'touch'
     ]
   };
@@ -72,9 +74,13 @@
   // Поток сборки плиток живёт по своим правилам: внутри рабочих потоков
   // таблицы импортов нет как явления. Его файлы обновляются иначе — см.
   // ниже.
+  // Поток дальнего леса (js/gl/forestworker.js) тянет за собой расстановку
+  // растений, а с ней — модели и профиль устройства: их тоже освежаем.
   var INWORKER = [
     'gl/bake', 'gl/ground', 'gl/icosphere', 'gl/quadtree', 'gl/terrain',
-    'gl/tilegeo', 'gl/tileworker'
+    'gl/tilegeo', 'gl/tileworker',
+    'gl/forest', 'gl/forestworker', 'gl/flora', 'gl/mesh',
+    'models/nature.parts', 'core/quality'
   ];
 
   var path = function (p) { return 'js/' + p + '.js'; };

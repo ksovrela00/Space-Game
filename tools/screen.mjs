@@ -328,6 +328,71 @@ const SCENES = {
         });
     `,
   },
+  giant: {
+    url: '&surface=clipmap',
+    title: 'корабль висит над лесом в полусотне метров: вид от третьего лица',
+    run: `
+      liftoff();
+      // Тот самый кадр, с которого началась работа над масштабом:
+      // корабль в пятидесяти метрах над редколесьем, вид из-за спины.
+      // Солнце за камерой (отворот на 150°): тень корабля ложится
+      // вперёд, под ним, и её видно из-под брюха.
+      //
+      // Камера ставится под корпус сразу, а не ждёт полторы секунды
+      // своего перелёта (js/game/chase.js, swing): в программном
+      // рендере это полторы сотни кадров и шесть минут. Сам перелёт
+      // проверяется в tools/test.mjs, здесь нужен только кадр.
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        0.051, 32, 150, 0)
+        .then(() => {
+          GAME.state.view = 'chase';
+          // Камера садится на место сразу: корабль сюда телепортирован,
+          // и тяжёлая камера догоняла бы его крен ещё секунду — горизонт
+          // на снимке вышел бы заваленным (так и вышло в первый раз).
+          GAME.chase.ready = false;
+          GAME.chase.below = true; GAME.chase.low = 1;
+          frames(24);
+        });
+    `,
+  },
+  giantdusk: {
+    url: '&surface=clipmap',
+    title: 'тот же корабль ночью и сбоку: окна, мостик, огни',
+    run: `
+      liftoff();
+      // Пара к сцене giant. Окна — на бортах, и из-за спины их не видно
+      // вовсе: смотреть надо сбоку, как при осмотре правой кнопкой. А
+      // светятся они по-настоящему только в сумерках: днём окно темнее
+      // обшивки под солнцем (js/models/hulldetail.js, winGlow).
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        // Солнце глубоко под горизонтом. Место подбирается с допуском в
+        // девять градусов, и «минус четыре» дважды подряд дали солнце
+        // чуть НАД горизонтом: земля уже в тени, а вертикальный борт
+        // залит низким светом целиком — так на закате горят стены домов.
+        // Окна на таком борту честно темнее обшивки, и их свечения не
+        // видно вовсе. Ночь его показывает.
+        0.051, -20, 150, 0)
+        .then(() => {
+          GAME.state.view = 'chase';
+          GAME.chase.ready = false;
+          GAME.chase.below = true; GAME.chase.low = 1;
+          // Осмотр сам возвращается за спину, стоит отпустить кнопку, —
+          // поэтому держится на каждом шаге ожидания.
+          const hold = window.__hold;
+          window.__hold = () => { hold(); GAME.camOrbit.yaw = 1.05; GAME.camOrbit.pitch = 0.12; };
+          window.__hold();
+          frames(24);
+        });
+    `,
+  },
   ground: {
     url: '&surface=clipmap',
     title: 'грунт с восьмидесяти метров: зерно и цвет земли',
@@ -421,6 +486,84 @@ const SCENES = {
       const st = GAME.world.stations[0];
       aimAt(st, 14);
       GAME.state.view = 'cockpit';
+    `,
+  },
+  // Кабина с поворотом головы: осмотр сам возвращается прямо, стоит
+  // отпустить кнопку, поэтому поворот держится на каждом шаге ожидания.
+  cockpitleft: {
+    title: 'кабина: взгляд влево и вниз — пульт, РУД, боковое окно',
+    run: `
+      liftoff();
+      aimAt(GAME.world.stations[0], 14);
+      GAME.state.view = 'cockpit';
+      const hold = window.__hold;
+      window.__hold = () => { if (hold) hold(); GAME.camOrbit.yaw = -1.05; GAME.camOrbit.pitch = 0.5; };
+      for (let i = 0; i < 10; i++) { window.__hold(); frames(1); }
+    `,
+  },
+  cockpitright: {
+    title: 'кабина: взгляд вправо и вниз — ручка управления, пульт',
+    run: `
+      liftoff();
+      aimAt(GAME.world.stations[0], 14);
+      GAME.state.view = 'cockpit';
+      GAME.ship.control.roll = 1; GAME.yoke.roll = 0.3;
+      const hold = window.__hold;
+      window.__hold = () => { if (hold) hold(); GAME.camOrbit.yaw = 0.75; GAME.camOrbit.pitch = -0.6; };
+      for (let i = 0; i < 10; i++) { window.__hold(); frames(1); }
+    `,
+  },
+  cockpitup: {
+    title: 'кабина: взгляд вверх — стекло над головой и пульт',
+    run: `
+      liftoff();
+      aimAt(GAME.world.stations[0], 14);
+      GAME.state.view = 'cockpit';
+      const hold = window.__hold;
+      window.__hold = () => { if (hold) hold(); GAME.camOrbit.yaw = 0.3; GAME.camOrbit.pitch = -0.92; };
+      for (let i = 0; i < 10; i++) { window.__hold(); frames(1); }
+    `,
+  },
+  cockpitday: {
+    url: '&surface=clipmap',
+    title: 'кабина днём у земли: солнце сквозь переплёт',
+    run: `
+      liftoff();
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        0.051, 38, 25, 0)
+        .then(() => { GAME.state.view = 'cockpit'; frames(12); });
+    `,
+  },
+  cockpitsun: {
+    url: '&surface=clipmap',
+    title: 'кабина: солнце сзади сверху — тени переплёта на доске',
+    run: `
+      liftoff();
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        0.051, 62, 160, 0)
+        .then(() => { GAME.state.view = 'cockpit'; frames(12); });
+    `,
+  },
+  cockpitnight: {
+    url: '&surface=clipmap',
+    title: 'кабина ночью: лампы, подсветка доски и свет экранов',
+    run: `
+      liftoff();
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g < 0.6 ? g * 0.01 : g * (flat(t, b, d) < 0.02 ? 1 : 0.05);
+        },
+        0.051, -20, 150, 0)
+        .then(() => { GAME.state.view = 'cockpit'; frames(12); });
     `,
   },
   map: {
@@ -1037,12 +1180,29 @@ try {
         overKm: near && +near.d.toFixed(3),
         lookDeg: u && +(Math.asin(Math.max(-1, Math.min(1,
           f.x * u.x + f.y * u.y + f.z * u.z))) * 180 / Math.PI).toFixed(1),
-        flora: st.flora, rocks: st.rocks, patches: st.patches,
+        flora: st.flora, rocks: st.rocks, patches: st.patches, forest: st.forest,
+        // Камера от третьего лица: ушла ли под корпус, насколько её
+        // подняла земля, и что метёт струя.
+        cam: GAME.chase && {
+          low: +GAME.chase.low.toFixed(2), lift: +(GAME.chase.lift * 1000).toFixed(1),
+          altM: near && +((Math.hypot(GAME.camera.pos.x - near.b.pos.x,
+            GAME.camera.pos.y - near.b.pos.y, GAME.camera.pos.z - near.b.pos.z)
+            - window.__surf.groundRadius(near.b, window.__surf.localDir(near.b, GAME.camera.pos)))
+            * 1000).toFixed(1),
+        },
+        dust: GAME.dust && { n: GAME.dust.list.length, air: GAME.dust.air,
+          ringM: +(GAME.dust.ring * 1000).toFixed(0) },
         tiles: st.tiles && { drawn: st.tiles.drawn, level: st.tiles.level },
         polys: st.polys, items: st.items,
       });
     `);
     console.log('поверхность:', info);
+  }
+  // Кабина: собрались ли её шейдеры (мок GL в tools/gl.mjs их не
+  // компилирует — ошибку GLSL видно только здесь), рисуются ли экраны.
+  if (process.env.CABINDBG) {
+    const info = await run(cdp, `return JSON.stringify(GAME.renderStats && GAME.renderStats.cabin);`);
+    console.log('кабина:', info);
   }
   if (process.env.CITYDBG) {
     const info = await run(cdp, `

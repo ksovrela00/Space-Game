@@ -11,17 +11,11 @@ import { SLOT } from '../models/stations.js';
 import { targetLabel, targetKind } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
-import { dirToWorld } from '../core/basis.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK } from './theme.js';
 import { Q } from '../core/quality.js';
 import { L, numLocale } from '../core/lang.js';
-import {
-  engineScreen, targetScreen, scopeScreen, commsScreen, systemsScreen,
-} from './panels.js';
-
-// Палитра и софт экранов кабины живут отдельно: их делят два вида —
-// угловые панели от третьего лица (здесь) и мониторы приборной доски
-// (js/ui/panels.js).
+// Палитра живёт отдельно (js/ui/theme.js): её делят угловые панели
+// (здесь) и мониторы приборной доски кабины (js/ui/panels.js).
 const TAU = Math.PI * 2;
 
 // Размеры угловых панелей в СВОИХ пикселях: на экран они попадают через
@@ -66,15 +60,6 @@ const _vm = { x: 0, y: 0 };
 const _pt = { x: 0, y: 0 };
 const _pp = { x: 0, y: 0 };
 const _ga = { x: 0, y: 0 };
-// Точки под приборы на доске кабины: та же экономия, что и везде —
-// вектор на кадр это мусор в куче шестьдесят раз в секунду.
-const _pw = { x: 0, y: 0, z: 0 };
-const _p0 = { x: 0, y: 0 };
-const _p1 = { x: 0, y: 0 };
-const _p2 = { x: 0, y: 0 };
-// Размер блока в пикселях. На экране кабины он растягивается на всю
-// бухту (её размер приходит из js/models/cockpit.js), поэтому важны
-// только ПРОПОРЦИИ: бухты под них и сделаны.
 
 export const fmtDist = (km) => {
   if (!isFinite(km)) return '—';
@@ -218,26 +203,11 @@ export function drawHud(r, game) {
   // закрепиться. Теперь панели стоят на месте всегда.
   const approach = !!(game.capture && state.mode === 'flight');
 
-  // Приборы: от третьего лица — по углам экрана, в кабине — НА ДОСКЕ.
-  // Рисует их один и тот же код: разница только в преобразовании
-  // холста, которое ставит onPanel.
-  const slots = state.view === 'cockpit' && game.cockpit ? game.cockpit.slots : null;
-  if (slots) {
-    // В кабине приборы — это СОФТ В МОНИТОРАХ (js/ui/panels.js), а не
-    // те же угловые панели, положенные на доску: у монитора есть корпус,
-    // заголовок, сетка подложки и своя вёрстка. Размер блока в пикселях
-    // выбран по пропорции бухты — растянется он на неё целиком.
-    onPanel(ctx, cam, ship, slots.left, 260, 222,
-      () => engineScreen(ctx, 260, 222, game));
-    onPanel(ctx, cam, ship, slots.right, 340, 170,
-      () => targetScreen(ctx, 340, 170, game, target));
-    onPanel(ctx, cam, ship, slots.mid, 260, 260,
-      () => scopeScreen(ctx, 260, 260, game));
-    onPanel(ctx, cam, ship, slots.upLeft, 280, 175,
-      () => commsScreen(ctx, 280, 175, game));
-    onPanel(ctx, cam, ship, slots.upRight, 280, 175,
-      () => systemsScreen(ctx, 280, 175, game));
-  } else {
+  // Приборы: от третьего лица — по углам экрана. В кабине их здесь нет
+  // вовсе: там они — картинка на мониторах доски (js/ui/panels.js,
+  // js/gl/cabin.js), текстурой на стекле, а не наклейкой поверх кадра.
+  const onBoard = state.view === 'cockpit' && !!game.cockpit;
+  if (!onBoard) {
     // Угловые панели рисуются в своих пикселях и ПРИЖИМАЮТСЯ к углам
     // через преобразование холста. Масштаб берётся из профиля
     // устройства: на телефоне в горизонте всего 393 точки высоты, и
@@ -285,9 +255,9 @@ export function drawHud(r, game) {
   if (game.dockAssist) drawDockAssist(ctx, w / 2, h / 2 - sc(150), game.dockAssist);
 
   // --- сообщения ---
-  // В кабине они уже стоят на верхнем левом табло (drawCommsBlock):
-  // одно и то же в двух местах хуже, чем в одном.
-  if (!slots) {
+  // В кабине они уже стоят на табло козырька: одно и то же в двух местах
+  // хуже, чем в одном.
+  if (!onBoard) {
     ctx.font = fnt(13);
     ctx.textAlign = 'left';
     let my = sc(30) + 18;
@@ -645,62 +615,6 @@ function drawGroundMark(ctx, cam, game) {
     }
   }
   ctx.restore();
-}
-
-/**
- * Приборы НА ДОСКЕ: блок, нарисованный в своих пикселях, кладётся на
- * плоскость приборной доски кабины.
- *
- * Зачем не просто нарисовать те же панели по углам экрана. В кокпите
- * доска — настоящая геометрия (js/models/cockpit.js), и показания,
- * висящие поверх неё ровным прямоугольником, сразу читаются как
- * наклейка: голова поворачивается, доска уезжает, а цифры стоят.
- * Здесь вместо этого берутся три точки самой доски — её центр и две
- * оси, — проецируются на экран, и по ним строится преобразование
- * холста. Дальше блок рисуется теми же вызовами, что и от третьего
- * лица, но ложится на доску вместе с её наклоном и перспективой.
- *
- * Приближение здесь одно: внутри блока перспектива считается линейной.
- * На куске доски в четверть метра разница меньше пикселя.
- *
- * @returns false, если доска ушла за спину — рисовать нечего.
- */
-function onPanel(ctx, cam, ship, slot, bw, bh, draw) {
-  if (!slot) return false;
-  const b = ship.basis;
-  // Блок растягивается на бухту целиком: по ширине — по её ширине, по
-  // высоте — по её высоте. Пропорции блоков под бухты и подобраны.
-  const sx = slot.w / bw, sy = slot.h / bh;                      // километров доски на пиксель блока
-  const put = (kx, ky, out) => {
-    // Точка доски в осях корабля -> направление в мире -> экран.
-    const p = slot.pos, r = slot.right, u = slot.up;
-    const lx = p.x + r.x * kx + u.x * ky;
-    const ly = p.y + r.y * kx + u.y * ky;
-    const lz = p.z + r.z * kx + u.z * ky;
-    dirToWorld(b, { x: lx, y: ly, z: lz }, _pw);
-    // projectDir ждёт ЕДИНИЧНОЕ направление: у него внутри есть подпорка
-    // z снизу (0.02), рассчитанная на длину 1. Точка доски — это метры,
-    // то есть тысячные километра, и без нормировки подпорка съела бы всю
-    // перспективу, схлопнув приборы в точку у центра кадра.
-    const ln = Math.hypot(_pw.x, _pw.y, _pw.z) || 1;
-    return projectDir(cam, _pw.x / ln, _pw.y / ln, _pw.z / ln, out);
-  };
-  const c = put(0, 0, _p0);
-  if (c.back) return false;
-  const ex = put(sx * bw * 0.5, 0, _p1);
-  const ey = put(0, -sy * bh * 0.5, _p2);
-  if (ex.back || ey.back) return false;
-  const ax = (ex.x - c.x) / (bw * 0.5), ay = (ex.y - c.y) / (bw * 0.5);
-  const cx = (ey.x - c.x) / (bh * 0.5), cy = (ey.y - c.y) / (bh * 0.5);
-  // Доска почти в профиль: блок вырождается в полоску, читать нечего.
-  if (Math.abs(ax * cy - ay * cx) < 0.02) return false;
-
-  ctx.save();
-  ctx.transform(ax, ay, cx, cy, c.x - (bw * 0.5) * ax - (bh * 0.5) * cx,
-    c.y - (bw * 0.5) * ay - (bh * 0.5) * cy);
-  draw();
-  ctx.restore();
-  return true;
 }
 
 /** Левый блок: тяга, скорость, форсаж, корпус, щит, шасси. */

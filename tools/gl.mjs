@@ -26,7 +26,18 @@ import {
 } from '../js/gl/shaders.js';
 import { shockGeometry } from '../js/gl/mesh.js';
 import { altitudeOf } from '../js/game/surface.js';
-import { buildCobra } from '../js/models/ships.js';
+import { buildCobra, HULL_HALF } from '../js/models/ships.js';
+import { MAT, DETAIL, lightLevel, BLINK } from '../js/models/hulldetail.js';
+import { HULL_GLSL, HULL } from '../js/gl/hull.js';
+import { WASH_GLSL } from '../js/gl/wash.js';
+import { CABIN_FS as CABIN_FS_SRC } from '../js/gl/cabin.js';
+import {
+  forestChunk, chunksAround, farRadius, thinAt, FAR as FOREST_FAR, cellStep, TREE_PROFILES, TREE_MODELS,
+} from '../js/gl/forest.js';
+import { treeBudgetR, smooth01 } from '../js/gl/flora.js';
+import { BEND, WASH } from '../js/game/downwash.js';
+import { buildFlatMesh } from '../js/gl/mesh.js';
+import { scatterRocks, buildRockGeometry } from '../js/gl/rocks.js';
 import { ENTRY, airDensity } from '../js/game/entry.js';
 import { ATMO_THICK, ATMO_GLOW } from '../js/gl/scene.js';
 import { skyFor, skyUniforms, SKY_BLOBS, SKY_GAIN, SKY_GLSL } from '../js/gl/nebula.js';
@@ -824,26 +835,47 @@ console.log('\n== растительность ==');
   }
 
   // Прореживание на высоте — ПОДМНОЖЕСТВО густой решётки: на снижении
-  // деревья появляются, а не переставляются.
+  // растения появляются, а не переставляются. Живёт оно теперь у кустов:
+  // деревья вдали рисует дальний лес (js/gl/forest.js), и их поле не
+  // прореживается никогда (см. ниже).
   {
-    const L = FLORA.layers[0];
-    const rNear = L.radiusOf(0.05), rFar = L.radiusOf(1.2);
+    // На компьютере бюджета кустам хватает с запасом, и прореживания нет
+    // вовсе — проверяется оно на бюджете телефона урезанном вдвое.
+    const keepMax = FLORA.max;
+    FLORA.max = 150;
+    const L = FLORA.layers[1];
+    const altN = 0.01, altF = L.maxAlt * 0.95;
+    const rNear = L.radiusOf(altN), rFar = L.radiusOf(altF);
     const sNear = strideFor(L, rNear), sFar = strideFor(L, rFar);
-    const near = scatterFlora(sea, spot, 0.05).filter((p) => p.kind === 'tree');
-    const far = scatterFlora(sea, spot, 1.2).filter((p) => p.kind === 'tree');
+    const near = scatterFlora(sea, spot, altN).filter((p) => p.kind === L.kind);
+    const far = scatterFlora(sea, spot, altF).filter((p) => p.kind === L.kind);
     const key = (p) => p.dir.x.toFixed(9) + '|' + p.dir.y.toFixed(9);
     const setN = new Set(near.map(key));
-    // Берём только те дальние деревья, что попали бы и в ближнее поле.
-    // Только внутри ближнего поля И вне его КРОМКИ: по краю лес
-    // намеренно редеет (scatterFlora, fade), и редеет он по радиусу
-    // поля — то есть у ближнего и дальнего края разные. Совпадать там
-    // ничего и не должно.
     const inRange = far.filter((p) => Math.acos(Math.max(-1, Math.min(1,
       p.dir.x * spot.x + p.dir.y * spot.y + p.dir.z * spot.z))) * R < rNear * 0.6);
     const kept = inRange.filter((p) => setN.has(key(p))).length;
+    FLORA.max = keepMax;
     ok(sFar > sNear && inRange.length > 0 && kept === inRange.length,
-      `с высоты шаг решётки ${sNear} -> ${sFar}, и все ${kept} дальних деревьев ` +
+      `кусты с высоты: шаг решётки ${sNear} -> ${sFar}, и все ${kept} дальних кустов ` +
       `в пределах ближнего поля стоят там же — это подмножество, а не новая расстановка`);
+  }
+
+  // Поле ДЕРЕВЬЕВ не прореживается и не обрезается бюджетом ни на какой
+  // высоте: его радиус выведен из бюджета так, чтобы при густоте 1 в него
+  // влезали все деревья. Только тогда дальний лес точно знает, какие
+  // деревья взяло поле.
+  {
+    const L = FLORA.layers[0];
+    let worst = 0, strided = 0;
+    for (const alt of [0.004, 0.05, 0.2, 0.5, 1, 2, L.maxAlt]) {
+      const r = L.radiusOf(alt);
+      if (strideFor(L, r) !== 1) strided++;
+      worst = Math.max(worst, Math.PI * (r / L.cell) ** 2 * L.chance);
+    }
+    const cap = FLORA.max * L.share;
+    ok(strided === 0 && worst <= cap + 1e-6 && Math.abs(L.radiusOf(2) - treeBudgetR()) < 1e-12,
+      `поле деревьев на любой высоте без прореживания: радиус не больше ${(treeBudgetR() * 1000).toFixed(0)} м, ` +
+      `и даже в сплошном лесу в него встаёт ${worst.toFixed(0)} деревьев при бюджете ${cap}`);
   }
 
   // Геометрия: растения стоят НА ГРУНТЕ той детализации, которой он
@@ -874,6 +906,47 @@ console.log('\n== растительность ==');
       `растения от ${below.toFixed(1)} до ${above.toFixed(1)} м над грунтом`);
     ok(geo.faces > 1000 && geo.faces < 200000,
       `граней в поле ${geo.faces} (у города их полмиллиона)`);
+
+    // Растения освещены солнцем, а не светятся сами. Альфа цвета — это
+    // ДОЛЯ СВЕЧЕНИЯ (MESH_FS), и у леса там стояла единица: у дерева не
+    // было ни солнечной, ни теневой стороны, и в кадре оно выходило
+    // плоской вырезкой. То же было у камней.
+    let glowF = 0;
+    for (let i = 3; i < geo.colors.length; i += 4) if (geo.colors[i] !== 0) glowF++;
+    const rg = buildRockGeometry(sea, scatterRocks(sea, spot, 0.2), { x: spot.x, y: spot.y, z: spot.z });
+    let glowR = 0;
+    for (let i = 3; i < rg.colors.length; i += 4) if (rg.colors[i] !== 0) glowR++;
+    ok(glowF === 0 && glowR === 0 && rg.colors.length > 0,
+      'растения и камни освещены солнцем: ни одна вершина не светится сама');
+
+    // Изгиб под струёй (js/gl/wash.js): у каждой вершины растения — доля
+    // высоты от комля и высота растения; у теней — нули, тень не гнётся.
+    const nv = geo.positions.length / 3;
+    const b = geo.bend;
+    let bad = 0, top = 0, flat = 0, hMin = Infinity, hMax = 0;
+    for (let i = 0; i < nv; i++) {
+      const fr = b[i * 3], hh = b[i * 3 + 1], ph = b[i * 3 + 2];
+      if (!(fr >= 0 && fr <= 1 && ph >= 0 && ph < 1)) bad++;
+      if (fr > 0.999) top++;
+      if (hh === 0) flat++;
+      else { hMin = Math.min(hMin, hh); hMax = Math.max(hMax, hh); }
+    }
+    const L0 = FLORA.layers;
+    const lo = Math.min(...L0.map((l) => l.hMin)), hi = Math.max(...L0.map((l) => l.hMax));
+    ok(b && b.length === nv * 3 && bad === 0 && top > 0 && flat > 0 &&
+       hMin >= lo * 0.99 && hMax <= hi * 1.01,
+      `у растений есть изгиб: макушек ${top}, неподвижных вершин ${flat} (комли и тени), ` +
+      `высоты ${(hMin * 1000).toFixed(1)}–${(hMax * 1000).toFixed(1)} м`);
+  }
+
+  // Шейдер гнёт тем же законом, что посчитан в js/game/downwash.js: числа
+  // в нём не переписаны руками, а вставлены из той же таблицы.
+  {
+    const DEG = Math.PI / 180;
+    const has = (name, v) => new RegExp(`${name} = ${String(v).replace('.', '\\.')}`).test(WASH_GLSL);
+    ok(has('W_TREE_CAP', BEND.tree.cap * DEG) && has('W_GRASS_REF', BEND.grass.ref * DEG) &&
+       has('W_SPREAD', WASH.spread) && /washBend/.test(MESH_VS) && /aBend/.test(MESH_VS),
+      'изгиб в шейдере взят из той же таблицы, что и в физике струи');
   }
 
   // Город расчищен: на перроне не растёт ничего.
@@ -887,6 +960,242 @@ console.log('\n== растительность ==');
       ok(true, 'города с площадкой в системе нет — проверять нечего');
     }
   }
+}
+
+// --- 8b2. Обшивка корабля ------------------------------------------------------
+//
+// Деталь человеческого размера (js/models/hulldetail.js, js/gl/hull.js):
+// мостик вместо фонаря истребителя, окна по бортам, сопла подъёмных на
+// днище, огни по правилам авиации. Проверяется, что всё это лежит НА
+// корпусе и там, где ему положено быть.
+console.log('\n== обшивка корабля ==');
+{
+  const hull = buildCobra();
+  const d = hull.detail;
+  const glass = hull.faces.filter((f) => f.mat === MAT.glass);
+  const inBox = glass.every((f) => f.v.every((i) => {
+    const q = hull.verts[i];
+    return Math.abs(q.x) < 0.007 && q.z > -0.02 && q.z < 0 && q.y > -0.004;
+  }));
+  ok(glass.length >= 20 && inBox && hull.faces.every((f) => f.mat === MAT.glass || f.mat === MAT.plate),
+    `фонарь истребителя стал мостиком: ${glass.length} граней стекла над серединой корпуса, ` +
+    `переплёт ${HULL.paneU}×${HULL.paneV} м`);
+
+  // Окна: каждое лежит НА грани корпуса — луч внутрь от середины окна
+  // упирается в обшивку через те самые три сантиметра зазора.
+  const dec = hull.decal;
+  const tri = (o, dd, a, b, c) => {
+    const e1 = v3(b.x - a.x, b.y - a.y, b.z - a.z), e2 = v3(c.x - a.x, c.y - a.y, c.z - a.z);
+    const pv = v3(dd.y * e2.z - dd.z * e2.y, dd.z * e2.x - dd.x * e2.z, dd.x * e2.y - dd.y * e2.x);
+    const det = e1.x * pv.x + e1.y * pv.y + e1.z * pv.z;
+    if (Math.abs(det) < 1e-18) return Infinity;
+    const tv = v3(o.x - a.x, o.y - a.y, o.z - a.z);
+    const u = (tv.x * pv.x + tv.y * pv.y + tv.z * pv.z) / det;
+    if (u < 0 || u > 1) return Infinity;
+    const qv = v3(tv.y * e1.z - tv.z * e1.y, tv.z * e1.x - tv.x * e1.z, tv.x * e1.y - tv.y * e1.x);
+    const w = (dd.x * qv.x + dd.y * qv.y + dd.z * qv.z) / det;
+    if (w < 0 || u + w > 1) return Infinity;
+    const t = (e2.x * qv.x + e2.y * qv.y + e2.z * qv.z) / det;
+    return t > 0 ? t : Infinity;
+  };
+  let onHull = 0, total = 0;
+  for (const f of dec.faces) {
+    const P = f.v.map((i) => dec.verts[i]);
+    const c = v3(P.reduce((s2, q) => s2 + q.x, 0) / 4, P.reduce((s2, q) => s2 + q.y, 0) / 4,
+      P.reduce((s2, q) => s2 + q.z, 0) / 4);
+    const inward = v3(-f.n.x, -f.n.y, -f.n.z);
+    let best = Infinity;
+    for (const g of hull.faces) {
+      for (let k = 1; k + 1 < g.v.length; k++) {
+        best = Math.min(best, tri(c, inward, hull.verts[g.v[0]], hull.verts[g.v[k]], hull.verts[g.v[k + 1]]));
+      }
+    }
+    total++;
+    if (Math.abs(best * 1000 - DETAIL.lift) < 0.01) onHull++;
+  }
+  ok(d.windows >= 30 && onHull === total && d.lit > d.windows * 0.5 && d.lit < d.windows,
+    `окон ${d.windows} (горит ${d.lit}), и все накладки — окна и сопла — лежат на обшивке ` +
+    `в ${DETAIL.lift * 100} см от неё`);
+
+  // Сопла подъёмных — на днище, парами по бортам.
+  const v = d.vents;
+  const paired = v.every((a) => v.some((b) => Math.abs(a.x + b.x) < 1e-6 && Math.abs(a.z - b.z) < 1e-6));
+  ok(v.length === 4 && paired && v.every((a) => a.y < 0),
+    `сопел подъёмных ${v.length}, парами с двух бортов, все на днище`);
+
+  // Огни: красный слева, зелёный справа (у этого корпуса правый борт —
+  // +X), белый на корме; вспышки на концах крыльев, маяки сверху и снизу.
+  const L = hull.navLights;
+  const red = L.find((l) => l.kind === 'nav' && l.color[0] > 0.9 && l.color[1] < 0.3);
+  const green = L.find((l) => l.kind === 'nav' && l.color[1] > 0.9 && l.color[0] < 0.3);
+  const white = L.find((l) => l.kind === 'nav' && l.color[0] > 0.9 && l.color[1] > 0.9);
+  const tip = HULL_HALF.x;
+  ok(red && green && white && red.pos.x < -tip * 0.98 && green.pos.x > tip * 0.98 &&
+     white.pos.z < -HULL_HALF.z * 0.95 &&
+     L.filter((l) => l.kind === 'strobe').length === 2 && L.filter((l) => l.kind === 'beacon').length === 2,
+    `огни по правилам: красный на ${(red.pos.x * 1000).toFixed(1)} м (левая консоль), зелёный на ` +
+    `${(green.pos.x * 1000).toFixed(1)} м, белый на корме; вспышки и маяки по паре`);
+
+  // Вспышки — двойные, 40–100 в минуту по FAR 25.1401.
+  let on = 0, flashes = 0, was = false;
+  const N = 12000;
+  for (let i = 0; i < N; i++) {
+    const t = i / N * BLINK.strobePeriod * 8;
+    const lit = lightLevel('strobe', t) > 0;
+    if (lit) on++;
+    if (lit && !was) flashes++;
+    was = lit;
+  }
+  const perMin = flashes / 2 / (BLINK.strobePeriod * 8) * 60;
+  ok(flashes === 16 && perMin >= 40 && perMin <= 100 && on / N < 0.15,
+    `вспышка двойная: ${perMin.toFixed(0)} пар в минуту, горит ${(on / N * 100).toFixed(0)}% времени`);
+
+  // Материал доезжает до видеокарты атрибутом, и у корпуса он есть, а у
+  // остального — нет (там шейдер видит ноль).
+  {
+    const bufs = new Map();
+    let cur = null;
+    const gl = {
+      ARRAY_BUFFER: 1, FLOAT: 2, TRIANGLES: 3,
+      createBuffer: () => ({}), bindBuffer: (t, b) => { cur = b; },
+      bufferData: (t, data) => { cur.data = data; },
+      createVertexArray: () => ({}), bindVertexArray: () => {},
+      enableVertexAttribArray: () => {},
+      vertexAttribPointer: (loc) => { bufs.set(loc, cur.data); },
+    };
+    buildFlatMesh(gl, { aPos: 0, aNormal: 1, aColor: 2, aMat: 5 }, hull);
+    const mat = bufs.get(5);
+    const kinds = new Set(mat ? Array.from(mat) : []);
+    const plain = new Map();
+    const gl2 = { ...gl, vertexAttribPointer: (loc) => { plain.set(loc, cur.data); } };
+    buildFlatMesh(gl2, { aPos: 0, aNormal: 1, aColor: 2, aMat: 5 },
+      { verts: hull.verts, faces: hull.faces.map((f) => ({ ...f, mat: 0 })) });
+    ok(mat && [MAT.plate, MAT.glass, MAT.vent, MAT.window].every((k) => kinds.has(k)) && !plain.has(5) &&
+       /hullDetail/.test(MESH_FS_DETAIL) && /uLiftGlow/.test(HULL_GLSL) && /uSkyK/.test(HULL_GLSL),
+      `у корпуса материал доезжает атрибутом (${[...kinds].sort().join(', ')}), у прочих сеток его нет`);
+  }
+}
+
+// --- 8b3. Дальний лес ---------------------------------------------------------
+//
+// Деревья до горизонта (js/gl/forest.js). Проверяется главное: это ТЕ ЖЕ
+// деревья, что в поле у корабля, и каждое рисуется ровно один раз —
+// либо полной моделью, либо силуэтом.
+console.log('\n== дальний лес ==');
+{
+  const worldF = makeSystem(0x1a7e);
+  const sea = worldF.planets.find((p) => p.kind === 'ocean');
+  const tf = makeTerrain(sea);
+  const R = sea.radius;
+  let spot = null, gBest = -1;
+  for (let i = 0; i < 12000; i++) {
+    const u = -1 + 2 * (i / 11999), a = i * 2.399963, s2 = Math.sqrt(Math.max(0, 1 - u * u));
+    const d = { x: s2 * Math.cos(a), y: u, z: s2 * Math.sin(a) };
+    const g = tf.floraAt(d.x, d.y, d.z);
+    if (g > gBest) { gBest = g; spot = d; }
+  }
+
+  // Дальность — из оптики: дерево среднего роста мельче pxMin пикселя.
+  const focal = 450 / Math.tan(34 * Math.PI / 180);
+  const rFar = farRadius(focal);
+  const px = FOREST_FAR.hMean * focal / rFar;
+  ok(Math.abs(px - FOREST_FAR.pxMin) < 1e-9 && rFar > 10 && rFar < 20,
+    `дальний лес до ${rFar.toFixed(1)} км: там дерево в ${FOREST_FAR.hMean * 1000} м — ` +
+    `${px.toFixed(1)} пикселя; прореживание с ${thinAt(focal).toFixed(1)} км`);
+
+  // Куски вокруг точки: круг покрыт целиком — всякая клетка решётки в
+  // круге принадлежит одному из кусков списка.
+  const list = chunksAround(sea, spot, 3);
+  const keys = new Set(list.map((c) => c.face + ':' + c.bi + ':' + c.bj));
+  const base = cellStep(sea);
+  let miss = 0;
+  for (let k = 0; k < 400; k++) {
+    const rr = Math.sqrt(k / 400) * 2.9, a = k * 2.399963;
+    const hp = Math.abs(spot.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const U = normalize(v3(hp.y * spot.z - hp.z * spot.y, hp.z * spot.x - hp.x * spot.z, hp.x * spot.y - hp.y * spot.x));
+    const V = v3(spot.y * U.z - spot.z * U.y, spot.z * U.x - spot.x * U.z, spot.x * U.y - spot.y * U.x);
+    const d = normalize(v3(spot.x + (U.x * Math.cos(a) + V.x * Math.sin(a)) * rr / R,
+      spot.y + (U.y * Math.cos(a) + V.y * Math.sin(a)) * rr / R, spot.z + (U.z * Math.cos(a) + V.z * Math.sin(a)) * rr / R));
+    const lk = cubeLookup(d.x, d.y, d.z);
+    const fu = Math.atan(lk.s) / (Math.PI / 4), fv = Math.atan(lk.t) / (Math.PI / 4);
+    const bi = Math.floor(Math.round(fu / base) / FOREST_FAR.chunk), bj = Math.floor(Math.round(fv / base) / FOREST_FAR.chunk);
+    if (!keys.has(lk.face + ':' + bi + ':' + bj)) miss++;
+  }
+  ok(miss === 0 && list.length > 0, `круг в 3 км покрыт ${list.length} кусками без дыр`);
+
+  // Те же деревья: у каждого дерева поля есть двойник в кусках — то же
+  // место, та же порода, тот же рост.
+  const chunks = list.filter((c) => c.dist < 2.5).map((c) => forestChunk(sea, c.face, c.bi, c.bj));
+  const all = [];
+  for (const ch of chunks) {
+    for (let k = 0; k < ch.n; k++) {
+      const o = k * 12;
+      all.push({
+        x: ch.inst[o] + ch.origin.x, y: ch.inst[o + 1] + ch.origin.y, z: ch.inst[o + 2] + ch.origin.z,
+        h: ch.inst[o + 3], model: ch.inst[o + 7], rank: ch.inst[o + 8], cls: ch.inst[o + 9], face: ch.face,
+      });
+    }
+  }
+  const alt = 0.02;
+  const nearList = scatterFlora(sea, spot, alt).filter((p) => p.kind === 'tree');
+  const L = FLORA.layers[0];
+  const rN = L.radiusOf(alt);
+  const dirOf = (q) => { const r = Math.hypot(q.x, q.y, q.z); return { x: q.x / r, y: q.y / r, z: q.z / r }; };
+  // Куски хранят место и рост во float32 (от своего начала — сотые доли
+  // миллиметра), поэтому двойник ищется ближайшим, с допуском в сантиметр.
+  const TOL = 0.00001 / R;
+  const twinOf = (d) => {
+    let best = null, bd = TOL;
+    for (const q of all) {
+      const e = dirOf(q);
+      const dd = Math.hypot(e.x - d.x, e.y - d.y, e.z - d.z);
+      if (dd < bd) { bd = dd; best = q; }
+    }
+    return best;
+  };
+  let twins = 0;
+  for (const p of nearList) {
+    const q = twinOf(p.dir);
+    if (q && Math.abs(q.h - p.height) < p.height * 1e-6 && TREE_MODELS[q.model].part === p.model) twins++;
+  }
+  ok(nearList.length > 50 && twins === nearList.length,
+    `все ${nearList.length} деревьев поля у корабля есть в дальнем лесу — то же место, порода и рост`);
+
+  // Каждое дерево — один раз: поле берёт его при ранге ≤ редения к краю,
+  // дальний лес — при ранге больше. Сверяется с настоящим составом поля.
+  const lk0 = cubeLookup(spot.x, spot.y, spot.z);
+  const inNearList = (d) => nearList.some((p) => Math.hypot(p.dir.x - d.x, p.dir.y - d.y, p.dir.z - d.z) < TOL);
+  let both = 0, none = 0, checked = 0;
+  for (const q of all) {
+    if (q.face !== lk0.face) continue;
+    const d = dirOf(q);
+    const far = Math.acos(Math.max(-1, Math.min(1, d.x * spot.x + d.y * spot.y + d.z * spot.z))) * R / rN;
+    if (far > 1.3) continue;
+    checked++;
+    const fade = far < 0.62 ? 1 : smooth01((1 - far) / 0.38);
+    const inNear = inNearList(d);
+    const inFar = q.rank > fade;
+    if (inNear && inFar) both++;
+    if (!inNear && !inFar) none++;
+  }
+  ok(checked > 100 && both === 0 && none === 0,
+    `на краю поля каждое из ${checked} деревьев рисуется ровно один раз: ни двойных, ни дыр`);
+
+  // Подрешётки для прореживания вдали: через одно — четверть деревьев,
+  // через три — шестнадцатая, и идут они в начале списка куска.
+  let n = 0, n1 = 0, n2 = 0, sorted = true;
+  for (const ch of chunks) {
+    n += ch.n; n1 += ch.n1; n2 += ch.n2;
+    for (let k = 1; k < ch.n; k++) if (ch.inst[k * 12 + 9] > ch.inst[(k - 1) * 12 + 9]) sorted = false;
+  }
+  ok(sorted && Math.abs(n1 / n - 0.25) < 0.06 && Math.abs(n2 / n - 1 / 16) < 0.03,
+    `подрешётки: через одно ${(n1 / n * 100).toFixed(1)}% деревьев, через три ` +
+    `${(n2 / n * 100).toFixed(1)}%; редкие — в начале списка`);
+
+  // Профили крон — из самих моделей, и все в разумных границах.
+  ok(TREE_PROFILES.length === TREE_MODELS.length && TREE_PROFILES.every(([y0, r0, y1, r1]) =>
+    y0 >= 0 && y0 < 0.9 && y1 >= y0 && y1 < 1 && r0 > 0.05 && r1 >= r0 && r1 < 0.5),
+    'профили крон: ' + TREE_MODELS.map((m, i) => `${m.name} ${TREE_PROFILES[i].map((v) => v.toFixed(2)).join('/')}`).join(', '));
 }
 
 // --- 8c. Бюджет детализации -------------------------------------------------
@@ -2606,6 +2915,9 @@ console.log('\n== мок GL: путь отрисовки ==');
     uniform1i: (loc, v) => {
       if (!loc) return;
       state.ints[loc.name] = v;
+      // Наибольшее за кадр: один и тот же uniform кадр ставит разным
+      // сеткам по-разному (фары светят на мир, но не на свой корпус).
+      if (state.intsMax) state.intsMax[loc.name] = Math.max(state.intsMax[loc.name] ?? -Infinity, v);
     },
     // Воздух уезжает четвёркой и тройкой чисел (js/gl/scene.js, setAir),
     // и проверкам нужны они целиком.
@@ -2644,6 +2956,8 @@ console.log('\n== мок GL: путь отрисовки ==');
       else state.skyBakes++;
     },
     generateMipmap: () => { state.mipmaps++; },
+    // Экраны кабины заливаются в атлас кусками (js/gl/cabin.js).
+    texSubImage2D: () => { state.texSubs = (state.texSubs || 0) + 1; },
     getParameter: () => 'mock-gpu',
     getExtension: () => null,
   };
@@ -2686,9 +3000,10 @@ console.log('\n== мок GL: путь отрисовки ==');
   cam.resize(1600, 900);
   const scene = new GlScene(canvas, cam, new Starfield(950, 0x51ee7));
   ok(scene.ok, 'сцена собралась: ' + (scene.error || 'шейдеры и буферы на месте'));
-  ok(state.programs === 16,
+  ok(state.programs === 20,
     `собрано программ: ${state.programs} (меш, звёзды, небо, запекание неба, полосы, тоннель, варп-тоннель, ` +
-    'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности, болты, щит)');
+    'пылинки, ореол, атмосфера, кольца, плазма входа, тень, запекание поверхности, болты, щит, дальний лес, ' +
+    'кабина, тень кабины, стекло фонаря)');
 
   const world = makeSystem(0x1a7e);
   const ship = makeShip();
@@ -2803,10 +3118,16 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(state.uni.uLampRange > 0 && state.uni.uLampPower > 0,
       `дальность и яркость доехали: ${state.uni.uLampRange} км`);
 
-    // А в кабине их нет: тот же кадр, другой вид.
+    // В кабине фары светят НАРУЖУ — мир ими освещён и из кокпита, — а
+    // саму кабину не освещают: лампы стоят в носу снаружи, и у шейдера
+    // кабины (js/gl/cabin.js) фар нет вовсе, только свои лампы.
     game.state.view = 'cockpit';
+    state.intsMax = {};
     frame();
-    ok(state.ints.uLampN === 0, 'в кабине фары в шейдер не уходят');
+    const lampsMax = state.intsMax.uLampN;
+    state.intsMax = null;
+    ok(lampsMax === 2 && !/\buLampN\b/.test(CABIN_FS_SRC),
+      'в кабине фары светят наружу (2 луча в общем шейдере), а кабину не освещают — у её шейдера их нет');
     game.state.view = view0;
     game.ship.lights = false;
 
@@ -3046,18 +3367,42 @@ console.log('\n== мок GL: путь отрисовки ==');
   // очистка глубины означала бы, что её съедает ближняя плоскость сцены.
   {
     const { buildCockpit, makeYoke } = await import('../js/models/cockpit.js');
+    const { makeDisplays } = await import('../js/ui/displays.js');
     game.cockpit = buildCockpit();
     game.yoke = makeYoke();
+    // Холсты экранов — пустышки: рисует на них софт (его проверяет
+    // tools/smoke.mjs), а здесь важно, что атлас заливается и ровно теми,
+    // кто перерисован.
+    game.displays = makeDisplays(game.cockpit, {
+      canvas: (w, h) => ({ width: w, height: h, getContext: () => null }),
+    });
+    for (const d of game.displays.list) d.dirty = true;
     game.state.view = 'cockpit';
+    const subs0 = state.texSubs || 0;
+    const nan0 = state.nan;
     scene.render(game);
     const inCockpit = scene.cabinDraws;
+    const uploaded = (state.texSubs || 0) - subs0;
+    const lamps = state.ints.uCabLampN;
+    scene.render(game);
+    const again = (state.texSubs || 0) - subs0 - uploaded;
+    const sunOn = scene.cabin.sunVis > 0.001;
     game.state.view = 'chase';
     scene.render(game);
     const inChase = scene.cabinDraws;
     game.state.view = 'cockpit';
-    ok(inCockpit === 2 && inChase === 0,
-      `кабина: ${inCockpit} вызова от первого лица (корпус и штурвал), ` +
+    // Проход: тень (корпус, ручка, РУД — если солнце видно), те же три
+    // сетки в кадр и стекло последним.
+    // Проход рубки: тень (пост, ручка, РУД и корпус — если солнце видно),
+    // свой корпус изнутри, те же три сетки поста и стекло последним.
+    ok(inCockpit === (sunOn ? 9 : 5) && inChase === 0,
+      `рубка: ${inCockpit} вызовов от первого лица (${sunOn ? 'тень, ' : ''}корпус изнутри, пост, ручка, РУД, стекло), ` +
       `${inChase} от третьего`);
+    ok(uploaded === game.displays.list.length && again === 0,
+      `экраны: в атлас ушли все ${uploaded} перерисованных, а в следующем кадре без перерисовки — ${again}`);
+    ok(lamps === game.cockpit.lights.length && state.nan === nan0,
+      `лампы кабины уехали в шейдер (${lamps}), и ни одного NaN`);
+    game.displays = null;
   }
 
   // Пылинки за бортом (js/game/flow.js): то, чем в пустоте видно
@@ -3689,14 +4034,16 @@ console.log('\n== мок GL: путь отрисовки ==');
   // отрисовки идёт прогрев — иначе прыжок только переносил бы «прогрузку»
   // на момент выхода.
   {
-    const normal = frame();
+    // Кабина рисуется и под тоннелем (она внутри корабля), поэтому её
+    // вызовы из сравнения вычитаются: меряется МИР, а не кабина.
+    const normal = frame() - (scene.cabinDraws || 0);
     scene.forgetSystem(world);
     game.warp = makeWarp();
     startWarp(game.warp, makeGalaxy().systems[0], makeGalaxy().systems[3]);
     game.warp.phase = 'tunnel';
     game.warp.t = game.warp.total * 0.5;     // середина: тоннель глухой
     game.warp.power = warpPower(game.warp);
-    const covered = frame();
+    const covered = frame() - (scene.cabinDraws || 0);
     const warmed = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
     ok(warpPower(game.warp) > 0.97 && covered < normal / 3 && covered > 0 && warmed > 0,
       `в тоннеле кадр из ${covered} вызовов против ${normal} обычных, ` +
@@ -3894,6 +4241,48 @@ console.log('\n== мок GL: путь отрисовки ==');
     for (let i = 0; i < 4; i++) scene.render(game);
     ok(!scene.city.mesh && scene.cityDraws === 0,
       'издалека город не держат в памяти и не рисуют');
+  }
+
+  // Дальний лес в кадре (js/gl/forestfield.js): куски собираются (под
+  // node потоков нет — по одному за кадр), рисуются ОДНИМ вызовом на кусок
+  // с экземплярами, и числа у них настоящие.
+  {
+    const sea = world.planets.find((b) => b.kind === 'ocean');
+    const tf = makeTerrain(sea);
+    let spot = null, gBest = -1;
+    for (let i = 0; i < 6000; i++) {
+      const u = -1 + 2 * (i / 5999), a = i * 2.399963, s2 = Math.sqrt(Math.max(0, 1 - u * u));
+      const d = { x: s2 * Math.cos(a), y: u, z: s2 * Math.sin(a) };
+      const g = tf.floraAt(d.x, d.y, d.z);
+      if (g > gBest) { gBest = g; spot = d; }
+    }
+    const f = scene.forest;
+    ok(!!f && !f.pool, 'дальний лес собран; под node без потоков он строится прямо в кадре');
+    const inst = [];
+    const keep = impl.drawArraysInstanced;
+    impl.drawArraysInstanced = (mode, first, count, n) => { inst.push({ count, n }); };
+    for (let i = 0; i < 8; i++) f.update(sea, spot, 0.05, cam.focal);
+    // Камера — в полусотне метров над этим местом, взгляд по горизонту.
+    const bb = bodyBasis(sea, makeBasis());
+    const gr = tf.displace(spot.x, spot.y, spot.z);
+    const loc = { x: spot.x * sea.radius * (1 + gr), y: spot.y * sea.radius * (1 + gr), z: spot.z * sea.radius * (1 + gr) };
+    const wp = (q) => ({
+      x: sea.pos.x + bb.right.x * q.x + bb.up.x * q.y + bb.fwd.x * q.z,
+      y: sea.pos.y + bb.right.y * q.x + bb.up.y * q.y + bb.fwd.y * q.z,
+      z: sea.pos.z + bb.right.z * q.x + bb.up.z * q.y + bb.fwd.z * q.z,
+    });
+    const upW = normalize(v3(wp(spot).x - sea.pos.x, wp(spot).y - sea.pos.y, wp(spot).z - sea.pos.z));
+    const cp = wp(loc);
+    cam.pos.x = cp.x + upW.x * 0.05; cam.pos.y = cp.y + upW.y * 0.05; cam.pos.z = cp.z + upW.z * 0.05;
+    const side = normalize(v3(upW.y, -upW.x, 0));
+    lookAlong(cam.basis, side, upW);
+    const nan0 = state.nan;
+    scene.drawForest(game, world.star.pos);
+    impl.drawArraysInstanced = keep;
+    ok(f.chunks.size >= 8 && inst.length === scene.forestDraws && inst.length > 0 &&
+       inst.every((c) => c.count === f.nBase && c.n > 0) && state.nan === nan0,
+      `дальний лес: ${f.chunks.size} кусков из ${f.want.length} нужных, в кадре ${inst.length} ` +
+      `вызовов на ${scene.forestTrees} деревьев — по вызову на кусок, по ${f.nBase / 3} треугольников на дерево`);
   }
 
   ok(state.nan === 0,

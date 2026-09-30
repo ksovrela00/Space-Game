@@ -8,6 +8,7 @@
 
 import { v3 } from '../core/vec3.js';
 import { loft, box, prismZ, makeMesh, mergeMeshes, transformMesh } from './geometry.js';
+import { detailHull } from './hulldetail.js';
 import {
   HULL_NAME, HULL_LENGTH, HULL_VERTS, HULL_FACES, HULL_EXHAUSTS, HULL_GEAR,
 } from './hull.data.js';
@@ -54,6 +55,10 @@ export function buildCobra() {
   mesh.length = HULL_LENGTH;
   mesh.name = HULL_NAME;
   mesh.rcs = rcsPorts(verts, HULL_HALF);
+  // Деталь человеческого размера: швы, мостик, окна, сопла, огни
+  // (js/models/hulldetail.js). После маневровых: те ищутся по голому
+  // корпусу, и накладкам в их поиске делать нечего.
+  detailHull(mesh);
   return boundOf(mesh);
 }
 
@@ -142,6 +147,37 @@ function hullFloor() {
   for (let i = 1; i < HULL_VERTS.length; i += 3) low = Math.min(low, HULL_VERTS[i]);
   return -low * MM;
 }
+
+/**
+ * Объём корпуса, м³ — по теореме о дивергенции: сумма объёмов
+ * тетраэдров «начало координат — треугольник грани».
+ *
+ * Нужен ради одной величины, которой в лётной модели нет, — массы
+ * (js/game/downwash.js). Лётная модель задаёт ускорения, а не силы, и
+ * пока корабль ни с чем не взаимодействовал, этого хватало. Струя
+ * движков у грунта — первое место, где нужна настоящая сила: ветер,
+ * которым гнёт деревья, зависит от тяги в ньютонах, а тяга на
+ * зависании — это вес.
+ *
+ * Модель замкнута не до конца (полсотни рёбер из 1753 висят на одной
+ * грани — стыки деталей пака), поэтому объём верен с точностью до
+ * этих щелей; проверка держит его в разумных долях габарита.
+ */
+export const HULL_VOLUME_M3 = (() => {
+  const v = (k) => [HULL_VERTS[k * 3] / 1000, HULL_VERTS[k * 3 + 1] / 1000, HULL_VERTS[k * 3 + 2] / 1000];
+  let vol = 0;
+  for (let i = 0; i < HULL_FACES.length;) {
+    const n = HULL_FACES[i++];
+    const a = v(HULL_FACES[i]);
+    for (let k = 1; k + 1 < n; k++) {
+      const b = v(HULL_FACES[i + k]), c = v(HULL_FACES[i + k + 1]);
+      vol += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6;
+    }
+    i += n + 3;
+  }
+  return Math.abs(vol);
+})();
 
 /**
  * Полуразмеры корпуса поперёк курса, км. Ими проверяется, лезет ли

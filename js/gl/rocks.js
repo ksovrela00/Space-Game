@@ -212,7 +212,10 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
       positions[o * 3 + 2] = d.z * lift + tz * u + bz * v;
       normals[o * 3] = d.x; normals[o * 3 + 1] = d.y; normals[o * 3 + 2] = d.z;
       colors[o * 4] = dark[0]; colors[o * 4 + 1] = dark[1]; colors[o * 4 + 2] = dark[2];
-      colors[o * 4 + 3] = 1;
+      // Не светится: альфа у сетки — доля свечения, а не непрозрачность
+      // (см. MESH_FS). Тень освещена тем же солнцем, что и грунт вокруг,
+      // иначе на закате она оставалась бы светлее самой земли.
+      colors[o * 4 + 3] = 0;
       indices[o] = o;
       o++;
     };
@@ -293,7 +296,10 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
         positions[o * 3 + 2] = p[2];
         normals[o * 3] = nx; normals[o * 3 + 1] = ny; normals[o * 3 + 2] = nz;
         colors[o * 4] = cr; colors[o * 4 + 1] = cg; colors[o * 4 + 2] = cb;
-        colors[o * 4 + 3] = 1;
+        // Альфа — доля СВЕЧЕНИЯ (MESH_FS), а не непрозрачность. Стояла
+        // единица, и камень не знал, где солнце: грань к свету и грань в
+        // тени красились одинаково, и россыпь читалась пятнами краски.
+        colors[o * 4 + 3] = 0;
         indices[o] = o;
         o++;
       }

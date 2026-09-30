@@ -20,8 +20,10 @@ import {
   PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
   BOLT_VS, BOLT_FS, SHIELD_VS, SHIELD_FS,
   WARPTUN_VS, WARPTUN_FS,
-  SKY_VS, SKY_FS, SKY_BAKE_VS, SKY_BAKE_FS,
+  SKY_VS, SKY_FS, SKY_BAKE_VS, SKY_BAKE_FS, FOREST_VS,
 } from './shaders.js';
+import { ForestField } from './forestfield.js';
+import { TREE_PROFILES, FAR as FOREST_FAR, thinAt } from './forest.js';
 import { skyFor, skyUniforms, SKY_GAIN } from './nebula.js';
 import {
   detailUniforms, tileDetailUniforms, makeDetailLoad, updateDetailLoad,
@@ -41,6 +43,9 @@ import { ENTRY } from '../game/entry.js';
 import { L } from '../core/lang.js';
 import { SHIELD_AXES } from '../models/ships.js';
 import { lampBeams, lampCone, LAMP } from '../game/lamps.js';
+import { washState, makeWash, engineLoad } from '../game/downwash.js';
+import { lightLevel } from '../models/hulldetail.js';
+import { washUniforms } from './wash.js';
 
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
@@ -56,16 +61,29 @@ import { RockField } from './rocks.js';
 import { FloraField } from './flora.js';
 import { CityField, SHADE_MAX, shadeBoxes } from './citymesh.js';
 import { perspective, modelView, dirToCamera, logDepthCoef } from './mat4.js';
-import { makeBasis, lookAlong, toLocal, copyBasis, rotateBasis, toWorld } from '../core/basis.js';
+import { makeBasis, lookAlong, toLocal, toWorld } from '../core/basis.js';
 import { bodyBasis } from '../game/world.js';
 import { warpPower } from '../game/warp.js';
 import { FLOW } from '../game/flow.js';
 import { Q } from '../core/quality.js';
 import { buildCockpit } from '../models/cockpit.js';
+import { CabinView } from './cabin.js';
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
 const GLOW_FALLOFF = 2.5;
 const NEAR = 0.004;          // 4 метра
+// Рубка — свой корпус изнутри и пост пилота — рисуется своим проходом
+// (drawCockpit): фонарь над головой в метре с небольшим, и с ближней
+// плоскостью сцены в четыре метра от него не осталось бы ни стойки. Там
+// своя проекция — от четырёх сантиметров до двухсот пятидесяти метров
+// (весь корпус), и своя логарифмическая глубина на этот отрезок: на нём
+// она различает сотые доли миллиметра.
+//
+// Сделать ближнюю плоскость маленькой у всей сцены нельзя, и это было
+// проверено кадром: проход неба сравнивает глубину без логарифма, и с
+// тридцатью сантиметрами небо легло поверх грунта — земля пропала.
+const NEAR_BRIDGE = 4e-5;          // км
+const FAR_BRIDGE = 0.25;           // км
 const FAR = 2e9;             // с запасом на всю систему
 const AMBIENT = 0.14;
 // Во сколько раз тень гасит поверхность. Не в ноль: на безатмосферном
@@ -103,15 +121,6 @@ const IDENTITY_BASIS = {
   up: { x: 0, y: 1, z: 0 },
   fwd: { x: 0, y: 0, z: 1 },
 };
-// Кабина стоит в метре от глаза, а ближняя плоскость сцены — на
-// четырёх метрах: в общий проход она не влезает ни одной гранью.
-// Поэтому у неё своя, в пять сантиметров, и свой проход (drawCockpit).
-const NEAR_CABIN = 5e-5;     // км
-// Внутри кабины светло даже в тени: доска подсвечена изнутри, по бортам
-// идёт дежурный свет, экраны светятся сами. Это не произвол — это
-// разница между кабиной и чёрной плитой: при звёздном ambient (0.14)
-// корпус кабины уходит в ноль, и в кадре остаются одни экраны.
-const CABIN_AMBIENT = 0.55;
 // Оптическая толщина воздуха ВЕРТИКАЛЬНО ВВЕРХ от поверхности, при
 // давлении в одну атмосферу: сколько света воздух СЪЕДАЕТ. Настоящий
 // воздух в этом смысле почти прозрачен — ночью сквозь него видны
@@ -213,6 +222,15 @@ export class GlScene {
       }
     }
     if (!this.detailOn) this.pMesh = buildProgram(gl, 'mesh', MESH_VS, MESH_FS);
+    // Дальний лес (js/gl/forest.js): свой вершинный шейдер, общий
+    // фрагментный — освещение и дымка те же, что у всего остального. Не
+    // собрался — лес остаётся полем у корабля, как было.
+    try {
+      this.pForest = buildProgram(gl, 'forest', FOREST_VS, MESH_FS);
+    } catch (e) {
+      console.error('Дальний лес не собрался, рисуем без него:\n' + e.message);
+      this.pForest = null;
+    }
     this.pStars = buildProgram(gl, 'stars', STARS_VS, STARS_FS);
     this.pGlow = buildProgram(gl, 'glow', GLOW_VS, GLOW_FS);
     this.pAtmo = buildProgram(gl, 'atmo', ATMO_VS, ATMO_FS);
@@ -225,6 +243,17 @@ export class GlScene {
     this.pMote = buildProgram(gl, 'mote', MOTE_VS, MOTE_FS);
     this.pBolt = buildProgram(gl, 'bolt', BOLT_VS, BOLT_FS);
     this.pShield = buildProgram(gl, 'shield', SHIELD_VS, SHIELD_FS);
+    // Кабина (js/gl/cabin.js): свои шейдеры, тени и экраны. Не соберётся
+    // — вид из кабины останется без неё, а не без игры; причина — в
+    // консоли и в cabinError (её показывает tools/screen.mjs).
+    try {
+      this.cabin = new CabinView(gl, { shadow: Q.cabinShadow });
+      this.cabinError = null;
+    } catch (e) {
+      console.error('Кабина не собралась:\n' + e.message);
+      this.cabin = null;
+      this.cabinError = e.message;
+    }
 
     // Небо: полоса галактического диска и туманности (js/gl/nebula.js).
     // Не соберётся — сцена остаётся рабочей, фон просто чёрный, как был.
@@ -252,6 +281,10 @@ export class GlScene {
       aColor: this.pMesh.attrib('aColor'),
       aUv: this.pMesh.attrib('aUv'),
       aGrain: this.pMesh.attrib('aGrain'),
+      // Изгиб растений под струёй (js/gl/wash.js) и материал обшивки
+      // корабля (js/gl/hull.js): у остальных сеток этих атрибутов нет.
+      aBend: this.pMesh.attrib('aBend'),
+      aMat: this.pMesh.attrib('aMat'),
     };
     this.atmoLocs = { aPos: this.pAtmo.attrib('aPos') };
     this.ringLocs = { aPos: this.pRing.attrib('aPos'), aT: this.pRing.attrib('aT') };
@@ -334,9 +367,6 @@ export class GlScene {
     // Кабина собирается по первому требованию: в виде от третьего лица
     // она не нужна вовсе, а модель не бесплатная.
     this.cockpit = null;
-    this.projCabin = new Float32Array(16);
-    this.cabinBasis = makeBasis();
-    this.cabinPos = { x: 0, y: 0, z: 0 };
     this.blankTex = createBlankTexture(gl);
 
     // Ручки в адресной строке (см. README, «Ручки в адресной строке»).
@@ -351,10 +381,17 @@ export class GlScene {
     // неё» пришлось бы правкой кода, а значит и другой сборкой.
     this.ground = loadGround(gl,
       q.get('photo') === '0' ? (src, on, fail) => fail() : undefined);
+    // `?wash=0` — тот же кадр без струи движков на растениях (js/gl/wash.js):
+    // изгиб к камере или от неё по одному снимку не разглядеть, а по
+    // разнице двух снимков — сразу.
+    this.washKnob = q.get('wash') !== '0';
     this.patch = new SurfacePatch(gl, this.meshLocs);
     // Камни у самой поверхности: предметы известного размера, по которым
     // глаз и меряет высоту (см. js/gl/rocks.js).
     this.rocks = new RockField(gl, this.meshLocs);
+    this.forest = this.pForest && q.get('forest') !== '0' ? new ForestField(gl, this.pForest) : null;
+    this.forestDraws = 0;
+    this.forestTrees = 0;
     // Растительность: деревья, кусты, трава (js/gl/flora.js). Поле
     // отдельное от камней, потому что видно его в пять раз дальше и
     // пересобирается оно по своим порогам.
@@ -924,62 +961,76 @@ export class GlScene {
   }
 
   /**
-   * Кабина: то, что видно с места пилота.
-   *
-   * Отдельный проход, и на то две причины, обе про расстояние. Кабина
-   * в МЕТРЕ от глаза, а ближняя плоскость сцены стоит на четырёх
-   * метрах (NEAR): в общем проходе от неё не осталось бы ни грани.
-   * И она ближе всего, что есть в кадре, — значит должна закрывать
-   * собой всё. Поэтому буфер глубины очищается, проекция берётся своя,
-   * и нарисованное раньше честно остаётся позади.
-   *
-   * Начало координат модели — глаз пилота (js/models/cockpit.js),
-   * а камера в кокпите стоит ровно там же. Поэтому перенос нулевой:
-   * кабина только поворачивается вместе с корпусом.
+   * Свой корпус из рубки: тот же меш, что снаружи, но стёкла фонаря
+   * сквозные (остаётся переплёт), а изнанка обшивки — стены рубки
+   * (js/gl/hull.js, uHullInside). Проекция — рубки: от четырёх сантиметров.
    */
-  drawCockpit(game, sunPos) {
-    const st = game.state;
-    if (!st || st.view !== 'cockpit' || st.mode === 'docked') return;
-    const ship = game.ship;
-    if (!ship) return;
-    const cp = game.cockpit || (this.cockpit || (this.cockpit = buildCockpit()));
+  drawHullInside(game, sunPos, logFC) {
     const gl = this.gl;
     const cam = this.camera;
     const prog = this.pMesh;
-
-    gl.disable(gl.BLEND);
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(true);
-    gl.clear(gl.DEPTH_BUFFER_BIT);
-    perspective(cam.fov, cam.w / Math.max(1, cam.h), NEAR_CABIN, FAR, this.projCabin);
-
+    const ship = game.ship;
+    if (!game.shipMesh || !ship) return;
+    perspective(cam.fov, cam.w / Math.max(1, cam.h), NEAR_BRIDGE, FAR_BRIDGE,
+      this.projBridge || (this.projBridge = new Float32Array(16)));
     prog.use();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
     this.useGround(prog);
-    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projCabin);
-    gl.uniform1f(prog.loc('uAmbient'), CABIN_AMBIENT);
-    // В кабине фар нет: лампы стоят в носу снаружи, и светить внутрь
-    // им нечем.
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projBridge);
+    gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
+    // Фары светят вперёд, на мир, а не на свою обшивку.
     this.noLamps(prog);
-    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform1f(prog.loc('uLogFC'), logFC);
     this.setDetail(prog, null, 0);
+    // Воздух — тот, что выставлен сцене: на метрах от глаза дымки нет, и
+    // трогать его незачем.
+    gl.uniform1f(prog.loc('uSkyK'), this.skyAt(game, sunPos));
+    gl.uniform1f(prog.loc('uLiftGlow'),
+      engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift);
+    gl.uniform1f(prog.loc('uHullInside'), 1);
+    this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+    this.drawGear(prog, game, sunPos);
+    gl.uniform1f(prog.loc('uHullInside'), 0);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+  }
 
-    this.drawObject(prog, this.glMeshFor(cp.shell), cam.pos, ship.basis, 1, sunPos);
-    this.cabinDraws = 1;
-
-    // Штурвал — свой меш со своей осью: вершины у него отсчитаны ОТ
-    // оси, поэтому поворот это поворот базиса, а место — сама ось,
-    // перенесённая в мир.
-    if (cp.yoke && game.yoke) {
-      copyBasis(this.cabinBasis, ship.basis);
-      rotateBasis(this.cabinBasis, game.yoke.pitch, game.yoke.yaw, game.yoke.roll);
-      toWorld(ship.basis, cam.pos, cp.pivot, this.cabinPos);
-      this.drawObject(prog, this.glMeshFor(cp.yoke), this.cabinPos, this.cabinBasis, 1, sunPos);
-      this.cabinDraws = 2;
-    }
+  /**
+   * Кабина: то, что видно с места пилота.
+   *
+   * Отдельный проход и отдельный шейдер (js/gl/cabin.js). Кабина в МЕТРЕ
+   * от глаза, а ближняя плоскость сцены стоит на четырёх метрах (NEAR):
+   * в общем проходе от неё не осталось бы ни грани. И она ближе всего,
+   * что есть в кадре, — значит закрывает собой всё: буфер глубины
+   * очищается, и нарисованное раньше честно остаётся позади.
+   */
+  drawCockpit(game, sunPos) {
+    const st = game.state;
+    if (!st || st.view !== 'cockpit' || st.mode === 'docked') return;
+    if (!game.ship || !this.cabin) return;
+    // Модель — из игры (там по ней раскладываются экраны); нет её —
+    // своя, собранная по первому требованию.
+    if (!game.cockpit && !this.cockpit) this.cockpit = buildCockpit();
+    const g = game.cockpit ? game : { ...game, cockpit: this.cockpit, displays: null };
+    const gl = this.gl;
+    const size = [this.canvas.width, this.canvas.height];
+    // 1. Экраны в атлас и карта теней — до кадра: у них свой буфер.
+    const pre = this.cabin.prepare(g, sunPos, size);
+    // 2. Рубка ближе всего в кадре и закрывает собой всё: глубина — с нуля.
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    const logFC = logDepthCoef(FAR_BRIDGE);
+    // 3. Свой корпус изнутри: сквозь стекло фонаря — нос, крылья, корма.
+    this.drawHullInside(game, sunPos, logFC);
+    // 4. Пост пилота и стекло поверх — той же глубиной.
+    this.cabinDraws = pre + 1 + this.cabin.drawPod(g, this.camera, size, logFC);
+    this.draws += this.cabinDraws;
+    this.tris += this.cabin.parts
+      ? (this.cabin.parts.shell.count + this.cabin.parts.glass.count) / 3 : 0;
   }
 
   /**
@@ -1270,6 +1321,22 @@ export class GlScene {
   }
 
   /**
+   * Радиус грунта под направлением dir (оси тела) — так, как его сейчас
+   * РИСУЕТ сетка, с той же подробностью, что и у камней с растениями
+   * (см. surfaceCell). Нужен камере (js/game/chase.js): у земли она
+   * держится на четырёх метрах, а нарисованный грунт отличается от
+   * настоящего на «уклон × ячейку», и по настоящему она уходила бы под
+   * картинку.
+   */
+  drawnGround(body, dir) {
+    const t = terrainOf(body);
+    if (t.isFlat) return body.radius;
+    const cell = this.surfaceCell(body);
+    const det = cell > 0 ? t.detailForCell(cell) : null;
+    return body.radius * (1 + t.displace(dir.x, dir.y, dir.z, det));
+  }
+
+  /**
    * Поле камней под камерой. Работает одинаково для обоих способов
    * рисовать поверхность: камни лежат в осях тела и к плиткам не
    * привязаны.
@@ -1298,10 +1365,103 @@ export class GlScene {
    * числам: тело, точка под камерой, высота и солнце у них общие.
    */
   updateFlora(body) {
-    if (!body || !this._floraDir) { this.flora.clear(); this.floraBody = null; return; }
+    if (!body || !this._floraDir) {
+      this.flora.clear(); this.floraBody = null;
+      if (this.forest) this.forest.update(null);
+      return;
+    }
     this.floraCell = this.surfaceCell(body);
     this.flora.update(body, this._floraDir, this._floraAlt, this._rsun, this.floraCell);
     this.floraBody = this.flora.mesh ? body : null;
+    // Дальний лес — вокруг той же точки под камерой.
+    if (this.forest) this.forest.update(body, this._floraDir, this._floraAlt, this.camera.focal);
+  }
+
+  /**
+   * Дальний лес: куски силуэтов вокруг камеры (js/gl/forestfield.js).
+   *
+   * Рисуется сразу после поля растений, своей программой. Дымка на нём
+   * ЕСТЬ, в отличие от прочих предметов: те стоят в сотнях метров, а
+   * лес — до пятнадцати километров, и без воздуха он лежал бы на
+   * затуманенном грунте тёмными точками.
+   */
+  drawForest(game, sunPos) {
+    const f = this.forest;
+    this.forestDraws = 0;
+    this.forestTrees = 0;
+    if (!f || !f.body || !f.chunks.size || !(f.rGround > 0)) return;
+    const gl = this.gl;
+    const prog = this.pForest;
+    const cam = this.camera;
+    const body = f.body;
+    prog.use();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.useGround(prog);
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    this.setLamps(prog, game);
+    this.setAir(prog, body);
+    if (!this._forestProf) {
+      this._forestProf = new Float32Array(32);
+      TREE_PROFILES.forEach((pr, i) => { if (i < 8) this._forestProf.set(pr, i * 4); });
+    }
+    gl.uniform4fv(prog.loc('uProf[0]'), this._forestProf);
+    gl.uniform1f(prog.loc('uTrunk'), FOREST_FAR.trunk);
+    const d1 = thinAt(cam.focal);
+    gl.uniform4f(prog.loc('uLod'), d1, d1 * 2, FOREST_FAR.band, f.rFar);
+
+    const basis = bodyBasis(body, this.basisTmp);
+    const camL = this._forestCam || (this._forestCam = { x: 0, y: 0, z: 0 });
+    toLocal(basis, body.pos, cam.pos, camL);
+    // Какие деревья взяло поле у корабля — их здесь пропускаем.
+    const fl = this.flora;
+    const nearOn = !!(fl.mesh && this.floraBody === body && fl.treeR > 0 && fl.treeAt);
+    const pos = this._forestPos || (this._forestPos = { x: 0, y: 0, z: 0 });
+    // Взгляд камеры в осях тела — для отсева кусков за спиной.
+    const fw = cam.basis.fwd;
+    const fx = fw.x * basis.right.x + fw.y * basis.right.y + fw.z * basis.right.z;
+    const fy = fw.x * basis.up.x + fw.y * basis.up.y + fw.z * basis.up.z;
+    const fz = fw.x * basis.fwd.x + fw.y * basis.fwd.y + fw.z * basis.fwd.z;
+    const half = FOREST_FAR.chunk * 0.038 * 0.75;
+    for (const c of f.chunks.values()) {
+      const o = c.origin;
+      const dx = o.x - camL.x, dy = o.y - camL.y, dz = o.z - camL.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist - half > f.rFar) continue;
+      // За спиной — не рисуем (с запасом на полкуска и на угол зрения).
+      if ((dx * fx + dy * fy + dz * fz) < -half) continue;
+      // За горизонтом отдельно не отсекаем: круг и так не дальше
+      // горизонта, а закрытое землёй честно отсекает буфер глубины.
+      toWorld(basis, body.pos, o, pos);
+      modelView(cam.basis, cam.pos, basis, pos, 1, this.mv, this.nrm);
+      gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
+      gl.uniformMatrix3fv(prog.loc('uNormalMat'), false, this.nrm);
+      gl.uniform3fv(prog.loc('uSunDir'), this.setSunDir(pos, sunPos));
+      gl.uniform3f(prog.loc('uUp'), c.up.x, c.up.y, c.up.z);
+      gl.uniform3f(prog.loc('uT'), c.T.x, c.T.y, c.T.z);
+      gl.uniform3f(prog.loc('uB'), c.B.x, c.B.y, c.B.z);
+      gl.uniform3f(prog.loc('uCamL'), camL.x - o.x, camL.y - o.y, camL.z - o.z);
+      const nearHere = nearOn && c.face === fl.treeFace;
+      gl.uniform1f(prog.loc('uNearOn'), nearHere ? 1 : 0);
+      if (nearHere) {
+        gl.uniform4f(prog.loc('uNear'), fl.treeAt.x - o.x, fl.treeAt.y - o.y, fl.treeAt.z - o.z, fl.treeR);
+      }
+      // Дальний кусок рисует только начало списка — редкие подрешётки.
+      const near = dist - half;
+      const count = near > d1 * 2 * (1 + FOREST_FAR.band) ? c.n2 : (near > d1 * (1 + FOREST_FAR.band) ? c.n1 : c.n);
+      if (count <= 0) continue;
+      gl.bindVertexArray(c.vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, f.nBase, count);
+      this.draws++;
+      this.forestDraws++;
+      this.forestTrees += count;
+      this.tris += count * (f.nBase / 3);
+    }
+    gl.bindVertexArray(null);
   }
 
   /**
@@ -1601,7 +1761,22 @@ export class GlScene {
       bodyBasis(this.floraBody, this.basisTmp);
       toWorld(this.basisTmp, this.floraBody.pos, this.flora.origin,
         this._floraPos || (this._floraPos = { x: 0, y: 0, z: 0 }));
+      // Струя движков гнёт растения (js/gl/wash.js). Считается в осях
+      // того же тела, на котором стоит поле, — другое тело под кораблём
+      // значит, что до этих деревьев струя не достаёт.
+      const w = washState(game, this.wash || (this.wash = makeWash()));
+      this.washOn = !!(this.washKnob && w.on && w.body === this.floraBody);
+      washUniforms(gl, prog, this.washOn ? w : null, this.flora.origin,
+        performance.now() / 1000);
       this.drawObject(prog, this.flora.mesh, this._floraPos, this.basisTmp, 1, sunPos);
+      gl.uniform1f(prog.loc('uWashOn'), 0);
+    }
+
+    // Дальний лес — те же деревья до горизонта (js/gl/forest.js). Своя
+    // программа; после неё возвращаемся к общей.
+    if (this.forest) {
+      this.drawForest(game, sunPos);
+      prog.use();
     }
 
     // Наземный город. После грунта и камней, но до станций: он ближе
@@ -1631,12 +1806,24 @@ export class GlScene {
       this.drawObject(prog, this.glMeshFor(game.stationMesh(st.type)), st.pos, st.basis, 1, sunPos);
     }
 
-    // Свой корабль — только в виде от третьего лица.
-    if (game.state.view === 'chase' && game.state.mode !== 'docked') {
+    // Свой корабль от третьего лица. Из рубки его рисует проход кабины
+    // (drawCockpit) — изнутри и со своей ближней плоскостью.
+    //
+    // Обшивке нужны два числа (js/gl/hull.js): как работают подъёмные
+    // (жар в соплах на днище) и сколько неба отражается в стекле мостика.
+    const skyK = this.skyAt(game, sunPos);
+    gl.uniform1f(prog.loc('uSkyK'), skyK);
+    if (game.state.mode !== 'docked' && game.state.view === 'chase') {
       const ship = game.ship;
+      // Вес держат подъёмные только у тела: в пустоте сопла холодные.
+      gl.uniform1f(prog.loc('uLiftGlow'),
+        engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift);
       this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
       this.drawGear(prog, game, sunPos);
     }
+    // У чужих кораблей работу движков сервер не присылает: сопла у них
+    // чуть тлеют, как на зависании.
+    gl.uniform1f(prog.loc('uLiftGlow'), 0.2);
 
     // Чужие пилоты — тем же корпусом, что и свой: других моделей пока
     // нет, а пустое место там, где по приборам кто-то есть, ощущается
@@ -1910,6 +2097,8 @@ export class GlScene {
   }
 
   drawTransparent(game, world, sunPos) {
+    // Солнце нужно и облакам пыли в проходе ореолов (drawAirDust).
+    this.lastSunPos = sunPos;
     const gl = this.gl;
     gl.depthMask(false);
     gl.enable(gl.BLEND);
@@ -2136,6 +2325,120 @@ export class GlScene {
     this.drawObject(prog, this.shockMesh, ship.pos, ship.basis, 1, sunPos);
   }
 
+  /**
+   * Пыль в воздухе (js/game/dust.js, updateAirDust).
+   *
+   * Два отличия от пыли на луне, и оба про то, что это ОБЛАКО, а не
+   * искры:
+   *
+   *   * размер — в метрах, а не в пикселях. Кольцо пыли под кораблём —
+   *     это сотни метров, и дальний его край обязан быть мельче
+   *     ближнего; облачко постоянного экранного размера превращало бы
+   *     кольцо в ровную полосу;
+   *   * смешивание — «поверх», а не сложением. Сложение делает частицу
+   *     светом: на луне, где фон чёрный, это сходит, а над дневным
+   *     лугом пыль выходила светящимися пятнами. Облако ЗАСЛОНЯЕТ то, что
+   *     за ним, и освещено тем же солнцем, что и грунт.
+   */
+  drawAirDust(dust, prog) {
+    const gl = this.gl;
+    const cam = this.camera;
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.uniform1f(prog.loc('uFalloff'), 1.2);
+    bodyBasis(dust.body, this.basisTmp);
+    modelView(cam.basis, cam.pos, this.basisTmp, dust.body.pos, 1, this.mv, null);
+    // Пиксели кадра на километр на единичной глубине: фокус камеры в
+    // точках CSS, а буфер может быть крупнее (плотность экрана).
+    const k = cam.focal * (this.canvas.height / Math.max(1, cam.h));
+    // Освещённость облака: солнце над местным горизонтом.
+    const lit = this.dustLit(dust.body);
+    for (const p of dust.list) {
+      const c = applyMat16(this.mv, p.x, p.y, p.z, this.tmp3);
+      if (c[2] <= NEAR) continue;
+      const px = p.size * k / c[2];
+      if (px < 0.6) continue;
+      gl.uniform3fv(prog.loc('uCenterView'), new Float32Array([c[0], c[1], c[2]]));
+      gl.uniform1f(prog.loc('uRadiusPx'), Math.min(px, 900));
+      const col = p.col || [0.74, 0.7, 0.64];
+      gl.uniform3fv(prog.loc('uColor'),
+        new Float32Array([col[0] * lit, col[1] * lit, col[2] * lit]));
+      // Молодое облако плотнее: пока его не раздуло, оно заслоняет.
+      gl.uniform1f(prog.loc('uIntensity'), 0.5 * p.fade * p.fade);
+      this.quad.draw();
+      this.draws++;
+    }
+    gl.uniform1f(prog.loc('uFalloff'), GLOW_FALLOFF);
+    gl.blendFunc(gl.ONE, gl.ONE);
+  }
+
+  /**
+   * Сколько светлого неба над кораблём, 0..1: его отражает стекло
+   * мостика (js/gl/hull.js). Небо бывает только под воздухом и только
+   * днём; в пустоте и ночью стекло отражает черноту.
+   */
+  skyAt(game, sunPos) {
+    const z = game.zone;
+    const b = z && z.body;
+    if (!b || !b.atmo || !(z.alt < b.radius * ENTRY.top)) return 0;
+    const p = game.ship.pos;
+    const ux = p.x - b.pos.x, uy = p.y - b.pos.y, uz = p.z - b.pos.z;
+    const sx = sunPos.x - p.x, sy = sunPos.y - p.y, sz = sunPos.z - p.z;
+    const e = (ux * sx + uy * sy + uz * sz) / ((Math.hypot(ux, uy, uz) * Math.hypot(sx, sy, sz)) || 1);
+    // Сумерки: небо светлеет, пока солнце поднимается на первые
+    // пятнадцать градусов.
+    const t = Math.max(0, Math.min(1, (e + 0.05) / 0.3));
+    const day = t * t * (3 - 2 * t);
+    // Выше над грунтом воздуха меньше, и небо темнеет к космосу.
+    return day * Math.max(0, 1 - z.alt / (b.radius * ENTRY.top));
+  }
+
+  /**
+   * Огни корабля (js/models/hulldetail.js): ходовые, вспышки, маяки.
+   *
+   * Точка огня не меньше двух пикселей: светящаяся точка на экране не
+   * тает до нуля с расстоянием, как тает предмет, — её размывает сам
+   * глаз. Ореол вокруг виден тем лучше, чем темнее вокруг: днём огонь
+   * — точка, ночью — пятно.
+   */
+  drawNavLights(prog, mesh, pos, basis, t, dayK) {
+    const lights = mesh.navLights;
+    if (!lights || !lights.length) return;
+    const gl = this.gl;
+    const cam = this.camera;
+    modelView(cam.basis, cam.pos, basis, pos, 1, this.mv, null);
+    const k = cam.focal * (this.canvas.height / Math.max(1, cam.h));
+    for (const L of lights) {
+      const level = lightLevel(L.kind, t);
+      if (level <= 0.01) continue;
+      const c = applyMat16(this.mv, L.pos.x, L.pos.y, L.pos.z, this.tmp3);
+      if (c[2] <= NEAR) continue;
+      const size = L.kind === 'strobe' ? 0.0006 : 0.0004;          // км
+      const core = Math.max(2.2, size * k / c[2]);
+      // Ходовые днём тусклее — они для ночи; вспышки рассчитаны и на день.
+      const bright = L.kind === 'nav' ? 1 - 0.45 * dayK : 1;
+      gl.uniform3fv(prog.loc('uCenterView'), new Float32Array([c[0], c[1], c[2]]));
+      gl.uniform3fv(prog.loc('uColor'), new Float32Array(L.color));
+      gl.uniform1f(prog.loc('uRadiusPx'), core * 4);
+      gl.uniform1f(prog.loc('uIntensity'), level * bright * 0.35 * (1 - 0.7 * dayK));
+      this.quad.draw();
+      gl.uniform1f(prog.loc('uRadiusPx'), core);
+      gl.uniform1f(prog.loc('uIntensity'), level * bright);
+      this.quad.draw();
+      this.draws += 2;
+    }
+  }
+
+  /** Сколько солнца падает на облако у поверхности, 0..1. */
+  dustLit(body) {
+    const sunPos = this.lastSunPos;
+    if (!sunPos || !body) return 0.7;
+    const up = this.camera.pos;
+    const ux = up.x - body.pos.x, uy = up.y - body.pos.y, uz = up.z - body.pos.z;
+    const sx = sunPos.x - body.pos.x, sy = sunPos.y - body.pos.y, sz = sunPos.z - body.pos.z;
+    const e = (ux * sx + uy * sy + uz * sz) / ((Math.hypot(ux, uy, uz) * Math.hypot(sx, sy, sz)) || 1);
+    return AMBIENT + (1 - AMBIENT) * Math.max(0, Math.min(1, e * 2.5));
+  }
+
   drawGlows(game, world) {
     const gl = this.gl;
     const cam = this.camera;
@@ -2183,9 +2486,10 @@ export class GlScene {
         0.55);
     }
 
-    // Факелы двигателей в виде от третьего лица.
+    // Факелы двигателей и огни своего корабля — в обоих видах: из рубки их
+    // видно, стоит обернуться.
     const ship = game.ship;
-    const own = game.state.view === 'chase';
+    const own = game.state.mode !== 'docked';
     if (own && ship.throttle > 0.03 && game.shipMesh.exhausts) {
       modelView(cam.basis, cam.pos, ship.basis, ship.pos, 1, this.mv, null);
       for (const e of game.shipMesh.exhausts) {
@@ -2200,11 +2504,31 @@ export class GlScene {
       }
     }
 
+    // Огни — свои и чужих кораблей. Мигают по часам страницы: это
+    // картинка, а не состояние корабля.
+    {
+      const t = performance.now() / 1000;
+      const dayK = this.skyAt(game, world.star.pos);
+      if (own && game.shipMesh.navLights) {
+        this.drawNavLights(prog, game.shipMesh, ship.pos, ship.basis, t, dayK);
+      }
+      const far = (game.shipMesh.length || 0.065) * cam.focal * 20;
+      const peers = game.peers || [];
+      for (let i = 0; i < peers.length; i++) {
+        const p = peers[i];
+        const d = Math.hypot(p.pos.x - cam.pos.x, p.pos.y - cam.pos.y, p.pos.z - cam.pos.z);
+        // Сдвиг по фазе — чтобы чужие вспышки не шли в такт своим.
+        if (d < far) this.drawNavLights(prog, game.shipMesh, p.pos, p.basis, t + i * 0.37 + 0.5, dayK);
+      }
+    }
+
     // Пыль из-под движков. Частицы живут в осях ТЕЛА (см. js/game/dust.js),
     // поэтому и матрица берётся телесная: иначе пыль отставала бы от
     // грунта ровно на скорость вращения планеты.
     const dust = game.dust;
-    if (dust && dust.body && dust.list.length) {
+    if (dust && dust.body && dust.list.length && dust.air) {
+      this.drawAirDust(dust, prog);
+    } else if (dust && dust.body && dust.list.length) {
       // Край у пылинки мягкий: резкий давал белые шары вместо взвеси.
       // Плотность берётся числом частиц, а не размером каждой.
       gl.uniform1f(prog.loc('uFalloff'), 1.6);

@@ -52,6 +52,15 @@ import {
 } from '../js/gl/citymesh.js';
 import { plateAt } from '../js/gl/terrain.js';
 import { makeDust, updateDust, DUST } from '../js/game/dust.js';
+import {
+  WASH, SHIP_MASS, engineLoad, liftThrust, groundQ, windOf, bendAngle, BEND,
+  washState, washAt, airDensity as washAir,
+} from '../js/game/downwash.js';
+import {
+  CHASE, CHASE_UNDER, eyeHeight, chaseRates, makeChase, updateChase, placeChase,
+} from '../js/game/chase.js';
+import { HULL_VOLUME_M3, HULL_CLEAR as HULL_FLOOR } from '../js/models/ships.js';
+import { cityLocal } from '../js/game/city.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
   makePlayer, ledgerAdd, ledgerTotals, cargoTons, loadCargo, dropCargo,
@@ -90,7 +99,13 @@ import { LAMP, lampBeams, lampCone } from '../js/game/lamps.js';
 import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
-import { buildCockpit, makeYoke, updateYoke, YOKE } from '../js/models/cockpit.js';
+import { buildCockpit, makeYoke, updateYoke, YOKE, SCREENS, CMAT } from '../js/models/cockpit.js';
+import { TIP_ARM } from '../js/game/ship.js';
+import { layoutAtlas, makeDisplays } from '../js/ui/displays.js';
+import { NOMINAL } from '../js/ui/panels.js';
+import { cabinArrays, sunVisibility } from '../js/gl/cabin.js';
+import { hullFrameAt } from '../js/gl/hull.js';
+import { BRIDGE } from '../js/models/hulldetail.js';
 import { qualityFor, fullscreenAvailable } from '../js/core/quality.js';
 import {
   makeTouch, touchLayout, touchUpdate, touchApply, touchDrag, TOUCH,
@@ -3389,43 +3404,63 @@ console.log('\n== карта системы ==');
 
 // --- 14. Масса в развороте ----------------------------------------------------
 //
-// Корабль ощущался игрушечным не потому, что вертелся быстро, а потому,
-// что трогался с места рывком: угловая скорость набиралась по экспоненте,
-// а та в первый же миг выдаёт максимальное ускорение. Теперь маневровые
-// дают постоянный МОМЕНТ, и проверяется здесь именно это.
+// Корабль в шестьдесят семь метров и 1682 тонны вертелся как истребитель:
+// 49° в секунду по тангажу и 92° по крену, с выходом на предел за 0.7 с
+// и без всякой задержки между рукой и поворотом. Теперь:
+//
+//   * предел вращения — из РАЗМЕРА: оконечности корпуса не должны
+//     испытывать больше SHIP.tipAccel (полграмма) центростремительного
+//     ускорения, ω = √(a/r);
+//   * момент маневровых один на все оси, разгон — из момента инерции;
+//   * маневровые выходят на тягу с задержкой (SHIP.rcsLag), и регулятор
+//     угловой скорости настроен на неё: без перелёта и без раскачки.
 console.log('\n== масса в развороте ==');
 {
   const S = 1 / 60;
-  const spin = (axis, rate, accel) => {
+  const DEG = 57.2957795;
+  const spin = (axis, rate, dt = S, hold = 12) => {
     const sh = makeShip();
     sh.control[axis] = 1;
-    const first = [];
-    let t = 0, t95 = 0, half = 0, ang = 0, t180 = 0;
-    for (let i = 0; i < 900; i++) {
-      updateShip(sh, S);
-      t += S;
-      ang += Math.abs(sh.rot[axis]) * S;
-      if (i < 3) first.push(Math.abs(sh.rot[axis]));
-      if (!half && t >= SHIP.rotRamp * 0.5) half = Math.abs(sh.rot[axis]);
-      if (!t95 && Math.abs(sh.rot[axis]) >= rate * 0.95) t95 = t;
+    let t = 0, t95 = 0, t10 = 0, ang = 0, t180 = 0, peak = 0, at01 = null;
+    for (let i = 0; i < Math.round(hold / dt); i++) {
+      updateShip(sh, dt);
+      t += dt;
+      const w = Math.abs(sh.rot[axis]);
+      ang += w * dt;
+      peak = Math.max(peak, w);
+      if (at01 === null && t >= 0.1 - 1e-9) at01 = w;
+      if (!t10 && w >= rate * 0.1) t10 = t;
+      if (!t95 && w >= rate * 0.95) t95 = t;
       if (!t180 && ang >= Math.PI) t180 = t;
     }
+    const w0 = Math.abs(sh.rot[axis]);
     sh.control[axis] = 0;
-    let stop = 0;
-    for (let i = 0; i < 900; i++) {
-      updateShip(sh, S);
-      stop += S;
-      if (Math.abs(sh.rot[axis]) < 1e-9) break;
+    let stop = 0, drift = 0;
+    for (let i = 0; i < Math.round(8 / dt); i++) {
+      updateShip(sh, dt);
+      stop += dt;
+      drift += Math.abs(sh.rot[axis]) * dt;
+      if (Math.abs(sh.rot[axis]) < rate * 0.05) break;
     }
-    return { t95, stop, t180, first, half, ramp: rate / accel };
+    return { t95, t10, t180, peak, at01, stop, drift, w0, sh };
   };
 
-  const p = spin('pitch', SHIP.pitchRate, SHIP.pitchAccel);
-  const y = spin('yaw', SHIP.yawRate, SHIP.yawAccel);
-  const r = spin('roll', SHIP.rollRate, SHIP.rollAccel);
+  const p = spin('pitch', SHIP.pitchRate);
+  const y = spin('yaw', SHIP.yawRate);
+  const r = spin('roll', SHIP.rollRate);
+
+  // Предел — из размера: на концах корпуса ровно tipAccel.
+  {
+    const tip = (w, arm) => w * w * arm * 1000;          // м/с²
+    const ap = tip(SHIP.pitchRate, TIP_ARM.pitch), ay = tip(SHIP.yawRate, TIP_ARM.yaw);
+    const ar = tip(SHIP.rollRate, TIP_ARM.roll);
+    ok([ap, ay, ar].every((v) => Math.abs(v - SHIP.tipAccel) < 1e-9) && SHIP.rollRate < 0.5,
+      `предел вращения из размера корпуса: тангаж ${(SHIP.pitchRate * DEG).toFixed(1)}°/с, ` +
+      `рыскание ${(SHIP.yawRate * DEG).toFixed(1)}°/с, крен ${(SHIP.rollRate * DEG).toFixed(1)}°/с — ` +
+      `на носу, корме и концах крыльев по ${SHIP.tipAccel} м/с² (было 9 g на концах крыльев в крене)`);
+  }
 
   // Момент один на все оси: он же и есть «маневровые такой-то силы».
-  // Отсюда и разные времена разгона — не из подбора, а из геометрии.
   const I = (a, b) => a * a + b * b;
   const mp = SHIP.pitchAccel * I(HULL_HALF.y, HULL_HALF.z);
   const my = SHIP.yawAccel * I(HULL_HALF.x, HULL_HALF.z);
@@ -3439,52 +3474,57 @@ console.log('\n== масса в развороте ==');
     `разгон осей из момента инерции: тангаж ${p.t95.toFixed(2)} с, рыскание ${y.t95.toFixed(2)} с, ` +
     `крен ${r.t95.toFixed(2)} с`);
 
-  // Постоянное ускорение — это ПРЯМАЯ: на половине времени разгона
-  // угловая скорость ровно половина предельной. Экспонента дала бы 0.63
-  // и больше, и именно это чувствовалось как рывок.
-  ok(Math.abs(r.half / SHIP.rollRate - 0.5) < 0.02,
-    `угловая скорость растёт прямой: на половине разгона ${(r.half / SHIP.rollRate * 100).toFixed(0)}% ` +
-    'предела (у экспоненты было бы 63%)');
+  // ЗАДЕРЖКА: нажал — корабль трогается не сразу. Через десятую долю
+  // секунды крен набрал доли процента предела, заметным (10%) он
+  // становится через полсекунды.
+  ok(r.at01 < SHIP.rollRate * 0.03 && r.t10 > 0.3 && r.t10 < 0.9,
+    `задержка между рукой и поворотом: через 0.1 с крен ${(r.at01 / SHIP.rollRate * 100).toFixed(1)}% ` +
+    `предела, 10% — через ${r.t10.toFixed(2)} с (маневровые выходят на тягу за ${SHIP.rcsLag} с)`);
 
-  // Первый кадр не должен давать больше, чем даёт момент за кадр.
-  const step = SHIP.rollAccel * S;
-  ok(r.first[0] <= step * 1.001 && Math.abs(r.first[1] - 2 * step) < step * 0.01,
-    `в первом кадре не рывок, а ${(r.first[0] * 57.3).toFixed(2)}°/с — ровно ускорение за кадр ` +
-    `(раньше было ${(SHIP.rollRate * 7 * S * 57.3).toFixed(1)}°/с)`);
+  // Без перелёта: скорость подходит к заданной и не проскакивает её.
+  ok(Math.max(p.peak / SHIP.pitchRate, y.peak / SHIP.yawRate, r.peak / SHIP.rollRate) < 1.01,
+    `без перелёта: наибольшая угловая скорость — ${(r.peak / SHIP.rollRate * 100).toFixed(1)}% ` +
+    'предела по крену');
 
-  // Останов стоит столько же, сколько разгон: тот же момент в другую
-  // сторону. Несимметричность означала бы, что где-то есть «тормоз».
-  ok(Math.abs(r.stop - r.t95) < 0.1 && Math.abs(p.stop - p.t95) < 0.1,
-    `останов симметричен разгону: крен ${r.t95.toFixed(2)} / ${r.stop.toFixed(2)} с, ` +
-    `тангаж ${p.t95.toFixed(2)} / ${p.stop.toFixed(2)} с`);
+  // ИНЕРЦИЯ: отпустил ручку — корабль ещё доворачивает, пока маневровые
+  // гасят вращение, и останов стоит почти столько же, сколько разгон.
+  ok(Math.abs(r.stop - r.t95) < 0.35 && Math.abs(p.stop - p.t95) < 0.35 && r.drift * DEG > 10,
+    `инерция: после отпущенной ручки крен гаснет ${r.stop.toFixed(2)} с (разгон ${r.t95.toFixed(2)} с), ` +
+    `доворачивая ещё ${(r.drift * DEG).toFixed(0)}°`);
 
   // Калибровочная таблица: по ней видно поведение целиком.
-  ok(r.t180 > 1.5 && r.t180 < 4 && y.t180 > 3,
-    `разворот на 180°: тангаж ${p.t180.toFixed(2)} с, рыскание ${y.t180.toFixed(2)} с, ` +
-    `крен ${r.t180.toFixed(2)} с`);
+  ok(r.t180 > 6 && r.t180 < 14 && p.t180 > 6 && y.t180 > p.t180,
+    `разворот на 180°: тангаж ${p.t180.toFixed(1)} с, рыскание ${y.t180.toFixed(1)} с, ` +
+    `крен ${r.t180.toFixed(1)} с`);
 
-  // Маневровые видно и слышно ровно тогда, когда приложен момент.
-  // В пустоте постоянный разворот не стоит ничего, и сопла обязаны
-  // молчать — иначе это не двигатели, а подсветка.
+  // От частоты кадров не зависит: на 12 и 240 Гц за ту же секунду — то же.
+  {
+    const at = (dt) => { const q = spin('roll', SHIP.rollRate, dt, 1.5); return q.w0; };
+    const slow = at(1 / 12), fast = at(1 / 240);
+    ok(Math.abs(slow - fast) / fast < 0.03,
+      `разгон не зависит от частоты кадров: ${(slow * DEG).toFixed(2)}°/с при 12 Гц против ` +
+      `${(fast * DEG).toFixed(2)}°/с при 240 Гц за 1.5 с`);
+  }
+
+  // Маневровые видно и слышно ровно тогда, когда приложен момент: на
+  // раскрутке и на остановке. Ровное вращение в пустоте не стоит ничего.
   {
     const sh = makeShip();
     sh.control.roll = 1;
     let onSpin = 0, onHold = 0;
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 600; i++) {
       updateShip(sh, S);
-      // Разгон крена занимает rotRamp; между ним и «держим ровно»
-      // оставляем зазор в пару кадров, иначе считаем границу.
-      if (i < 40) onSpin += sh.rcs.roll !== 0 ? 1 : 0;
-      else if (i >= 48) onHold += sh.rcs.roll !== 0 ? 1 : 0;
+      if (i >= 10 && i < 40) onSpin += sh.rcs.roll !== 0 ? 1 : 0;
+      else if (i >= 420) onHold += sh.rcs.roll !== 0 ? 1 : 0;
     }
     sh.control.roll = 0;
     let onStop = 0, sign = 0;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 90; i++) {
       updateShip(sh, S);
       if (sh.rcs.roll !== 0) { onStop++; sign = sh.rcs.roll; }
     }
-    ok(onSpin === 40 && onHold === 0 && onStop > 20 && sign === -1,
-      `сопла работают на раскрутке (${onSpin} кадров из 40) и на остановке (${onStop}, ` +
+    ok(onSpin === 30 && onHold === 0 && onStop > 30 && sign === -1,
+      `сопла работают на раскрутке (${onSpin} кадров из 30) и на остановке (${onStop}, ` +
       `момент обратный), а на ровном вращении молчат (${onHold})`);
 
     // Оглушённый корабль кувыркается сам — управления нет, и сопел тоже.
@@ -3779,6 +3819,340 @@ console.log('\n== пыль из-под движков ==');
   }
 }
 
+// --- 16b. Струя движков у грунта ----------------------------------------------
+//
+// Деревья гнёт и пыль поднимает одна и та же струя (js/game/downwash.js).
+// Проверяется, что она следует из законов турбулентных струй и из самого
+// корабля, а не из подобранных чисел: масса — из объёма корпуса, тяга на
+// зависании — ровно вес, две формулы струи стыкуются без скачка.
+console.log('\n== струя движков у грунта ==');
+{
+  const w = makeSystem(0x1a7e);
+  const lave = w.planets.find((b) => b.kind === 'ocean');
+  const bboxM3 = HULL_SIZE.x * HULL_SIZE.y * HULL_SIZE.z * 1e9;
+  ok(HULL_VOLUME_M3 > bboxM3 * 0.05 && HULL_VOLUME_M3 < bboxM3 * 0.6 &&
+     Math.abs(SHIP_MASS - HULL_VOLUME_M3 * WASH.density) < 1e-6,
+    `масса из объёма корпуса: ${HULL_VOLUME_M3.toFixed(0)} м³ ` +
+    `(${(HULL_VOLUME_M3 / bboxM3 * 100).toFixed(0)}% габаритного ящика) × ${WASH.density} кг/м³ ` +
+    `= ${(SHIP_MASS / 1000).toFixed(0)} т`);
+
+  // На зависании подъёмные держат ровно вес — это и есть их доля хода.
+  const hover = 1 / SHIP.liftTWR;
+  const T = liftThrust(lave, hover);
+  ok(Math.abs(T - SHIP_MASS * lave.g0) < 1e-6 * T,
+    `на зависании тяга подъёмных — ровно вес: ${(T / 1e6).toFixed(1)} МН ` +
+    `при ${lave.g0.toFixed(2)} м/с²`);
+
+  // Две формулы струи — свободная и настильная — сходятся там, где
+  // расширившаяся струя ложится на грунт; дальше напор падает как 1/r².
+  const h = 51;
+  const rJoin = h * WASH.wallK / WASH.jetK;
+  const qAxis = groundQ(T, h, 0), qJoin = groundQ(T, h, rJoin * 1.0001);
+  const q100 = groundQ(T, h, 100), q200 = groundQ(T, h, 200);
+  ok(Math.abs(qJoin - qAxis) < qAxis * 1e-3 && Math.abs(q100 / q200 - 4) < 1e-9,
+    `свободная и настильная струи стыкуются на ${rJoin.toFixed(1)} м без скачка, ` +
+    `дальше напор ~1/r²: с ${h} м ветер ${windOf(q100, 1.225).toFixed(0)} м/с на 100 м ` +
+    `и ${windOf(q200, 1.225).toFixed(0)} м/с на 200 м`);
+
+  // Растение: наклон растёт с напором, но не за предел; дерево держит
+  // ветер лучше травы.
+  const at = (u, hm) => bendAngle(0.5 * 1.225 * u * u, hm) * 180 / Math.PI;
+  const tree20 = at(20, 15), grass20 = at(20, 0.5), tree60 = at(60, 15), tree5 = at(5, 15);
+  ok(tree5 < tree20 && tree20 < tree60 && tree60 <= BEND.tree.cap + 1e-9 &&
+     grass20 > tree20 * 3 && tree20 > 6 && tree20 < BEND.tree.ref + 1e-9,
+    `отклик растения: дерево ${tree5.toFixed(1)}° при 5 м/с, ${tree20.toFixed(1)}° при 20, ` +
+    `${tree60.toFixed(1)}° при 60 (предел ${BEND.tree.cap}°); трава при 20 м/с — ${grass20.toFixed(0)}°`);
+
+  // Состояние струи в кадре: висящий корабль бьёт в грунт под собой, и
+  // напор в точке — тот же, что даёт формула.
+  const dir = normalize(v3(0.3, 0.5, 0.81));
+  const sh = makeShip();
+  const pos = worldPoint(lave, dir, groundRadius(lave, dir) + h / 1000, v3());
+  const up = normalize(v3(pos.x - lave.pos.x, pos.y - lave.pos.y, pos.z - lave.pos.z));
+  const bs = makeBasis();
+  lookAlong(bs, normalize(cross(up, v3(0, 0, 1), v3())), up);
+  placeShip(sh, pos, bs);
+  const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+  const ws = washState(g);
+  // Точка в сотне метров от удара по касательной.
+  const tan = normalize(cross(ws.up, v3(1, 0, 0), v3()));
+  const pt = v3(ws.hit.x + tan.x * 0.1, ws.hit.y + tan.y * 0.1, ws.hit.z + tan.z * 0.1);
+  const pdir = v3();
+  const qa = washAt(ws, pt, pdir);
+  const along = (pdir.x * tan.x + pdir.y * tan.y + pdir.z * tan.z);
+  ok(ws.on && Math.abs(ws.h - h) < 0.5 && Math.abs(qa - groundQ(ws.T, ws.h, 100)) < qa * 0.01 &&
+     along > 0.99 && washAir(lave) > 1,
+    `висящий корабль бьёт в грунт под собой: струя ${ws.h.toFixed(1)} м, напор в 100 м ` +
+    `${qa.toFixed(0)} Па и дует ОТ точки удара`);
+
+  // Сели на шасси и заглушили — струи нет, а ветки успокаиваются.
+  sh.gear.out = true;
+  const still = washState(g);
+  ok(engineLoad(sh).lift === 0 && still.T === 0 && washAt(still, pt) === 0,
+    'на шасси с заглушёнными движками струи нет');
+}
+
+// --- 16c. Пыль в воздухе ------------------------------------------------------
+//
+// На теле с воздухом пыль не баллистическая: её несёт настильная струя,
+// и кольцо набирается там, где ветер у грунта падает ниже порога срыва.
+console.log('\n== пыль в воздухе ==');
+{
+  const w = makeSystem(0x1a7e);
+  const lave = w.planets.find((b) => b.kind === 'ocean');
+  const run = (alt, secs) => {
+    // Суша, а не море: ищется точка, где грунт выше уровня воды.
+    let dir = null;
+    for (let i = 0; i < 4000 && !dir; i++) {
+      const u = -0.5 + (i / 3999), a = i * 2.399963, s2 = Math.sqrt(1 - u * u);
+      const d = v3(s2 * Math.cos(a), u, s2 * Math.sin(a));
+      if (groundRadius(lave, d) - lave.radius > 0.05) dir = d;
+    }
+    const sh = makeShip();
+    const pos = worldPoint(lave, dir, groundRadius(lave, dir) + alt, v3());
+    const up = normalize(v3(pos.x - lave.pos.x, pos.y - lave.pos.y, pos.z - lave.pos.z));
+    const bs = makeBasis();
+    lookAlong(bs, normalize(cross(up, v3(0, 0, 1), v3())), up);
+    placeShip(sh, pos, bs);
+    const g = { ship: sh, world: w, zone: landingContext(w, sh) };
+    const d = makeDust();
+    for (let i = 0; i < Math.round(secs / STEP); i++) updateDust(d, g, STEP);
+    const ws = washState(g);
+    const r = d.list.map((q) => {
+      const ex = q.x - ws.hit.x, ey = q.y - ws.hit.y, ez = q.z - ws.hit.z;
+      const e = ex * ws.up.x + ey * ws.up.y + ez * ws.up.z;
+      return Math.hypot(ex - ws.up.x * e, ey - ws.up.y * e, ez - ws.up.z * e) * 1000;
+    }).sort((a, b) => a - b);
+    return { d, ws, r };
+  };
+  const a = run(0.051, 4);
+  const S = Math.sqrt(a.ws.T / washAir(lave));
+  const ringM = WASH.wallK * S / DUST.airThreshold;
+  const med = a.r[Math.floor(a.r.length / 2)] || 0;
+  ok(a.d.air && a.d.list.length > 40 && Math.abs(a.d.ring * 1000 - ringM) < 1 &&
+     med > ringM * 0.55 && a.r[a.r.length - 1] < ringM * 1.6,
+    `с 51 м струя метёт грунт кольцом: срыв до ${ringM.toFixed(0)} м (там ветер падает ` +
+    `до ${DUST.airThreshold} м/с), половина пыли дальше ${med.toFixed(0)} м, ` +
+    `${a.d.list.length} облаков`);
+
+  // Высоко — струя доходит до грунта слабее порога, и пыли нет.
+  const hMax = WASH.jetK * S / DUST.airThreshold / 1000;
+  const b = run(hMax * 1.15, 2);
+  ok(b.d.list.length === 0,
+    `выше ${(hMax * 1000).toFixed(0)} м ветер на оси у грунта слабее порога — пыли нет ` +
+    '(высота выводится из тяги, а не задана)');
+}
+
+// --- 16d. Камера из-за спины ------------------------------------------------------
+//
+// Великана снимают снизу, тяжёлое не дёргается (js/game/chase.js).
+// Проверяется, где камера стоит в полёте и у земли, что её не пускает в
+// грунт и в дома и сколько она запаздывает.
+console.log('\n== камера из-за спины ==');
+{
+  const w = makeSystem(0x1a7e);
+  const lave = w.planets.find((b) => b.kind === 'ocean');
+  const cam = new Camera();
+  cam.resize(1600, 900);
+  const dir = normalize(v3(0.3, 0.5, 0.81));
+  const sh = makeShip();
+  const g = {
+    ship: sh, world: w, zone: null, state: { mode: 'flight' },
+    camOrbit: { yaw: 0, pitch: 0 }, quantum: null, warp: null,
+  };
+  const put = (alt) => {
+    const pos = worldPoint(lave, dir, groundRadius(lave, dir) + alt, v3());
+    const up = normalize(v3(pos.x - lave.pos.x, pos.y - lave.pos.y, pos.z - lave.pos.z));
+    const bs = makeBasis();
+    lookAlong(bs, normalize(cross(up, v3(0, 0, 1), v3())), up);
+    placeShip(sh, pos, bs);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0;
+    g.zone = landingContext(w, sh);
+  };
+  const c = makeChase();
+  const settle = (secs) => {
+    for (let i = 0; i < Math.round(secs / STEP); i++) {
+      updateChase(c, g, STEP);
+      placeChase(c, g, cam);
+    }
+  };
+  const rel = () => {
+    const b = sh.basis;
+    const dx = cam.pos.x - sh.pos.x, dy = cam.pos.y - sh.pos.y, dz = cam.pos.z - sh.pos.z;
+    return {
+      back: -(dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z) * 1000,
+      up: (dx * b.up.x + dy * b.up.y + dz * b.up.z) * 1000,
+    };
+  };
+
+  // Высоко — прежний вынос: над крышей и позади.
+  put(2);
+  settle(2);
+  const hi = rel();
+  ok(Math.abs(hi.back - CHASE.back * 1000) < 0.5 && Math.abs(hi.up - CHASE.up * 1000) < 0.5 && !c.below,
+    `в полёте камера над крышей: ${hi.back.toFixed(1)} м позади, ${hi.up.toFixed(1)} м выше центра`);
+
+  // Два порога: спускаясь, под брюхо она уходит ниже lowIn; поднимаясь —
+  // возвращается выше lowOut. На одной и той же высоте между ними она там,
+  // откуда пришла, — и никогда не стоит вровень с корпусом.
+  const mid = (CHASE.lowIn + CHASE.lowOut) / 2;
+  put(mid); settle(0.2);
+  const downMid = c.below;
+  put(CHASE.lowIn * 0.8); settle(0.2);
+  const downLow = c.below;
+  put(mid); settle(3);
+  const upMid = c.below, upMidRel = rel();
+  put(CHASE.lowOut * 1.2); settle(0.2);
+  ok(!downMid && downLow && upMid && !c.below && upMidRel.up < CHASE_UNDER * 1000 + 0.5,
+    `под брюхо — ниже ${CHASE.lowIn * 1000} м, наверх — выше ${CHASE.lowOut * 1000} м; ` +
+    `на ${(mid * 1000).toFixed(0)} м камера там, откуда пришла, и не на уровне корпуса ` +
+    `(${upMidRel.up.toFixed(1)} м от центра)`);
+
+  // У земли — под брюхом: ниже днища корпуса, а корабль нависает над ней.
+  put(0.051); settle(3);
+  const lo = rel();
+  ok(c.below && c.low === 1 && Math.abs(lo.up - CHASE_UNDER * 1000) < 0.5 &&
+     lo.up < -HULL_FLOOR * 1000 && Math.abs(lo.back - CHASE.back * CHASE.lowK * 1000) < 0.5,
+    `с 51 м камера под брюхом: ${(-lo.up).toFixed(1)} м ниже центра (днище — ` +
+    `${(HULL_FLOOR * 1000).toFixed(1)} м), ${lo.back.toFixed(0)} м позади`);
+
+  // Перелёт под корпус — движение крана, а не прыжок.
+  {
+    const c2 = makeChase();
+    put(0.5);
+    for (let i = 0; i < 30; i++) updateChase(c2, g, STEP);
+    put(0.051);
+    let steps = 0;
+    while (c2.low < 1 && steps < 1000) { updateChase(c2, g, STEP); steps++; }
+    ok(Math.abs(steps * STEP - CHASE.swing) < 0.05,
+      `под корпус камера перелетает за ${(steps * STEP).toFixed(2)} с (${CHASE.swing} с), а не за кадр`);
+  }
+
+  // Пол: на шасси камера стоит на высоте, ниже которой ближняя плоскость
+  // срезала бы землю у нижнего края кадра.
+  put(0.0136);
+  settle(2);
+  const eye = eyeHeight(cam);
+  const camAlt = Math.hypot(cam.pos.x - lave.pos.x, cam.pos.y - lave.pos.y, cam.pos.z - lave.pos.z)
+    - groundRadius(lave, localDir(lave, cam.pos, v3()));
+  // Земля на нижнем краю кадра — на глубине eye / tan(fov/2).
+  const depth = eye / Math.tan(cam.fov / 2);
+  ok(c.lift > 0 && camAlt >= eye - 1e-6 && camAlt < eye + 0.002 && depth >= cam.near * 1.4,
+    `у самой земли камера на ${(camAlt * 1000).toFixed(1)} м: ниже ближняя плоскость ` +
+    `(${cam.near * 1000} м) срезала бы грунт у края кадра — там он на ${(depth * 1000).toFixed(1)} м`);
+
+  // Вес: камера догоняет нос за то же время, за какое корабль
+  // раскручивается по тангажу, — но не дольше 0.8 с: тяжёлый корабль
+  // раскручивается 1.3 с, и камера с таким отставанием теряла бы его в
+  // ровном развороте к краю кадра.
+  const r = chaseRates();
+  const ramp = Math.min(SHIP.pitchRate / SHIP.pitchAccel, 0.8);
+  {
+    const c3 = makeChase();
+    put(2);
+    updateChase(c3, g, STEP);
+    // Ступенька: нос резко уводится на 20°, меряем, за сколько камера
+    // пройдёт 63% пути.
+    const b = sh.basis;
+    const f0 = v3(b.fwd.x, b.fwd.y, b.fwd.z);
+    const ax = b.up;
+    const ang = 20 * Math.PI / 180;
+    const cs = Math.cos(ang), sn = Math.sin(ang);
+    const f1 = v3(
+      f0.x * cs + (ax.y * f0.z - ax.z * f0.y) * sn,
+      f0.y * cs + (ax.z * f0.x - ax.x * f0.z) * sn,
+      f0.z * cs + (ax.x * f0.y - ax.y * f0.x) * sn);
+    lookAlong(b, f1, ax);
+    let t = 0;
+    const angle = () => Math.acos(Math.min(1, dot(c3.fwd, f1)));
+    while (angle() > ang * Math.exp(-1) && t < 3) { updateChase(c3, g, STEP); t += STEP; }
+    ok(Math.abs(1 / r.turn - ramp) < 1e-9 && Math.abs(r.roll * 2 - r.turn) < 1e-9 &&
+       Math.abs(t - ramp) < 0.03,
+      `камера догоняет нос за ${t.toFixed(2)} с — столько же, сколько корабль раскручивается по ` +
+      `тангажу (${(SHIP.pitchRate / SHIP.pitchAccel).toFixed(2)} с), но не дольше 0.8 с; крен вдвое медленнее`);
+  }
+
+  // Дрожь — от двигателей: заглушённый корабль на шасси неподвижен,
+  // висящий у земли — дрожит, и не больше полуградуса.
+  {
+    const c4 = makeChase();
+    put(0.02);
+    sh.gear.out = true; sh.throttle = 0; sh.control.lift = 0;
+    for (let i = 0; i < 120; i++) updateChase(c4, g, STEP);
+    const calm = c4.shake;
+    sh.gear.out = false;
+    for (let i = 0; i < 120; i++) updateChase(c4, g, STEP);
+    const hum = c4.shake;
+    ok(calm < 1e-3 && hum > 0.25 && CHASE.shake * hum < 0.5 * Math.PI / 180,
+      `дрожь от движков: на шасси ${calm.toFixed(3)}, в зависании у земли ${hum.toFixed(2)} ` +
+      `(${(CHASE.shake * hum * 180 / Math.PI).toFixed(2)}°)`);
+  }
+
+  // Дома: камера у площадки не оказывается внутри постройки ни при
+  // каком развороте корабля.
+  {
+    const city = w.cities[0];
+    const cb = city.body;
+    const g2 = { ...g, zone: null };
+    let blocked = 0, pulled = 0;
+    const c5 = makeChase();
+    for (const pad of city.plan.pads.slice(0, 3)) {
+      for (let k = 0; k < 12; k++) {
+        const pos = cityWorld(city, pad.x, 0.02, pad.z);
+        const up = normalize(v3(pos.x - cb.pos.x, pos.y - cb.pos.y, pos.z - cb.pos.z));
+        const a2 = k / 12 * Math.PI * 2;
+        const bf = city.basis.fwd, br = city.basis.right;
+        const fw = normalize(v3(bf.x * Math.cos(a2) + br.x * Math.sin(a2),
+          bf.y * Math.cos(a2) + br.y * Math.sin(a2), bf.z * Math.cos(a2) + br.z * Math.sin(a2)));
+        const bs = makeBasis();
+        lookAlong(bs, fw, up);
+        placeShip(sh, pos, bs);
+        g2.zone = landingContext(w, sh);
+        c5.ready = false;
+        updateChase(c5, g2, STEP);
+        placeChase(c5, g2, cam);
+        if (c5.pulled > 0) pulled++;
+        const lp = cityLocal(city, cam.pos, v3());
+        if (cityBlocked(city.plan, lp.x, lp.y, lp.z, 0)) blocked++;
+      }
+    }
+    ok(blocked === 0,
+      `у площадок камера ни разу не в доме (36 разворотов; подтянута к кораблю ${pulled} раз)`);
+
+    // А вот нарочно: корабль кормой к постройке, ровно на выносе камеры
+    // от её середины. Без подтягивания камера стояла бы внутри.
+    const back = CHASE.back * CHASE.lowK;
+    let tried = 0, inside = 0, saved = 0;
+    for (const bx of city.plan.boxes) {
+      if (tried >= 6) break;
+      if (bx.h < 0.012) continue;                 // ниже камеры у земли — не мешает
+      const cdir = normalize(v3(bx.x, 0, bx.z));   // от центра города к постройке
+      const sx = bx.x - cdir.x * back, sz = bx.z - cdir.z * back;
+      if (cityBlocked(city.plan, sx, 0.02, sz, 0.035)) continue;   // сам корабль в доме
+      const pos = cityWorld(city, sx, 0.02, sz);
+      const up = normalize(v3(pos.x - cb.pos.x, pos.y - cb.pos.y, pos.z - cb.pos.z));
+      const bf = city.basis.fwd, br = city.basis.right;
+      // Нос — от постройки: камера за кормой смотрит на неё.
+      const fw = normalize(v3(-(br.x * cdir.x + bf.x * cdir.z),
+        -(br.y * cdir.x + bf.y * cdir.z), -(br.z * cdir.x + bf.z * cdir.z)));
+      const bs = makeBasis();
+      lookAlong(bs, fw, up);
+      placeShip(sh, pos, bs);
+      g2.zone = landingContext(w, sh);
+      c5.ready = false;
+      updateChase(c5, g2, STEP);
+      placeChase(c5, g2, cam);
+      tried++;
+      if (c5.pulled > 0) inside++;
+      const lp = cityLocal(city, cam.pos, v3());
+      if (!cityBlocked(city.plan, lp.x, lp.y, lp.z, 0)) saved++;
+    }
+    ok(tried >= 3 && inside === tried && saved === tried,
+      `кормой к постройке камера упирается в неё ${inside} раз из ${tried} и каждый раз ` +
+      'подтягивается к кораблю, наружу');
+  }
+}
+
 // --- 17. Шасси касается грунта ------------------------------------------------
 //
 // Корабль стоял по высоте центра масс, а стойки разнесены на тридцать
@@ -4045,178 +4419,333 @@ console.log('\n== пылинки за бортом ==');
 console.log('\n== кабина ==');
 {
   const cp = buildCockpit();
-  const M = 1000;                      // км -> м
   const DEG = 57.2957795;
-  // Поле зрения игры: вниз от центра видно ровно половину его.
   const FOV = 68 / DEG;
-  const halfDown = FOV / 2;
+  const W = 1600, H = 900;
+  const focal = (H / 2) / Math.tan(FOV / 2);
+  // Кадр кокпита: глаз в нуле, взгляд по +z. Экранные координаты.
+  const px = (p) => ({ x: W / 2 + focal * p.x / p.z, y: H / 2 - focal * p.y / p.z });
 
-  // Габарит кабины — человеческий. Это не придирка к модели, а проверка
-  // масштаба: данные лежат в миллиметрах, и ошибка в тысячу раз здесь
-  // выглядела бы как «кабина собралась».
-  {
-    const w = (cp.bound.hi.x - cp.bound.lo.x) * M;
-    const h = (cp.bound.hi.y - cp.bound.lo.y) * M;
-    ok(w > 1.5 && w < 2.5 && h > 1.5 && h < 2.6,
-      `кабина человеческого размера: ${w.toFixed(2)} x ${h.toFixed(2)} м`);
-  }
-
-  // ГЛАВНОЕ ТРЕБОВАНИЕ к кабине: она не смеет лезть в прицел. Проём
-  // фонаря здесь не вырезан, а задан — рамы в нём просто нет, — и это
-  // должно быть видно числом, а не на глаз.
-  {
-    let inCone = 0;
-    for (const f of cp.shell.faces) {
-      let x = 0, y = 0, z = 0;
-      for (const i of f.v) {
-        const p = cp.shell.verts[i];
-        x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+  // Треугольники сетки — для лучей из глаза.
+  const trisOf = (mesh, filter = () => true) => {
+    const out = [];
+    for (const f of mesh.faces) {
+      if (!filter(f)) continue;
+      for (let t = 1; t + 1 < f.v.length; t++) {
+        out.push([mesh.verts[f.v[0]], mesh.verts[f.v[t]], mesh.verts[f.v[t + 1]], f]);
       }
-      if (z <= 0) continue;
-      if (Math.atan2(Math.hypot(x, y), z) < 14 / DEG) inCone++;
     }
-    ok(inCone === 0, `прицел чист: в конусе 14° вокруг оси ${inCone} граней кабины`);
+    return out;
+  };
+  // Луч из глаза: ближайшее пересечение (Мёллер — Трумбор).
+  const hit = (tris, d) => {
+    let best = Infinity, face = null;
+    for (const [a, b, c, f] of tris) {
+      const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
+      const e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
+      const px_ = d.y * e2z - d.z * e2y, py_ = d.z * e2x - d.x * e2z, pz_ = d.x * e2y - d.y * e2x;
+      const det = e1x * px_ + e1y * py_ + e1z * pz_;
+      if (Math.abs(det) < 1e-12) continue;
+      const inv = 1 / det;
+      const tx = -a.x, ty = -a.y, tz = -a.z;
+      const u = (tx * px_ + ty * py_ + tz * pz_) * inv;
+      if (u < -1e-9 || u > 1 + 1e-9) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (d.x * qx + d.y * qy + d.z * qz) * inv;
+      if (v < -1e-9 || u + v > 1 + 1e-9) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 1e-6 && t < best) { best = t; face = f; }
+    }
+    return { t: best, face };
+  };
+  const shell = trisOf(cp.shell);
+  const glass = trisOf(cp.glass);
+  const fib = (n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const y = 1 - 2 * (i + 0.5) / n, r = Math.sqrt(1 - y * y), a = i * 2.399963;
+      out.push({ x: r * Math.cos(a), y, z: r * Math.sin(a) });
+    }
+    return out;
+  };
+
+  // Габарит поста — человеческий: он в метрах, и ошибка в тысячу раз
+  // (километры игры) видна сразу. Палуба рубки сюда не входит.
+  {
+    const w = cp.bound.hi.x - cp.bound.lo.x, h = cp.bound.hi.y - cp.bound.lo.y;
+    ok(w > 1.8 && w < 2.6 && h > 1.0 && h < 2.1,
+      `пост пилота человеческого размера: ${w.toFixed(2)} × ${h.toFixed(2)} м`);
   }
 
-  // Рама фонаря обязана быть ВИДНА по краям кадра — иначе кабина
-  // читается как приборная плита, подставленная снизу (так и вышло с
-  // покупной моделью: её пришлось так резать, что от кабины осталась
-  // одна доска). Считаем грани, попадающие в боковые полосы кадра:
-  // по горизонтали видно ±50°, значит стойки на ±36° в кадре есть.
+  // Корпус в осях кабины. Стекло фонаря — окно (сквозь стёкла, мимо
+  // переплёта, виден мир), всё прочее — стены.
+  const hullTris = trisOf(cp.hull);
+  const E = cp.eye;
+  const model = (q) => ({ x: q.x + E.x, y: q.y + E.y, z: q.z + E.z });
+  const firstHit = (d) => {
+    const a = hit(shell, d), b = hit(hullTris, d);
+    if (a.t <= b.t) return { t: a.t, pod: true, face: a.face };
+    return { t: b.t, pod: false, face: b.face };
+  };
+  const pane = (h, d) => {
+    if (h.pod || !h.face || !h.face.glass) return false;
+    const q = model({ x: d.x * h.t, y: d.y * h.t, z: d.z * h.t });
+    return !hullFrameAt(q, h.face.n);
+  };
+
+  // ЧЕСТНОЕ МЕСТО. Глаз — в рубке, под фонарём, а пост целиком внутри
+  // корпуса: ни одна его вершина не торчит сквозь обшивку. Раньше глаз
+  // стоял в девяти метрах над носом, снаружи корпуса, и своего корабля
+  // из кабины не было видно вовсе.
   {
-    let side = 0, top = 0;
-    for (const f of cp.shell.faces) {
-      let x = 0, y = 0, z = 0;
-      for (const i of f.v) {
-        const p = cp.shell.verts[i];
-        x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+    let out = 0;
+    for (const v of cp.shell.verts) {
+      const L = Math.hypot(v.x, v.y, v.z);
+      if (L < 1e-6) continue;
+      const hh = hit(hullTris, { x: v.x / L, y: v.y / L, z: v.z / L });
+      if (hh.t < L - 0.002) out++;
+    }
+    ok(out === 0, `пост пилота целиком под фонарём: из ${cp.shell.verts.length} вершин ` +
+      `сквозь обшивку торчит ${out}; глаз — в (${E.x}, ${E.y}, ${E.z}) м от центра корабля`);
+  }
+
+  // Нутро корпуса не видно: всякий луч из глаза упирается либо в пост и
+  // палубу, либо в стекло фонаря, либо в стену рубки ВЫШЕ палубы. Корпус
+  // пуст изнутри, и без палубы, опустив взгляд, пилот видел бы изнанку
+  // днища.
+  {
+    const dirs = fib(1200);
+    let leak = 0, viaGlass = 0;
+    for (const d of dirs) {
+      const h = firstHit(d);
+      if (!isFinite(h.t)) { leak++; continue; }
+      if (!h.pod && !h.face.glass && d.y * h.t < cp.size.floorY - 0.01) leak++;
+      if (!h.pod && h.face.glass) viaGlass++;
+    }
+    ok(leak === 0, `нутра корпуса из рубки не видно: ${leak} из ${dirs.length} лучей; ` +
+      `на стекло фонаря приходится ${(viaGlass / dirs.length * 100).toFixed(0)}% всех направлений`);
+  }
+
+  // ОБЗОР: доля кадра, которая смотрит наружу сквозь стекло — мимо поста
+  // и переплёта.
+  {
+    let glassPx = 0, n = 0;
+    for (let j = 0; j < 30; j++) {
+      for (let i = 0; i < 48; i++) {
+        const sx = (i + 0.5) / 48 * W, sy = (j + 0.5) / 30 * H;
+        const d = normalize(v3((sx - W / 2) / focal, -(sy - H / 2) / focal, 1));
+        if (pane(firstHit(d), d)) glassPx++;
+        n++;
       }
-      if (z <= 0) continue;
-      const az = Math.abs(Math.atan2(x, z)) * DEG;
-      const el = Math.atan2(y, Math.hypot(x, z)) * DEG;
-      if (az > 25 && az < 50 && el > -20 && el < 34) side++;
-      if (el > 20 && el < 34 && az < 50) top++;
     }
-    ok(side > 8 && top > 4,
-      `рама в кадре: ${side} граней по бортам, ${top} сверху — обзор обрамлён, а не завешен`);
+    ok(glassPx / n > 0.5, `обзор: сквозь стекло рубки — ${(glassPx / n * 100).toFixed(0)}% кадра`);
   }
 
-  // Кабина должна быть ЗАКРЫТОЙ: пилот вертит головой (ПКМ), и назад,
-  // вниз и вбок он обязан видеть кабину, а не открытый космос.
+  // Прицел чист: в конусе 14° вокруг оси — только стекло, без переплёта.
+  // Лобовое стекло потому и задано углами от глаза (BRIDGE): сетка
+  // «окнами в рост человека» клала стойку ровно по оси.
   {
-    const dirs = [
-      ['назад', 0, 0, -1], ['вниз', 0, -1, 0],
-      ['влево', -1, 0, 0], ['вправо', 1, 0, 0],
-    ];
-    const seen = [];
-    for (const [name, dx, dy, dz] of dirs) {
-      let hit = 0;
-      for (const f of cp.shell.faces) {
-        let x = 0, y = 0, z = 0;
-        for (const i of f.v) {
-          const p = cp.shell.verts[i];
-          x += p.x / f.v.length; y += p.y / f.v.length; z += p.z / f.v.length;
+    let blocked = 0, rays = 0;
+    for (let k = 0; k < 300; k++) {
+      const r = Math.sqrt(k / 300) * Math.tan(14 / DEG), a = k * 2.399963;
+      const d = normalize(v3(r * Math.cos(a), r * Math.sin(a), 1));
+      rays++;
+      if (!pane(firstHit(d), d)) blocked++;
+    }
+    ok(blocked === 0, `прицел чист: в конусе 14° вокруг оси из ${rays} лучей в пост или переплёт не упёрся ни один`);
+  }
+
+  // НОС ВИДЕН. Лучи чуть ниже оси проходят стекло — и упираются в свой
+  // корпус снаружи: это и есть нос, который пилот обязан видеть.
+  {
+    let nose = 0, n = 0;
+    for (let el = -9; el >= -15; el -= 1) {
+      for (let az = -3; az <= 3; az += 1.5) {
+        const d = v3(Math.sin(az / DEG) * Math.cos(el / DEG), Math.sin(el / DEG), Math.cos(az / DEG) * Math.cos(el / DEG));
+        n++;
+        const h = firstHit(d);
+        if (!pane(h, d)) continue;
+        // Дальше стекла: следующее пересечение с корпусом.
+        const o = { x: d.x * (h.t + 0.01), y: d.y * (h.t + 0.01), z: d.z * (h.t + 0.01) };
+        let best = Infinity, face = null;
+        for (const [a, b, c, f] of hullTris) {
+          const sh = (P) => ({ x: P.x - o.x, y: P.y - o.y, z: P.z - o.z });
+          const r = hit([[sh(a), sh(b), sh(c), f]], d);
+          if (r.t < best) { best = r.t; face = f; }
         }
-        const L = Math.hypot(x, y, z) || 1;
-        if ((x * dx + y * dy + z * dz) / L > 0.7) hit++;
+        if (face && !face.glass) nose++;
       }
-      if (hit > 0) seen.push(name);
     }
-    ok(seen.length === dirs.length,
-      `кабина закрыта со всех сторон, кроме фонаря: ${seen.join(', ')}`);
+    ok(nose / n > 0.8, `нос виден над козырьком: ${nose} из ${n} лучей от −9° до −15° ` +
+      `проходят стекло и упираются в свой корпус`);
   }
 
-  // Штурвал должен быть ВИДЕН: кабина, в которой не видно собственных
-  // органов управления, теряет смысл. Верх штурвала обязан попадать в
-  // нижнюю половину кадра, а не лежать под ней.
+  // Рама лобового стекла в кадре — по бокам и сверху: кадр обрамлён, как
+  // из настоящего фонаря, а не висит в пустоте.
   {
-    let top = -Infinity;
-    for (const v of cp.yoke.verts) top = Math.max(top, v.y + cp.pivot.y);
-    const z = cp.pivot.z;
-    const down = Math.atan2(-top, z);
-    ok(cp.yoke && down > 0 && down < halfDown,
-      `штурвал в кадре: верх на ${(down * DEG).toFixed(0)}° ниже оси, видно ` +
-      `${(halfDown * DEG).toFixed(0)}° (ось колонки в ${(z * M).toFixed(2)} м впереди)`);
-  }
-
-  // Приборная доска: три места, все ниже горизонта и в кадре.
-  {
-    const cam = new Camera();
-    cam.resize(1600, 900);
-    cam.basis.right = { x: 1, y: 0, z: 0 };
-    cam.basis.up = { x: 0, y: 1, z: 0 };
-    cam.basis.fwd = { x: 0, y: 0, z: 1 };
-    const at = (p) => {
-      const L = Math.hypot(p.x, p.y, p.z);
-      return projectDir(cam, p.x / L, p.y / L, p.z / L, {});
+    const frameAt = (sx, sy) => {
+      const d = normalize(v3((sx - W / 2) / focal, -(sy - H / 2) / focal, 1));
+      const h = firstHit(d);
+      return !h.pod && h.face && h.face.glass && !pane(h, d);
     };
-    const s = cp.slots;
-    ok(!!s, 'приборная доска найдена по геометрии модели');
-    const L = at(s.left.pos), C = at(s.mid.pos), R = at(s.right.pos);
-    const onScreen = (p) => p.x > 0 && p.x < 1600 && p.y > 450 && p.y < 900;
-    ok(Object.keys(s).length === 5 && [...Object.values(s)].every((sl) => sl.w > 0 && sl.h > 0),
-      `экранов в кабине ${Object.keys(s).length}, у каждого свой размер`);
-    ok(onScreen(L) && onScreen(C) && onScreen(R) && L.x < C.x && C.x < R.x,
-      `приборы стоят на доске и в кадре: слева ${L.x | 0},${L.y | 0}; ` +
-      `по центру ${C.x | 0},${C.y | 0}; справа ${R.x | 0},${R.y | 0}`);
-
-    // ТО, ЧТО БЫЛО СЛОМАНО: у верхних табло ось «вправо» бралась от
-    // НОРМАЛИ (направления на пилота), а не от направления взгляда, и
-    // оказывалась зеркальной — текст на них читался задом наперёд.
-    // Проверяем все экраны разом: «вправо» по экрану обязано идти
-    // вправо по кадру, «вверх» — вверх.
-    {
-      const bad = [];
-      for (const k of Object.keys(s)) {
-        const sl = s[k];
-        const c = at(sl.pos);
-        const r = at({
-          x: sl.pos.x + sl.right.x * sl.w * 0.4,
-          y: sl.pos.y + sl.right.y * sl.w * 0.4,
-          z: sl.pos.z + sl.right.z * sl.w * 0.4,
-        });
-        const u = at({
-          x: sl.pos.x + sl.up.x * sl.h * 0.4,
-          y: sl.pos.y + sl.up.y * sl.h * 0.4,
-          z: sl.pos.z + sl.up.z * sl.h * 0.4,
-        });
-        if (!(r.x > c.x + 1) || !(u.y < c.y - 1)) bad.push(k);
+    let left = 0, right = 0, top = 0;
+    for (let k = 0; k < 16; k++) {
+      const y = 140 + k * 28;
+      let l = false, r = false;
+      for (let x = 0; x < W * 0.2 && !(l && r); x += 6) {
+        if (!l && frameAt(x, y)) l = true;
+        if (!r && frameAt(W - x, y)) r = true;
       }
-      ok(bad.length === 0,
-        `ни один экран не зеркальный и не перевёрнутый (проверено ${Object.keys(s).length})` +
-        (bad.length ? ': ' + bad.join(', ') : ''));
+      if (l) left++;
+      if (r) right++;
+      let t = false;
+      for (let y2 = 0; y2 < H * 0.16 && !t; y2 += 5) if (frameAt(300 + k * 60, y2)) t = true;
+      if (t) top++;
     }
-
-    // Оси доски — настоящие оси плоскости: перпендикулярны и не
-    // вырождены. Иначе преобразование холста схлопнет блок в полоску.
-    const dotv = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
-    let worst = 0;
-    for (const k of ['left', 'mid', 'right']) {
-      worst = Math.max(worst, Math.abs(dotv(s[k].right, s[k].up)));
-      // Нормаль смотрит НА пилота — иначе приборы окажутся с изнанки.
-      if (dotv(s[k].normal, s[k].pos) > 0) worst = 1;
-    }
-    ok(worst < 1e-6,
-      `оси доски перпендикулярны и повёрнуты к пилоту (худшее ${worst.toExponential(1)})`);
+    ok(left >= 12 && right >= 12 && top >= 12,
+      `рама лобового стекла в кадре: стойки слева ${left}/16 и справа ${right}/16, верх ${top}/16`);
   }
 
-  // Штурвал ходит за РУЧКАМИ, а не за угловой скоростью корабля: он в
-  // руках у пилота и стоять должен там, куда его отклонили.
+  // МОНИТОРЫ. Пять на доске и три табло на козырьке; все — целиком в
+  // кадре, ничем не заслонены, и мониторы — в ОДИН РЯД И ОДНОГО РАЗМЕРА.
+  // Последнее — то, что сломала первая, дуговая доска: крайний монитор
+  // выходил вдвое выше среднего и уходил за кромку кадра.
+  {
+    const scr = cp.screens;
+    ok(Object.keys(scr).length === SCREENS.length &&
+       SCREENS.every((s) => scr[s.id] && scr[s.id].w > 0 && scr[s.id].h > 0),
+      `экранов в кабине ${Object.keys(scr).length}: ` + SCREENS.map((s) => s.id).join(', '));
+    const corner = (s, sx, sy) => ({
+      x: s.pos.x + s.right.x * sx * s.w / 2 + s.up.x * sy * s.h / 2,
+      y: s.pos.y + s.right.y * sx * s.w / 2 + s.up.y * sy * s.h / 2,
+      z: s.pos.z + s.right.z * sx * s.w / 2 + s.up.z * sy * s.h / 2,
+    });
+    // Углы экрана — настоящие (у гнутого табло плоская хорда лежит за
+    // ним), чуть внутрь: самый край закрывает рамка, как у любого монитора.
+    const inset = (s, k) => s.corners.map((q) => ({
+      x: s.pos.x + (q.x - s.pos.x) * k, y: s.pos.y + (q.y - s.pos.y) * k, z: s.pos.z + (q.z - s.pos.z) * k,
+    }));
+    const bad = [], hidden = [], mirror = [];
+    const box = {};
+    for (const s of Object.values(scr)) {
+      const pts = inset(s, 0.96);
+      const P = pts.map(px);
+      if (P.some((p) => p.x < 0 || p.x > W || p.y < 0 || p.y > H)) bad.push(s.id);
+      // Заслонён ли: луч в угол экрана упирается во что-то ближе самого
+      // экрана (экран — тоже грань оболочки, её пропускаем).
+      for (const q of pts.concat([s.pos])) {
+        const L = Math.hypot(q.x, q.y, q.z);
+        const d = { x: q.x / L, y: q.y / L, z: q.z / L };
+        const hh = hit(shell.filter((t) => t[3].screen !== s.id), d);
+        if (hh.t < L - 0.004) { hidden.push(s.id); break; }
+      }
+      const c = px(s.pos), r = px(corner(s, 0.8, 0)), u = px(corner(s, 0, 0.8));
+      if (!(r.x > c.x + 1) || !(u.y < c.y - 1)) mirror.push(s.id);
+      // Длины верхней и нижней кромки: у плоскости, наклонённой к кадру,
+      // боковые кромки сходятся, и рамка крайних трапеций шире — меряется
+      // сам экран.
+      const E = s.corners.map(px);
+      box[s.id] = { y0: Math.min(...E.map((p) => p.y)), y1: Math.max(...E.map((p) => p.y)),
+        w: Math.hypot(E[1].x - E[0].x, E[1].y - E[0].y), wb: Math.hypot(E[2].x - E[3].x, E[2].y - E[3].y) };
+    }
+    ok(bad.length === 0 && hidden.length === 0,
+      'все экраны целиком в кадре и ничем не заслонены' +
+      (bad.length ? `; за кадром: ${bad.join(', ')}` : '') + (hidden.length ? `; заслонены: ${hidden.join(', ')}` : ''));
+    ok(mirror.length === 0, 'ни один экран не зеркальный и не перевёрнутый' +
+      (mirror.length ? ': ' + mirror.join(', ') : ''));
+    const mf = SCREENS.filter((s) => s.kind === 'mfd').map((s) => box[s.id]);
+    const top = mf.map((b) => b.y0), bot = mf.map((b) => b.y1), wid = mf.map((b) => b.w);
+    const spread = (a) => Math.max(...a) - Math.min(...a);
+    ok(spread(top) < 3 && spread(bot) < 3 && spread(wid) / Math.min(...wid) < 0.03 &&
+       spread(mf.map((b) => b.wb)) / Math.min(...mf.map((b) => b.wb)) < 0.03,
+      `мониторы в один ряд и одного размера: верх ${Math.min(...top).toFixed(0)}–${Math.max(...top).toFixed(0)}, ` +
+      `низ ${Math.min(...bot).toFixed(0)}–${Math.max(...bot).toFixed(0)}, ширина ${Math.min(...wid).toFixed(0)}–` +
+      `${Math.max(...wid).toFixed(0)} пикселей на кадре ${W}×${H}`);
+    // Табло — на кромке козырька, выше мониторов.
+    const stripLow = Math.max(...SCREENS.filter((s) => s.kind === 'strip').map((s) => box[s.id].y1));
+    ok(stripLow <= Math.min(...top) + 2, `табло над мониторами: низ табло ${stripLow.toFixed(0)}, верх мониторов ${Math.min(...top).toFixed(0)}`);
+  }
+
+  // Атлас экранов: всё помещается, ничего не наезжает, высота — степень
+  // двойки, и у каждого экрана пропорции его холста — пропорции
+  // номинала софта (иначе картинку растянет).
+  {
+    const d = makeDisplays(cp, { density: 2000, atlasW: 2048, canvas: () => null });
+    let overlap = 0;
+    for (const a of d.list) {
+      for (const b of d.list) {
+        if (a === b) continue;
+        if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) overlap++;
+      }
+    }
+    const inside = d.list.every((x) => x.x >= 0 && x.y >= 0 && x.x + x.w <= d.w && x.y + x.h <= d.h);
+    const pow2 = (d.h & (d.h - 1)) === 0;
+    const aspect = d.list.map((x) => {
+      const [nw, nh] = NOMINAL[x.id] || NOMINAL.mfd;
+      return Math.abs((x.w / x.h) / (nw / nh) - 1);
+    });
+    ok(overlap === 0 && inside && pow2 && Math.max(...aspect) < 0.03,
+      `атлас экранов ${d.w}×${d.h}: ${d.list.length} холстов без наложений; ` +
+      `пропорции холстов сходятся с номиналом софта (худшее ${(Math.max(...aspect) * 100).toFixed(1)}%)`);
+    const dm = makeDisplays(cp, { density: 1200, atlasW: 1024, canvas: () => null });
+    ok(dm.w === 1024 && dm.h <= 1024, `на телефоне атлас ${dm.w}×${dm.h}`);
+
+    // Координаты экранов в буфере: у каждого экрана — внутри своего места
+    // в атласе.
+    const arr = cabinArrays(cp.shell, (id) => (d.byId[id] ? d.byId[id].uv : null));
+    const STRIDE = 15;
+    let off = 0, screensSeen = 0;
+    for (let i = 0; i < arr.length; i += STRIDE) {
+      if (Math.round(arr[i + 10]) !== CMAT.screen) continue;
+      screensSeen++;
+      const u = arr[i + 11], v = arr[i + 12];
+      const ok1 = d.list.some((x) => u >= x.uv[0] - 1e-6 && u <= x.uv[0] + x.uv[2] + 1e-6 &&
+        v >= x.uv[1] - 1e-6 && v <= x.uv[1] + x.uv[3] + 1e-6);
+      if (!ok1) off++;
+    }
+    ok(screensSeen > 0 && off === 0, `экранные вершины (${screensSeen}) смотрят в свои места атласа`);
+  }
+
+  // Свет снаружи: планета между кораблём и звездой гасит солнце, в
+  // стороне — нет, на краю диска — частично (полутень).
+  {
+    const star = { pos: { x: 0, y: 0, z: 0 }, radius: 700000 };
+    const pl = { pos: { x: 1e8, y: 0, z: 0 }, radius: 6000 };
+    const world = { star, bodies: [star, pl] };
+    const behind = sunVisibility(world, { x: 1e8 + 20000, y: 0, z: 0 });
+    const aside = sunVisibility(world, { x: 1e8 + 20000, y: 30000, z: 0 });
+    // Край тени: угловой радиус планеты с 20 000 км — 17.5°, звезды — 0.4°.
+    const ab = Math.asin(6000 / 20000);
+    const edge = sunVisibility(world, { x: 1e8 + 20000 * Math.cos(ab), y: 20000 * Math.sin(ab), z: 0 });
+    ok(behind === 0 && aside === 1 && edge > 0.05 && edge < 0.95,
+      `затмение: за планетой солнца ${behind}, в стороне ${aside}, на краю тени ${edge.toFixed(2)}`);
+  }
+
+  // Лампы кабины — внутри неё: свет, поставленный снаружи обшивки,
+  // светил бы сквозь стену.
+  {
+    const inside = (p) => p.x >= cp.bound.lo.x && p.x <= cp.bound.hi.x && p.y >= cp.bound.lo.y &&
+      p.y <= cp.bound.hi.y && p.z >= cp.bound.lo.z && p.z <= cp.bound.hi.z;
+    ok(cp.lights.length >= 5 && cp.lights.every((l) => inside(l.pos) && l.range > 0),
+      `ламп в кабине ${cp.lights.length}, все внутри`);
+  }
+
+  // Ручка ходит за РУЧКАМИ, а не за угловой скоростью корабля: она в
+  // руках у пилота и стоять должна там, куда её отклонили. РУД — за
+  // заданной тягой.
   {
     const y = makeYoke();
     const c = { pitch: 1, yaw: 0, roll: -1 };
-    for (let i = 0; i < 120; i++) updateYoke(y, c, STEP);
-    ok(Math.abs(y.pitch - YOKE.pitch) < 1e-3 && Math.abs(y.roll + YOKE.roll) < 1e-3,
-      `штурвал доходит до упора: тангаж ${(y.pitch * DEG).toFixed(0)}°, ` +
-      `крен ${(y.roll * DEG).toFixed(0)}°`);
+    for (let i = 0; i < 120; i++) updateYoke(y, c, STEP, 0.5);
+    ok(Math.abs(y.pitch - YOKE.pitch) < 1e-3 && Math.abs(y.roll + YOKE.roll) < 1e-3 &&
+       Math.abs(y.throttle - YOKE.throttle * 0.5) < 1e-3,
+      `ручка доходит до упора: тангаж ${(y.pitch * DEG).toFixed(0)}°, крен ${(y.roll * DEG).toFixed(0)}°; ` +
+      `РУД на половине тяги — ${(y.throttle * DEG).toFixed(0)}°`);
 
-    // Возврат: ручки отпущены — штурвал сам идёт в нейтраль.
-    for (let i = 0; i < 120; i++) updateYoke(y, { pitch: 0, yaw: 0, roll: 0 }, STEP);
-    ok(Math.abs(y.pitch) < 1e-3 && Math.abs(y.roll) < 1e-3,
-      'отпущенные ручки возвращают штурвал в нейтраль');
+    for (let i = 0; i < 120; i++) updateYoke(y, { pitch: 0, yaw: 0, roll: 0 }, STEP, 0);
+    ok(Math.abs(y.pitch) < 1e-3 && Math.abs(y.roll) < 1e-3 && Math.abs(y.throttle) < 1e-3,
+      'отпущенные ручки возвращают ручку и РУД в нейтраль');
 
-    // Скорость не зависит от частоты кадров: на 12 и 240 Гц за ту же
-    // секунду штурвал уходит одинаково.
     const run = (dt) => {
       const z = makeYoke();
       for (let i = 0; i < Math.round(1 / dt); i++) updateYoke(z, { pitch: 1 }, dt);
@@ -4224,8 +4753,10 @@ console.log('\n== кабина ==');
     };
     const slow = run(1 / 12), fast = run(1 / 240);
     ok(Math.abs(slow - fast) < YOKE.pitch * 0.05,
-      `ход штурвала почти не зависит от частоты кадров: ${(slow * DEG).toFixed(1)}° ` +
+      `ход ручки почти не зависит от частоты кадров: ${(slow * DEG).toFixed(1)}° ` +
       `при 12 Гц против ${(fast * DEG).toFixed(1)}° при 240 Гц`);
+    ok(cp.stick.mesh.faces.length > 0 && cp.throttle.mesh.faces.length > 0,
+      `ручка (${cp.stick.mesh.faces.length} граней) и РУД (${cp.throttle.mesh.faces.length}) собраны`);
   }
 }
 
@@ -4554,11 +5085,13 @@ console.log('\n== свежий код: адреса модулей ==');
       }
       return [...seen].sort();
     };
-    const need = closure('js/gl/tileworker.js');
+    // Потоков два — плиток и дальнего леса (js/gl/forestworker.js), и
+    // освежать надо всё, что читает хотя бы один из них.
+    const need = [...new Set([...closure('js/gl/tileworker.js'), ...closure('js/gl/forestworker.js')])].sort();
     const got = a.asked.map(([u]) => u).sort();
     ok(got.join() === need.join() && a.asked.every(([, c]) => c === 'reload') && !!a.fresh,
-      `файлы потока сборки берутся мимо кеша (cache: reload), все ${need.length}: ` +
-      need.map((f) => f.slice(6)).join(', '));
+      `файлы потоков сборки берутся мимо кеша (cache: reload), все ${need.length}: ` +
+      need.map((f) => f.slice(3)).join(', '));
   }
 
   {

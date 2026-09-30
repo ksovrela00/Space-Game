@@ -140,10 +140,9 @@
             "spec": {
                 "flight": {
                     "lateral": 0.5,
-                    "pitchRate": 0.85,
-                    "yawRate": 0.55,
-                    "rollRate": 1.6,
-                    "rotRamp": 0.7
+                    "tipAccel": 4.9,
+                    "rotRamp": 1.4,
+                    "rcsLag": 0.25
                 }
             },
             "price": 6000,

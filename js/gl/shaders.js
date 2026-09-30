@@ -3,6 +3,8 @@
 
 import { DETAIL_GLSL, BAKE_DETAIL_GLSL } from './detail.js';
 import { GRAIN_GLSL } from './ground.js';
+import { WASH_GLSL } from './wash.js';
+import { HULL_GLSL } from './hull.js';
 import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
 
@@ -118,10 +120,16 @@ in vec3 aNormal;
 in vec4 aColor;          // rgb + флаг «сам светится» в альфе
 in vec2 aUv;             // у плиток: координата в их запечённой текстуре
 in vec2 aGrain;          // у грунта: координата фотографии (js/gl/ground.js)
+// У корпуса корабля: материал грани (js/gl/hull.js). У всех остальных
+// сеток атрибута нет, и видеокарта подставляет ноль — «обычная грань».
+in float aMat;
 
 uniform mat4 uProj;
 uniform mat4 uModelView;
 uniform mat3 uNormalMat;
+// Струя движков: гнёт растения (js/gl/wash.js). Включена только на
+// поле растительности, у остальных uWashOn = 0.
+${WASH_GLSL}
 
 out vec3 vNormal;
 out vec3 vViewPos;
@@ -130,17 +138,132 @@ out float vFragDepth;
 out vec3 vLocal;         // позиция в локальных осях тела — для мелкого рельефа
 out vec2 vUv;
 out vec2 vGrain;
+out float vMat;
+out vec3 vNormalL;       // нормаль в осях модели — обшивке корабля
 
 void main() {
-  vec4 vp = uModelView * vec4(aPos, 1.0);
+  vec3 pos = aPos;
+  vec3 nrm = aNormal;
+  if (uWashOn > 0.5 && aBend.y > 0.0) pos = washBend(pos, nrm);
+  vec4 vp = uModelView * vec4(pos, 1.0);
   gl_Position = uProj * vp;
   vFragDepth = 1.0 + gl_Position.w;
   vViewPos = vp.xyz;
-  vNormal = uNormalMat * aNormal;
+  vNormal = uNormalMat * nrm;
   vColor = aColor;
-  vLocal = aPos;
+  vLocal = pos;
   vUv = aUv;
   vGrain = aGrain;
+  vMat = aMat;
+  vNormalL = nrm;
+}`;
+
+// --- Дальний лес (js/gl/forest.js) -----------------------------------------------
+//
+// Дерево вдали — силуэт по профилю своей породы, один экземпляр на
+// дерево, один вызов на кусок леса. Фрагментный шейдер — общий у сеток
+// (MESH_FS): освещение, фары и дымка воздуха те же, что у всего
+// остального, и дальний лес не выпадает из кадра ни цветом, ни туманом.
+export const FOREST_VS = `#version 300 es
+in vec4 aP;       // угол вершины, кольцо (0..3), угол середины грани, пояс (0..2)
+in vec4 aTree;    // место от начала куска (км) и рост (км)
+in vec4 aLook;    // цвет полога и номер породы
+in vec4 aMisc;    // ранг, класс подрешётки, разворот, запас
+
+uniform mat4 uProj;
+uniform mat4 uModelView;
+uniform mat3 uNormalMat;
+uniform vec3 uUp;         // местная вертикаль куска, оси тела
+uniform vec3 uT;          // касательные оси куска
+uniform vec3 uB;
+uniform vec4 uProf[8];    // профили пород: низ кроны, радиус там, самое широкое место, радиус там
+uniform float uTrunk;     // радиус ствола, доля роста
+uniform vec4 uNear;       // середина поля растений от начала куска и его радиус, км
+uniform float uNearOn;    // поле растений на этой грани есть
+uniform vec3 uCamL;       // камера от начала куска, км
+uniform vec4 uLod;        // (первое прореживание, второе, ширина перехода, дальность), км
+
+out vec3 vNormal;
+out vec3 vViewPos;
+out vec4 vColor;
+out float vFragDepth;
+out vec3 vLocal;
+out vec2 vUv;
+out vec2 vGrain;
+out float vMat;
+out vec3 vNormalL;
+
+float fSmooth(float t) { t = clamp(t, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+
+void main() {
+  vec3 base = aTree.xyz;
+  float H = aTree.w;
+
+  // Кто рисует это дерево: поле у корабля или дальний лес. Поле берёт его,
+  // если ранг не больше редения к своему краю (js/gl/flora.js,
+  // scatterFlora), — значит здесь ровно обратное условие.
+  float keep = 1.0;
+  if (uNearOn > 0.5) {
+    float f = length(base - uNear.xyz) / uNear.w;
+    float fade = f < 0.62 ? 1.0 : fSmooth((1.0 - f) / 0.38);
+    if (aMisc.x <= fade) keep = 0.0;
+  }
+
+  // Прореживание вдали: редкие подрешётки остаются и шире, остальные
+  // тают. Площадь крон сохраняется, число силуэтов — нет.
+  float d = length(base - uCamL);
+  float b = uLod.z;
+  float s1 = smoothstep(uLod.x * (1.0 - b), uLod.x * (1.0 + b), d);
+  float s2 = smoothstep(uLod.y * (1.0 - b), uLod.y * (1.0 + b), d);
+  float cls = aMisc.y;
+  float stay = cls > 1.5 ? 1.0 : (cls > 0.5 ? 1.0 - s2 : 1.0 - s1);
+  float wide = 1.0 + (cls > 0.5 ? s1 : 0.0) + (cls > 1.5 ? 2.0 * s2 : 0.0);
+  float edge = 1.0 - smoothstep(uLod.w * 0.85, uLod.w, d);
+  float k = keep * stay * edge;
+
+  vUv = vec2(0.0);
+  vGrain = vec2(0.0);
+  vMat = 0.0;
+  if (k < 0.002) {
+    // За пределами отсечения: треугольник выбрасывается целиком.
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vNormal = vec3(0.0, 0.0, 1.0); vViewPos = vec3(0.0, 0.0, -1.0);
+    vColor = vec4(0.0); vFragDepth = 1.0; vLocal = vec3(0.0); vNormalL = vec3(0.0, 1.0, 0.0);
+    return;
+  }
+
+  vec4 pr = uProf[int(aLook.w + 0.5)];
+  float ry[4] = float[4](0.0, pr.x, pr.z, 1.0);
+  float rr[4] = float[4](uTrunk, pr.y, pr.w, 0.0);
+  int ring = int(aP.y + 0.5);
+  int band = int(aP.w + 0.5);
+  float hh = H * k;
+  float ww = H * k * wide;
+
+  float a = aP.x + aMisc.z;
+  vec3 side = uT * cos(a) + uB * sin(a);
+  vec3 p = base + uUp * (ry[ring] * hh) + side * (rr[ring] * ww);
+
+  // Нормаль — на грань пояса целиком (плоское затенение, как у полных
+  // моделей): по середине грани и наклону пояса.
+  float am = aP.z + aMisc.z;
+  vec3 mid = uT * cos(am) + uB * sin(am);
+  float dy = (ry[band + 1] - ry[band]) * hh;
+  float dr = (rr[band + 1] - rr[band]) * ww;
+  vec3 nl = mid * dy - uUp * dr;
+  nl = dot(nl, nl) > 1e-18 ? normalize(nl) : mid;
+
+  // Нижний пояс — ствол: кора темнее и рыжее полога.
+  vec3 c = band == 0 ? aLook.rgb * vec3(0.9, 0.55, 0.45) : aLook.rgb;
+  vColor = vec4(c, 0.0);
+
+  vec4 vp = uModelView * vec4(p, 1.0);
+  gl_Position = uProj * vp;
+  vFragDepth = 1.0 + gl_Position.w;
+  vViewPos = vp.xyz;
+  vNormal = uNormalMat * nl;
+  vNormalL = nl;
+  vLocal = p;
 }`;
 
 // Фрагментный шейдер мешей собирается в двух вариантах: с процедурной
@@ -180,6 +303,8 @@ ${SHADE_GLSL}
 uniform sampler2D uSurfTex;
 uniform float uSurfMode;
 ${GRAIN_GLSL}
+// Обшивка корабля: швы, переплёт мостика, сопла (js/gl/hull.js).
+${HULL_GLSL}
 ${AIR_GLSL}
 ${detail ? `
 // Во сколько раз расширен след пикселя: ручка цены кадра, её ведёт
@@ -203,6 +328,9 @@ void main() {
 ${LOG_DEPTH_FRAG}
   vec3 n = normalize(vNormal);
   vec3 albedo = vColor.rgb;
+  // Собственный свет узора — окна мостика, жар сопел. Постоянный: его
+  // не освещают, он светит сам.
+  vec3 emit = vec3(0.0);
 
   // Готовая поверхность из текстуры: нормаль берётся целиком из неё,
   // поэтому освещение не зависит от того, какой уровень сетки под
@@ -272,6 +400,15 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
     if (gw > 0.01) groundPhoto(dirG, vGrain, uNormalMat, gw, n, albedo);
   }
 
+  // Обшивка корабля. У всего, что не корабль, материала нет (vMat = 0),
+  // и блок пропускается одним сравнением.
+  if (vMat > 0.5) hullDetail(vViewPos, n, albedo, emit);
+  // Свой корпус ИЗНУТРИ (вид из рубки): изнанка обшивки у фонаря — это
+  // стены рубки. Снаружи она тёмный борт в тени, а изнутри — крашеная
+  // стена, освещённая тем, что попало под стекло.
+  bool inner = uHullInside > 0.5 && vMat > 0.5 && dot(n, vViewPos) > 0.0;
+  if (inner) albedo = vec3(0.30, 0.32, 0.35);
+
   // Двустороннее освещение: нормаль всегда разворачиваем к камере. Так
   // корректно светятся «двусторонние» грани (тоннель порта станции), и
   // не нужно следить за порядком обхода вершин при сборке мешей.
@@ -279,6 +416,7 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
 
   float lam = max(dot(n, uSunDir), 0.0);
   float lit = uAmbient + (1.0 - uAmbient) * lam;
+  if (inner) lit = max(lit, 0.36);
 
   // Фары. Свет точечный и направленный: от лампы до точки считается
   // настоящее расстояние, дальше — конус и падение с дальностью.
@@ -320,7 +458,7 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   lit = min(lit, 1.45);
 
   float shade = mix(lit, 1.0, vColor.a);
-  vec3 rgb = albedo * shade;
+  vec3 rgb = albedo * shade + emit;
 
   // Дымка: воздух между камерой и ЭТОЙ точкой. Расстояние здесь
   // известно точно — это сам фрагмент, — поэтому ни сфер грунта, ни

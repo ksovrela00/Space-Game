@@ -74,7 +74,15 @@ export const FLORA = {
       hMin: 0.007,
       hMax: 0.019,
       share: 0.50,
-      radiusOf: (alt) => Math.min(2.2, Math.max(0.42, alt * 3.0)),
+      // Полными моделями — только вблизи: дальше те же деревья рисует
+      // дальний лес силуэтами (js/gl/forest.js) до самого горизонта.
+      // Радиус упирается в БЮДЖЕТ, и он выведен из него: в самом густом
+      // лесу (густота 1) в круг радиуса r встаёт π·r²/cell²·chance
+      // деревьев, и r выбран так, чтобы это число не превысило долю
+      // бюджета. Тогда поле никогда не обрезается счётом и не
+      // прореживается — а только так дальний лес и может точно знать,
+      // какие деревья взяло поле, а какие остались ему.
+      radiusOf: (alt) => Math.min(treeBudgetR(), Math.max(0.42, alt * 3.0)),
     },
     {
       kind: 'bush',
@@ -122,8 +130,9 @@ export const FLORA = {
 };
 
 // Хеш номера ячейки -> четыре независимых числа 0..1. Тот же, что у
-// камней: одна решётка, одни правила.
-const hash4 = (a, b, c) => {
+// камней: одна решётка, одни правила. Наружу — дальнему лесу
+// (js/gl/forest.js): его деревья ОБЯЗАНЫ быть теми же, что здесь.
+export const hash4 = (a, b, c) => {
   let h = (Math.imul(a, 374761393) ^ Math.imul(b, 668265263) ^ Math.imul(c, 2246822519)) | 0;
   const out = [0, 0, 0, 0];
   for (let i = 0; i < 4; i++) {
@@ -135,7 +144,7 @@ const hash4 = (a, b, c) => {
 };
 
 const clamp01 = (t) => (t <= 0 ? 0 : (t >= 1 ? 1 : t));
-const smooth01 = (t) => (t <= 0 ? 0 : (t >= 1 ? 1 : t * t * (3 - 2 * t)));
+export const smooth01 = (t) => (t <= 0 ? 0 : (t >= 1 ? 1 : t * t * (3 - 2 * t)));
 
 /**
  * Шаг прореживания решётки для поля такого радиуса: 1, 2, 4, 8.
@@ -145,6 +154,15 @@ const smooth01 = (t) => (t <= 0 ? 0 : (t >= 1 ? 1 : t * t * (3 - 2 * t)));
  * Степень двойки берётся ближайшая снизу — лучше чуть гуще бюджета,
  * чем реже.
  */
+/**
+ * Радиус поля деревьев, в который при любой густоте леса влезает их
+ * бюджет (см. FLORA.layers[0].radiusOf), км.
+ */
+export function treeBudgetR() {
+  const L = FLORA.layers[0];
+  return L.cell * Math.sqrt(FLORA.max * L.share / (Math.PI * L.chance));
+}
+
 export function strideFor(L, radius) {
   // Сколько растений выйдет при таком шаге: ячейки поля, занятые по
   // chance и прореженные густотой (FLORA.dens — средняя по суше,
@@ -162,7 +180,7 @@ export function strideFor(L, radius) {
 }
 
 /** Модели по ярусам — считается один раз. */
-const BY_KIND = (() => {
+export const BY_KIND = (() => {
   const out = {};
   for (const [name, part] of Object.entries(NATURE_PARTS)) {
     (out[part.kind] || (out[part.kind] = [])).push({ name, part });
@@ -226,7 +244,14 @@ export function scatterFlora(body, dir, alt, out = []) {
     // появляются они далеко, где занимают пиксель.
     const stride = strideFor(L, radius);
     const step = (L.cell * stride / R) / QUARTER;
-    const half = Math.ceil((radius / R) / QUARTER / step);
+    // Полстороны обхода — с запасом в полтора раза. Развёртка грани
+    // равноугловая только вдоль осей: в стороне от середины грани клетка
+    // в её параметрах короче по дуге, и круг занимает больше клеток, чем
+    // «радиус на шаг». Без запаса край поля не попадал в обход: там, на
+    // 0.87–0.94 радиуса, терялись деревья, которые поле обязано было
+    // взять, — а дальний лес их по праву пропускал (js/gl/forest.js), и
+    // выходила дыра. Лишние клетки отсекает проверка по углу ниже.
+    const half = Math.ceil((radius / R) / QUARTER / step * 1.5) + 1;
     // Центр тоже кратен шагу — иначе подмножество «съезжало» бы на
     // полклетки при каждой смене шага, и все деревья менялись разом.
     const ci = Math.round(fu / step) * stride, cj = Math.round(fv / step) * stride;
@@ -378,20 +403,33 @@ export function floraBuilder(body, plants, sun = null, center = null, detail = n
   const positions = new Float32Array(total * 3);
   const normals = new Float32Array(total * 3);
   const colors = new Float32Array(total * 4);
+  // Изгиб под струёй движков (js/gl/wash.js): доля высоты вершины от
+  // комля, высота растения в км и его фаза. У теней нули — тень лежит
+  // на земле, и гнуться ей нечему.
+  const bend = new Float32Array(total * 3);
   const indices = new Uint32Array(total);
   const ground = [0, 0, 0];
+  let bendH = 0, bendPh = 0;
   const col = [0, 0, 0];
   let o = 0;
   let at = 0;
   let result = null;
 
-  const put = (px, py, pz, nx, ny, nz, cr, cg, cb) => {
+  const put = (px, py, pz, nx, ny, nz, cr, cg, cb, frac = 0) => {
+    bend[o * 3] = frac;
+    bend[o * 3 + 1] = frac > 0 ? bendH : 0;
+    bend[o * 3 + 2] = bendPh;
     positions[o * 3] = (px - ox) * R;
     positions[o * 3 + 1] = (py - oy) * R;
     positions[o * 3 + 2] = (pz - oz) * R;
     normals[o * 3] = nx; normals[o * 3 + 1] = ny; normals[o * 3 + 2] = nz;
     colors[o * 4] = cr; colors[o * 4 + 1] = cg; colors[o * 4 + 2] = cb;
-    colors[o * 4 + 3] = 1;
+    // Альфа — это НЕ непрозрачность, а доля собственного свечения
+    // (MESH_FS: shade = mix(lit, 1, a)). Здесь стояла единица, и лес
+    // светился сам: у дерева не было ни солнечной, ни теневой стороны, и
+    // в кадре оно выходило плоской вырезкой из картона — одна из причин,
+    // по которой всё вокруг корабля читалось макетом.
+    colors[o * 4 + 3] = 0;
     indices[o] = o;
     o++;
   };
@@ -489,10 +527,17 @@ export function floraBuilder(body, plants, sun = null, center = null, detail = n
       out3[0] = d.x * (h + py) + tx * lu + bx * lv;
       out3[1] = d.y * (h + py) + ty * lu + by * lv;
       out3[2] = d.z * (h + py) + tz * lu + bz * lv;
+      // Доля высоты — для изгиба: по ней шейдер находит комель под
+      // вершиной и знает, насколько её отклонить.
+      out3[3] = Math.max(0, Math.min(1, verts[vi * 3 + 1] / 1000));
       return out3;
     };
+    bendH = pl.height;
+    // Фаза своя у каждого растения: иначе под струёй лес качался бы
+    // строем. Берётся из разворота — он и так случаен и привязан к месту.
+    bendPh = ((pl.spin / (Math.PI * 2)) * 7.13 % 1 + 1) % 1;
 
-    const a = [0, 0, 0], b = [0, 0, 0], c = [0, 0, 0];
+    const a = [0, 0, 0, 0], b = [0, 0, 0, 0], c = [0, 0, 0, 0];
     const src = part.faces;
     for (let i = 0; i < src.length;) {
       const cnt = src[i];
@@ -515,9 +560,9 @@ export function floraBuilder(body, plants, sun = null, center = null, detail = n
         // одинаковых пятен, и без этого дерево выходит литым.
         const jit = 0.88 + ((nx * 11.3 + nz * 6.1) % 1 + 1) % 1 * 0.24;
         const cr = col[0] * jit, cg = col[1] * jit, cb = col[2] * jit;
-        put(a[0], a[1], a[2], nx, ny, nz, cr, cg, cb);
-        put(b[0], b[1], b[2], nx, ny, nz, cr, cg, cb);
-        put(c[0], c[1], c[2], nx, ny, nz, cr, cg, cb);
+        put(a[0], a[1], a[2], nx, ny, nz, cr, cg, cb, a[3]);
+        put(b[0], b[1], b[2], nx, ny, nz, cr, cg, cb, b[3]);
+        put(c[0], c[1], c[2], nx, ny, nz, cr, cg, cb, c[3]);
       }
       i += cnt + 2;
     }
@@ -533,7 +578,7 @@ export function floraBuilder(body, plants, sun = null, center = null, detail = n
       const end = Math.min(n, at + count);
       for (; at < end; at++) one(plants[at]);
       if (at < n) return false;
-      result = { positions, normals, colors, indices, faces: o / 3, count: n,
+      result = { positions, normals, colors, bend, indices, faces: o / 3, count: n,
         origin: { x: ox * R, y: oy * R, z: oz * R } };
       return true;
     },
@@ -567,6 +612,9 @@ export class FloraField {
     this.origin = { x: 0, y: 0, z: 0 };
     this.cell = 0;          // ячейка грунта, на которую уложено поле
     this.alt = 0;
+    this.treeR = 0;         // радиус поля деревьев, км (0 — деревьев нет)
+    this.treeFace = -1;     // грань куба, на решётке которой оно стоит
+    this.treeAt = null;     // его середина на грунте, км в осях тела
     this.count = 0;
     this.builds = 0;
     this.job = null;
@@ -626,6 +674,13 @@ export class FloraField {
       this.body = this.job.body;
       this.center = this.job.center;
       this.alt = this.job.alt;
+      // Какие деревья взяло это поле — дальний лес пропускает ровно их
+      // (js/gl/forest.js): середина, радиус и грань, на которой оно стоит.
+      const c = this.center;
+      this.treeR = this.alt <= FLORA.layers[0].maxAlt ? FLORA.layers[0].radiusOf(this.alt) : 0;
+      this.treeFace = cubeLookup(c.x, c.y, c.z).face;
+      const gr = (1 + terrainOf(this.body).displace(c.x, c.y, c.z)) * this.body.radius;
+      this.treeAt = { x: c.x * gr, y: c.y * gr, z: c.z * gr };
       this.count = geo.count;
       this.builds++;
       this.job = null;
@@ -654,5 +709,6 @@ export class FloraField {
     this.center = null;
     this.count = 0;
     this.job = null;
+    this.treeR = 0;
   }
 }

@@ -778,7 +778,7 @@ ok(($byCode['shield']['spec']['flight']['maxShield'] ?? 0) > 0
 //    содержать всё, по чему корабль летит. Пропажа даёт NaN на первом же
 //    кадре, причём молча.
 $assembled = Specs::mergeFlight($fromApi['shipTypes'][0]['spec'], $fromApi['modules']);
-$needKeys = ['maxSpeed', 'accel', 'brake', 'lateral', 'pitchRate', 'rollRate', 'rotRamp',
+$needKeys = ['maxSpeed', 'accel', 'brake', 'lateral', 'tipAccel', 'rotRamp', 'rcsLag',
     'boostMax', 'boostBurn', 'liftTWR', 'gearTime', 'hold', 'maxShield', 'maxHull',
     'quantumSpeed', 'hitRadius'];
 $lost = array_values(array_diff($needKeys, array_keys($assembled)));

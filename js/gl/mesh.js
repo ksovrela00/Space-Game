@@ -57,18 +57,29 @@ const attrib = (gl, loc, buf, size) => {
   gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
 };
 
-/** Меш из {verts, faces}: плоское затенение, без индексов. */
+/**
+ * Меш из {verts, faces}: плоское затенение, без индексов.
+ *
+ * Накладки корпуса (mesh.decal — окна, сопла, js/models/hulldetail.js)
+ * рисуются вместе с ним одной сеткой, но живут отдельно: всё, что меряет
+ * корпус, меряет его без них.
+ */
 export function buildFlatMesh(gl, locs, mesh) {
+  const parts = mesh.decal ? [mesh, mesh.decal] : [mesh];
   let tris = 0;
-  for (const f of mesh.faces) tris += Math.max(0, f.v.length - 2);
+  for (const part of parts) for (const f of part.faces) tris += Math.max(0, f.v.length - 2);
   const n = tris * 3;
 
   const pos = new Float32Array(n * 3);
   const nrm = new Float32Array(n * 3);
   const col = new Float32Array(n * 4);
+  // Материал грани (js/models/hulldetail.js) — только у размеченных
+  // корпусов; у остальных атрибута нет, и шейдер видит ноль.
+  const hasMat = parts.some((part) => part.faces.some((f) => f.mat > 0));
+  const mat = hasMat ? new Float32Array(n) : null;
 
   let o = 0;
-  for (const f of mesh.faces) {
+  for (const part of parts) for (const f of part.faces) {
     const idx = f.v;
     const r = f.c[0] / 255, g = f.c[1] / 255, b = f.c[2] / 255;
     // Доля свечения: 0 — обычная грань, 1 — светится сама. Промежуточные
@@ -78,10 +89,11 @@ export function buildFlatMesh(gl, locs, mesh) {
     for (let t = 1; t + 1 < idx.length; t++) {
       const tri = [idx[0], idx[t], idx[t + 1]];
       for (const vi of tri) {
-        const v = mesh.verts[vi];
+        const v = part.verts[vi];
         pos[o * 3] = v.x; pos[o * 3 + 1] = v.y; pos[o * 3 + 2] = v.z;
         nrm[o * 3] = f.n.x; nrm[o * 3 + 1] = f.n.y; nrm[o * 3 + 2] = f.n.z;
         col[o * 4] = r; col[o * 4 + 1] = g; col[o * 4 + 2] = b; col[o * 4 + 3] = em;
+        if (mat) mat[o] = f.mat || 0;
         o++;
       }
     }
@@ -92,6 +104,7 @@ export function buildFlatMesh(gl, locs, mesh) {
   attrib(gl, locs.aPos, arrayBuffer(gl, pos), 3);
   attrib(gl, locs.aNormal, arrayBuffer(gl, nrm), 3);
   attrib(gl, locs.aColor, arrayBuffer(gl, col), 4);
+  if (mat) attrib(gl, locs.aMat, arrayBuffer(gl, mat), 1);
   gl.bindVertexArray(null);
   return new GlMesh(gl, vao, n, gl.TRIANGLES, null);
 }
@@ -111,6 +124,7 @@ export function buildIndexedMesh(gl, locs, data) {
   if (data.colors) add(locs.aColor, data.colors, 4);
   if (data.uv) add(locs.aUv, data.uv, 2);
   if (data.grain) add(locs.aGrain, data.grain, 2);
+  if (data.bend) add(locs.aBend, data.bend, 3);
   if (data.t) add(locs.aT, data.t, 1);
 
   const ib = gl.createBuffer();
