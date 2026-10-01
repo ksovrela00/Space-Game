@@ -8119,6 +8119,162 @@ console.log('\n== наземный город ==');
     for (const x of In.doors) x.open = 0;
   }
 
+  // Сквозь закрытую дверь не видно ничего: ни комнаты за ней, ни пустоты.
+  // Пока дверь закрыта, комнату за ней не рисуют (visibleNow), и всякая щель
+  // у двери светилась: рама стоит на стене одной комнаты (с другой стороны
+  // её не было), в углах прямоугольного проёма под скошенную створку пака
+  // оставались треугольники, у деталей стены рядом с кодовой дверью был
+  // открыт торец верхнего короба, а переборку рубки из шахты трапа не
+  // рисовали вовсе. Лучи бьют в стену вокруг двери с обеих сторон — прямо и
+  // наискось вдоль стены — и обязаны попасть в то, что рисует кабина, пока
+  // глаз в этой комнате (js/gl/cabin.js): её и видимые сетки, рамы и
+  // створки. Нарочные проёмы (проходы, люки) — не дыра.
+  {
+    for (const d of In.doors) d.open = 0;
+    const trisOf = (m, xf = null) => {
+      const out = [], P = m.pos;
+      for (let i = 0; i + 8 < P.length; i += 9) {
+        const t = [[P[i], P[i + 1], P[i + 2]], [P[i + 3], P[i + 4], P[i + 5]], [P[i + 6], P[i + 7], P[i + 8]]];
+        out.push(xf ? t.map(xf) : t);
+      }
+      return out;
+    };
+    const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dt = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const hit = (o, dir, t, maxT) => {
+      const e1 = sub(t[1], t[0]), e2 = sub(t[2], t[0]), p = crs(dir, e2), det = dt(e1, p);
+      if (Math.abs(det) < 1e-12) return false;
+      const s = sub(o, t[0]), u = dt(s, p) / det;
+      if (u < 0 || u > 1) return false;
+      const q = crs(s, e1), v = dt(dir, q) / det;
+      if (v < 0 || u + v > 1) return false;
+      const tt = dt(e2, q) / det;
+      return tt > 1e-4 && tt < maxT;
+    };
+    const drawn = (roomId) => {
+      const vis = In.visibleNow(roomId), out = [];
+      for (const id of vis) if (In.meshes[id]) out.push(...trisOf(In.meshes[id]));
+      for (const d of In.doors) {
+        if (!d.rooms.some((id) => vis.includes(id))) continue;
+        out.push(...trisOf(In.doorMesh, (p) => [0, 1, 2].map((k) => d.origin[k] + d.ux[k] * p[0] + d.uy[k] * p[1] + d.uz[k] * p[2])));
+        const fr = In.doorFrames[d.id];
+        if (fr && !vis.includes(d.rooms[0]) && vis.includes(d.rooms[1])) out.push(...trisOf(fr));
+      }
+      return out;
+    };
+    // Луч ушёл в нарочный проём стены, пола или потолка этой комнаты.
+    const opening = (roomId, o, dir) => In.faces[roomId].some((g) => {
+      if (Math.abs(dir[g.ax]) < 1e-9) return false;
+      const t = (g.at - o[g.ax]) / dir[g.ax];
+      if (t < 0 || t > 1.6) return false;
+      const p = [o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t];
+      const u = g.ax === 1 ? p[0] : p[g.uAx], v = g.ax === 1 ? p[2] : p[1];
+      return g.holes.some((h) => !h.door && u > h.u[0] - 0.06 && u < h.u[1] + 0.06 && v > h.v[0] - 0.06 && v < h.v[1] + 0.06);
+    });
+    const bad = [];
+    let rays = 0;
+    for (const d of In.doors) {
+      for (const roomId of d.rooms) {
+        if (roomId === 'bridge') continue;               // рубку рисует пост пилота
+        const f = In.faces[roomId].find((g) => g.ax !== 1
+          && Math.abs(g.at - d.pos[g.ax]) < 0.7 && d.pos[g.uAx] > g.u[0] && d.pos[g.uAx] < g.u[1]
+          && d.pos[1] >= g.v[0] - 0.01 && d.pos[1] < g.v[1]);
+        if (!f) { bad.push(d.id + '/' + roomId + ': нет стены'); continue; }
+        const tris = drawn(roomId), C = 0.5, cells = new Map();
+        for (const t of tris) {
+          const us = t.map((p) => p[f.uAx]), vs = t.map((p) => p[1]);
+          for (let i = Math.floor(Math.min(...us) / C); i <= Math.floor(Math.max(...us) / C); i++)
+            for (let j = Math.floor(Math.min(...vs) / C); j <= Math.floor(Math.max(...vs) / C); j++) {
+              const k = i * 1000 + j;
+              if (!cells.has(k)) cells.set(k, []);
+              cells.get(k).push(t);
+            }
+        }
+        const c = d.pos[f.uAx];
+        let miss = 0, where = null;
+        for (let u = Math.max(f.u[0] + 0.05, c - 1.0); u <= Math.min(f.u[1] - 0.05, c + 1.0); u += 0.08) {
+          for (let v = Math.max(f.v[0], d.pos[1]) + 0.3; v <= Math.min(f.v[1] - 0.12, d.pos[1] + 2.5); v += 0.08) {
+            const o = [0, v, 0];
+            o[f.ax] = f.at + f.n[f.ax] * 0.35; o[f.uAx] = u;
+            for (const du of [0, 0.84, -0.84]) {
+              const dir = [0, 0, 0];
+              dir[f.ax] = -f.n[f.ax]; dir[f.uAx] = du;
+              const L = Math.hypot(...dir); dir[0] /= L; dir[1] /= L; dir[2] /= L;
+              rays++;
+              const ua = Math.min(u, u + dir[f.uAx] * 1.5), ub = Math.max(u, u + dir[f.uAx] * 1.5);
+              let got = false;
+              for (let i = Math.floor(ua / C); i <= Math.floor(ub / C) && !got; i++)
+                for (const t of cells.get(i * 1000 + Math.floor(v / C)) || []) if (hit(o, dir, t, 1.5)) { got = true; break; }
+              if (!got && !opening(roomId, o, dir)) { miss++; where = where || `u ${u.toFixed(2)}, y ${v.toFixed(2)}, наискось ${du}`; }
+            }
+          }
+        }
+        if (miss) bad.push(`${d.id} из ${roomId}: ${miss} лучей в пустоту (${where})`);
+      }
+    }
+    ok(bad.length === 0 && rays > 10000,
+      `сквозь закрытые двери с обеих сторон — ни щели: ${rays} лучей в стены у ${In.doors.length} дверей` + (bad.length ? '; ' + bad.join('; ') : ''));
+  }
+
+  // Окна (WINDOWS): все встали — за обшивкой у каждого открыто; от стены по
+  // середине окна наружу лучу не мешает ничего, кроме вырезанного коробкой
+  // окна, и дальше корпуса нет; а сквозь стекло не пройти.
+  {
+    const box = (b, p, m = 0) => p.every((v, i) => v > b.lo[i] - m && v < b.hi[i] + m);
+    const T = [];
+    for (const f of hull.faces) {
+      for (let k = 1; k + 1 < f.v.length; k++) {
+        T.push([f.v[0], f.v[k], f.v[k + 1]].map((i) => [hull.verts[i].x * MM, hull.verts[i].y * MM, hull.verts[i].z * MM]));
+      }
+    }
+    const roomTris = (id) => {
+      const P = In.meshes[id].pos, out = [];
+      for (let i = 0; i + 8 < P.length; i += 9) out.push([[P[i], P[i + 1], P[i + 2]], [P[i + 3], P[i + 4], P[i + 5]], [P[i + 6], P[i + 7], P[i + 8]]]);
+      return out;
+    };
+    const along = (tris, o, d) => {
+      const out = [];
+      for (const t of tris) {
+        const e1 = [0, 1, 2].map((i) => t[1][i] - t[0][i]), e2 = [0, 1, 2].map((i) => t[2][i] - t[0][i]);
+        const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
+        const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+        if (Math.abs(det) < 1e-12) continue;
+        const s = [0, 1, 2].map((i) => o[i] - t[0][i]);
+        const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) / det;
+        if (u < 0 || u > 1) continue;
+        const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
+        const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) / det;
+        if (v < 0 || u + v > 1) continue;
+        const tt = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) / det;
+        if (tt > 1e-4 && tt < 9) out.push(tt);
+      }
+      return out;
+    };
+    const bad = [];
+    for (const w of I.WINDOWS) {
+      const got = In.windows.find((x) => x.id === w.id), cut = In.windowCarve.find((c) => c.room === w.room && (c.lo[0] + c.hi[0]) * w.side > 0
+        && (w.c - c.lo[2]) * (c.hi[2] - w.c) > 0);
+      if (!got || !cut) { bad.push(w.id + ': не встало'); continue; }
+      const r = In.roomById[w.room], at = w.side < 0 ? r.lo[0] : r.hi[0];
+      const o = [at - w.side * 1.0, r.lo[1] + w.y + w.h / 2, w.c], d = [w.side, 0, 0];
+      // В комнате: ни стены, ни мебели до стекла.
+      const glassT = Math.abs(got.glass.reduce((s, p) => s + p[0], 0) / 4 - o[0]);
+      const block = along(roomTris(w.room), o, d).filter((t) => t < glassT);
+      // Корпус по пути — только в вырезе окна, и за ним — ничего.
+      const hullHits = along(T, o, d).map((t) => o.map((v, i) => v + d[i] * t));
+      const uncut = hullHits.filter((p) => !box(cut, p, 1e-3));
+      // Сквозь проём не пройти: стена твёрдая и в нём.
+      const solid = In.solids.some((s) => s.wall === w.room && box(s, [at - w.side * 0.05, o[1], o[2]]));
+      if (block.length || uncut.length || !solid) {
+        bad.push(`${w.id}: ${block.length ? 'в комнате загорожено; ' : ''}${uncut.length ? 'корпус за вырезом в ' + uncut.length + ' местах; ' : ''}${solid ? '' : 'проём проходим'}`);
+      }
+    }
+    ok(bad.length === 0 && In.windows.length === I.WINDOWS.length,
+      `окна: ${In.windows.map((x) => x.id).join(', ')} — вид наружу открыт, обшивка вырезана, сквозь стекло не пройти` +
+      (bad.length ? '; ' + bad.join('; ') : ''));
+  }
+
   // --- шлюзы (js/game/airlock.js) --------------------------------------
   console.log('\n== шлюзы и трапы ==');
   const A = await import('../js/game/airlock.js');

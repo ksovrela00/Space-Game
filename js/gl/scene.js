@@ -1043,9 +1043,11 @@ export class GlScene {
       ? engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift
       : 0.2 + (ship.lift || 0));
     gl.uniform1f(prog.loc('uHullInside'), 1);
-    // Вырез помещений и открытых люков: коробки, метры модели.
+    // Вырез помещений и открытых люков: коробки, метры модели. И окна —
+    // тех комнат, что сейчас видны: вырез окна доходит до наружной
+    // обшивки, и из рубки сквозь фонарь в борту была бы дыра.
     const air = airOf(game, ship);
-    this.setShipCarveAir(prog, game.interior, air, true);
+    this.setShipCarveAir(prog, game.interior, air, true, this.cabin ? this.cabin.visible(game) : null);
     this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
     gl.uniform1i(prog.loc('uCarveN'), 0);
     this.drawGearOf(prog, game, ship, sunPos);
@@ -1109,7 +1111,7 @@ export class GlScene {
   }
 
   /** То же для корабля с шлюзами air (свой или чужой). */
-  setShipCarveAir(prog, I, air, inside) {
+  setShipCarveAir(prog, I, air, inside, vis = null) {
     const gl = this.gl;
     const list = this._carve || (this._carve = []);
     list.length = 0;
@@ -1119,6 +1121,10 @@ export class GlScene {
       air.hatches.forEach((hx, i) => { if (hx.open > 0) { open = true; list.push(hatchCut(hx, cuts[i])); } });
     }
     if (I && (inside || open)) for (const c of I.carve) list.push(c);
+    // Окна — только изнутри и только видимых комнат: снаружи сквозь проём
+    // было бы видно откос без комнаты (её рисует проход кабины), и
+    // обшивка остаётся целой.
+    if (I && inside && vis && I.windowCarve) for (const c of I.windowCarve) if (vis.includes(c.room)) list.push(c);
     const n = Math.min(CARVE_MAX, list.length);
     gl.uniform1i(prog.loc('uCarveN'), n);
     for (let i = 0; i < n; i++) {

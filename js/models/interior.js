@@ -307,6 +307,81 @@ export const HATCHES = [
   { id: 'sR', lock: 'lockS', side: 1, skin: 14.605, inset: 14.462, z: [-14.206, -11.142], y: [-7.971, -6.108], rgb: [59, 57, 55] },
 ];
 
+// Окна: проём в боковой стене комнаты, откос до обшивки и стекло у её
+// края. Стоят там, где от стены до обшивки рукой подать и за обшивкой
+// открыто: на бортах трюма (46 см), у каюты и медотсека и у переднего
+// торца кают-компании (1.66 м). Остальные стены смотрят в крылья и
+// гондолы: по бортам кают-компании за обшивкой ещё шесть метров корпуса.
+// side — борт (−1 левый, x−; +1 правый, x+), c — середина по длине (z),
+// y — низ от пола комнаты, w × h — проём, м. Глубину откоса меряет сборка
+// по самому корпусу (fitWindows); окно, за которым не открыто, не ставится.
+// Места выбраны и по мебели: правый борт кают-компании весь занят
+// камбузом с навесными шкафами, в каюте у борта койка и шкафчики (окно —
+// над койкой), в медотсеке — между капсулами.
+export const WINDOWS = [
+  { id: 'cabin', room: 'cabin', side: -1, c: -12.6, y: 1.78, w: 1.2, h: 0.55 },
+  { id: 'medbay', room: 'medbay', side: 1, c: -8.75, y: 1.0, w: 0.8, h: 0.75 },
+  { id: 'hall', room: 'hall', side: -1, c: -16.2, y: 0.95, w: 1.0, h: 0.85 },
+  // В трюме — под потолком: вдоль бортов ящики в два яруса, до 2.26 м.
+  { id: 'holdL', room: 'hold', side: -1, c: 9.5, y: 2.35, w: 2.2, h: 0.55 },
+  { id: 'holdR', room: 'hold', side: 1, c: 9.5, y: 2.35, w: 2.2, h: 0.55 },
+];
+
+// Дальше этого откос не тянут, м: окно в толще корпуса глубже — бойница.
+const WIN_DEPTH = 2.5;
+
+/**
+ * Примерить окна к корпусу: у каждого угла проёма — до обшивки по
+ * нормали стены (последняя грань корпуса в пределах WIN_DEPTH), и дальше,
+ * до восьми метров, корпуса быть не должно: окно в крыло не нужно.
+ * @returns окна с глубиной откоса у углов: [u0v0, u1v0, u1v1, u0v1], м
+ */
+function fitWindows(hullM) {
+  const T = [];
+  for (const f of hullM.faces) {
+    for (let k = 1; k + 1 < f.v.length; k++) {
+      const a = hullM.verts[f.v[0]], b = hullM.verts[f.v[k]], c = hullM.verts[f.v[k + 1]];
+      T.push([a.x, a.y, a.z, b.x - a.x, b.y - a.y, b.z - a.z, c.x - a.x, c.y - a.y, c.z - a.z]);
+    }
+  }
+  // Пересечения луча (o, вдоль x со знаком s) с корпусом — расстояния.
+  const hits = (o, s) => {
+    const out = [];
+    const d = [s, 0, 0];
+    for (const t of T) {
+      const e1 = [t[3], t[4], t[5]], e2 = [t[6], t[7], t[8]];
+      const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
+      const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+      if (Math.abs(det) < 1e-12) continue;
+      const sv = [o[0] - t[0], o[1] - t[1], o[2] - t[2]];
+      const u = (sv[0] * p[0] + sv[1] * p[1] + sv[2] * p[2]) / det;
+      if (u < 0 || u > 1) continue;
+      const q = [sv[1] * e1[2] - sv[2] * e1[1], sv[2] * e1[0] - sv[0] * e1[2], sv[0] * e1[1] - sv[1] * e1[0]];
+      const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) / det;
+      if (v < 0 || u + v > 1) continue;
+      const tt = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) / det;
+      if (tt > 1e-4 && tt < 8) out.push(tt);
+    }
+    return out;
+  };
+  const out = [];
+  for (const w of WINDOWS) {
+    const r = R[w.room];
+    const at = w.side < 0 ? r.lo[0] : r.hi[0];
+    const u0 = w.c - w.w / 2, u1 = w.c + w.w / 2, v0 = r.lo[1] + w.y, v1 = v0 + w.h;
+    const depth = [];
+    for (const [u, v] of [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]) {
+      // Угол — чуть внутри проёма: ребро корпуса ровно по углу не в счёт.
+      const h = hits([at, v + (v === v0 ? 0.03 : -0.03), u + (u === u0 ? 0.03 : -0.03)], w.side);
+      const skin = Math.max(-1, ...h.filter((t) => t <= WIN_DEPTH));
+      if (skin < 0 || h.some((t) => t > skin + 0.08)) { depth.length = 0; break; }
+      depth.push(skin);
+    }
+    if (depth.length === 4) out.push({ ...w, at, u0, u1, v0, v1, depth });
+  }
+  return out;
+}
+
 // Дверь, собранная кодом: проём пака (1.13 × 1.97 м) в стальной панели,
 // косяки по четверть метра.
 const CODE_DOOR = { jamb: 0.25 };
@@ -373,7 +448,7 @@ function roomFaces(room) {
 const faceOf = (faces, ax, s) => faces.find((f) => f.ax === ax && f.side.endsWith(s > 0 ? '+' : '-'));
 
 /** Грани всех комнат; проёмы и двери разложены по ним. */
-function layoutFaces() {
+function layoutFaces(wins = []) {
   const Fs = {};
   for (const r of ROOMS) Fs[r.id] = roomFaces(r);
   for (const o of OPENINGS) {
@@ -416,6 +491,10 @@ function layoutFaces() {
     faceOf(Fs[h.lock], 0, h.side).holes.push({
       u: [h.z[0], h.z[1]], v: [Math.max(r.lo[1], h.y[0]), Math.min(r.hi[1], h.y[1])], hatch: h.id, to: 'out',
     });
+  }
+  // Окна: проём в боковой стене (откос и рама — buildWindow).
+  for (const w of wins) {
+    faceOf(Fs[w.room], 0, w.side).holes.push({ u: [w.u0, w.u1], v: [w.v0, w.v1], window: w.id, win: w, to: 'out' });
   }
   return Fs;
 }
@@ -553,6 +632,88 @@ function frameOf(ctx, id) {
   return ctx.frames[id] || (ctx.frames[id] = new MeshBuf());
 }
 
+/**
+ * Силуэт створки пака: полуширина |x| на каждой высоте, единицы модели.
+ * Строки — через сантиметр: на скосе 45° это сантиметр же.
+ */
+function leafSilhouette(mesh) {
+  const P = mesh.pos;
+  let H = 0;
+  for (let i = 1; i < P.length; i += 3) H = Math.max(H, P[i]);
+  const n = Math.ceil(H / 0.01), rows = [];
+  for (let k = 0; k <= n; k++) {
+    const y = Math.min(H - 1e-4, Math.max(1e-4, k * H / n));
+    let s = 0;
+    for (let i = 0; i + 8 < P.length; i += 9) {
+      for (let e = 0; e < 3; e++) {
+        const a = i + e * 3, b = i + ((e + 1) % 3) * 3;
+        const ya = P[a + 1], yb = P[b + 1];
+        if ((ya - y) * (yb - y) > 0 || ya === yb) continue;
+        s = Math.max(s, Math.abs(P[a] + (P[b] - P[a]) * (y - ya) / (yb - ya)));
+      }
+    }
+    rows.push([k * H / n, s]);
+  }
+  return { H, rows };
+}
+
+/**
+ * Вставка вокруг створки в прямоугольном проёме (кодовая дверь, дверь
+ * рубки).
+ *
+ * Створка — пака, а проём под неё собран кодом и прямоугольный, а у
+ * створки верх уже низа (0.762 против 0.837 модели) и углы скошены под
+ * 45°. В верхних углах проёма оставались треугольные щели (у двери
+ * бортового шлюза — 19 × 17 см) и щель в полсантиметра вдоль боков.
+ * Пока дверь закрыта, комнату за ней не рисуют (visibleNow), и сквозь
+ * щели светилась пустота. Вставка стоит в плоскости створки и закрывает
+ * ровно то, чего та не закрывает, — по её же силуэту. Вплотную к створке
+ * она заходит под неё с запасом: внутри створки её не видно, а открылась
+ * дверь — остаётся скошенной притолокой проёма.
+ */
+function leafFiller(buf, d, sil, dh, top) {
+  const len = (v) => Math.hypot(v[0], v[1], v[2]);
+  const e = dh / len(d.ux), hTop = top / len(d.uy);
+  const zMid = -0.4175;                 // середина толщины створки (модель), она же середина перегородки
+  const P = (x, y) => [0, 1, 2].map((k) => d.origin[k] + d.ux[k] * x + d.uy[k] * y + d.uz[k] * zMid);
+  const R = sil.rows;
+  // Полуширина у каждой строки — меньшая из соседних: на уступе силуэта
+  // полоса не оставляет клина.
+  const a = R.map((r, k) => Math.min(r[1], R[Math.max(0, k - 1)][1], R[Math.min(R.length - 1, k + 1)][1]) - 0.005);
+  for (const sx of [-1, 1]) {
+    for (let k = 0; k + 1 < R.length; k++) {
+      if (a[k] >= e && a[k + 1] >= e) continue;
+      const a0 = Math.min(a[k], e), a1 = Math.min(a[k + 1], e);
+      buf.poly([P(sx * a0, R[k][0]), P(sx * e, R[k][0]), P(sx * e, R[k + 1][0]), P(sx * a1, R[k + 1][0])], C.steel, CMAT.paint);
+    }
+  }
+  // Над верхом створки — до верха проёма.
+  if (hTop > sil.H - 0.003) {
+    buf.poly([P(-e, sil.H - 0.003), P(e, sil.H - 0.003), P(e, hTop + 0.003), P(-e, hTop + 0.003)], C.steel, CMAT.paint);
+  }
+}
+
+/**
+ * Окно: откос от лица стены до обшивки (у каждого угла — своя глубина:
+ * обшивка у окна наклонная) и янтарная рама по проёму, как у дверей.
+ * Обшивку в проёме вырезает коробка (interior.windowCarve), стекло —
+ * отдельной сеткой (interior.windows, рисует проход стекла кабины).
+ */
+function buildWindow(buf, f, h) {
+  const [u0, u1] = h.u, [v0, v1] = h.v, D = h.win.depth;
+  const P = (u, v, d) => wallPoint(f, u, v, d);
+  const e = (k) => -(D[k] + 0.05);       // на пять сантиметров за обшивку
+  buf.poly([P(u0, v0, 0.01), P(u1, v0, 0.01), P(u1, v0, e(1)), P(u0, v0, e(0))], C.steel, CMAT.paint);
+  buf.poly([P(u0, v1, 0.01), P(u0, v1, e(3)), P(u1, v1, e(2)), P(u1, v1, 0.01)], C.steel, CMAT.paint);
+  buf.poly([P(u0, v0, 0.01), P(u0, v0, e(0)), P(u0, v1, e(3)), P(u0, v1, 0.01)], C.steel, CMAT.paint);
+  buf.poly([P(u1, v0, 0.01), P(u1, v1, 0.01), P(u1, v1, e(2)), P(u1, v0, e(1))], C.steel, CMAT.paint);
+  const fw = 0.07;
+  wallBox(buf, f, u0 - fw, u0, v0 - fw, v1 + fw, -0.02, 0.04, C.accent, CMAT.paint);
+  wallBox(buf, f, u1, u1 + fw, v0 - fw, v1 + fw, -0.02, 0.04, C.accent, CMAT.paint);
+  wallBox(buf, f, u0, u1, v0 - fw, v0, -0.02, 0.04, C.accent, CMAT.paint);
+  wallBox(buf, f, u0, u1, v1, v1 + fw, -0.02, 0.04, C.accent, CMAT.paint);
+}
+
 /** Колонна пака стоймя: середина в (x, z), низ y0, высота h. */
 function column(ctx, buf, name, x, y0, z, h, solid = false) {
   const key = Math.round(x * 100) + ':' + Math.round(z * 100) + ':' + Math.round(y0 * 10);
@@ -562,9 +723,56 @@ function column(ctx, buf, name, x, y0, z, h, solid = false) {
   if (solid) ctx.solids.push({ lo: [x - 0.22, y0, z - 0.22], hi: [x + 0.22, y0 + h, z + 0.22], column: true });
 }
 
+/**
+ * Заглушка открытого торца детали пака — там, где деталь кончается не у
+ * соседней детали и не у колонны: у кодовой двери, у низкого проёма.
+ *
+ * Деталь пака полая: верхний короб стены выступает в комнату на треть
+ * метра, а торец у него открыт (пак закрывает его колонной). Без колонны в
+ * торец было видно зазор перегородки и то, что за ним: у двери бортового
+ * шлюза над дверью по бокам светились дыры. Заглушка — сечение самой
+ * детали у торца: на каждой высоте — насколько она выступает в комнату.
+ * Где деталь не выступает, заглушки нет.
+ * @param from, to — где в buf.pos лежит эта стена (без заглушек)
+ * @param side −1 — деталь левее торца ue, +1 — правее
+ */
+function capEnd(buf, f, from, to, ue, side, y0, y1) {
+  const P = buf.pos, ax = f.ax, uAx = f.uAx, nn = f.n[ax];
+  const us = ue + side * 0.003;
+  const step = 0.01, rows = Math.ceil((y1 - y0) / step);
+  const dep = new Float64Array(rows + 1);
+  for (let i = from; i + 8 < to; i += 9) {
+    const pts = [];
+    for (let e = 0; e < 3; e++) {
+      const a = i + e * 3, b = i + ((e + 1) % 3) * 3;
+      const ua = P[a + uAx], ub = P[b + uAx];
+      if ((ua - us) * (ub - us) > 0 || ua === ub) continue;
+      const t = (us - ua) / (ub - ua);
+      pts.push([((P[a + ax] + (P[b + ax] - P[a + ax]) * t) - f.at) * nn, P[a + 1] + (P[b + 1] - P[a + 1]) * t]);
+    }
+    if (pts.length < 2) continue;
+    const [p, q] = pts;
+    const va = Math.min(p[1], q[1]), vb = Math.max(p[1], q[1]);
+    for (let k = Math.max(0, Math.ceil((va - y0) / step)); k <= Math.min(rows, Math.floor((vb - y0) / step)); k++) {
+      const v = y0 + k * step;
+      const d = vb - va < 1e-9 ? Math.max(p[0], q[0]) : p[0] + (q[0] - p[0]) * (v - p[1]) / (q[1] - p[1]);
+      if (d > dep[k]) dep[k] = d;
+    }
+  }
+  const pt = (d, v) => wallPoint(f, us, v, d);
+  for (let k = 0; k < rows; k++) {
+    if (dep[k] < 0.01 && dep[k + 1] < 0.01) continue;
+    const va = y0 + k * step, vb = Math.min(y1, va + step);
+    buf.poly([pt(0, va), pt(dep[k], va), pt(dep[k + 1], vb), pt(0, vb)], C.steel, CMAT.paint);
+  }
+}
+
 /** Стена комнаты целиком: детали, двери, проёмы. */
 function buildWall(ctx, buf, room, f) {
   const y0 = f.v[0], y1 = f.v[1];
+  const from = buf.pos.length;
+  // Где детали пака кончаются открытым торцом: [u, сторона детали].
+  const ends = [];
   const cuts = [];
   for (const d of f.doors) {
     const hw = d.code ? INT.doorHalf + CODE_DOOR.jamb : INT.wallW / 2;
@@ -578,6 +786,7 @@ function buildWall(ctx, buf, room, f) {
     if (c.u0 > u + 1e-6) fillWall(buf, f, u, c.u0, y0, y1, seed + u);
     if (c.door && c.door.code) {
       codeDoor(buf, f, c.door, c.u0, c.u1, y0, y1, c.door.side === 'A' ? frameOf(ctx, c.door.id) : null);
+      ends.push([c.u0, -1], [c.u1, 1]);
     } else if (c.door) {
       const d = c.door;
       wallPiece(buf, f, d.side === 'A' ? 'doorWallA' : 'doorWallB', d.c, y0, INT.wallW, INT.wallH);
@@ -588,6 +797,7 @@ function buildWall(ctx, buf, room, f) {
       // Проём не во всю высоту — перемычка над ним и стенка под ним.
       if (h.v[1] < y1 - 0.02) panel(buf, f, h.u[0], h.u[1], h.v[1], y1);
       if (h.v[0] > y0 + 0.02) panel(buf, f, h.u[0], h.u[1], y0, h.v[0]);
+      if (h.win) buildWindow(buf, f, h);
       // Кромки проёма — колонны: торец детали пака открыт, а колонна его
       // закрывает (так пак и задуман). У проёмов к трапу их нет: там
       // кромку продолжает стена шахты, а колонна встала бы на ступень.
@@ -597,11 +807,19 @@ function buildWall(ctx, buf, room, f) {
           const p = wallPoint(f, ue, y0, 0);
           column(ctx, buf, 'columnSlim', p[0], y0, p[2], y1 - y0, true);
         }
+      } else {
+        ends.push([h.u[0], -1], [h.u[1], 1]);
       }
     }
     u = Math.max(u, c.u1);
   }
   if (f.u[1] > u + 1e-6) fillWall(buf, f, u, f.u[1], y0, y1, seed + u);
+  // Торцы — по готовой стене: сечение её деталей, без заглушек.
+  const to = buf.pos.length;
+  for (const [ue, side] of ends) {
+    if (ue <= f.u[0] + 0.01 || ue >= f.u[1] - 0.01) continue;     // угол комнаты: торец закрыт соседней стеной
+    capEnd(buf, f, from, to, ue, side, y0, y1);
+  }
 }
 
 /** Пол или потолок: плитка по прямоугольнику минус дыры. */
@@ -1033,7 +1251,8 @@ function roomSolids(room, faces, solids) {
   for (const f of faces) {
     // Переборку рубки (передняя стенка шахты A) делает сама рубка.
     if (room.id === 'shaftA' && f.side === 'z+') continue;
-    for (const r of subtract({ u: f.u, v: f.v }, f.holes)) {
+    // Окно — стекло: стена в нём такая же твёрдая.
+    for (const r of subtract({ u: f.u, v: f.v }, f.holes.filter((h) => !h.window))) {
       const lo = [0, 0, 0], hi = [0, 0, 0];
       if (f.ax === 1) {
         lo[0] = r.u[0]; hi[0] = r.u[1]; lo[2] = r.v[0]; hi[2] = r.v[1];
@@ -1069,12 +1288,18 @@ function bulkheadSolids(solids) {
  */
 export function buildInterior(hull) {
   const hullM = hullMeters(hull);
-  const faces = layoutFaces();
+  const wins = fitWindows(hullM);
+  const faces = layoutFaces(wins);
   const ctx = { meshes: {}, frames: {}, lamps: [], solids: [], columns: new Set() };
   for (const r of ROOMS) ctx.meshes[r.id] = new MeshBuf();
 
   // Рубка: переборка с дверью по сечению фонаря.
-  buildBulkhead(ctx.meshes.bridge, canopyProfile(hullM, INT.bulkZ + 0.05));
+  // Переборка — в рубке и ещё раз в раме двери рубки: из шахты трапа при
+  // закрытой двери рубку не рисуют, и без этого переборки с её стороны не
+  // было вовсе — сквозь неё светились фонарь и небо.
+  const prof = canopyProfile(hullM, INT.bulkZ + 0.05);
+  buildBulkhead(ctx.meshes.bridge, prof);
+  buildBulkhead(frameOf(ctx, 'bridge'), prof);
   bridgeSolids(hullM, ctx.solids);
   bulkheadSolids(ctx.solids);
 
@@ -1179,6 +1404,14 @@ export function buildInterior(hull) {
   // их ставит и двигает рисование (js/gl/cabin.js).
   const doorMesh = new MeshBuf();
   doorMesh.part('door', [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]);
+  // Щели вокруг створки в проёмах, собранных кодом: вставка — в комнату a
+  // и в раму двери (рисуется ровно одна из двух, js/gl/cabin.js).
+  const sil = leafSilhouette(doorMesh);
+  for (const d of doors) {
+    const def = DOORS.find((x) => x.id === d.id);
+    if (d.id !== 'bridge' && !(def && def.code)) continue;
+    for (const b of [ctx.meshes[d.rooms[0]], frameOf(ctx, d.id)]) leafFiller(b, d, sil, INT.doorHalf, INT.doorTop);
+  }
   const crateMesh = new MeshBuf();
   crateMesh.part(CRATE.name, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]);
 
@@ -1186,6 +1419,19 @@ export function buildInterior(hull) {
     INT, rooms: ROOMS, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
     carve, sunBox, stairs: STAIRS, slots: crateSlots(), crate: CRATE, hullM, doorMesh, crateMesh,
     doorFrames: ctx.frames,
+    // Окна: стекло у обшивки (оси корабля, м) — его рисует проход стекла
+    // кабины; и коробки выреза обшивки в проёмах — только изнутри, как
+    // вырез помещений (js/gl/scene.js, setShipCarveAir).
+    windows: wins.map((w) => {
+      const f = faceOf(faces[w.room], 0, w.side);
+      const g = (k) => -(w.depth[k] - 0.03);
+      return { id: w.id, room: w.room, glass: [wallPoint(f, w.u0, w.v0, g(0)), wallPoint(f, w.u1, w.v0, g(1)),
+        wallPoint(f, w.u1, w.v1, g(2)), wallPoint(f, w.u0, w.v1, g(3))] };
+    }),
+    windowCarve: wins.map((w) => {
+      const xa = w.at, xb = w.at + w.side * (Math.max(...w.depth) + 0.3);
+      return { room: w.room, lo: [Math.min(xa, xb), w.v0 + 0.005, w.u0 + 0.005], hi: [Math.max(xa, xb), w.v1 - 0.005, w.u1 - 0.005] };
+    }),
     // Люки (данные; их ход и трапы ведёт js/game/airlock.js — он же
     // кладёт сюда своё состояние, air).
     hatches: HATCHES, air: null, airways: AIRWAYS,

@@ -3586,6 +3586,36 @@ console.log('\n== мок GL: путь отрисовки ==');
       ok(!!fr && shut === 1 && opened === 0,
         `дверь из машинного закрыта — её рама нарисована (${shut} раз), открыта — рама приходит с кают-компанией (${opened})`);
     }
+    // Окно каюты: обшивка в его проёме вырезана (коробка окна — к коробкам
+    // помещений), стекло — тем же проходом, что фонарь, но без переплёта
+    // (uPane). Из рубки окон не видно — и вырезов окон в обшивке нет: иначе
+    // сквозь фонарь в борту была бы дыра.
+    {
+      const In = game.interior;
+      w.pos = [-2.3, -4.94, -12.6];
+      w.room = In.roomById.cabin;
+      game.walkEye = Wk.walkerEye(w, In);
+      cam.basis.right = { ...sb.fwd };
+      cam.basis.up = { ...sb.up };
+      cam.basis.fwd = { x: -sb.right.x, y: -sb.right.y, z: -sb.right.z };
+      const was = state.intsMax;
+      state.intsMax = {};
+      state.uni.uPane = -Infinity;
+      scene.render(game);
+      const cabinCarve = state.intsMax.uCarveN, pane = state.uni.uPane;
+      w.room = In.roomById.bridge;
+      w.pos = In.seat.stand.slice();
+      game.walkEye = Wk.walkerEye(w, In);
+      look(false);
+      state.intsMax = {};
+      scene.render(game);
+      const bridgeCarve = state.intsMax.uCarveN;
+      state.intsMax = was;
+      const wins = In.windowCarve.filter((c) => c.room === 'cabin').length;
+      ok(wins === 1 && cabinCarve === In.carve.length + wins && pane === 1 && bridgeCarve === In.carve.length,
+        `в каюте обшивка вырезана и в окне (${cabinCarve} коробок при ${In.carve.length} помещений), стекло окна — без переплёта; ` +
+        `в рубке вырезов окон нет (${bridgeCarve})`);
+    }
     ok(state.nan === nan0, 'в помещениях ни одного NaN');
 
     // Шлюз снаружи (js/game/airlock.js): люк открыт, трап выдвинут — вид

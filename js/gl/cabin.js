@@ -390,6 +390,8 @@ uniform vec3 uSunC;
 uniform vec3 uAmb;
 uniform sampler2D uScreens;
 uniform vec3 uEyeM;
+// Окно помещения (1), а не фонарь (0): переплёта по обшивке у него нет.
+uniform float uPane;
 out vec4 outColor;
 ${HULL_FRAME_GLSL}
 
@@ -408,7 +410,7 @@ void main() {
   vec3 pm = vPos + uEyeM;
   vec2 hu = hullUv(pm, vN);
   vec2 fw = vec2(length(vec2(dFdx(hu.x), dFdy(hu.x))), length(vec2(dFdx(hu.y), dFdy(hu.y))));
-  if (hullFrame(pm, hu, max(fw, vec2(1e-4))) > 0.5) discard;
+  if (uPane < 0.5 && hullFrame(pm, hu, max(fw, vec2(1e-4))) > 0.5) discard;
   vec3 n = normalize(vN);
   vec3 V = normalize(vPos - uEye);            // от глаза сквозь стекло
   if (dot(n, V) > 0.0) n = -n;                // n — к пилоту
@@ -839,9 +841,26 @@ export class CabinView {
       const pk = packed(m, EYE);
       frames[id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
     }
+    // Стекло окон — сетка в осях кабины (от глаза), как стекло фонаря.
+    const windows = (interior.windows || []).map((w) => {
+      const verts = w.glass.map((p) => ({ x: p[0] - EYE.x, y: p[1] - EYE.y, z: p[2] - EYE.z }));
+      const a = verts[0], b = verts[1], c = verts[2];
+      const n = { x: (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
+        y: (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
+        z: (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) };
+      const l = Math.hypot(n.x, n.y, n.z) || 1;
+      n.x /= l; n.y /= l; n.z /= l;
+      const data = cabinArrays({ verts, faces: [{ v: [0, 1, 2, 3], n, c: [200, 220, 235], mat: CMAT.glass }] }, null);
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const v of verts) {
+        [v.x, v.y, v.z].forEach((x, i) => { lo[i] = Math.min(lo[i], x); hi[i] = Math.max(hi[i], x); });
+      }
+      return { id: w.id, room: w.room, part: upload(gl, data), lo, hi };
+    });
     this.inter = {
       rooms,
       frames,
+      windows,
       door: uploadInterior(gl, packed(interior.doorMesh)),
       crate: uploadInterior(gl, packed(interior.crateMesh)),
     };
@@ -852,7 +871,8 @@ export class CabinView {
     if (!this.inter) return;
     const gl = this.gl;
     const parts = [...Object.values(this.inter.rooms).map((r) => r.part),
-      ...Object.values(this.inter.frames).map((r) => r.part), this.inter.door, this.inter.crate];
+      ...Object.values(this.inter.frames).map((r) => r.part), ...this.inter.windows.map((r) => r.part),
+      this.inter.door, this.inter.crate];
     for (const p of parts) { gl.deleteBuffer(p.buf); gl.deleteVertexArray(p.vao); }
     this.inter = null;
     this.interOf = null;
@@ -1113,9 +1133,24 @@ export class CabinView {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
+    gl.uniform1f(pg.loc('uPane'), 0);
     gl.bindVertexArray(this.parts.glass.vao);
     gl.drawArrays(gl.TRIANGLES, 0, this.parts.glass.count);
     this.draws++;
+    // Окна помещений — тем же стеклом, без переплёта: в видимых комнатах
+    // и в кадре. Глубина пишется сетками комнат раньше, и стекло за стеной
+    // отсекается само.
+    if (game.interior && this.inter && this.inter.windows.length) {
+      const vis = this.visible(game);
+      gl.uniform1f(pg.loc('uPane'), 1);
+      for (const w of this.inter.windows) {
+        if (!vis.includes(w.room) || !boxInView(this.pv, w.lo, w.hi)) continue;
+        gl.bindVertexArray(w.part.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, w.part.count);
+        this.draws++;
+      }
+      gl.uniform1f(pg.loc('uPane'), 0);
+    }
 
     // Состояние — как было: остальным проходам сцены чужие текстуры на
     // старших блоках ни к чему, а карта теней со сравнением в обычной

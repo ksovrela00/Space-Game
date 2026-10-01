@@ -103,9 +103,10 @@ float hullFrame(vec3 p, vec2 uv, vec2 fw) {
 /**
  * Сколько коробок выреза помещается в шейдер: шесть — помещения
  * (js/models/interior.js, carve), четыре — открытые люки (панель обшивки
- * уходит, на её месте — проём в шлюз; js/game/airlock.js, hatchCut).
+ * уходит, на её месте — проём в шлюз; js/game/airlock.js, hatchCut), и
+ * до шести — окна (обшивка в проёме окна, windowCarve; только изнутри).
  */
-export const CARVE_MAX = 10;
+export const CARVE_MAX = 16;
 
 export const HULL_GLSL = `
 in float vMat;

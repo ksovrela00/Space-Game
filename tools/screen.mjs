@@ -781,6 +781,27 @@ const SCENES = {
     title: 'машинное: закрытая дверь в кают-компанию — с той стороны, где нет рамы',
     run: WALK_SCENE([0, -4.94, -27.7], 0, 0.04),
   },
+  // Окно (js/models/interior.js, WINDOWS): корабль повёрнут левым бортом
+  // к станции — за окном кают-компании должен быть её створ, а не космос.
+  walkwindow: {
+    title: 'окно кают-компании: корабль бортом к станции',
+    run: WALK_SCENE([-2.4, -4.94, -16.2], '-Math.PI / 2', 0).replace('frames(4);', `
+    const S = GAME.world.stations[0], sh = GAME.ship, b = sh.basis;
+    const cr = (a, c) => ({ x: a.y * c.z - a.z * c.y, y: a.z * c.x - a.x * c.z, z: a.x * c.y - a.y * c.x });
+    const dot = (a, c) => a.x * c.x + a.y * c.y + a.z * c.z;
+    const sgn = Math.sign(dot(cr(b.right, b.up), b.fwd));
+    let d = { x: S.pos.x - sh.pos.x, y: S.pos.y - sh.pos.y, z: S.pos.z - sh.pos.z };
+    let L = Math.hypot(d.x, d.y, d.z);
+    const right = { x: -d.x / L, y: -d.y / L, z: -d.z / L };
+    const k = dot(b.up, right);
+    let up = { x: b.up.x - right.x * k, y: b.up.y - right.y * k, z: b.up.z - right.z * k };
+    L = Math.hypot(up.x, up.y, up.z);
+    up = { x: up.x / L, y: up.y / L, z: up.z / L };
+    const f = cr(right, up);
+    Object.assign(b.right, right); Object.assign(b.up, up);
+    Object.assign(b.fwd, { x: f.x * sgn, y: f.y * sgn, z: f.z * sgn });
+    frames(4);`),
+  },
   lockopen: {
     url: '&surface=clipmap',
     title: 'стоянка у моря: носовой люк открыт, трап на грунте',
