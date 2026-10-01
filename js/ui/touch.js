@@ -62,8 +62,8 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   const bx = thr.x - TOUCH.thrW / 2 - pad - TOUCH.btnR;
   const by = h - B - pad - TOUCH.btnR;
   const step = TOUCH.btnR * 2 + 12;
-  const btn = (x, y, id, label, code, hold = false, only = null) =>
-    ({ x, y, r: TOUCH.btnR, id, label, code, hold, only });
+  const btn = (x, y, id, label, code, hold = false, only = null, walk = false) =>
+    ({ x, y, r: TOUCH.btnR, id, label, code, hold, only, walk });
   const buttons = [
     btn(bx, by, 'boost', 'ФОРС', 'Space', true),
     btn(bx - step, by, 'rollL', '↺', 'KeyQ', true),
@@ -86,6 +86,16 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   // на телефоне клавиатуры нет, и без кнопки пустой бак был бы тупиком.
   // Всё остальное время её нет вовсе — ни на экране, ни под пальцем.
   buttons.push(btn(liftX, by - step * 2, 'tow', 'БУКС', 'KeyU', false, 'tow'));
+  // Встать с кресла (Y) — в верхнем ряду, к редким; есть, когда помещения
+  // собраны (t.stand).
+  buttons.push(btn(w - R - pad - TOUCH.btnR - step * 4, insets.top + pad + TOUCH.btnR, 'stand', 'ВСТАТЬ', 'KeyY',
+    false, 'stand'));
+  // На ногах (t.walk) джойстик ведёт ноги, палец по экрану — голову, а
+  // под правой рукой — прыжок, бег и «сесть» у кресла. Полётных кнопок
+  // в это время нет вовсе: ручки остались в рубке.
+  buttons.push(btn(bx, by, 'wJump', 'ПРЫЖ', 'Space', false, null, true));
+  buttons.push(btn(bx - step, by, 'wRun', 'БЕГ', 'ShiftLeft', true, null, true));
+  buttons.push(btn(bx, by - step, 'wSit', 'СЕСТЬ', 'KeyE', false, 'seat', true));
   return { stick, thr, buttons, w, h };
 }
 
@@ -98,10 +108,16 @@ export const makeTouch = () => ({
   taps: new Set(),              // кнопки, нажатые в этом кадре
   layout: null,
   tow: false,                   // предложен ли буксир (ставит js/main.js)
+  walk: false,                  // пилот на ногах: свой набор кнопок
+  seat: false,                  // стоит у кресла — можно сесть
+  stand: false,                 // можно встать (помещения собраны)
 });
 
-/** Работает ли кнопка сейчас: у некоторых есть условие (b.only). */
-const offered = (t, b) => !b.only || !!t[b.only];
+/**
+ * Работает ли кнопка сейчас: у некоторых есть условие (b.only), а набор
+ * кнопок пилота на ногах (b.walk) и полётный не показываются вместе.
+ */
+const offered = (t, b) => (b.walk ? !!t.walk : !t.walk) && (!b.only || !!t[b.only]);
 
 const hitCircle = (p, c) => Math.hypot(p.x - c.x, p.y - c.y) <= c.r * 1.25;
 const hitRect = (p, r) =>
@@ -150,7 +166,7 @@ export function touchUpdate(t, points, layout) {
 
     // Новое касание: чей это орган.
     if (hitCircle(p, layout.stick)) { t.stick.id = p.id; continue; }
-    if (hitRect(p, layout.thr)) {
+    if (!t.walk && hitRect(p, layout.thr)) {
       t.thr.id = p.id;
       const top = layout.thr.y - layout.thr.h / 2;
       t.thr.frac = clamp(1 - (p.y - top) / layout.thr.h, 0, 1);
@@ -192,7 +208,7 @@ export function touchApply(t, ship) {
   pad.lift = 0;
   // Ползунок задаёт саму тягу, а не её приращение: пальцем «подержать»
   // клавишу нельзя.
-  if (t.thr.id !== null && ship) ship.throttle = t.thr.frac;
+  if (t.thr.id !== null && ship && !t.walk) ship.throttle = t.thr.frac;
   pad.thr = 0;
 
   if (!t.layout) return t;
@@ -247,8 +263,9 @@ export function touchDraw(ctx, t, layout, game) {
   ctx.beginPath(); ctx.arc(kx, ky, TOUCH.knobR, 0, TAU); ctx.fill();
   ring(ctx, kx, ky, TOUCH.knobR, CY);
 
-  // Ползунок тяги: заливка снизу — это и есть тяга.
+  // Ползунок тяги: заливка снизу — это и есть тяга. На ногах его нет.
   const r = layout.thr;
+  if (!t.walk) {
   const top = r.y - r.h / 2;
   const frac = clamp(ship ? ship.throttle : 0, 0, 1);
   ctx.strokeStyle = CY_DIM;
@@ -259,6 +276,7 @@ export function touchDraw(ctx, t, layout, game) {
   ctx.fillStyle = CY;
   ctx.font = '10px Consolas, monospace';
   ctx.fillText(L('ТЯГА'), r.x, top - 10);
+  }
 
   // Кнопки.
   ctx.font = '10px Consolas, monospace';

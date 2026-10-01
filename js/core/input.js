@@ -38,7 +38,13 @@ class Input {
     this.mouse = {
       right: false, dx: 0, dy: 0,
       left: false, x: 0, y: 0, pdx: 0, pdy: 0, wheel: 0, clicked: false,
+      // Взгляд пилота на ногах: сдвиг мыши в захвате (Pointer Lock).
+      lx: 0, ly: 0,
     };
+    // Мышь в захвате: курсор спрятан, а каждое её движение — поворот
+    // головы, без зажатой кнопки. Так ходят во всех играх от первого
+    // лица; отпускает захват Esc (это делает сам браузер) или игра.
+    this.locked = false;
     // Аналоговые оси с сенсорных органов (js/ui/touch.js). Клавиша даёт
     // только -1, 0 и +1, а джойстик — всё между ними, и терять это
     // нельзя: на телефоне иначе нечем вести корабль плавно.
@@ -115,6 +121,13 @@ class Input {
       if (e.button === 0) this.mouse.left = false;
     });
     win.addEventListener('mousemove', (e) => {
+      // В захвате курсора нет — есть только сдвиг, и он весь уходит
+      // взгляду: ни карте, ни осмотру из-за спины его отдавать незачем.
+      if (this.locked) {
+        this.mouse.lx += e.movementX || 0;
+        this.mouse.ly += e.movementY || 0;
+        return;
+      }
       this.setPos(e);
       // Тянуть карту можно только левой, вертеть камеру — только правой.
       if (this.mouse.left) {
@@ -136,6 +149,54 @@ class Input {
     }, { passive: false });
     // Потеря фокуса не должна оставлять кнопку «зажатой».
     win.addEventListener('blur', () => { this.mouse.right = false; this.mouse.left = false; });
+    // Захват снимает и браузер (Esc), и потеря фокуса — узнаём об этом
+    // отсюда, а не верим своему флагу.
+    const doc = win.document || (typeof document !== 'undefined' ? document : null);
+    if (doc && doc.addEventListener) {
+      doc.addEventListener('pointerlockchange', () => {
+        this.locked = !!doc.pointerLockElement;
+        this.mouse.lx = 0; this.mouse.ly = 0;
+      });
+    }
+  }
+
+  /**
+   * Захватить мышь на элементе. Браузер разрешает это только в ответ на
+   * действие пользователя — нажатие клавиши или щелчок за последние
+   * несколько секунд, — поэтому зовут это прямо из разбора нажатий.
+   * Отказ (вкладка без фокуса, запрет политики) не ошибка: остаётся
+   * осмотр правой кнопкой.
+   */
+  lock(el) {
+    if (this.locked || !el || typeof el.requestPointerLock !== 'function') return false;
+    try {
+      const r = el.requestPointerLock({ unadjustedMovement: true });
+      if (r && typeof r.catch === 'function') {
+        // Без «сырого» движения (его поддерживают не везде) — обычное.
+        r.catch(() => {
+          try {
+            const r2 = el.requestPointerLock();
+            if (r2 && typeof r2.catch === 'function') r2.catch(() => {});
+          } catch (e) { /* не дали — и ладно */ }
+        });
+      }
+    } catch (e) { return false; }
+    return true;
+  }
+
+  /** Отпустить мышь (пилот сел в кресло). */
+  unlock() {
+    const doc = typeof document !== 'undefined' ? document : null;
+    if (doc && doc.pointerLockElement && doc.exitPointerLock) doc.exitPointerLock();
+    this.locked = false;
+    this.mouse.lx = 0; this.mouse.ly = 0;
+  }
+
+  /** Забрать сдвиг мыши в захвате и обнулить его. */
+  takeLook(out = { x: 0, y: 0 }) {
+    out.x = this.mouse.lx; out.y = this.mouse.ly;
+    this.mouse.lx = 0; this.mouse.ly = 0;
+    return out;
   }
 
   setPos(e) {

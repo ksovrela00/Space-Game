@@ -4847,11 +4847,14 @@ console.log('\n== телефон: профиль, джойстик, полный
 
   {
     // Кнопки не должны налезать друг на друга: палец шириной в сантиметр
-    // нажмёт обе.
+    // нажмёт обе. Сравниваются только те, что бывают на экране вместе:
+    // набор пилота на ногах (b.walk) стоит на месте полётного и с ним
+    // никогда не показывается.
     let worst = Infinity, pair = '';
     for (let i = 0; i < L.buttons.length; i++) {
       for (let j = i + 1; j < L.buttons.length; j++) {
         const a = L.buttons[i], b = L.buttons[j];
+        if (!!a.walk !== !!b.walk) continue;
         const gap = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
         if (gap < worst) { worst = gap; pair = `${a.id}/${b.id}`; }
       }

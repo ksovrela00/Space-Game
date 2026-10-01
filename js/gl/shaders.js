@@ -326,6 +326,8 @@ out vec4 outColor;
 
 void main() {
 ${LOG_DEPTH_FRAG}
+  // Свой корпус изнутри: там, где стоят помещения, обшивки нет.
+  if (uHullInside > 0.5 && vMat > 0.5 && hullCarved(vLocal * 1000.0)) discard;
   vec3 n = normalize(vNormal);
   vec3 albedo = vColor.rgb;
   // Собственный свет узора — окна мостика, жар сопел. Постоянный: его

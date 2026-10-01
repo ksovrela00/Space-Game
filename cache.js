@@ -46,7 +46,7 @@
       'entry', 'flow', 'fuel',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
-      'warp', 'weapons', 'world'
+      'walker', 'warp', 'weapons', 'world'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
@@ -57,6 +57,7 @@
     ],
     'models/': [
       'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
+      'interior', 'interior.parts',
       'nature.parts', 'ships', 'station.parts', 'stations'
     ],
     'net/': [
@@ -67,7 +68,7 @@
     ],
     'ui/': [
       'debug', 'displays', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
-      'touch'
+      'touch', 'walkhud'
     ]
   };
 

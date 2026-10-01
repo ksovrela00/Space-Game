@@ -100,6 +100,9 @@ float hullFrame(vec3 p, vec2 uv, vec2 fw) {
 }
 `;
 
+/** Сколько коробок выреза помещений помещается в шейдер. */
+export const CARVE_MAX = 6;
+
 export const HULL_GLSL = `
 in float vMat;
 in vec3 vNormalL;
@@ -107,6 +110,19 @@ uniform float uLiftGlow;   // работа подъёмных движков, 0.
 uniform float uSkyK;       // яркость неба, отражённого стеклом (0 — ночь или пустота)
 // Корпус изнутри (вид из рубки): стёкла сквозные, остаётся переплёт.
 uniform float uHullInside;
+// Помещения корабля вырезаны из корпуса изнутри (js/models/interior.js,
+// carve): у модели пака под обшивкой лежат внутренние грани деталей, и
+// без выреза они резали бы комнаты пополам. Коробки — в метрах модели.
+uniform int uCarveN;
+uniform vec3 uCarveLo[${CARVE_MAX}];
+uniform vec3 uCarveHi[${CARVE_MAX}];
+bool hullCarved(vec3 p) {
+  for (int i = 0; i < ${CARVE_MAX}; i++) {
+    if (i >= uCarveN) break;
+    if (all(greaterThan(p, uCarveLo[i])) && all(lessThan(p, uCarveHi[i]))) return true;
+  }
+  return false;
+}
 
 const float H_ROW = ${f(HULL.row)};
 const float H_CELL = ${f(HULL.cell)};

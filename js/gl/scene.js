@@ -68,6 +68,7 @@ import { FLOW } from '../game/flow.js';
 import { Q } from '../core/quality.js';
 import { buildCockpit } from '../models/cockpit.js';
 import { CabinView } from './cabin.js';
+import { CARVE_MAX } from './hull.js';
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
 const GLOW_FALLOFF = 2.5;
@@ -991,6 +992,15 @@ export class GlScene {
     gl.uniform1f(prog.loc('uLiftGlow'),
       engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift);
     gl.uniform1f(prog.loc('uHullInside'), 1);
+    // Вырез помещений: их коробки, метры модели (js/models/interior.js).
+    const carve = game.interior ? game.interior.carve : [];
+    const nc = Math.min(CARVE_MAX, carve.length);
+    gl.uniform1i(prog.loc('uCarveN'), nc);
+    for (let i = 0; i < nc; i++) {
+      const c = carve[i];
+      gl.uniform3f(prog.loc(`uCarveLo[${i}]`), c.lo[0], c.lo[1], c.lo[2]);
+      gl.uniform3f(prog.loc(`uCarveHi[${i}]`), c.hi[0], c.hi[1], c.hi[2]);
+    }
     this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
     this.drawGear(prog, game, sunPos);
     gl.uniform1f(prog.loc('uHullInside'), 0);
@@ -1008,7 +1018,9 @@ export class GlScene {
    */
   drawCockpit(game, sunPos) {
     const st = game.state;
-    if (!st || st.view !== 'cockpit' || st.mode === 'docked') return;
+    // Пилот на ногах — внутри корабля в любом режиме, и в порту тоже.
+    const walking = !!(game.walk && game.walk.on);
+    if (!st || st.view !== 'cockpit' || (st.mode === 'docked' && !walking)) return;
     if (!game.ship || !this.cabin) return;
     // Модель — из игры (там по ней раскладываются экраны); нет её —
     // своя, собранная по первому требованию.

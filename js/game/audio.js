@@ -139,6 +139,11 @@ export function audioCue(a, kind, opts = {}) {
     case 'quantum':
       push(a, { kind: 'spool', up: opts.dir > 0, level: clamp(opts.level || 0, 0, 1) });
       break;
+    case 'door':
+      // Створка двери на палубе: привод на её ход и защёлка — тот же
+      // сэмпл, что у шасси, ускоренный до хода двери.
+      push(a, { kind: 'servo', dur: opts.dur || 0.45, up: true });
+      break;
     default: break;
   }
 }

@@ -174,6 +174,7 @@ export function stationAct(game, act, arg = {}) {
     return true;
   }
   if (act === 'launch') { game.launch(); return true; }
+  if (act === 'stand') { if (game.rise) game.rise(); return true; }
   if (act === 'map') { hideOverlay(); game.state.mode = ST.MAP; return true; }
   if (act === 'repair') { game.repair(); return true; }
   if (s.busy) return false;
@@ -421,7 +422,8 @@ function html(game) {
     <div class="st-tabs">${tabs}</div>
     <div class="st-body">${body}</div>
     ${note}
-    <div class="st-foot">${btn(L('ВЫЛЕТ'), 'launch')}${btn(L('КАРТА СИСТЕМЫ'), 'map', {}, 'ghost')}</div>`;
+    <div class="st-foot">${btn(L('ВЫЛЕТ'), 'launch')}${btn(L('КАРТА СИСТЕМЫ'), 'map', {}, 'ghost')}${
+  game.cockpit ? btn(L('ПРОЙТИСЬ ПО КОРАБЛЮ · Y'), 'stand', {}, 'ghost') : ''}</div>`;
 }
 
 const overlay = () => document.getElementById('overlay');
@@ -442,6 +444,7 @@ function onClick(game, e) {
 /** Перерисовать, не трогая прокрутку: после сделки глаз остаётся на строке. */
 function redraw(game) {
   if (game.state.mode !== ST.DOCKED || !game.ship.dockedAt) return;
+  if (game.walk && game.walk.on) return;
   const p = panelEl();
   const keep = p.scrollTop;
   p.innerHTML = html(game);
@@ -454,6 +457,8 @@ function redraw(game) {
  * что-то поменялось (ответ сервера на стыковку, ремонт, закрытие карты).
  */
 export function showDocked(game) {
+  // Пилот ходит по кораблю — экран порта покажется, когда он сядет.
+  if (game.walk && game.walk.on) return;
   const s = st(game);
   const here = game.ship.dockedAt;
   if (s.at !== here) {

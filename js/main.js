@@ -63,6 +63,11 @@ import {
 } from './ui/screens.js';
 import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
 import {
+  makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook,
+  crateSolids, WALK,
+} from './game/walker.js';
+import { drawWalkHud } from './ui/walkhud.js';
+import {
   burnThrust, burnQuantum, burnWarp, warpSettled, applyServerFuel, resetFuelBook,
   fuelLevel, fuelReserve,
 } from './game/fuel.js';
@@ -203,6 +208,14 @@ const game = {
   // Что уже сказано о баке: предупреждаем на КАЖДОМ пороге один раз, а
   // не каждый кадр, пока топлива мало.
   fuelSaid: 'ok',
+  // Пилот на ногах (js/game/walker.js) и помещения корабля, по которым он
+  // ходит (js/models/interior.js). Помещения грузятся лениво, после
+  // первого кадра: это мегабайт деталей, и ждать его на старте незачем.
+  walk: makeWalker(),
+  interior: null,
+  walkEye: null,          // глаз идущего в осях корабля, м (null — сидит)
+  walkRoomT: 0,           // сколько ещё показывать название помещения, с
+  walkIntro: 0,           // сколько ещё показывать подсказку по клавишам, с
 };
 
 const dbg = makeDebug();
@@ -210,6 +223,8 @@ let booted = false;
 const _sun = v3();
 const _camDir = v3();
 const _camRight = v3();
+const _camUp = v3();
+const _wLook = { fwd: [0, 0, 1], right: [1, 0, 0], up: [0, 1, 0] };
 const _tmp = v3();
 // Куда уехало несущее тело за шаг мира: замер до и после updateWorld.
 const _carried = v3();
@@ -461,6 +476,7 @@ const RESTART_CONFIRM = 3;
  * держат ссылки и сцена, и приборы, и звук.
  */
 game.restart = () => {
+  seatPilot();
   stopDockingComputer(ship);
   stopLanding(ship);
   ship.landedAt = null;
@@ -516,9 +532,205 @@ game.closeOverlay = () => {
   hideOverlay();
   game.state.mode = restMode();
   if (ship.dockedAt) showDocked(game);
+  // Справку закрыли на ногах — мышь обратно взгляду (нажатие закрытия и
+  // есть действие игрока, которого требует браузер).
+  if (game.walk.on && !Q.touchUi) input.lock(screenCanvas);
 };
 
+// --- пилот на ногах -------------------------------------------------------------
+//
+// Встав с кресла, пилот отпускает ручки: корабль летит, как летел, —
+// держит тягу и курс, гасители гасят, автоматика (докинг, посадка, привод)
+// работает дальше. Клавиши W/A/S/D и мышь уходят ногам и голове
+// (js/game/walker.js), а в кресло садятся там же, откуда встали, — у
+// кресла, клавишей E.
+
+let interiorJob = null;
+
+/** Собрать помещения (один раз; модуль грузится лениво). */
+function loadInterior() {
+  if (game.interior) return Promise.resolve(game.interior);
+  // Помещения рисует проход кабины; на запасном пути Canvas 2D его нет.
+  if (!game.cockpit) return Promise.resolve(null);
+  if (!interiorJob) {
+    interiorJob = import('./models/interior.js').then((m) => {
+      game.interior = m.buildInterior(shipMesh);
+      syncCargo(true);
+      return game.interior;
+    }).catch((e) => {
+      console.warn('помещения корабля не собрались', e);
+      interiorJob = null;
+      return null;
+    });
+  }
+  return interiorJob;
+}
+game.loadInterior = loadInterior;
+
+/** Груз в трюме: ящик на тонну (рисует кабина, твёрдыми их видит ход). */
+function syncCargo(force = false) {
+  const I = game.interior;
+  if (!I) return;
+  let tons = 0;
+  for (const c of game.player.cargo || []) tons += c.tons || 0;
+  const n = Math.min(I.slots.length, Math.max(0, Math.ceil(tons / I.crate.tons - 1e-9)));
+  if (!force && n === I.cargo) return;
+  I.cargo = n;
+  game.walk.crates = crateSolids(I, n * I.crate.tons);
+}
+
+/** Встать с кресла: в полёте, на грунте и в порту. */
+game.rise = () => {
+  const st = game.state;
+  if (game.walk.on) return false;
+  if (!game.cockpit) {
+    say(st, L('ВСТАТЬ НЕКУДА: БЕЗ WEBGL2 ПОМЕЩЕНИЙ НЕТ'), '#ff7a66', 3);
+    return false;
+  }
+  if (!game.interior) {
+    say(st, L('ПОМЕЩЕНИЯ КОРАБЛЯ ЕЩЁ ГОТОВЯТСЯ…'), '#ffcc66', 2);
+    loadInterior();
+    return false;
+  }
+  if (st.mode !== ST.FLIGHT && st.mode !== ST.LANDED && st.mode !== ST.DOCKED) return false;
+  game.walk.prevView = st.view;
+  st.view = 'cockpit';
+  // Голова, повёрнутая в кресле, остаётся повёрнутой и на ногах.
+  standUp(game.walk, game.interior, { yaw: game.camOrbit.yaw, pitch: 0 });
+  game.camOrbit.yaw = 0;
+  game.camOrbit.pitch = 0;
+  game.menu.open = false;
+  if (st.mode === ST.DOCKED) hideOverlay();
+  input.releaseAll();
+  // Мышь — сразу: нажатие Y и есть то действие игрока, без которого
+  // браузер её не отдаёт.
+  if (!Q.touchUi) input.lock(screenCanvas);
+  game.walkRoomT = 0;
+  game.walkIntro = 8;
+  syncCargo(true);
+  say(st, st.mode === ST.FLIGHT
+    ? L('ПИЛОТ ВСТАЛ · КОРАБЛЬ ДЕРЖИТ КУРС И ТЯГУ')
+    : L('ПИЛОТ ВСТАЛ С КРЕСЛА'), '#9fd9ff', 3);
+  return true;
+};
+
+/** Сесть: только у кресла и стоя на палубе. */
+game.sit = () => {
+  const w = game.walk;
+  if (!w.on || w.phase !== 'walk' || !game.interior || !nearSeat(w, game.interior)) return false;
+  sitDown(w);
+  return true;
+};
+
+/** Сел: мышь — обратно курсором, вид — тот, что был, порт — экраном. */
+function seated() {
+  const st = game.state;
+  input.unlock();
+  input.releaseAll();
+  st.view = game.walk.prevView || 'cockpit';
+  game.walkEye = null;
+  if (st.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
+  say(st, L('ПИЛОТ В КРЕСЛЕ'), '#78e08f', 2);
+}
+
+/** В кресло сразу, без шага: крушение, страховка, новая игра. */
+function seatPilot() {
+  if (!game.walk.on) return;
+  seatNow(game.walk);
+  input.unlock();
+  game.state.view = game.walk.prevView || game.state.view;
+  game.walkEye = null;
+}
+
+/** Клавиши пилота на ногах: сесть, справка, захват мыши. */
+function walkKeys() {
+  const st = game.state;
+  const w = game.walk;
+  if (w.phase !== 'walk') return;
+  if (input.pressed('KeyE', 'KeyY')) {
+    if (!game.sit() && input.pressed('KeyY')) {
+      say(st, L('КРЕСЛО ПИЛОТА — В РУБКЕ: ПОДОЙДИТЕ К НЕМУ'), '#ffcc66', 2.5);
+    }
+  }
+  if (input.pressed('KeyH')) {
+    st.mode = ST.HELP;
+    input.unlock();
+    showHelp(game);
+    return;
+  }
+  // Мышь — щелчком по кадру: браузер отдаёт её только по действию игрока
+  // (после Esc её приходится брать заново).
+  if (input.mouse.clicked && !input.locked && !Q.touchUi) input.lock(screenCanvas);
+}
+
+const _look = { x: 0, y: 0 };
+const _walkDrag = { x: 0, y: 0 };
+const _walkTouch = { x: 0, y: 0 };
+const _eyeM = [0, 0, 0];
+
+/** Шаг пилота: ноги, голова, двери, комната. По времени кадра. */
+function walkFrame(dt) {
+  const w = game.walk, I = game.interior, st = game.state;
+  if (!I) return;
+  // Под справкой, меню и картой ноги стоят: ввод сейчас не их.
+  if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open) {
+    game.walkEye = walkerEye(w, I, _eyeM);
+    return;
+  }
+  syncCargo();
+  // Реакторы машинного горят по работе движков: на стоянке — дежурно.
+  I.reactor = st.mode === ST.FLIGHT
+    ? clamp(Math.abs(ship.throttle) + (ship.boosting ? 0.5 : 0) + Math.abs(ship.control.lift || 0) * 0.3, 0, 1)
+    : 0.08;
+  input.takeLook(_look);
+  input.takeDrag(_walkDrag);
+  let lx = _look.x, ly = _look.y;
+  // Без захвата мыши (его не дали или отпустили Esc) голову по-прежнему
+  // можно повернуть правой кнопкой.
+  if (input.mouse.right) { lx += _walkDrag.x; ly += _walkDrag.y; }
+  if (Q.touchUi) {
+    touchDrag(game.touch, _walkTouch);
+    lx += _walkTouch.x * 1.6; ly += _walkTouch.y * 1.6;
+  }
+  const pad = input.pad;
+  // Стрелки ←/→ поворачивают голову: ходить можно и вовсе без мыши.
+  const turn = input.axis(['ArrowLeft'], ['ArrowRight']) * 2.0 * dt;
+  const ctl = {
+    fwd: clamp(input.axis(['KeyS', 'ArrowDown'], ['KeyW', 'ArrowUp']) - pad.pitch, -1, 1),
+    side: clamp(input.axis(['KeyA'], ['KeyD']) + pad.yaw, -1, 1),
+    run: input.isDown('ShiftLeft', 'ShiftRight'),
+    jump: input.pressed('Space'),
+    lookX: lx * WALK.look + turn,
+    lookY: -ly * WALK.look,
+  };
+  const ev = updateWalker(w, I, ctl, dt);
+  for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
+  if (ev.room) game.walkRoomT = 2.6;
+  game.walkRoomT = Math.max(0, game.walkRoomT - dt);
+  game.walkIntro = Math.max(0, game.walkIntro - dt);
+  if (ev.seated) seated();
+  game.walkEye = w.on ? walkerEye(w, I, _eyeM) : null;
+}
+
+/** Подсказки внизу кадра пилоту на ногах. */
+function walkHints() {
+  const w = game.walk;
+  const fl = fuelLevel(ship);
+  return {
+    seat: game.interior && nearSeat(w, game.interior)
+      ? (Q.touchUi ? L('СЕСТЬ — КНОПКА «СЕСТЬ»') : L('E — СЕСТЬ В КРЕСЛО ПИЛОТА')) : null,
+    mouse: !Q.touchUi && !input.locked && w.phase === 'walk'
+      ? L('ЩЁЛКНИТЕ ПО КАДРУ — ВЗГЛЯД МЫШЬЮ · ESC — ОТПУСТИТЬ МЫШЬ') : null,
+    intro: game.walkIntro > 0
+      ? (Q.touchUi ? L('ДЖОЙСТИК — ИДТИ · ПАЛЕЦ ПО ЭКРАНУ — СМОТРЕТЬ')
+        : L('WASD — ИДТИ · SHIFT — БЕГ · ПРОБЕЛ — ПРЫЖОК')) : null,
+    fuel: fl === 'dry' ? L('ТОПЛИВО КОНЧИЛОСЬ') : fl === 'reserve' ? L('ТОПЛИВО НА РЕЗЕРВЕ') : null,
+    touch: Q.touchUi,
+  };
+}
+
 function crash(reason) {
+  seatPilot();
   game.entry = null;
   game.crashReason = reason;
   game.stats.crashes++;
@@ -1138,6 +1350,11 @@ function handleKeys(dt) {
     save();
   }
 
+  // На ногах ручки корабля остались в рубке: разбирается только своё —
+  // сесть, справка, мышь. Ходьбу читает walkFrame. Это раньше тоннеля:
+  // по кораблю ходят и в варпе.
+  if (game.walk.on && st.mode !== ST.HELP) { walkKeys(); return; }
+
   // В тоннеле не работает ничего, кроме звука: карта чужой системы —
   // это карта того, чего сейчас нет (половину прыжка мир вообще не
   // собран), а справка и смена вида просто вернули бы игрока в кадр,
@@ -1187,6 +1404,12 @@ function handleKeys(dt) {
   // Карта — единственный режим, где работают мышь и колесо, поэтому её
   // ввод разбирается целиком в js/ui/map.js, а не здесь.
   if (st.mode === ST.MAP) { mapInput(game, input); return; }
+
+  // Y — встать с кресла: в полёте, на грунте и в порту.
+  if (input.pressed('KeyY') && (st.mode === ST.FLIGHT || st.mode === ST.LANDED || st.mode === ST.DOCKED)) {
+    game.rise();
+    return;
+  }
 
   if (st.mode === ST.DOCKED) {
     // 1–4 — разделы экрана станции (js/ui/station.js).
@@ -1575,7 +1798,9 @@ function step(dt) {
     game.statusLine = updateLandingComputer(ship, dt, zone);
   } else if (ship.docking) {
     game.statusLine = updateDockingComputer(ship, dt);
-  } else {
+  } else if (!game.walk.on) {
+    // Пилот на ногах ручек не держит: органы управления в нуле
+    // (clearControls выше), корабль держит тягу и курс сам.
     readControls(ship);
   }
 
@@ -1765,6 +1990,8 @@ const LOOK = 0.0042;        // рад на пиксель
 const _drag = { x: 0, y: 0 };
 const _touchLook = { x: 0, y: 0 };
 function updateCamOrbit(dt) {
+  // На ногах головой ведёт walkFrame: сдвиг мыши и пальца его.
+  if (game.walk.on) return;
   const o = game.camOrbit;
   input.takeDrag(_drag);
   // Осматриваться можно и стоя на грунте: посадка больше не экран
@@ -1850,6 +2077,23 @@ function setupCamera() {
   cam.basis.right = { ...ship.basis.right };
   cam.basis.up = { ...ship.basis.up };
   cam.basis.fwd = { ...ship.basis.fwd };
+  if (game.walk.on && game.walkEye) {
+    // Глаз идущего: точка в осях корабля, взгляд — его голова.
+    const b = ship.basis, e = game.walkEye;
+    cam.pos.x = ship.pos.x + (b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]) / 1000;
+    cam.pos.y = ship.pos.y + (b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]) / 1000;
+    cam.pos.z = ship.pos.z + (b.right.z * e[0] + b.up.z * e[1] + b.fwd.z * e[2]) / 1000;
+    walkerLook(game.walk, _wLook);
+    const f = _wLook.fwd, u = _wLook.up;
+    _camDir.x = b.right.x * f[0] + b.up.x * f[1] + b.fwd.x * f[2];
+    _camDir.y = b.right.y * f[0] + b.up.y * f[1] + b.fwd.y * f[2];
+    _camDir.z = b.right.z * f[0] + b.up.z * f[1] + b.fwd.z * f[2];
+    _camUp.x = b.right.x * u[0] + b.up.x * u[1] + b.fwd.x * u[2];
+    _camUp.y = b.right.y * u[0] + b.up.y * u[1] + b.fwd.y * u[2];
+    _camUp.z = b.right.z * u[0] + b.up.z * u[1] + b.fwd.z * u[2];
+    lookAlong(cam.basis, _camDir, _camUp);
+    return;
+  }
   if (game.state.view === 'chase') {
     // Где стоит камера и куда смотрит — js/game/chase.js. Грунт ей
     // отдаётся ТАКИМ, КАК ОН НАРИСОВАН: сетка у земли бывает выше
@@ -2035,6 +2279,7 @@ function render() {
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
+  else if (game.walk.on && game.state.mode !== ST.HELP) drawWalkHud(hud, game, walkHints());
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
   // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в
   // справке: там свои экраны целиком.
@@ -2047,7 +2292,8 @@ function render() {
   // Сенсорные органы поверх приборов, но только в полёте и на грунте:
   // в меню и на карте они мешают, а делать нечего.
   if (Q.touchUi && !game.menu.open
-      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
+      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED
+        || (game.walk.on && game.state.mode === ST.DOCKED))) {
     touchDraw(hud.ctx, game.touch, touchArea, game);
   }
   if (game.fsButton) drawFullscreenButton(hud.ctx, game.fsButton, isFull());
@@ -2089,11 +2335,16 @@ function frame(now) {
     // уже нет (js/ui/touch.js, кнопка 'tow').
     const fl = fuelLevel(ship);
     game.touch.tow = !ship.dockedAt && (fl === 'reserve' || fl === 'dry');
+    // На ногах — свой набор: идти, бежать, прыгать, сесть у кресла.
+    game.touch.walk = game.walk.on;
+    game.touch.seat = !!(game.interior && nearSeat(game.walk, game.interior));
+    game.touch.stand = !!game.interior && !game.walk.on;
     touchUpdate(game.touch, [...touchPoints.values()], touchArea);
     touchApply(game.touch, ship);
   }
 
   handleKeys(dt);
+  if (game.walk.on) walkFrame(dt);
 
   acc += dt;
   let steps = 0;
@@ -2189,7 +2440,7 @@ function frame(now) {
   // Софт мониторов — после приборов (он читает то же, что они), и только
   // когда кабина в кадре: рисовать восемь холстов для вида снаружи незачем.
   if (game.displays && game.state.view === 'cockpit'
-      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
+      && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED || game.walk.on)) {
     updateDisplays(game.displays, game, now / 1000);
   }
 
@@ -2483,6 +2734,9 @@ async function boot() {
 
   // Дальность старта показываем в отладке, а сцену рисуем сразу.
   requestAnimationFrame(frame);
+  // Помещения корабля — после первых кадров, фоном: их встают смотреть
+  // не на первой секунде, а мегабайт деталей на старте телефона лишний.
+  setTimeout(() => { loadInterior(); }, 800);
 }
 
 boot();
