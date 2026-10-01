@@ -681,6 +681,36 @@ export class Sound {
     this.clunk(gain, 120, 0.5);
   }
 
+  /**
+   * Шлюз: воздух уходит или входит. Шум в полосе 1.5–6 кГц с огибающей
+   * истечения: расход пропорционален перепаду давления, а перепад тает
+   * по экспоненте — громко в первую секунду и сходит на нет к концу
+   * цикла (js/game/airlock.js). Сэмпла под это нет — синтез и только.
+   */
+  hiss(gain = 0.35, dur = 2.0) {
+    if (!this.ok || !this.noise) return;
+    const t0 = this._slot();
+    if (t0 === null) return;
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 1500;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(6000, t0);
+    lp.frequency.exponentialRampToValueAtTime(2200, t0 + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(gain * 0.5, t0 + 0.08);
+    g.gain.setTargetAtTime(0.0001, t0 + 0.08, dur / 3);
+    src.connect(hp); hp.connect(lp); lp.connect(g); g.connect(this.master);
+    src.start(t0, Math.random() * (NOISE_SEC - 0.05));
+    this._release(src, t0 + dur + 0.1);
+  }
+
   /** Привод шасси: сэмпл растягивается ровно на время выпуска. */
   servo(dur = 2.4, up = true) {
     if (!this.ok) return;

@@ -27,7 +27,7 @@ import { checkStation, startDockingComputer, updateDockingComputer, dockingQuali
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
   isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
-  worldPoint, surfaceVelocity, localDir, dirToWorldBody,
+  worldPoint, surfaceVelocity, localDir, dirToWorldBody, waterAt, hasSea,
 } from '../js/game/surface.js';
 import {
   toggleGear, updateGear, gearReady, landingContext, bounceOff, LAND,
@@ -1272,9 +1272,37 @@ console.log('\n== поверхность ==');
   }
 
   const moon = w.bodies.find((b) => b.kind === 'moon');
-  ok(isLandable(moon) && !isLandable(w.home) && !isLandable(w.star) &&
+  ok(isLandable(moon) && isLandable(w.home) && !isLandable(w.star) &&
      !isLandable(w.planets.find((p) => p.kind === 'gas')),
-    'сесть можно на луну, но не на мир с атмосферой, не на светило и не на гиганта');
+    'сесть можно на луну и на мир с атмосферой, но не на светило и не на гиганта');
+
+  // Вода — не грунт. Море — это рельеф ниже уровня моря, ровная сфера:
+  // ровнее любой суши, и поиск площадки без запрета выбирал бы именно его.
+  {
+    const home = w.home;
+    let wetDir = null, dryDir = null;
+    for (let i = 0; i < 400 && !(wetDir && dryDir); i++) {
+      const a = i * 2.399963, u = -0.6 + 1.2 * (i / 399), s = Math.sqrt(1 - u * u);
+      const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+      if (waterAt(home, d)) { if (!wetDir) wetDir = d; } else if (!dryDir) dryDir = d;
+    }
+    const icy = w.bodies.find((b) => b.kind === 'ice');
+    ok(wetDir && dryDir && hasSea(home) && !hasSea(icy) && !hasSea(moon)
+      && Math.abs(groundRadius(home, wetDir) - home.radius) < 1e-9,
+      'у океанического мира море — ровная сфера на уровне моря; у ледяного «море» замёрзло, по нему ходят');
+    // Возле берега: ищем точку суши рядом с водой и площадку от воды.
+    let coast = null;
+    for (let i = 0; i < 4000 && !coast; i++) {
+      const a = i * 2.399963, u = -0.6 + 1.2 * (i / 3999), s = Math.sqrt(1 - u * u);
+      const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+      if (!waterAt(home, d)) continue;
+      const site = findSite(home, d, 3);
+      if (!site.water) coast = { d, site };
+    }
+    ok(coast && !waterAt(home, coast.site.dir) && coast.site.slope <= 0.35,
+      'из воды у берега поиск уводит площадку на сушу' +
+      (coast ? ': уклон ' + (coast.site.slope * 57.3).toFixed(1) + '°' : ''));
+  }
 
   // Высота считается по рельефу, а не по сфере: над горой она меньше.
   const dirA = normalize(v3(0.3, 0.7, 0.6));
@@ -1329,6 +1357,12 @@ function landTest(pick, altKm, opts = {}) {
     body.pos.z + dir.z * r0), makeBasis());
   lookAlong(sh.basis, normalize(v3(
     body.pos.x - sh.pos.x, body.pos.y - sh.pos.y, body.pos.z - sh.pos.z)));
+  if (opts.dir) {
+    placeShip(sh, v3(body.pos.x + opts.dir.x * r0, body.pos.y + opts.dir.y * r0,
+      body.pos.z + opts.dir.z * r0), makeBasis());
+    lookAlong(sh.basis, normalize(v3(
+      body.pos.x - sh.pos.x, body.pos.y - sh.pos.y, body.pos.z - sh.pos.z)));
+  }
   const res = startLanding(sh, body, sh.pos);
   if (!res.ok) return { status: 'refused', reason: res.reason };
   if (opts.noGear) { sh.gear.out = false; sh.gear.t = 0; }
@@ -1346,6 +1380,7 @@ function landTest(pick, altKm, opts = {}) {
     if (sh.landing) {
       updateLandingComputer(sh, STEP, zone);
       phases.add(sh.landing.phase);
+      if (sh.landing.abort) return { status: 'abort', t, reason: sh.landing.abort, sh, w, body };
     }
     updateShip(sh, STEP, gravityField(cap, sh));
     t += STEP;
@@ -1425,8 +1460,37 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   ok(r2.status === 'landed', `вторая луна с 2.5 радиусов: ${r2.status} за ${r2.t ? r2.t.toFixed(0) : '?'} с`);
   const r3 = landTest(rockPick, QUANTUM.exitAlt);
   ok(r3.status === 'landed', `каменистая планета: ${r3.status} за ${r3.t ? r3.t.toFixed(0) : '?'} с`);
-  const r4 = landTest((w) => w.home, QUANTUM.exitAlt);
-  ok(r4.status === 'refused', `на мир с атмосферой компьютер не берётся: ${r4.reason || r4.status}`);
+  // Мир с атмосферой: тот же компьютер, та же посадка. Нагрева на
+  // спуске нет — скорость снижения далеко ниже порога (ENTRY.vFloor).
+  // Над сушей: направление берётся в осях тела, где вода и суша известны.
+  const wHome = makeSystem(0x1a7e);
+  let dryHome = null;
+  for (let i = 0; i < 600 && !dryHome; i++) {
+    const a = i * 2.399963, u = -0.6 + 1.2 * (i / 599), s = Math.sqrt(1 - u * u);
+    const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+    const site = findSite(wHome.home, d, 2.5);
+    if (!site.water && site.slope < 0.15 && slopeAt(wHome.home, d) < 0.15) dryHome = dirToWorldBody(wHome.home, d, v3());
+  }
+  const r4 = landTest((w) => w.home, QUANTUM.exitAlt, { dir: dryHome });
+  ok(r4.status === 'landed' && r4.r.slopeOk && r4.r.landOk,
+    `на мир с атмосферой (${r4.body ? r4.body.name : '?'}) компьютер садится: ${r4.status} за ${r4.t ? r4.t.toFixed(0) : '?'} с`,
+    r4.phases ? r4.phases.join(' -> ') : r4.reason || '');
+  const r5 = landTest((w) => w.planets.find((p) => p.kind === 'desert'), QUANTUM.exitAlt);
+  ok(r5.status === 'landed', `пустынная планета: ${r5.status} за ${r5.t ? r5.t.toFixed(0) : '?'} с`);
+  // Над открытым морем садиться некуда: компьютер отдаёт ручки пилоту, а
+  // не ведёт корабль в воду.
+  {
+    const w0 = makeSystem(0x1a7e);
+    let deep = null;
+    for (let i = 0; i < 600 && !deep; i++) {
+      const a = i * 2.399963, u = -0.6 + 1.2 * (i / 599), s = Math.sqrt(1 - u * u);
+      const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+      if (findSite(w0.home, d, 50).water) deep = d;
+    }
+    const r6 = deep ? landTest((w) => w.home, QUANTUM.exitAlt, { dir: dirToWorldBody(w0.home, deep, v3()) }) : { status: 'нет моря' };
+    ok(r6.status === 'abort',
+      `над открытым морем компьютер садиться отказывается: ${r6.reason || r6.status}`);
+  }
 }
 
 // Мягкое касание с убранным шасси: скорости в допуске, но садиться не на
@@ -1494,20 +1558,44 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
     `−${res && res.damage ? res.damage.toFixed(0) : '?'}% при запасе ${SHIP.maxHull}`);
 }
 
-// Касание планеты с атмосферой — всегда удар, даже идеально мягкое:
-// садиться туда нельзя, а рельеф у неё есть, и считается он так же.
+// Касание планеты с атмосферой — такое же, как у луны: мягкое на шасси —
+// посадка. Раньше оно было ударом всегда, каким бы мягким ни было, и
+// корабль гиб на первой попытке. А вот вода — крушение при любом
+// касании: на плаву корабль не держится.
 {
   const w = makeSystem(0x1a7e);
   const planet = w.planets.find((p) => p.kind === 'desert');
-  const sh = makeShip();
-  const dir = normalize(v3(0.1, 0.9, 0.4));
-  placeShip(sh, worldPoint(planet, dir, groundRadius(planet, dir) + 0.005, v3()), makeBasis());
-  sh.gear.out = true; sh.gear.t = 1;
-  const zone = landingContext(w, sh);
-  const touch = zone ? checkTouchdown(sh, zone) : null;
-  ok(zone && zone.body === planet && touch && touch.result === 'crash',
-    `у планеты с атмосферой рельеф учитывается, но посадка невозможна: ` +
-    `${touch ? touch.reason : 'касание не определено'}`);
+  const touchAt = (body, dir) => {
+    const sh = makeShip();
+    const up = normalize(v3(dir.x, dir.y, dir.z));
+    placeShip(sh, worldPoint(body, up, groundRadius(body, up) + SHIP.gearClear - 0.0003, v3()), makeBasis());
+    // Брюхом к грунту: верх корабля — по местной вертикали.
+    const wu = dirToWorldBody(body, up, v3());
+    const side = Math.abs(wu.y) < 0.9 ? v3(0, 1, 0) : v3(1, 0, 0);
+    const fwd = normalize(v3(side.y * wu.z - side.z * wu.y, side.z * wu.x - side.x * wu.z, side.x * wu.y - side.y * wu.x));
+    lookAlong(sh.basis, fwd, wu);
+    sh.gear.out = true; sh.gear.t = 1;
+    const zone = landingContext(w, sh);
+    return { zone, touch: zone ? checkTouchdown(sh, zone) : null };
+  };
+  let flat = null;
+  for (let i = 0; i < 400 && !flat; i++) {
+    const a = i * 2.399963, u = -0.6 + 1.2 * (i / 399), s = Math.sqrt(1 - u * u);
+    const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+    if (slopeAt(planet, d) < 0.05) flat = d;
+  }
+  const dry = touchAt(planet, flat);
+  ok(dry.zone && dry.zone.body === planet && dry.touch && dry.touch.result === 'landed',
+    `у планеты с атмосферой мягкое касание на шасси — посадка: ${dry.touch ? dry.touch.result : 'касание не определено'}`);
+  let wet = null;
+  for (let i = 0; i < 400 && !wet; i++) {
+    const a = i * 2.399963, u = -0.6 + 1.2 * (i / 399), s = Math.sqrt(1 - u * u);
+    const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+    if (waterAt(w.home, d)) wet = d;
+  }
+  const sea = touchAt(w.home, wet);
+  ok(sea.zone && sea.zone.water && sea.touch && sea.touch.result === 'crash' && landingReadout(makeShip(), sea.zone).landOk === false,
+    `касание воды — крушение, и прибор «суша» горит красным заранее: ${sea.touch ? sea.touch.reason : '—'}`);
 }
 
 // Шасси: время выпуска и ограничение скорости.
@@ -7888,7 +7976,14 @@ console.log('\n== наземный город ==');
       ['hall', 0, -15.5], ['corridor', 0, -11.5], ['cabin', -3.0, -11.5], ['corridor', 0, -11.5],
       ['medbay', 2.5, -8.5], ['corridor', 0, -8.5], ['storage', -2.5, -5.5], ['corridor', 0, -5.5],
       ['corridor', 0, -12.9], ['washroom', 2.4, -12.9], ['corridor', 0, -12.9], ['corridor', 0, -4.5], ['hold', 0, 2.5],
-      ['hold', 0, 12.0], ['hold', 0, 2.0], ['corridor', 0, -4.6], ['corridor', 0, -14.0],
+      ['hold', 0, 12.0], ['hold', 0, 2.0],
+      // Нижний коридор, трап вверх к бортовому шлюзу, шлюз от гондолы до
+      // гондолы, обратно — и носовой шлюз от борта до борта.
+      ['hold', 2.6, 2.0], ['keel', 2.6, 0.0], ['keel', 2.6, -8.8], ['lockS', 2.6, -11.6],
+      ['lockS', 12.8, -12.6], ['lockS', -12.8, -12.6], ['lockS', 2.6, -11.6], ['keel', 2.6, -9.6],
+      ['keel', 2.6, 0.0], ['hold', 2.6, 2.2], ['hold', 0, 11.6], ['lockN', 0, 14.2], ['lockN', 3.4, 15.3],
+      ['lockN', -3.4, 15.3], ['lockN', 0, 14.2], ['hold', 0, 11.0], ['hold', 0, 2.0],
+      ['corridor', 0, -4.6], ['corridor', 0, -14.0],
       ['hall', -1.6, -21.0], ['hall', 0, -24.0], ['engine', 0, -26.0], ['hall', 0, -23.8],
       ['shaftA', 0, -15.4], ['bridge', 0, -12.0], ['bridge', 0, -8.6],
     ];
@@ -7921,7 +8016,8 @@ console.log('\n== наземный город ==');
       }
     }
     ok(!fail, 'весь корабль ногами — рубка, трап, кают-компания, коридор, каюта, медотсек, кладовая, ' +
-      'санузел, трюм, машинное и обратно к креслу' + (fail ? ': застрял — ' + fail : ` за ${time.toFixed(0)} с ходьбы`));
+      'санузел, трюм, нижний коридор, оба шлюза, машинное и обратно к креслу' +
+      (fail ? ': застрял — ' + fail : ` за ${time.toFixed(0)} с ходьбы`));
     ok(opened.size === In.doors.length, `по дороге открылись все двери: ${[...opened].join(', ')}`);
     ok(!headBump, 'ни на трапах, ни в дверях голова ничего не задела');
     ok(Wk.nearSeat(p, In), 'вернувшись, пилот стоит у кресла');
@@ -7956,6 +8052,294 @@ console.log('\n== наземный город ==');
       'в проёме двери тело упирается в створку, а открытый проём свободен');
     for (const x of In.doors) x.open = 0;
   }
+
+  // --- шлюзы (js/game/airlock.js) --------------------------------------
+  console.log('\n== шлюзы и трапы ==');
+  const A = await import('../js/game/airlock.js');
+  const O = await import('../js/game/outside.js');
+  // Люки — те самые утопленные панели обшивки: у каждого в корпусе есть
+  // грань по оси x на его глубине и с его краями (до двух миллиметров).
+  {
+    let found = 0;
+    for (const h of In.hatches) {
+      const hit = hull.faces.some((f) => {
+        const P = f.v.map((i) => [hull.verts[i].x * MM, hull.verts[i].y * MM, hull.verts[i].z * MM]);
+        const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]), zs = P.map((p) => p[2]);
+        const near = (a, b) => Math.abs(a - b) < 0.002;
+        return xs.every((x) => near(x, h.side * h.inset)) && near(Math.min(...ys), h.y[0]) && near(Math.max(...ys), h.y[1])
+          && near(Math.min(...zs), h.z[0]) && near(Math.max(...zs), h.z[1]);
+      });
+      if (hit) found++;
+    }
+    ok(found === 4, `четыре люка — четыре утопленные панели корпуса (нашлось ${found}): у носа 3.1 × 3.8 м, у гондол 3.1 × 1.9 м`);
+  }
+  const gear = SHIP.gearClear * 1000;
+  const air = A.makeAirlocks(In, SHIP.gearClear);
+  const flatEnv = { pOut: 0, block: null, ground: () => -gear, occupied: () => false };
+  const run = (env, sec) => {
+    const evs = [];
+    for (let i = 0; i < Math.round(sec * 60); i++) for (const e of A.updateAirlocks(air, env, 1 / 60)) evs.push({ ...e, t: i / 60 });
+    return evs;
+  };
+  // Трап — ступени по двадцать сантиметров, уклон сорок градусов, и на
+  // ровной площадке его пята ложится ровно на грунт.
+  for (const hx of air.hatches.filter((x) => x.h.side > 0)) {
+    const d = hx.design;
+    const slope = Math.atan2(d.r, d.t) * 180 / Math.PI;
+    const foot = A.stairPoint({ ...hx, swing: 0 }, 1, [d.foot[0], d.foot[1], 0]);
+    ok(d.r > 0.19 && d.r < 0.21 && Math.abs(slope - 40) < 0.5 && Math.abs(foot[1] + gear) < 0.005,
+      `трап ${hx.lock === 'lockN' ? 'носового' : 'бортового'} люка: ${d.n} подъёмов по ${(d.r * 100).toFixed(1)} см, ` +
+      `${slope.toFixed(0)}°, пята на грунте стоянки (порог на ${(hx.h.y[0] + gear).toFixed(2)} м)`);
+  }
+  // Цикл: давление, люк, трап — по порядку и ни шагом раньше.
+  {
+    const hx = A.hatchById(air, 'sR'), L0 = air.locks.lockS;
+    A.toggleHatch(air, hx);
+    const env = { ...flatEnv, pOut: 0.35 };
+    let order = [], pAtOpen = null;
+    for (let i = 0; i < 60 * 10; i++) {
+      for (const e of A.updateAirlocks(air, env, 1 / 60)) {
+        order.push(e.kind);
+        if (e.kind === 'hatch') pAtOpen = L0.p;
+      }
+    }
+    ok(order.join(' ') === 'cycle hatch stair' && Math.abs(pAtOpen - 0.35) < 0.006 && hx.open === 1 && hx.stair === 1
+      && In.doors.every((d) => !('locked' in d)),
+      `открыть: давление стравлено до забортного (${pAtOpen && pAtOpen.toFixed(2)} бар), ` +
+      `потом люк, потом трап: ${order.join(' → ')}; двери шлюз не запирает`);
+    ok(hx.exitOk && Math.abs(hx.footGap) < 0.01, `трап на грунте: пята в ${(hx.footGap * 100).toFixed(1)} см от земли, сойти можно`);
+    A.toggleHatch(air, hx);
+    order = [];
+    let sealedAt = null;
+    for (let i = 0; i < 60 * 10; i++) {
+      for (const e of A.updateAirlocks(air, env, 1 / 60)) {
+        order.push(e.kind);
+        if (e.kind === 'sealed') sealedAt = i / 60;
+      }
+    }
+    ok(order.join(' ') === 'stair hatch cycle sealed' && L0.p === A.AIR.cabin && sealedAt !== null,
+      `закрыть: трап, люк, наддув до давления корабля (задраен через ${sealedAt && sealedAt.toFixed(1)} с): ${order.join(' → ')}`);
+  }
+  // Запреты: в прыжке люк не открыть, а открытый закрывается сам.
+  {
+    const hx = A.hatchById(air, 'nL');
+    A.toggleHatch(air, hx);
+    run(flatEnv, 6);
+    const was = hx.open;
+    const blockEnv = { ...flatEnv, block: 'ЛЮКИ ЗАБЛОКИРОВАНЫ: КВАНТОВЫЙ ПРЫЖОК' };
+    const ev = run(blockEnv, 0.1);
+    const other = A.hatchById(air, 'sL');
+    const refuse = A.toggleHatch(air, other);
+    run(blockEnv, 8);
+    ok(was === 1 && ev.some((e) => e.kind === 'forced') && refuse === blockEnv.block && hx.open === 0 && hx.stair === 0
+      && !other.want && other.open === 0,
+      'в прыжке люк не открывается («' + refuse + '»), а открытый закрывается сам');
+    run(flatEnv, 6);
+  }
+  // Сойти можно, только если есть куда: в пустоте проём перекрыт, над
+  // высоким грунтом у пяты трапа заслон.
+  {
+    const hx = A.hatchById(air, 'nR');
+    A.toggleHatch(air, hx);
+    run({ ...flatEnv, ground: () => null }, 8);
+    const plug = A.airSolids(air).filter((s) => s.hatch === 'nR');
+    const vacuum = !hx.exitOk && plug.length === 1 && Math.abs(plug[0].hi[2] - plug[0].lo[2] - (hx.h.z[1] - hx.h.z[0])) < 1e-9;
+    run({ ...flatEnv, ground: () => -gear - 12 }, 3);
+    const gate = A.airSolids(air).some((s) => s.stair === 'nR' && s.tag === 'gate');
+    run(flatEnv, 3);
+    const noGate = !A.airSolids(air).some((s) => s.stair === 'nR' && s.tag === 'gate');
+    ok(vacuum && gate && noGate && hx.exitOk,
+      'в пустоте проём перекрыт целиком; корабль висит высоко — у пяты трапа заслон; сел — заслона нет');
+    // Трап доворачивается к грунту: площадка на метр выше — трап положе.
+    run({ ...flatEnv, ground: () => -gear + 1 }, 3);
+    ok(hx.swing > 0.05 && Math.abs(hx.footGap) < 0.02,
+      `грунт выше на метр — трап довернулся на ${(hx.swing * 57.3).toFixed(1)}°, пята на земле`);
+    run(flatEnv, 3);
+  }
+  // По трапу ногами — вниз до земли и обратно; голова ничего не задевает.
+  {
+    const tunnel = In.solids.filter((s) => (s.sill && /^[ns][LR]$/.test(s.sill)) || s.hatchWall);
+    for (const id of ['nR', 'sL']) {
+      const hx = A.hatchById(air, id);
+      if (!hx.want) A.toggleHatch(air, hx);
+      run(flatEnv, 8);
+      const Wo = Wk.outsideWorld(tunnel.concat(A.airSolids(air)), () => -gear, null, 9.81);
+      const p = Wk.makeWalker();
+      Wk.standUp(p, In); p.phase = 'walk'; p.out = { test: true };
+      const s = hx.h.side;
+      p.pos = [s * (hx.h.skin - 0.3), hx.h.y[0], hx.zc];
+      p.yaw = s * Math.PI / 2;
+      let bump = false, t = 0;
+      const far = Math.abs(A.stairPoint(hx, 1, [hx.design.foot[0] + 1.5, 0, 0])[0]);
+      while (t < 12 && Math.abs(p.pos[0]) < far) {
+        const vy = p.vel[1];
+        Wk.updateWalker(p, In, { fwd: 1 }, 1 / 60, Wo);
+        if (vy > 0.5 && p.vel[1] === 0) bump = true;
+        t += 1 / 60;
+      }
+      const down = Math.abs(p.pos[1] + gear) < 0.01;
+      p.yaw += Math.PI;
+      let t2 = 0;
+      while (t2 < 12 && Math.abs(p.pos[0]) > hx.h.skin - 0.2) { Wk.updateWalker(p, In, { fwd: 1 }, 1 / 60, Wo); t2 += 1 / 60; }
+      const up = Math.abs(p.pos[1] - hx.h.y[0]) < 0.01;
+      ok(down && up && !bump, `по трапу ${id === 'nR' ? 'носового' : 'бортового'} люка: вниз за ${t.toFixed(1)} с, ` +
+        `наверх за ${t2.toFixed(1)} с, головой не задели ничего`);
+    }
+    A.resetAirlocks(air);
+  }
+  // Давление — по помещениям. Люк открыт в пустоту, дверь шлюза закрыта —
+  // в трюме воздух остаётся. Дверь открылась — уходит всё, что связано с
+  // шлюзом проёмами (трюм, трап, коридор, кают-компания, шахта трапа), а
+  // за закрытыми дверями (рубка, каюта, медотсек, машинное…) остаётся.
+  {
+    const R = air.rooms, cab = A.AIR.cabin;
+    const hx = A.hatchById(air, 'nR');
+    const door = (id) => In.doors.find((x) => x.id === id);
+    for (const x of In.doors) x.open = 0;
+    A.toggleHatch(air, hx);
+    run(flatEnv, 8);
+    const behind = R.lockN.p < 0.001 && R.lockN.leak && R.hold.p === cab && !R.hold.leak;
+    door('lockN').open = 1;
+    const ev = run(flatEnv, 0.1);
+    const rush = ev.find((e) => e.kind === 'rush' && e.id === 'lockN');
+    let t01 = null;
+    for (let i = 0; i < 60 * 30; i++) { run(flatEnv, 1 / 60); if (t01 === null && R.hold.p < 0.1) t01 = i / 60; }
+    const gone = ['hold', 'shaftB', 'corridor', 'hall', 'shaftA'];
+    const kept = ['bridge', 'cabin', 'storage', 'washroom', 'medbay', 'engine', 'keel', 'lockS'];
+    let vol = 0, mass = 0;
+    for (const r of Object.values(R)) { vol += r.V; mass += r.p * r.V; }
+    ok(behind && rush && Math.abs(rush.dp - cab) < 1e-9 && gone.every((id) => R[id].p < 0.01 && R[id].leak)
+      && kept.every((id) => R[id].p === cab && !R[id].leak) && t01 !== null,
+      `люк открыт в пустоту: за закрытой дверью шлюза воздух остался; дверь открылась — трюм ниже 0.1 бар ` +
+      `через ${t01 && t01.toFixed(1)} с, с ним ${gone.length - 1} помещения за проёмами; ` +
+      `за закрытыми дверями (${kept.length}) — 1 бар`);
+    // Дверь каюты открылась в пустой коридор — каюта пустеет за секунду.
+    door('cabin').open = 1;
+    let tc = null;
+    for (let i = 0; i < 60 * 5; i++) { run(flatEnv, 1 / 60); if (tc === null && R.cabin.p < 0.1) tc = i / 60; }
+    door('cabin').open = 0;
+    // Дверь шлюза закрылась — отсек за ней закрыт от забортного, и корабль
+    // набирает в нём воздух, хотя люк ещё открыт: 0.05 бар/с (соседи по
+    // отсеку, где воздуха осталось чуть больше, немного помогают).
+    door('lockN').open = 0;
+    const p0 = R.hold.p;
+    let tf = null;
+    for (let i = 0; i < 60 * 30; i++) { run(flatEnv, 1 / 60); if (tf === null && R.hold.p === cab) tf = (i + 1) / 60; }
+    ok(tc !== null && tc < 2 && tf !== null && tf <= (cab - p0) / A.AIR.supply + 0.05
+      && tf > 0.9 * (cab - p0) / A.AIR.supply && R.cabin.p === cab
+      && R.lockN.p < 0.001 && hx.open === 1,
+      `каюта через открытую дверь — ниже 0.1 бар за ${tc && tc.toFixed(1)} с; дверь шлюза закрылась — ` +
+      `жизнеобеспечение вернуло 1 бар за ${tf && tf.toFixed(1)} с, а в шлюзе с открытым люком пусто`);
+    // Воздух не берётся ниоткуда: пока всё связано, его ровно столько, сколько было.
+    for (const r of Object.values(R)) r.p = r.id === 'hold' ? 0.4 : 0.9;
+    let m0 = 0;
+    for (const r of Object.values(R)) m0 += r.p * r.V;
+    for (const x of In.doors) x.open = 1;
+    A.toggleHatch(air, hx);
+    const keepSupply = A.AIR.supply, keepRate = A.AIR.rate;
+    A.AIR.supply = 0; A.AIR.rate = 0;
+    hx.open = 0; hx.stair = 0;
+    run(flatEnv, 30);   // корабль — цепочка помещений через узкие проходы: секунды
+    let m1 = 0, spread = 0;
+    for (const r of Object.values(R)) { m1 += r.p * r.V; spread = Math.max(spread, Math.abs(r.p - m0 / vol)); }
+    A.AIR.supply = keepSupply; A.AIR.rate = keepRate;
+    ok(Math.abs(m1 - m0) < 1e-9 * m0 && spread < 1e-3,
+      `двери нараспашку, люки закрыты, наддува нет: давление выровнялось до ${(m0 / vol).toFixed(3)} бар ` +
+      `(разброс ${spread.toExponential(1)}), воздуха столько же — ${m1.toFixed(1)} бар·м³ из ${m0.toFixed(1)}`);
+    for (const x of In.doors) x.open = 0;
+    A.resetAirlocks(air);
+  }
+  // Люк открыт, а по кораблю ходят как обычно: дверь шлюза перед пилотом
+  // открывается (он в скафандре), воздух трюма уходит, пока она открыта.
+  {
+    const hx = A.hatchById(air, 'nR'), R = air.rooms;
+    A.toggleHatch(air, hx);
+    run(flatEnv, 8);
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In); p.phase = 'walk'; p.pos = [0, I.INT.deck.low, 14.2]; p.room = In.roomById.lockN; p.yaw = Math.PI;
+    let low = 1, opened = false;
+    const go = (tx, tz) => {
+      for (let t = 0; t < 15 && Math.hypot(tx - p.pos[0], tz - p.pos[2]) >= 0.25; t += 1 / 60) {
+        const want = Math.atan2(tx - p.pos[0], tz - p.pos[2]);
+        const turn = Math.atan2(Math.sin(want - p.yaw), Math.cos(want - p.yaw));
+        const ev = Wk.updateWalker(p, In, { fwd: 1, lookX: Math.max(-0.2, Math.min(0.2, turn)) }, 1 / 60);
+        if (ev.opened.includes('lockN')) opened = true;
+        A.updateAirlocks(air, flatEnv, 1 / 60);
+        low = Math.min(low, R.hold.p);
+      }
+      return p.room && p.room.id;
+    };
+    const path = [go(0, 11.0), go(0, 4.0), go(0, 11.6), go(0, 14.2), go(3.4, 15.3)];
+    ok(path.join(' ') === 'hold hold hold lockN lockN' && opened && hx.open === 1 && air.locks.lockN.state === 'open' && low < 0.9,
+      `люк открыт, а ходить ничто не мешает: шлюз → трюм → обратно к люку (${path.join(' → ')}); ` +
+      `пока дверь была открыта, в трюме упало до ${low.toFixed(2)} бар`);
+    for (const x of In.doors) x.open = 0;
+    A.resetAirlocks(air);
+  }
+  // За бортом — оси грунта: туда и обратно без потерь, «вверх» — от
+  // центра тела, грунт — по радиусу, вода — стена.
+  {
+    const w0 = makeSystem(0x1a7e);
+    const body = w0.home;
+    let dry = null, coast = null;
+    for (let i = 0; i < 6000 && !(dry && coast); i++) {
+      const u = -0.5 + (i / 5999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const d = normalize(v3(s * Math.cos(a), u, s * Math.sin(a)));
+      if (!waterAt(body, d) && !dry && slopeAt(body, d) < 0.05) dry = d;
+      if (waterAt(body, d) && !coast) {
+        // Берег рядом: шагаем от воды, пока не выйдем на сушу.
+        const t = normalize(v3(-d.z, 0, d.x));
+        for (let k = 1; k < 5000; k++) {
+          const q = normalize(v3(d.x + t.x * k * 0.002 / body.radius, d.y, d.z + t.z * k * 0.002 / body.radius));
+          if (!waterAt(body, q)) { coast = { wet: d, dry: q, t }; break; }
+        }
+      }
+    }
+    const feet = worldPoint(body, dry, groundRadius(body, dry), v3());
+    const G = O.makeGroundFrame(body, feet, v3(0, 0, 1));
+    const P = O.groundToWorld(G, [12.5, 3.2, -40]);
+    const back = O.worldToGround(G, P);
+    const upW = O.groundDirToWorld(G, [0, 1, 0]);
+    const rad = normalize(v3(feet.x - body.pos.x, feet.y - body.pos.y, feet.z - body.pos.z));
+    const gy0 = O.groundY(G, 0, 0, groundRadius);
+    ok(Math.hypot(back[0] - 12.5, back[1] - 3.2, back[2] + 40) < 1e-4 && dot(upW, rad) > 1 - 1e-9 && Math.abs(gy0) < 1e-6,
+      'оси грунта: точка туда и обратно — до десятой мм, «вверх» — от центра тела, грунт под ногами на нуле');
+    // Вода: берег — стена.
+    if (coast) {
+      const fe = worldPoint(body, coast.dry, groundRadius(body, coast.dry), v3());
+      const Gc = O.makeGroundFrame(body, fe, dirToWorldBody(body, coast.t, v3()));
+      const wc = Wk.makeWalker();
+      Wk.standUp(wc, In); wc.phase = 'walk'; wc.out = Gc; wc.pos = [0, 0.05, 0];
+      const Wc = Wk.outsideWorld([], (x, z) => O.groundY(Gc, x, z, groundRadius), (x, z) => O.waterUnder(Gc, x, z), 9.81);
+      // Лицом к воде: она позади по направлению t (шли от воды к суше).
+      wc.yaw = Math.PI;
+      for (let i = 0; i < 60 * 8; i++) Wk.updateWalker(wc, In, { fwd: 1 }, 1 / 60, Wc);
+      const atEdge = !O.waterUnder(Gc, wc.pos[0], wc.pos[2]);
+      ok(atEdge && Math.hypot(wc.pos[0], wc.pos[2]) < 3,
+        `у моря пилот останавливается на берегу: в воду не заходит (${Math.hypot(wc.pos[0], wc.pos[2]).toFixed(1)} м от начала)`);
+    }
+    // Днище — твёрдое над пилотом под кораблём, но не у порога люка.
+    const t0u = performance.now();
+    const map = O.hullUnderside(hull);
+    const msU = performance.now() - t0u;
+    const under = O.undersideBoxes(map, [0, -gear, 0], 1, []);
+    const atHatch = O.undersideBoxes(map, [4.9, -8.84, 15.3], 1, []);
+    ok(under.length > 0 && under.every((b) => b.lo[1] > -9.8 && b.lo[1] < -5) && atHatch.length === 0 && msU < 500,
+      `днище корабля над пилотом твёрдое (низ — ${Math.min(...under.map((b) => b.lo[1])).toFixed(2)} м), а у порога люка ` +
+      `коробок нет; карта днища — за ${msU.toFixed(0)} мс`);
+    // Прыжок за бортом — по тяжести тела: толчок ногами тот же.
+    const icy = w0.bodies.find((b) => b.kind === 'ice' && b.g0 < 1);
+    const g = icy ? icy.g0 : 1.0;
+    const wj = Wk.makeWalker();
+    Wk.standUp(wj, In); wj.phase = 'walk'; wj.out = { test: true }; wj.pos = [0, 0, 0];
+    const Wj = Wk.outsideWorld([], () => 0, null, g);
+    let peak = 0;
+    Wk.updateWalker(wj, In, { jump: true }, 1 / 60, Wj);
+    for (let i = 0; i < 60 * 12; i++) { Wk.updateWalker(wj, In, {}, 1 / 60, Wj); peak = Math.max(peak, wj.pos[1]); }
+    const want = Wk.jumpSpeed() ** 2 / (2 * g);
+    ok(Math.abs(peak - want) / want < 0.03 && wj.ground,
+      `на ${icy ? icy.name : 'лёгком теле'} (${g.toFixed(2)} м/с²) прыгают на ${peak.toFixed(2)} м, а не на ${Wk.WALK.jump} — толчок тот же`);
+  }
 }
 
 // --- сенсорный набор пилота на ногах ---------------------------------------
@@ -7979,6 +8363,9 @@ console.log('\n== наземный город ==');
   const sitNo = tapAt(true, 'wSit');
   const sitYes = tapAt(true, 'wSit', { seat: true });
   ok(!sitNo.taps.has('wSit') && sitYes.taps.has('wSit'), 'кнопка «сесть» — только у кресла');
+  const hatchNo = tapAt(true, 'wHatch');
+  const hatchYes = tapAt(true, 'wHatch', { hatch: true });
+  ok(!hatchNo.taps.has('wHatch') && hatchYes.taps.has('wHatch'), 'кнопка «люк» — только когда люк под рукой');
   const standOff = tapAt(false, 'stand');
   const standOn = tapAt(false, 'stand', { stand: true });
   ok(!standOff.taps.has('stand') && standOn.taps.has('stand'), 'кнопка «встать» — когда помещения собраны');

@@ -1,6 +1,6 @@
 {
  "version": 2,
- "generatedAt": "2026-09-30T15:42:16.486Z",
+ "generatedAt": "2026-10-01T10:23:59.817Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
@@ -102,7 +102,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 4,
@@ -160,7 +160,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 6,
@@ -247,7 +247,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 9,
@@ -508,7 +508,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 18,
@@ -735,7 +735,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 4,
@@ -793,7 +793,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 6,
@@ -822,7 +822,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 7,
@@ -909,7 +909,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 10,
@@ -1025,7 +1025,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 15,
@@ -1149,7 +1149,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 4,
@@ -1236,7 +1236,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 6,
@@ -1294,7 +1294,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 8,
@@ -1352,7 +1352,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 10,
@@ -1381,7 +1381,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 11,
@@ -1468,7 +1468,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 14,
@@ -1497,7 +1497,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 15,
@@ -1526,7 +1526,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 16,
@@ -1708,7 +1708,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 6,
@@ -1766,7 +1766,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 8,
@@ -1969,7 +1969,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 15,
@@ -2064,7 +2064,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 3,
@@ -2267,7 +2267,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 10,
@@ -2325,7 +2325,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 12,
@@ -2652,7 +2652,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 6,
@@ -2739,7 +2739,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 10,
@@ -2855,7 +2855,7 @@
      "hasRings": false,
      "hasStation": false,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 13,
@@ -2971,7 +2971,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 17,
@@ -3124,7 +3124,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": true,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 5,
@@ -3182,7 +3182,7 @@
      "hasRings": false,
      "hasStation": true,
      "isHomeWorld": false,
-     "landable": false
+     "landable": true
     },
     {
      "localId": 7,

@@ -69,6 +69,11 @@ import { Q } from '../core/quality.js';
 import { buildCockpit } from '../models/cockpit.js';
 import { CabinView } from './cabin.js';
 import { CARVE_MAX } from './hull.js';
+import { hatchCut, hatchPanelAt, stairPose } from '../game/airlock.js';
+import { buildStairMesh, buildHatchMesh } from '../models/airstair.js';
+
+// Пилот за бортом: на трапе или на грунте (js/game/walker.js, out).
+const walkingOut = (game) => !!(game.walk && game.walk.on && game.walk.out);
 
 // Насколько мягко спадает к краю обычное свечение (солнце, выхлоп, огни).
 const GLOW_FALLOFF = 2.5;
@@ -84,6 +89,12 @@ const NEAR = 0.004;          // 4 метра
 // проверено кадром: проход неба сравнивает глубину без логарифма, и с
 // тридцатью сантиметрами небо легло поверх грунта — земля пропала.
 const NEAR_BRIDGE = 4e-5;          // км
+// Пилот на ногах: грунт у самых ног и ступени трапа ближе четырёх метров,
+// и с ближней плоскостью сцены их не было бы. Сантиметры здесь
+// безопасны: все проходы с глубиной пишут её логарифмом (LOG_DEPTH_FRAG),
+// а небо и звёзды рисуются без проверки глубины — снимок грунта с такой
+// плоскостью это подтвердил (небо поверх земли не ложится).
+const NEAR_FOOT = 5e-5;            // км
 const FAR_BRIDGE = 0.25;           // км
 const FAR = 2e9;             // с запасом на всю систему
 const AMBIENT = 0.14;
@@ -753,7 +764,7 @@ export class GlScene {
     this.cabinDraws = 0;
 
     const aspect = this.canvas.width / this.canvas.height;
-    perspective(cam.fov, aspect, NEAR, FAR, this.proj);
+    perspective(cam.fov, aspect, game.walk && game.walk.on ? NEAR_FOOT : NEAR, FAR, this.proj);
 
     // Досборка геометрии и запекание поверхности — ДО настройки кадра.
     // Проход запекания рисует в свою текстуру: он меняет вьюпорт и
@@ -803,6 +814,7 @@ export class GlScene {
     this.updateJump(game);
     this.drawStars();
     this.drawOpaque(game, world, sunPos);
+    this.drawLocksOut(game, sunPos);
     this.drawTransparent(game, world, sunPos);
     this.drawMotes(game);
     this.drawCockpit(game, sunPos);
@@ -992,17 +1004,14 @@ export class GlScene {
     gl.uniform1f(prog.loc('uLiftGlow'),
       engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift);
     gl.uniform1f(prog.loc('uHullInside'), 1);
-    // Вырез помещений: их коробки, метры модели (js/models/interior.js).
-    const carve = game.interior ? game.interior.carve : [];
-    const nc = Math.min(CARVE_MAX, carve.length);
-    gl.uniform1i(prog.loc('uCarveN'), nc);
-    for (let i = 0; i < nc; i++) {
-      const c = carve[i];
-      gl.uniform3f(prog.loc(`uCarveLo[${i}]`), c.lo[0], c.lo[1], c.lo[2]);
-      gl.uniform3f(prog.loc(`uCarveHi[${i}]`), c.hi[0], c.hi[1], c.hi[2]);
-    }
+    // Вырез помещений и открытых люков: коробки, метры модели.
+    this.setShipCarve(prog, game, true);
     this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+    gl.uniform1i(prog.loc('uCarveN'), 0);
     this.drawGear(prog, game, sunPos);
+    // Створки люков и трапы — снаружи корабля, но из шлюза они в метре от
+    // глаза: их видно сквозь проём.
+    this.drawHatches(prog, game, sunPos);
     gl.uniform1f(prog.loc('uHullInside'), 0);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
   }
@@ -1018,6 +1027,8 @@ export class GlScene {
    */
   drawCockpit(game, sunPos) {
     const st = game.state;
+    // Пилот за бортом: корабль нарисован снаружи (drawOpaque), рубки нет.
+    if (walkingOut(game)) return;
     // Пилот на ногах — внутри корабля в любом режиме, и в порту тоже.
     const walking = !!(game.walk && game.walk.on);
     if (!st || st.view !== 'cockpit' || (st.mode === 'docked' && !walking)) return;
@@ -1043,6 +1054,84 @@ export class GlScene {
     this.draws += this.cabinDraws;
     this.tris += this.cabin.parts
       ? (this.cabin.parts.shell.count + this.cabin.parts.glass.count) / 3 : 0;
+  }
+
+  /**
+   * Коробки выреза своего корпуса (js/gl/hull.js, CARVE_MAX): панели
+   * открытых люков — всегда, помещения — изнутри всегда, а снаружи только
+   * пока открыт люк: сквозь проём видно шлюз, а не изнанку обшивки. Люки
+   * — первыми: их срезать нельзя ни при каком числе коробок.
+   */
+  setShipCarve(prog, game, inside) {
+    const gl = this.gl;
+    const I = game.interior, air = I && I.air;
+    const list = this._carve || (this._carve = []);
+    list.length = 0;
+    let open = false;
+    if (air) {
+      const cuts = this._cuts || (this._cuts = air.hatches.map(() => ({ lo: [0, 0, 0], hi: [0, 0, 0] })));
+      air.hatches.forEach((hx, i) => { if (hx.open > 0) { open = true; list.push(hatchCut(hx, cuts[i])); } });
+    }
+    if (I && (inside || open)) for (const c of I.carve) list.push(c);
+    const n = Math.min(CARVE_MAX, list.length);
+    gl.uniform1i(prog.loc('uCarveN'), n);
+    for (let i = 0; i < n; i++) {
+      const c = list[i];
+      gl.uniform3f(prog.loc(`uCarveLo[${i}]`), c.lo[0], c.lo[1], c.lo[2]);
+      gl.uniform3f(prog.loc(`uCarveHi[${i}]`), c.hi[0], c.hi[1], c.hi[2]);
+    }
+  }
+
+  /**
+   * Створки открытых люков и трапы (js/game/airlock.js): сетки мира, как
+   * стойки шасси, — в осях корабля и с его ходом.
+   */
+  drawHatches(prog, game, sunPos) {
+    const air = game.interior && game.interior.air;
+    if (!air || !game.ship) return;
+    const ship = game.ship, b = ship.basis;
+    const meshes = this._airMeshes || (this._airMeshes = new Map());
+    const at = (p, out) => {
+      out.x = ship.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
+      out.y = ship.pos.y + (b.right.y * p[0] + b.up.y * p[1] + b.fwd.y * p[2]) / 1000;
+      out.z = ship.pos.z + (b.right.z * p[0] + b.up.z * p[1] + b.fwd.z * p[2]) / 1000;
+      return out;
+    };
+    const dir = (d, out) => {
+      out.x = b.right.x * d[0] + b.up.x * d[1] + b.fwd.x * d[2];
+      out.y = b.right.y * d[0] + b.up.y * d[1] + b.fwd.y * d[2];
+      out.z = b.right.z * d[0] + b.up.z * d[1] + b.fwd.z * d[2];
+      return out;
+    };
+    const pose = this._stairPose || (this._stairPose = { o: [0, 0, 0], ex: [0, 0, 0], ey: [0, 0, 0], ez: [0, 0, 0] });
+    const bs = this._stairBasis || (this._stairBasis = makeBasis());
+    const hp = this._hp || (this._hp = [0, 0, 0]);
+    for (const hx of air.hatches) {
+      if (hx.open <= 0) continue;
+      let hm = meshes.get(hx.id);
+      if (!hm) meshes.set(hx.id, hm = buildHatchMesh(hx.h));
+      this.drawObject(prog, this.glMeshFor(hm), at(hatchPanelAt(hx, hp), this.tmpPos), b, 1, sunPos);
+      if (hx.stair <= 0) continue;
+      const key = hx.design.n + ':' + hx.design.r.toFixed(4);
+      let sm = meshes.get(key);
+      if (!sm) meshes.set(key, sm = buildStairMesh(hx.design));
+      stairPose(hx, hx.stair, pose);
+      dir(pose.ex, bs.right); dir(pose.ey, bs.up); dir(pose.ez, bs.fwd);
+      this.drawObject(prog, this.glMeshFor(sm), at(pose.o, this.tmpPos), bs, 1, sunPos);
+    }
+  }
+
+  /**
+   * Шлюзы сквозь открытые люки, когда корабль виден снаружи: от третьего
+   * лица и пилоту за бортом (js/gl/cabin.js, drawLocksOutside).
+   */
+  drawLocksOut(game, sunPos) {
+    if (!this.cabin || !game.interior || !game.interior.air || game.state.mode === 'docked') return;
+    if (game.state.view !== 'chase' && !walkingOut(game)) return;
+    const n = this.cabin.drawLocksOutside(game, this.camera, [this.canvas.width, this.canvas.height],
+      sunPos, this.logFC);
+    this.draws += n;
+    this.cabinDraws += n;
   }
 
   /**
@@ -1825,13 +1914,18 @@ export class GlScene {
     // (жар в соплах на днище) и сколько неба отражается в стекле мостика.
     const skyK = this.skyAt(game, sunPos);
     gl.uniform1f(prog.loc('uSkyK'), skyK);
-    if (game.state.mode !== 'docked' && game.state.view === 'chase') {
+    // Пилот за бортом (на трапе, на грунте) видит свой корабль снаружи —
+    // так же, как камера от третьего лица.
+    if (game.state.mode !== 'docked' && (game.state.view === 'chase' || walkingOut(game))) {
       const ship = game.ship;
       // Вес держат подъёмные только у тела: в пустоте сопла холодные.
       gl.uniform1f(prog.loc('uLiftGlow'),
         engineLoad(ship, this._load || (this._load = { lift: 0, main: 0 }), !!game.zone).lift);
+      this.setShipCarve(prog, game, false);
       this.drawObject(prog, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+      gl.uniform1i(prog.loc('uCarveN'), 0);
       this.drawGear(prog, game, sunPos);
+      this.drawHatches(prog, game, sunPos);
     }
     // У чужих кораблей работу движков сервер не присылает: сопла у них
     // чуть тлеют, как на зависании.

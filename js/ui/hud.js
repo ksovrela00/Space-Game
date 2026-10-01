@@ -682,6 +682,7 @@ function drawShipColumn(ctx, px, py, game, approach) {
         [L('ШАССИ'), li.gearOk],
         [L('НАКЛОН'), li.tiltOk],
         [L('УКЛОН'), li.slopeOk],
+        ...(li.sea ? [[L('СУША'), li.landOk]] : []),
       ] });
     }
     rows.push({ kind: 'rule', label: b.name.toUpperCase().slice(0, 18) });

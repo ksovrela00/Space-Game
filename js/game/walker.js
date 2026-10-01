@@ -27,6 +27,14 @@
 // Модель помещений сюда не импортируется: в ней мегабайт деталей пака, и
 // грузится она лениво (js/main.js, loadInterior). Всё нужное — числа
 // планировки (interior.INT) и roomAt — приезжает вместе с ней.
+//
+// ЗА БОРТОМ (w.out) — то же тело, те же шаг и прыжок, но в осях грунта
+// (js/game/outside.js) и с другим миром: опора — сам грунт (W.ground —
+// высота под точкой), тяжесть — тела (W.g), а вода — стена (W.water):
+// по ней не ходят. Твёрдое — то, что торчит из корабля: трап, порог,
+// стойки шасси, переложенные в оси грунта. Этот мир собирает js/main.js.
+
+import { airSolids } from './airlock.js';
 
 export const WALK = {
   half: 0.25,          // м — полуширина тела в плане
@@ -68,6 +76,7 @@ export function makeWalker() {
     lag: 0,              // м — на сколько глаз отстаёт от шага на ступень
     bobPhase: 0,
     room: null,          // комната под ногами (js/models/interior.js)
+    out: null,           // за бортом: оси грунта (js/game/outside.js), иначе null
     from: null,          // откуда встали: взгляд головы в кресле
     grid: null,          // твёрдое, разложенное по клеткам
     crates: [],          // ящики груза в трюме (твёрдые, меняются с грузом)
@@ -128,7 +137,9 @@ function makeWorld(w, interior) {
     w.grid = solidGrid(interior.solids);
     w.gridOf = interior;
   }
-  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates) };
+  // Люки и трапы (js/game/airlock.js): закрытая панель — стена, трап —
+  // ступени и поручни.
+  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(interior.air, w._air || (w._air = []))) };
 }
 
 const overlap = (s, lo, hi) => s.lo[0] < hi[0] && s.hi[0] > lo[0] && s.lo[1] < hi[1]
@@ -166,7 +177,13 @@ function body(p, lo = _lo, hi = _hi) {
 /** Упирается ли тело в точке p во что-нибудь. */
 export function blocked(W, p) {
   body(p);
-  return query(W, _lo, _hi, _hits).length > 0;
+  if (query(W, _lo, _hi, _hits).length > 0) return true;
+  // Грунт — твёрдое под ногами: ниже его тело не опускается.
+  if (W.ground) {
+    const gy = W.ground(p[0], p[2]);
+    if (gy > p[1] + 0.002) return true;
+  }
+  return false;
 }
 
 /** Опора под телом: верх самого высокого твёрдого в полосе [y − depth, y + up]. */
@@ -175,6 +192,10 @@ function support(W, p, depth, up = 0.001) {
   _hi[0] = p[0] + WALK.half; _hi[1] = p[1] + up; _hi[2] = p[2] + WALK.half;
   let top = -Infinity;
   for (const s of query(W, _lo, _hi, _hits)) if (s.hi[1] <= p[1] + up + 1e-6) top = Math.max(top, s.hi[1]);
+  if (W.ground) {
+    const gy = W.ground(p[0], p[2]);
+    if (gy <= p[1] + up + 1e-6 && gy >= p[1] - depth) top = Math.max(top, gy);
+  }
   return top;
 }
 
@@ -195,6 +216,7 @@ export function standUp(w, interior, look = { yaw: 0, pitch: 0 }) {
   w.from = { yaw: w.yaw, pitch: w.pitch };
   w.ground = true;
   w.lag = 0;
+  w.out = null;
   w.room = interior.rooms.find((r) => r.id === 'bridge');
   return w;
 }
@@ -220,6 +242,7 @@ export function sitDown(w) {
 /** Вернуть в кресло сразу (крушение, смерть, перезапуск). */
 export function seatNow(w) {
   w.on = false;
+  w.out = null;
   w.phase = 'seated';
   w.t = 0;
   w.vel = [0, 0, 0];
@@ -271,10 +294,11 @@ export function walkerLook(w, out = { fwd: [0, 0, 1], right: [1, 0, 0], up: [0, 
  * @param ctl { fwd, side: −1..1, run, jump (нажат в этом кадре), lookX, lookY (рад) }
  * @returns события кадра: { opened: [id двери], seated: true, room: сменилась }
  */
-export function updateWalker(w, interior, ctl, dt) {
+export function updateWalker(w, interior, ctl, dt, outside = null) {
   const ev = { opened: [], seated: false, room: false };
   if (!w.on) return ev;
   updateDoors(w, interior, dt, ev);
+  if (w.out && !outside) return ev;
   if (w.phase === 'rise') {
     w.t += dt;
     if (w.t >= WALK.rise) { w.phase = 'walk'; w.t = 0; }
@@ -293,7 +317,7 @@ export function updateWalker(w, interior, ctl, dt) {
   w.yaw = wrapPi(w.yaw + (ctl.lookX || 0));
   w.pitch = Math.max(-WALK.pitchMax, Math.min(WALK.pitchMax, w.pitch + (ctl.lookY || 0)));
 
-  const W = makeWorld(w, interior);
+  const W = w.out ? outside : makeWorld(w, interior);
   let left = Math.min(dt, 0.1);
   let jump = !!ctl.jump;
   while (left > 1e-6) {
@@ -309,6 +333,10 @@ export function updateWalker(w, interior, ctl, dt) {
   const v = Math.hypot(w.vel[0], w.vel[2]);
   if (w.ground && v > 0.2) w.bobPhase += (v * dt / WALK.stride) * Math.PI;
 
+  if (w.out) {
+    if (w.room) { w.room = null; ev.room = true; }
+    return ev;
+  }
   const r = interior.roomAt(w.pos) || w.room;
   if (r !== w.room) { w.room = r; ev.room = true; }
   return ev;
@@ -329,8 +357,10 @@ function stepBody(w, W, ctl, dt, jump) {
   const dl = Math.hypot(dx, dz);
   if (dl <= a) { v[0] = wx; v[2] = wz; } else { v[0] += dx / dl * a; v[2] += dz / dl * a; }
 
+  // Толчок ногами один и тот же, а высота прыжка — по тяжести: на
+  // ледяной луне человек прыгает на два метра.
   if (jump && w.ground) { v[1] = jumpSpeed(); w.ground = false; w.jumped = true; }
-  v[1] -= WALK.g * dt;
+  v[1] -= (W.g || WALK.g) * dt;
 
   const wasGround = w.ground;
   // По плану — по осям, с подъёмом на порог.
@@ -339,6 +369,8 @@ function stepBody(w, W, ctl, dt, jump) {
     if (d === 0) continue;
     const q = [p[0], p[1], p[2]];
     q[ax] += d;
+    // Вода — берег: в неё не заходят (но из неё, если уж попал, — выходят).
+    if (W.water && W.water(q[0], q[2]) && !W.water(p[0], p[2])) { v[ax] = 0; continue; }
     if (!blocked(W, q)) { p[ax] = q[ax]; continue; }
     // Порог: тело поднимается ровно на высоту того, во что упёрлось, а не
     // на весь допуск сразу, — иначе под низким потолком (трап уходит в
@@ -400,7 +432,7 @@ function stepBody(w, W, ctl, dt, jump) {
 function updateDoors(w, interior, dt, ev) {
   for (const d of interior.doors) {
     const t = d.ax === 0 ? 2 : 0;
-    const near = w.on && w.phase !== 'seated'
+    const near = w.on && w.phase !== 'seated' && !w.out
       && Math.hypot(w.pos[d.ax] - d.pos[d.ax], w.pos[t] - d.pos[t]) < WALK.doorNear
       && Math.abs(w.pos[1] - d.pos[1]) < 1.2;
     const want = near ? 1 : 0;
@@ -415,3 +447,9 @@ function updateDoors(w, interior, dt, ev) {
 export function closeDoors(interior) {
   for (const d of interior.doors) { d.open = 0; d.want = 0; }
 }
+
+/** Мир за бортом для шага (updateWalker, outside): твёрдое, грунт, вода, тяжесть. */
+export function outsideWorld(solids, ground, water, g) {
+  return { grid: EMPTY, extra: solids, ground, water, g };
+}
+const EMPTY = new Map();

@@ -12,7 +12,10 @@
 //     прыгает. Корабль на ходу остался без пилота, и об этом должно быть
 //     видно отовсюду;
 //   * связь — те же сообщения, что на табло козырька;
-//   * подсказка — что сейчас можно сделать: сесть в кресло, взять мышь.
+//   * подсказка — что сейчас можно сделать: сесть в кресло, взять мышь,
+//     открыть люк;
+//   * в шлюзе — давление и что он делает (задраен, стравливает, открыт);
+//   * за бортом — где пилот, какая тут тяжесть и воздух, далеко ли корабль.
 
 import { CY, AMBER, GREEN, RED, INK } from './theme.js';
 import { Q } from '../core/quality.js';
@@ -27,6 +30,7 @@ const sc = (n) => n * Q.hudScale;
 function deckName(room) {
   if (!room) return '';
   if (room.id === 'bridge') return L('ЯРУС РУБКИ');
+  if (room.id === 'lockS') return L('ПАЛУБА ГОНДОЛ');
   if (room.lo[1] < -7) return L('НИЖНЯЯ ПАЛУБА');
   if (room.lo[1] < -3) return L('СРЕДНЯЯ ПАЛУБА');
   return L('ЯРУС РУБКИ');
@@ -67,21 +71,23 @@ export function drawWalkHud(r, game, hint = {}) {
   ctx.fillStyle = 'rgba(216,242,255,0.9)';
   ctx.beginPath(); ctx.arc(cx, cy, sc(1.8), 0, Math.PI * 2); ctx.fill();
 
-  // Где ты: название помещения и ярус — при входе, потом гаснет.
+  // Где ты: название помещения и ярус — при входе, потом гаснет. За
+  // бортом — тело под ногами, его тяжесть и воздух.
   const room = walk && walk.room;
   const t = game.walkRoomT || 0;
-  if (room && t > 0) {
+  const out = hint.out;
+  if ((room || out) && t > 0) {
     ctx.globalAlpha = Math.min(1, t);
     ctx.textAlign = 'center';
     ctx.font = fnt(18, 'bold');
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-    const name = L(room.name);
+    const name = out ? out.name : L(room.name);
     ctx.strokeText(name, cx, sc(64));
     ctx.fillStyle = INK;
     ctx.fillText(name, cx, sc(64));
     ctx.font = fnt(12);
-    const deck = deckName(room);
+    const deck = out ? out.info : deckName(room);
     ctx.strokeText(deck, cx, sc(84));
     ctx.fillStyle = CY;
     ctx.fillText(deck, cx, sc(84));
@@ -98,8 +104,13 @@ export function drawWalkHud(r, game, hint = {}) {
   ctx.strokeText(line, rx, ry);
   ctx.fillStyle = color;
   ctx.fillText(line, rx, ry);
-  // Корпус и топливо — только когда о них стоит знать.
+  // Корпус и топливо — только когда о них стоит знать. Шлюз и дорога до
+  // корабля — тут же, под строкой о корабле.
   const warn = [];
+  if (hint.lock) warn.push(hint.lock);
+  if (hint.press) warn.push(hint.press);
+  if (out) warn.push([out.info, CY]);
+  if (out && out.ship) warn.push([out.ship, CY]);
   if (game.ship.hull < 35) warn.push([L('КОРПУС ') + Math.round(game.ship.hull) + '%', RED]);
   if (hint.fuel) warn.push([hint.fuel, RED]);
   let wy = ry + sc(18);
@@ -125,6 +136,7 @@ export function drawWalkHud(r, game, hint = {}) {
 
   // Подсказки внизу: что можно сделать прямо сейчас.
   const tips = [];
+  if (hint.hatch) tips.push(hint.hatch);
   if (hint.seat) tips.push([hint.seat, GREEN]);
   if (hint.mouse) tips.push([hint.mouse, AMBER]);
   if (hint.intro) tips.push([hint.intro, CY]);

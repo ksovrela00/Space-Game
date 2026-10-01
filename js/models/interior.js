@@ -9,7 +9,17 @@
 //   ярус рубки (пол 0.2 м)   — рубка, переборка с дверью, верх трапа;
 //   средняя палуба (−4.94)   — кают-компания с камбузом, коридор, каюта,
 //                              кладовая, санузел, медотсек, машинное;
-//   нижняя палуба (−9.0)     — грузовой трюм под носом.
+//   нижняя палуба (−9.0)     — грузовой трюм под носом, носовой шлюз,
+//                              нижний коридор под средней палубой;
+//   палуба гондол (−8.05)    — бортовой шлюз поперёк корабля, от гондолы
+//                              до гондолы.
+//
+// ШЛЮЗЫ. Снаружи на корпусе четыре утопленные панели в рост человека и
+// выше: у носа по бортам и на внешних стенках гондол. Это и есть люки
+// (HATCHES): их края сняты с самой модели, и проверка сверяет их с ней.
+// За носовыми — носовой шлюз (из трюма), за бортовыми — бортовой (из
+// нижнего коридора, на пять ступеней выше: пол гондол выше днища). Как
+// шлюз открывается и где выдвигается трап — js/game/airlock.js.
 //
 // Каждая комната — коробка в осях корабля (метры, нос +z, верх +y).
 // Коробки проверены по самому корпусу (tools/test.mjs, «помещения»):
@@ -56,7 +66,7 @@ export const INT = {
   tile: 2 * K,                // 1.5 м — плитка пола и потолка
   gap: 0.6,                   // м — перегородка между комнатами (тоннель двери 0.59)
   // Палубы: пол яруса рубки — палуба рубки (js/models/hulldetail.js).
-  deck: { bridge: 0.2, mid: -4.94, low: -9.0 },
+  deck: { bridge: 0.2, mid: -4.94, low: -9.0, lock: -8.05 },
   // Переборка рубки: задний край палубы рубки (там корпус переходит из
   // стекла в наклонную плиту за креслом).
   bulkZ: -14.35,
@@ -74,6 +84,9 @@ export const INT = {
 
 const CEIL_MID = INT.deck.mid + INT.wallH;    // −1.6175
 const CEIL_LOW = INT.deck.low + INT.wallH;    // −5.6775
+// Бортовой шлюз — в гондолах, а гондола изнутри ниже стены пака: от пола
+// на высоте люка до потолка 2.4 м (стены пака ужаты по высоте на 0.72).
+const CEIL_LOCK = -5.65;
 
 // --- палитра -------------------------------------------------------------------
 //
@@ -238,7 +251,14 @@ export const ROOMS = [
   { id: 'medbay', name: 'МЕДОТСЕК', lo: [1.5, INT.deck.mid, -10.8], hi: [4.2, CEIL_MID, -4.0] },
   { id: 'engine', name: 'МАШИННОЕ ОТДЕЛЕНИЕ', lo: [-4.2, INT.deck.mid, -28.4], hi: [4.2, CEIL_MID, -25.0] },
   { id: 'shaftB', name: 'ТРАП', kind: 'shaft', lo: [-0.8, INT.deck.low, -4.0], hi: [0.8, -2.75, 1.4] },
-  { id: 'hold', name: 'ГРУЗОВОЙ ТРЮМ', lo: [-4.2, INT.deck.low, 1.4], hi: [4.2, CEIL_LOW, 15.4] },
+  // Трюм — до носового шлюза; шире средней палубы на тридцать сантиметров
+  // с борта (обшивка носа — на 4.96): иначе ящики крайнего ряда закрыли
+  // бы дверь в нижний коридор.
+  { id: 'hold', name: 'ГРУЗОВОЙ ТРЮМ', lo: [-4.5, INT.deck.low, 1.4], hi: [4.5, CEIL_LOW, 12.6] },
+  // Шлюзы и дорога к ним.
+  { id: 'lockN', name: 'НОСОВОЙ ШЛЮЗ', kind: 'lock', lo: [-4.2, INT.deck.low, 13.2], hi: [4.2, CEIL_LOW, 17.3] },
+  { id: 'keel', name: 'НИЖНИЙ КОРИДОР', lo: [1.4, INT.deck.low, -10.3], hi: [4.0, CEIL_LOW, 0.8] },
+  { id: 'lockS', name: 'БОРТОВОЙ ШЛЮЗ', kind: 'lock', lo: [-14.0, INT.deck.lock, -14.4], hi: [14.0, CEIL_LOCK, -10.9] },
 ];
 const R = Object.fromEntries(ROOMS.map((r) => [r.id, r]));
 
@@ -248,6 +268,9 @@ export const STAIRS = [
   { id: 'A', x: 0, zTop: -16.1, yTop: INT.deck.bridge, yBot: INT.deck.mid, dir: -1, room: 'shaftA', to: 'hall' },
   // Из носа коридора вниз к носу, в трюм.
   { id: 'B', x: 0, zTop: -4.0, yTop: INT.deck.mid, yBot: INT.deck.low, dir: 1, room: 'shaftB', to: 'hold' },
+  // Из нижнего коридора к бортовому шлюзу: палуба гондол выше нижней
+  // палубы на пять ступеней (0.95 м).
+  { id: 'C', x: 2.6, zTop: -10.3, yTop: INT.deck.lock, yBot: INT.deck.low, dir: 1, room: 'keel', to: 'keel' },
 ];
 for (const s of STAIRS) {
   s.n = Math.round((s.yTop - s.yBot) / INT.rise);
@@ -264,7 +287,29 @@ export const DOORS = [
   { id: 'washroom', a: 'corridor', b: 'washroom', c: -12.9 },
   { id: 'medbay', a: 'corridor', b: 'medbay', c: -8.5 },
   { id: 'engine', a: 'hall', b: 'engine', c: 0 },
+  // Двери шлюзов — обычные: шлюз их не запирает (пилот в скафандре,
+  // js/game/airlock.js). Дверь бортового шлюза — на верхней ступени трапа
+  // (y) и собрана кодом (code): стена пака выше гондолы на метр, и сквозь
+  // потолок она вылезла бы в медотсек.
+  { id: 'lockN', a: 'hold', b: 'lockN', c: 0 },
+  { id: 'keel', a: 'hold', b: 'keel', c: 2.6 },
+  { id: 'lockS', a: 'keel', b: 'lockS', c: 2.6, y: INT.deck.lock, code: true },
 ];
+
+// Люки — утопленные панели обшивки (оси корабля, м): skin — обшивка у
+// люка, inset — сама панель, z и y — её края. Сняты с модели
+// (js/models/hull.data.js) и сверены с ней проверкой. Проём в стене
+// шлюза — по ним же; trap — куда выдвигается трап: наружу по борту.
+export const HATCHES = [
+  { id: 'nL', lock: 'lockN', side: -1, skin: 4.959, inset: 4.816, z: [13.788, 16.852], y: [-8.837, -5.037], rgb: [98, 96, 94] },
+  { id: 'nR', lock: 'lockN', side: 1, skin: 4.959, inset: 4.816, z: [13.788, 16.852], y: [-8.837, -5.037], rgb: [98, 96, 94] },
+  { id: 'sL', lock: 'lockS', side: -1, skin: 14.605, inset: 14.462, z: [-14.206, -11.142], y: [-7.971, -6.108], rgb: [59, 57, 55] },
+  { id: 'sR', lock: 'lockS', side: 1, skin: 14.605, inset: 14.462, z: [-14.206, -11.142], y: [-7.971, -6.108], rgb: [59, 57, 55] },
+];
+
+// Дверь, собранная кодом: проём пака (1.13 × 1.97 м) в стальной панели,
+// косяки по четверть метра.
+const CODE_DOOR = { jamb: 0.25 };
 
 // Проёмы без дверей: прямоугольник в плоскости общей грани двух
 // комнат (u — координата вдоль грани, y — высота).
@@ -279,6 +324,15 @@ export const OPENINGS = [
   // кромка не ближе −21.83 м; взято −22.0.
   { a: 'hall', b: 'shaftA', ceil: true, x: [-0.8, 0.8], z: [-22.0, STAIRS[0].zTop] },
 ];
+
+// Проходы для воздуха без дверей (js/game/airlock.js): проёмы — с
+// площадью сечения, м². Рубка от шахты отделена дверью переборки.
+const AIRWAYS = OPENINGS.map((o) => {
+  if (o.ceil) return { a: o.a, b: o.b, area: (o.x[1] - o.x[0]) * (o.z[1] - o.z[0]) };
+  const A = R[o.a], B = R[o.b];
+  const y = o.y || [Math.max(A.lo[1], B.lo[1]), Math.min(A.hi[1], B.hi[1])];
+  return { a: o.a, b: o.b, area: (o.u[1] - o.u[0]) * (y[1] - y[0]) };
+});
 
 /** Грань комнаты, к которой примыкает соседняя: ось, знак, координата. */
 function sharedFace(a, b) {
@@ -341,16 +395,27 @@ function layoutFaces() {
     if (!sf) throw new Error('дверь ' + d.id + ': комнаты не соседи');
     if (Math.abs(sf.gap - INT.gap) > 1e-6) throw new Error('дверь ' + d.id + ': перегородка не ' + INT.gap + ' м');
     const fa = faceOf(Fs[d.a], sf.ax, sf.s), fb = faceOf(Fs[d.b], sf.ax, -sf.s);
-    const y = a.lo[1];
+    // Порог — на полу комнаты A; у двери бортового шлюза — на верхней
+    // ступени трапа (DOORS, y).
+    const y = d.y !== undefined ? d.y : a.lo[1];
     const hole = { u: [d.c - INT.doorHalf, d.c + INT.doorHalf], v: [y, y + INT.doorTop], door: d.id };
     fa.holes.push({ ...hole, to: d.b }); fb.holes.push({ ...hole, to: d.a });
-    fa.doors.push({ id: d.id, c: d.c, side: 'A' });
-    fb.doors.push({ id: d.id, c: d.c, side: 'B' });
+    fa.doors.push({ id: d.id, c: d.c, side: 'A', code: !!d.code, y });
+    fb.doors.push({ id: d.id, c: d.c, side: 'B', code: !!d.code, y });
     d.ax = sf.ax; d.s = sf.s; d.at = sf.at; d.y = y;
     // Середина проёма в перегородке — по ней работает автоматика двери.
     d.pos = [0, y, 0];
     d.pos[sf.ax] = sf.at + sf.s * INT.gap / 2;
     d.pos[sf.ax === 0 ? 2 : 0] = d.c;
+  }
+  // Люки: проём в боковой стене шлюза — по краям панели обшивки, но не
+  // выше потолка (у носового люка панель выше шлюза: над проёмом снаружи
+  // ставится перемычка, buildHatch).
+  for (const h of HATCHES) {
+    const r = R[h.lock];
+    faceOf(Fs[h.lock], 0, h.side).holes.push({
+      u: [h.z[0], h.z[1]], v: [Math.max(r.lo[1], h.y[0]), Math.min(r.hi[1], h.y[1])], hatch: h.id, to: 'out',
+    });
   }
   return Fs;
 }
@@ -434,6 +499,43 @@ function panel(buf, f, u0, u1, v0, v1, rgb = C.steel) {
   buf.poly([a, b, c, d], rgb, CMAT.paint);
 }
 
+/** Брусок вдоль стены: u, v — по стене, d — от лица в комнату (м). */
+function wallBox(buf, f, u0, u1, v0, v1, d0, d1, rgb, mat, em = 0) {
+  const a = wallPoint(f, u0, v0, d0), b = wallPoint(f, u1, v1, d1);
+  buf.box([Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2])],
+    [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2])], rgb, mat, em);
+}
+
+/**
+ * Дверь, собранная кодом (DOORS, code): проём пака в стальной панели,
+ * янтарная рама, над ней — табличка с лампой. Со стороны A — ещё и
+ * тоннель сквозь перегородку (у двери пака его даёт сама деталь
+ * doorWallA): щёки, потолок и порог с кромкой «осторожно».
+ */
+function codeDoor(buf, f, d, u0, u1, y0, y1) {
+  const dh = INT.doorHalf, top = d.y + INT.doorTop;
+  panel(buf, f, u0, d.c - dh, y0, y1);
+  panel(buf, f, d.c + dh, u1, y0, y1);
+  if (top < y1 - 0.01) panel(buf, f, d.c - dh, d.c + dh, top, y1);
+  if (d.y > y0 + 0.01) panel(buf, f, d.c - dh, d.c + dh, y0, d.y);
+  const fw = 0.1;
+  wallBox(buf, f, d.c - dh - fw, d.c - dh, d.y, top, -0.02, 0.04, C.accent, CMAT.paint);
+  wallBox(buf, f, d.c + dh, d.c + dh + fw, d.y, top, -0.02, 0.04, C.accent, CMAT.paint);
+  wallBox(buf, f, d.c - dh - fw, d.c + dh + fw, top, top + fw, -0.02, 0.04, C.accent, CMAT.paint);
+  if (top + 0.42 < y1) {
+    wallBox(buf, f, d.c - 0.3, d.c + 0.3, top + 0.2, top + 0.32, 0.005, 0.02, C.dark, CMAT.trim);
+    wallBox(buf, f, d.c - 0.16, d.c + 0.16, top + 0.35, top + 0.39, 0.005, 0.03, C.lamp, CMAT.lamp, 1);
+  }
+  if (d.side !== 'A') return;
+  const g = -INT.gap;
+  const P = (u, v, w) => wallPoint(f, u, v, w);
+  buf.poly([P(d.c - dh, d.y, 0), P(d.c - dh, d.y, g), P(d.c - dh, top, g), P(d.c - dh, top, 0)], C.steel, CMAT.paint);
+  buf.poly([P(d.c + dh, d.y, 0), P(d.c + dh, top, 0), P(d.c + dh, top, g), P(d.c + dh, d.y, g)], C.steel, CMAT.paint);
+  buf.poly([P(d.c - dh, top, 0), P(d.c - dh, top, g), P(d.c + dh, top, g), P(d.c + dh, top, 0)], C.steel, CMAT.paint);
+  buf.poly([P(d.c - dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, g),
+    P(d.c - dh, d.y + 0.004, g)], C.hazard, CMAT.hazard);
+}
+
 /** Колонна пака стоймя: середина в (x, z), низ y0, высота h. */
 function column(ctx, buf, name, x, y0, z, h, solid = false) {
   const key = Math.round(x * 100) + ':' + Math.round(z * 100) + ':' + Math.round(y0 * 10);
@@ -447,14 +549,19 @@ function column(ctx, buf, name, x, y0, z, h, solid = false) {
 function buildWall(ctx, buf, room, f) {
   const y0 = f.v[0], y1 = f.v[1];
   const cuts = [];
-  for (const d of f.doors) cuts.push({ u0: d.c - INT.wallW / 2, u1: d.c + INT.wallW / 2, door: d });
+  for (const d of f.doors) {
+    const hw = d.code ? INT.doorHalf + CODE_DOOR.jamb : INT.wallW / 2;
+    cuts.push({ u0: d.c - hw, u1: d.c + hw, door: d });
+  }
   for (const h of f.holes) if (!h.door) cuts.push({ u0: h.u[0], u1: h.u[1], hole: h });
   cuts.sort((a, b) => a.u0 - b.u0);
   let u = f.u[0];
   const seed = room.lo[0] * 3 + room.lo[2] * 7 + f.ax;
   for (const c of cuts) {
     if (c.u0 > u + 1e-6) fillWall(buf, f, u, c.u0, y0, y1, seed + u);
-    if (c.door) {
+    if (c.door && c.door.code) {
+      codeDoor(buf, f, c.door, c.u0, c.u1, y0, y1);
+    } else if (c.door) {
       const d = c.door;
       wallPiece(buf, f, d.side === 'A' ? 'doorWallA' : 'doorWallB', d.c, y0, INT.wallW, INT.wallH);
       if (y1 - y0 > INT.wallH + 0.02) panel(buf, f, c.u0, c.u1, y0 + INT.wallH, y1);
@@ -615,8 +722,51 @@ function lamp(ctx, buf, room, x, z, opts = {}) {
   ctx.lamps.push({
     pos: [x, y - 0.15, z], dir: [0, -1, 0], cos: Math.cos(80 * Math.PI / 180),
     color: opts.color || [0.95, 0.9, 0.8], range: opts.range || 3.4,
-    room: room.id, kind: 'ceiling',
+    room: room.id, kind: opts.kind || 'ceiling',
   });
+}
+
+/**
+ * Люк изнутри: тоннель от проёма в стене шлюза до панели обшивки (щёки,
+ * потолок, порог с кромкой «осторожно»), рама по проёму и пульт люка на
+ * передней стене шлюза. Над проёмом носового люка — перемычка снаружи:
+ * панель обшивки выше потолка шлюза на шестьдесят сантиметров.
+ *
+ * Твёрдое тоннеля — здесь же; створка и трап — подвижные, их твёрдое
+ * считает js/game/airlock.js.
+ */
+function buildHatch(ctx, buf, h) {
+  const r = R[h.lock], s = h.side;
+  const xw = s > 0 ? r.hi[0] : r.lo[0];
+  const xo = s * (h.inset + 0.02);
+  const [z0, z1] = h.z, y0 = h.y[0];
+  const yt = Math.min(h.y[1], r.hi[1]);
+  const quad = (P, rgb, mat) => buf.poly(s > 0 ? P : P.slice().reverse(), rgb, mat);
+  quad([[xw, y0, z0], [xw, y0, z1], [xo, y0, z1], [xo, y0, z0]], C.stair, CMAT.tread);
+  const xe = s * (h.inset - 0.14);
+  quad([[xe, y0 + 0.003, z0], [xe, y0 + 0.003, z1], [xo, y0 + 0.003, z1], [xo, y0 + 0.003, z0]], C.hazard, CMAT.hazard);
+  quad([[xw, y0, z0], [xo, y0, z0], [xo, yt, z0], [xw, yt, z0]], C.steel, CMAT.paint);
+  quad([[xw, y0, z1], [xw, yt, z1], [xo, yt, z1], [xo, y0, z1]], C.steel, CMAT.paint);
+  quad([[xw, yt, z0], [xo, yt, z0], [xo, yt, z1], [xw, yt, z1]], C.steel, CMAT.paint);
+  if (h.y[1] > yt + 0.01) quad([[xo, yt, z0], [xo, h.y[1] + 0.01, z0], [xo, h.y[1] + 0.01, z1], [xo, yt, z1]], C.frame, CMAT.paint);
+  // Рама по проёму со стороны шлюза: янтарь, как у дверей.
+  const fx0 = xw - s * 0.06, fx1 = xw + s * 0.02;
+  const bx = (a, b) => buf.box([Math.min(a[0], b[0]), a[1], a[2]], [Math.max(a[0], b[0]), b[1], b[2]], C.accent, CMAT.paint);
+  bx([fx0, y0, z0 - 0.1], [fx1, yt, z0]);
+  bx([fx0, y0, z1], [fx1, yt, z1 + 0.1]);
+  if (yt < r.hi[1] - 0.05) bx([fx0, yt, z0 - 0.1], [fx1, yt + 0.1, z1 + 0.1]);
+  // Пульт люка — на передней стене шлюза, у самого борта.
+  const zf = r.hi[2], xp = s * (Math.abs(xw) - 0.75), yp = r.lo[1] + 1.05;
+  buf.box([xp - 0.24, yp, zf - 0.07], [xp + 0.24, yp + 0.5, zf], C.dark, CMAT.trim);
+  buf.box([xp - 0.19, yp + 0.13, zf - 0.075], [xp + 0.19, yp + 0.42, zf - 0.07], [70, 190, 150], CMAT.paint, 0.8);
+  buf.box([xp - 0.26, yp - 0.03, zf - 0.08], [xp + 0.26, yp, zf], C.hazard, CMAT.hazard);
+  h.panel = [xp, yp + 0.27, zf - 0.1];
+  // Твёрдое тоннеля: порог, щёки, потолок — до самой обшивки.
+  const xa = Math.min(xw, s * h.skin), xb = Math.max(xw, s * h.skin);
+  ctx.solids.push({ lo: [xa - 0.1, y0 - 0.5, z0], hi: [xb + 0.05, y0, z1], sill: h.id });
+  ctx.solids.push({ lo: [xa, y0 - 0.5, z0 - 0.4], hi: [xb + 0.05, yt + 0.5, z0], hatchWall: h.id });
+  ctx.solids.push({ lo: [xa, y0 - 0.5, z1], hi: [xb + 0.05, yt + 0.5, z1 + 0.4], hatchWall: h.id });
+  ctx.solids.push({ lo: [xa, yt, z0], hi: [xb + 0.05, yt + 0.5, z1], hatchWall: h.id });
 }
 
 function furnish(ctx) {
@@ -716,11 +866,31 @@ function furnish(ctx) {
   }
   lamp(ctx, b, E, 0, -26.7, { alongX: true, range: 3.2 });
 
-  // --- трюм: пульт у кормовой переборки и свет вдоль прохода.
+  // --- трюм: пульт у кормовой переборки и свет вдоль прохода. Пульт —
+  // по левому борту: по правому дверь в нижний коридор.
   const Hd = R.hold;
   b = M.hold;
-  prop(ctx, b, 'computerSmall', 2.2, INT.deck.low, Hd.lo[2] + 0.35, 0, K);
-  for (const z of [3.6, 7.6, 11.6]) lamp(ctx, b, Hd, 0, z, { w: 1.4, range: 4.2 });
+  prop(ctx, b, 'computerSmall', -2.6, INT.deck.low, Hd.lo[2] + 0.35, 0, K);
+  for (const z of [3.4, 7.0, 10.6]) lamp(ctx, b, Hd, 0, z, { w: 1.4, range: 4.2 });
+
+  // --- носовой шлюз: шкафчики со скафандрами у передней стены.
+  const Ln = R.lockN;
+  b = M.lockN;
+  for (const x of [-1.2, -0.4, 0.4, 1.2]) prop(ctx, b, 'locker', x, INT.deck.low, Ln.hi[2] - 0.27, Math.PI, F);
+  for (const x of [-2.2, 2.2]) lamp(ctx, b, Ln, x, 15.3, { range: 3.6, kind: 'lock' });
+
+  // --- нижний коридор: свет вдоль.
+  b = M.keel;
+  for (const z of [-1.0, -4.6, -8.2]) lamp(ctx, b, R.keel, 2.7, z, { range: 3.4 });
+
+  // --- бортовой шлюз: баллоны у задней стены, свет вдоль.
+  const Ls = R.lockS;
+  b = M.lockS;
+  for (const sx of [-1, 1]) {
+    prop(ctx, b, 'vesselTall', sx * 7.6, INT.deck.lock, Ls.lo[2] + 0.35, 0, K);
+    prop(ctx, b, 'vessel', sx * 8.2, INT.deck.lock, Ls.lo[2] + 0.3, 0, K);
+  }
+  for (const x of [-11.5, -6.0, -0.6, 6.0, 11.5]) lamp(ctx, b, Ls, x, -12.65, { alongX: true, range: 3.6, kind: 'lock' });
 
   // --- шахты трапов.
   lamp(ctx, M.shaftA, R.shaftA, 0, -15.3, { alongX: true, w: 0.6, range: 3.2 });
@@ -743,7 +913,9 @@ export function crateSlots() {
   for (let layer = 0; layer < 2; layer++) {
     for (let i = 0; ; i++) {
       const z = Hd.hi[2] - 0.2 - s / 2 - i * (s + 0.06);
-      if (z - s / 2 < Hd.lo[2] + 2.6) break;
+      // У кормовой переборки — тридцать сантиметров: ящики стоят у бортов,
+      // а трап и дверь в нижний коридор выходят в проход между ними.
+      if (z - s / 2 < Hd.lo[2] + 0.3) break;
       for (const sx of [-1, 1]) {
         out.push({ x: sx * (Hd.hi[0] - 0.16 - s / 2), y: INT.deck.low + layer * (h + 0.005), z,
           yaw: hash(i + layer * 13, sx) * 0.12 - 0.06, half: s / 2, h });
@@ -920,6 +1092,7 @@ export function buildInterior(hull) {
   // Пол шахты B под трапом.
   buildFlat(ctx.meshes.shaftB, { side: 'y-', at: INT.deck.low, u: [-0.8, 0.8], v: [R.shaftB.lo[2], R.shaftB.hi[2]], holes: [] });
   for (const s of STAIRS) buildStair(ctx.meshes[s.room], ctx.solids, s);
+  for (const h of HATCHES) buildHatch(ctx, ctx.meshes[h.lock], h);
 
   furnish(ctx);
 
@@ -927,6 +1100,18 @@ export function buildInterior(hull) {
   const doors = DOORS.map((d) => {
     const f = faces[d.a].find((ff) => ff.doors && ff.doors.some((x) => x.id === d.id));
     const t = tangentOf(f.n);
+    if (d.code) {
+      // Створка пака под проём кодовой двери — как у двери рубки: в
+      // середине перегородки, по ширине проёма с рамой.
+      const bw = 2 * INT.doorHalf + 0.1, bsx = bw / 1.674, bsy = INT.doorTop / 2.79, bsz = 0.4;
+      const mid = wallPoint(f, d.c, d.y, -INT.gap / 2);
+      return {
+        id: d.id, rooms: [d.a, d.b], pos: d.pos, ax: d.ax,
+        origin: mid.map((v, i) => v + f.n[i] * 0.4175 * bsz), tangent: t,
+        ux: t.map((c) => c * bsx), uy: [0, bsy, 0], uz: f.n.map((c) => c * bsz),
+        slide: bw, half: bw / 2, height: INT.doorTop, open: 0, want: 0,
+      };
+    }
     return {
       id: d.id, rooms: [d.a, d.b], pos: d.pos, ax: d.ax,
       origin: wallPoint(f, d.c, d.y, FACE * K), tangent: t,
@@ -959,9 +1144,11 @@ export function buildInterior(hull) {
   // Вырез корпуса: всё, где стоят комнаты (кроме рубки), — по ярусам.
   const carve = [
     { lo: [-4.25, INT.deck.mid - 0.05, -28.45], hi: [4.25, CEIL_MID + 0.05, -3.95] },
-    { lo: [-4.25, INT.deck.low - 0.05, 1.35], hi: [4.25, CEIL_LOW + 0.05, 15.45] },
+    { lo: [-4.55, INT.deck.low - 0.05, 1.35], hi: [4.55, CEIL_LOW + 0.05, 17.35] },
     { lo: [-0.85, CEIL_MID - 0.05, -22.05], hi: [0.85, 2.5, INT.bulkZ - INT.bulkT + 0.02] },
     { lo: [-0.85, INT.deck.low - 0.05, -4.0], hi: [0.85, -2.7, 1.45] },
+    { lo: [1.35, INT.deck.low - 0.05, -10.35], hi: [4.05, CEIL_LOW + 0.05, 0.85] },
+    { lo: [-14.05, INT.deck.lock - 0.05, -14.45], hi: [14.05, CEIL_LOCK + 0.05, -10.85] },
   ];
 
   // Рубка — единственное место, куда попадает свет снаружи: стекло
@@ -980,6 +1167,9 @@ export function buildInterior(hull) {
   const out = {
     INT, rooms: ROOMS, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
     carve, sunBox, stairs: STAIRS, slots: crateSlots(), crate: CRATE, hullM, doorMesh, crateMesh,
+    // Люки (данные; их ход и трапы ведёт js/game/airlock.js — он же
+    // кладёт сюда своё состояние, air).
+    hatches: HATCHES, air: null, airways: AIRWAYS,
     roomAt,
     // Сколько ящиков в трюме и как горят реакторы — ставит игра.
     cargo: 0,
@@ -1003,6 +1193,13 @@ export function roomAt(p) {
       && p[1] <= r.hi[1] + 0.05 && p[2] >= r.lo[2] - 0.05 && p[2] <= r.hi[2] + 0.05) return r;
   }
   if (p[2] >= INT.bulkZ - 0.05 && p[2] <= -4 && p[1] >= INT.deck.bridge - 0.3 && Math.abs(p[0]) < 4) return R.bridge;
+  // Тоннель люка — часть своего шлюза: от стены до обшивки.
+  for (const h of HATCHES) {
+    const r = R[h.lock], ax = Math.abs(p[0]);
+    if (Math.sign(p[0]) === h.side && ax >= Math.abs(h.side > 0 ? r.hi[0] : r.lo[0]) - 0.05
+      && ax <= h.skin + 0.02 && p[2] >= h.z[0] - 0.05 && p[2] <= h.z[1] + 0.05
+      && p[1] >= h.y[0] - 0.3 && p[1] <= h.y[1]) return r;
+  }
   for (const d of DOORS) {
     if (!d.pos) continue;
     if (Math.abs(p[d.ax] - d.pos[d.ax]) <= INT.gap / 2 + 0.05
@@ -1063,4 +1260,4 @@ export function visibleNow(id, doors) {
 
 const OPEN_LINKS = new Set(OPENINGS.map((o) => o.a + '|' + o.b));
 
-export { R as ROOM_BY_ID, CEIL_MID, CEIL_LOW };
+export { R as ROOM_BY_ID, CEIL_MID, CEIL_LOW, CEIL_LOCK };

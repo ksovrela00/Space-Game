@@ -144,6 +144,10 @@ export function audioCue(a, kind, opts = {}) {
       // сэмпл, что у шасси, ускоренный до хода двери.
       push(a, { kind: 'servo', dur: opts.dur || 0.45, up: true });
       break;
+    case 'air':
+      // Шлюз стравливает или набирает воздух (js/game/airlock.js).
+      push(a, { kind: 'hiss', gain: clamp(opts.gain || 0.35, 0, 1), dur: opts.dur || 2 });
+      break;
     default: break;
   }
 }
@@ -317,6 +321,7 @@ export function playAudio(a, sound) {
       case 'clunk': sound.clunk(e.gain, e.freq, e.dur, e.delay || 0); break;
       case 'clamp': sound.clamp(e.gain); break;
       case 'servo': sound.servo(e.dur, e.up); break;
+      case 'hiss': if (sound.hiss) sound.hiss(e.gain, e.dur); break;
       case 'spool': sound.spool(e.up, e.level); break;
       default: break;
     }

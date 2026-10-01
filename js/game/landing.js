@@ -1,5 +1,6 @@
-// Посадка на безатмосферное тело: шасси, посадочный компьютер и стоянка
-// на поверхности.
+// Посадка на тело с твёрдой поверхностью — с воздухом и без: шасси,
+// посадочный компьютер и стоянка на поверхности. Нельзя садиться только
+// на воду (js/game/surface.js, waterAt).
 //
 // Отдельного «посадочного режима» здесь нет. Корабль всегда летит одним
 // и тем же способом: тяга — вдоль носа, R/F — вверх и вниз подъёмными
@@ -23,7 +24,7 @@ import { SHIP } from './ship.js';
 import { alignBasis, aimAt, levelRoll, horizontal } from './pilot.js';
 import {
   isLandable, isSolid, altitudeOf, surfaceNormal, worldPoint,
-  dirToWorldBody, groundRadius, findSite, bodyFrame, latLon,
+  dirToWorldBody, groundRadius, findSite, bodyFrame, latLon, waterAt, hasSea,
 } from './surface.js';
 import { groundDrift, gravityAt } from './gravity.js';
 import { GEAR_FEET } from '../models/ships.js';
@@ -158,6 +159,9 @@ export function landingContext(world, ship, out = _zone) {
   out.relVel.x = ship.vel.x - out.surfVel.x;
   out.relVel.y = ship.vel.y - out.surfVel.y;
   out.relVel.z = ship.vel.z - out.surfVel.z;
+  // Под кораблём вода: на неё не садятся (см. checkTouchdown), и приборы
+  // говорят об этом раньше, чем корабль её коснётся.
+  out.water = waterAt(b, out.dir);
   return out;
 }
 
@@ -180,6 +184,10 @@ export function landingReadout(ship, zone) {
     hspeedOk: hSpeed <= LAND.hspeed,
     tiltOk: tilt >= LAND.tilt,
     slopeOk: zone.slope <= LAND.slope,
+    // Суша под кораблём: над водой посадки нет. Прибор нужен только там,
+    // где море есть вообще.
+    sea: hasSea(zone.body),
+    landOk: !zone.water,
   };
 }
 
@@ -187,7 +195,7 @@ export function landingReadout(ship, zone) {
 
 export function startLanding(ship, body, pos) {
   if (!isLandable(body)) {
-    return { ok: false, reason: L('СЕСТЬ МОЖНО ТОЛЬКО НА ТЕЛО БЕЗ АТМОСФЕРЫ') };
+    return { ok: false, reason: L('СЕСТЬ МОЖНО ТОЛЬКО НА ТВЁРДУЮ ПОВЕРХНОСТЬ') };
   }
   const d = Math.hypot(pos.x - body.pos.x, pos.y - body.pos.y, pos.z - body.pos.z);
   if (d - body.radius > body.radius * LAND.range) {
@@ -304,6 +312,16 @@ export function updateLandingComputer(ship, dt, zone = null) {
     la.siteR = groundRadius(b, site.dir);
     la.slope = site.slope;
     la.moved = site.moved;
+    la.water = site.water;
+  }
+  // Суши в пределах поиска нет — под кораблём открытое море. Садиться
+  // некуда, и компьютер отдаёт управление пилоту, а не ведёт корабль в
+  // воду: вести к берегу — решение пилота (js/main.js снимает его).
+  // Сначала поиск расширяется (по кадру на попытку, как и на крутизне):
+  // берег может быть в десятке километров.
+  if (la.water && la.tries >= 4) {
+    la.abort = L('ПОД КОРАБЛЁМ МОРЕ: ПОСАДКА ТОЛЬКО НА СУШУ');
+    return la.abort;
   }
 
   // Боковое смещение от площадки в мировых осях.
@@ -422,8 +440,12 @@ export function checkTouchdown(ship, zone) {
     : zone.alt - SHIP.hullClear;
   if (touch > 0) return null;
 
-  // На планету с атмосферой сесть нельзя — касание её поверхности
-  // означает удар, каким бы мягким он ни был.
+  // Вода — не грунт: корабль на плаву не держится (днище — это сопла
+  // подъёмных движков, а не лодка), и коснуться её значит уйти под воду,
+  // как бы мягко ни подошли. Приборы предупреждают заранее: «СУША».
+  if (zone.water) {
+    return { result: 'crash', reason: L('Корабль ушёл под воду: ') + zone.body.name + '.' };
+  }
   if (!isLandable(zone.body)) {
     return { result: 'crash', reason: L('Столкновение с поверхностью ') + zone.body.name + '.' };
   }

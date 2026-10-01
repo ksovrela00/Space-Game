@@ -37,6 +37,7 @@ import { CMAT, EYE } from '../models/cockpit.js';
 import { MAT as HULL_MAT } from '../models/hulldetail.js';
 import { HULL_FRAME_GLSL } from './hull.js';
 import { ENTRY } from '../game/entry.js';
+import { lockLight } from '../game/airlock.js';
 
 /**
  * Сколько ламп кабина освещает разом. Пост пилота — шесть своих
@@ -1187,6 +1188,7 @@ export class CabinView {
 
   /** Видимые комнаты: где глаз, и куда из неё видно. */
   visible(game) {
+    if (this._visOverride) return this._visOverride;
     const I = game.interior;
     if (!I) return [];
     const w = game.walk;
@@ -1220,14 +1222,18 @@ export class CabinView {
     }
     if (I) {
       const glow = 0.35 + 0.65 * Math.max(0, Math.min(1, I.reactor || 0));
+      const now = (game && game.now) || 0;
       for (const l of I.lamps) {
         if (!vis.includes(l.room)) continue;
         const room = I.roomById[l.room];
         const pos = [l.pos[0] - EYE.x, l.pos[1] - EYE.y, l.pos[2] - EYE.z];
         const k = l.kind === 'reactor' ? glow : 1;
+        // Свет шлюза — по его циклу (js/game/airlock.js): дежурный, жёлтый
+        // мигающий на стравливании и наддуве, красный при открытом люке.
+        const lc = l.kind === 'lock' && I.air ? lockLight(I.air, l.room, now, this._lc || (this._lc = [0, 0, 0])) : l.color;
         out.push({
           pos, dir: l.dir, cos: l.cos, range: l.range,
-          color: [l.color[0] * k, l.color[1] * k, l.color[2] * k],
+          color: [lc[0] * k, lc[1] * k, lc[2] * k],
           lo: [room.lo[0] - EYE.x - 0.15, room.lo[1] - EYE.y - 0.15, room.lo[2] - EYE.z - 0.15],
           hi: [room.hi[0] - EYE.x + 0.15, room.hi[1] - EYE.y + 0.15, room.hi[2] - EYE.z + 0.15],
           d: Math.hypot(pos[0] - e[0], pos[1] - e[1], pos[2] - e[2]) / l.range,
@@ -1239,6 +1245,73 @@ export class CabinView {
     out.sort((a, b) => a.d - b.d);
     if (out.length > CAB_LAMPS) out.length = CAB_LAMPS;
     return out;
+  }
+
+  /**
+   * Шлюзы снаружи — сквозь открытый люк: от третьего лица и с трапа или с
+   * грунта. Глубина — общая со сценой и в тех же единицах (логарифм от
+   * километров, logFC сцены): обшивка вокруг проёма закрывает комнату
+   * честно, без своего буфера и без очистки. Солнца в шлюзе нет — его
+   * коробка только рубка, — светят лампы шлюза.
+   *
+   * @returns сколько вызовов отрисовки ушло
+   */
+  drawLocksOutside(game, cam, size, sunPos, logFC) {
+    const I = game.interior, air = I && I.air;
+    if (!air || !game.ship) return 0;
+    const vis = [];
+    for (const hx of air.hatches) if (hx.open > 0.01 && !vis.includes(hx.lock)) vis.push(hx.lock);
+    if (!vis.length) return 0;
+    const gl = this.gl;
+    if (this.interOf !== I) this.buildInterior(I);
+    if (!this.atlas) {
+      this.atlas = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.atlas);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([4, 8, 12, 255]));
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+    const L = this.light || (this.light = {
+      sunL: new Float32Array(3), sunC: new Float32Array(3), sky: new Float32Array(3),
+      skyDir: new Float32Array(3), planet: new Float32Array(3), planetDir: new Float32Array(3),
+    });
+    this.outside(game, sunPos, L);
+    const lb = this.lightBasis || (this.lightBasis = {
+      r: new Float32Array([1, 0, 0]), u: new Float32Array([0, 1, 0]), f: new Float32Array([0, 0, 1]),
+    });
+    // Глаз — сама камера, в осях кабины (метры от глаза пилота).
+    const ship = game.ship, b = ship.basis;
+    const dx = (cam.pos.x - ship.pos.x) * 1000, dy = (cam.pos.y - ship.pos.y) * 1000, dz = (cam.pos.z - ship.pos.z) * 1000;
+    const e = this.eye;
+    e[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z - EYE.x;
+    e[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z - EYE.y;
+    e[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z - EYE.z;
+    const before = this.draws;
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    perspective(cam.fov, size[0] / Math.max(1, size[1]), CABIN.near, CABIN.far, this.proj);
+    const off = this._off || (this._off = { x: 0, y: 0, z: 0 });
+    off.x = -(b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]);
+    off.y = -(b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]);
+    off.z = -(b.right.z * e[0] + b.up.z * e[1] + b.fwd.z * e[2]);
+    modelView(cam.basis, ZERO3, b, off, 1, this.view, this.nrm);
+    mul4(this.proj, this.view, this.pv);
+    const pc = this.pCabin;
+    pc.use();
+    this.game = game;
+    this._visOverride = vis;
+    this.bindCommon(pc, L, lb, 0, null);
+    gl.uniform1f(pc.loc('uLogFC'), logFC);
+    this.drawInterior(game, pc);
+    this._visOverride = null;
+    gl.bindVertexArray(null);
+    for (const u of [4, 5, 6]) {
+      gl.activeTexture(gl.TEXTURE0 + u);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    return this.draws - before;
   }
 
   /** Uniform-ы основного прохода кабины. */

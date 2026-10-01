@@ -473,8 +473,11 @@ export const MOUNT_TINT = 0.5;
 // строкой, когда до них дойдут руки: машинерия общая, разные только
 // пять чисел.
 const KIND = {
+  // liquid — вода ЖИДКАЯ: на неё не садятся и по ней не ходят
+  // (js/game/surface.js, waterAt). У ледяного мира «вода» рампы —
+  // замёрзшее море, по нему ходят, как по суше.
   ocean: {
-    amp: 0.010, sea: 0.02, water: true, ridge: false, freq: 1.9, craters: 0, caps: true,
+    amp: 0.010, sea: 0.02, water: true, liquid: true, ridge: false, freq: 1.9, craters: 0, caps: true,
     mount: { amp: 0.0022, freq: 66, thr: 0.12, soft: 0.45, spread: 4.5 },
     // Растительность (js/gl/flora.js). Признак тела, а не рендера:
     // где растёт лес, решает мир, а не то, чем его рисуют.

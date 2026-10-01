@@ -42,10 +42,10 @@
       'sound', 'vec3'
     ],
     'game/': [
-      'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
+      'airlock', 'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
       'entry', 'flow', 'fuel',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
-      'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
+      'outside', 'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
       'walker', 'warp', 'weapons', 'world'
     ],
     'gl/': [
@@ -56,7 +56,7 @@
       'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [
-      'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
+      'airstair', 'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
       'interior', 'interior.parts',
       'nature.parts', 'ships', 'station.parts', 'stations'
     ],

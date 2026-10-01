@@ -772,6 +772,143 @@ await step('пилот на ногах: Y — встать, ходьба, гол
   }
 });
 
+// Шлюз — сквозь всю игру: посадка на мир с атмосферой (раньше это было
+// крушение), пилот встаёт, идёт в носовой шлюз, E — цикл, люк, трап;
+// по трапу на грунт, в оси грунта; обратно в тоннель — в оси корабля;
+// E — люк закрыт, шлюз под давлением, дверь в трюм отперта.
+await step('шлюз: сели на мир с атмосферой, E — люк и трап, за бортом по грунту и обратно, люк задраен', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { AIR } = await import('../js/game/airlock.js');
+  const S = await import('../js/game/surface.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+    // Сухое ровное место океанического мира — оно же проверка, что на мир
+    // с атмосферой садятся.
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    let d = null;
+    for (let i = 0; i < 3000 && !d; i++) {
+      const u = -0.5 + (i / 2999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const q = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      if (!S.waterAt(b, q) && S.slopeAt(b, q) < 0.05 && S.groundRadius(b, q) - b.radius > 0.05) d = q;
+    }
+    if (!d) throw new Error('на океаническом мире не нашлось ровной суши');
+    S.worldPoint(b, d, S.groundRadius(b, d) + 0.02, sh.pos);
+    const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const f = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+    const fl = Math.hypot(f.x, f.y, f.z);
+    lookAlong(sh.basis, { x: f.x / fl, y: f.y / fl, z: f.z / fl }, up);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    frames(2);
+    if (!game.landHere() || game.state.mode !== 'landed') throw new Error('не сели: ' + game.state.mode);
+    frames(2);
+    if (game.state.mode !== 'landed') throw new Error('корабль на грунте мира с атмосферой не устоял: ' + game.state.mode);
+
+    key('KeyY'); frames(60);
+    const w = game.walk, I = game.interior, air = I.air;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    // В носовой шлюз, лицом к правому люку.
+    w.pos = [3.3, -9.0, 15.3]; w.room = I.roomById.lockN; w.yaw = Math.PI / 2; w.pitch = 0;
+    frames(3);
+    texts = []; frames(2);
+    let seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('ОТКРЫТЬ ЛЮК') >= 0)) throw new Error('у люка нет подсказки «открыть люк»');
+    const hx = air.hatches.find((x) => x.id === 'nR');
+    const door = I.doors.find((x) => x.id === 'lockN');
+    key('KeyE');
+    const cycle = Math.abs(1 - air.pOut) / AIR.rate + AIR.hatchTime + AIR.stairTime;
+    frames(Math.ceil(cycle * 60) + 30);
+    if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) {
+      throw new Error(`люк не открылся за ${cycle.toFixed(1)} с: панель ${hx.open}, трап ${hx.stair}`);
+    }
+    if (!(Math.abs(air.locks.lockN.p - air.pOut) < 0.01 && air.pOut > 0.5)) {
+      throw new Error('давление в шлюзе не забортное: ' + air.locks.lockN.p.toFixed(2) + ' при ' + air.pOut.toFixed(2));
+    }
+    // Люк открыт, а в корабль — свободно: дверь в трюм открывается перед
+    // пилотом, и трюм, пока она открыта, связан с забортным.
+    w.pos = [0, -9.0, 14.2]; w.yaw = Math.PI; w.pitch = 0;
+    let leaked = false;
+    holdDown('KeyW');
+    for (let i = 0; i < 90; i++) { frames(1); leaked = leaked || air.rooms.hold.leak; }
+    release('KeyW'); frames(10);
+    if (!w.room || w.room.id !== 'hold' || !leaked || door.open === 0 && w.pos[2] > 12) {
+      throw new Error('из открытого шлюза в трюм не пройти: ' + (w.room && w.room.id) + ', трюм открыт забортному ' + leaked);
+    }
+    w.yaw = 0;
+    holdDown('KeyW'); frames(90); release('KeyW'); frames(10);
+    if (!w.room || w.room.id !== 'lockN') throw new Error('из трюма в открытый шлюз не вернуться: ' + (w.room && w.room.id));
+    w.pos = [3.3, -9.0, 15.3]; w.room = I.roomById.lockN; w.yaw = Math.PI / 2; w.pitch = 0;
+    frames(3);
+    // Наружу и по трапу вниз.
+    holdDown('KeyW'); frames(60 * 6); release('KeyW'); frames(10);
+    if (!w.out) throw new Error('за порог не вышли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
+    const away = Math.hypot(w.pos[0], w.pos[2]);
+    if (!(away > 6) || !w.ground) throw new Error('по трапу на грунт не сошли: ' + away.toFixed(1) + ' м от порога');
+    texts = []; frames(2);
+    seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('ТЯЖЕСТЬ') >= 0 && s.indexOf('БАР') >= 0)) {
+      throw new Error('за бортом нет строки о тяжести и воздухе');
+    }
+    // Прыжок за бортом — по тяжести планеты, не палубы.
+    const y0 = w.pos[1];
+    let peak = y0;
+    key('Space');
+    for (let i = 0; i < 90; i++) { frames(1); peak = Math.max(peak, w.pos[1]); }
+    const g = 9.81 * 0.45 / Math.max(0.01, peak - y0);
+    if (!(peak - y0 > 0.5)) throw new Error('прыжок за бортом — как на палубе: ' + (peak - y0).toFixed(2) + ' м');
+    // Обратно: развернуться и вверх по трапу — в тоннель.
+    w.yaw += Math.PI;
+    holdDown('KeyW');
+    for (let i = 0; i < 60 * 10 && w.out; i++) frames(1);
+    // Дальше от проёма: пока стоишь в нём, люк не закрыть.
+    frames(25); release('KeyW'); frames(5);
+    if (w.out || !w.room || w.room.id !== 'lockN') {
+      throw new Error('с трапа в шлюз не вернулись: ' + (w.out ? 'за бортом' : w.room && w.room.id));
+    }
+    // E — задраить: трап, люк, наддув, дверь отперта.
+    frames(2);
+    key('KeyE');
+    frames(Math.ceil((AIR.stairTime / 1.3 + AIR.hatchTime + (1 - air.pOut) / AIR.rate) * 60) + 40);
+    if (!(hx.stair === 0 && hx.open === 0 && air.locks.lockN.state === 'sealed')) {
+      throw new Error(`шлюз не задраился: трап ${hx.stair}, люк ${hx.open}, ${air.locks.lockN.state}; ` +
+        `пилот ${w.pos.map((v) => v.toFixed(2)).join(',')}, люк под рукой ${game.walkHatch && game.walkHatch.id}, ` +
+        `сказано: ${game.state.messages.map((m) => m.text).join(' | ')}`);
+    }
+    if (g > 9) throw new Error('тяжесть за бортом — палубная');
+  } finally {
+    if (game.walk.on) {
+      game.walk.out = null;
+      game.walk.pos = game.interior.seat.stand.slice(); game.walk.room = game.interior.roomById.bridge;
+      frames(2); key('KeyE'); frames(50);
+    }
+    if (game.interior && game.interior.air) {
+      for (const x of game.interior.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const L of Object.values(game.interior.air.locks)) { L.p = 1; L.state = 'sealed'; L.vent = false; }
+      for (const r of Object.values(game.interior.air.rooms)) { r.p = 1; r.leak = false; }
+    }
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(2);
+  }
+});
+
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
   const before = calls.fill;
   key('KeyV');

@@ -3430,9 +3430,14 @@ console.log('\n== мок GL: путь отрисовки ==');
     };
     // Сидя, лицом вперёд: переборка рубки за спиной, рисовать нечего.
     look(false);
+    // Наибольшее за кадр: после своего корпуса вырез гасится (у остальных
+    // сеток его нет), и последнее значение — ноль.
+    const maxWas = state.intsMax;
+    state.intsMax = {};
     scene.render(game);
     const ahead = scene.cabin.interDraws;
-    const carveN = state.ints.uCarveN;
+    const carveN = state.intsMax.uCarveN;
+    state.intsMax = maxWas;
     const carve0 = state.vecName['uCarveLo[0]'];
     // Сидя, обернувшись: переборка и створка двери рубки.
     look(true);
@@ -3478,6 +3483,54 @@ console.log('\n== мок GL: путь отрисовки ==');
     const empty = scene.cabin.interDraws;
     ok(with10 - empty === 10, `10 т в трюме — 10 ящиков в кадре (${with10} вызовов против ${empty} в пустом)`);
     ok(state.nan === nan0, 'в помещениях ни одного NaN');
+
+    // Шлюз снаружи (js/game/airlock.js): люк открыт, трап выдвинут — вид
+    // от третьего лица сбоку, на носовой люк. Панель обшивки вырезана
+    // (коробка люка — плюс шесть коробок помещений: сквозь проём видно
+    // шлюз, а не изнанку обшивки), створка и трап — две сетки, шлюз —
+    // проходом кабины в общей глубине.
+    {
+      const A = await import('../js/game/airlock.js');
+      const { GEAR_CLEAR } = await import('../js/models/ships.js');
+      const air = A.makeAirlocks(game.interior, GEAR_CLEAR);
+      game.walk = Wk.makeWalker();
+      game.walkEye = null;
+      game.state.view = 'chase';
+      const sp = ship.pos;
+      const at = [30, -8, 15];
+      cam.pos.x = sp.x + (sb.right.x * at[0] + sb.up.x * at[1] + sb.fwd.x * at[2]) / 1000;
+      cam.pos.y = sp.y + (sb.right.y * at[0] + sb.up.y * at[1] + sb.fwd.y * at[2]) / 1000;
+      cam.pos.z = sp.z + (sb.right.z * at[0] + sb.up.z * at[1] + sb.fwd.z * at[2]) / 1000;
+      cam.basis.right = { ...sb.fwd };
+      cam.basis.up = { ...sb.up };
+      cam.basis.fwd = { x: -sb.right.x, y: -sb.right.y, z: -sb.right.z };
+      state.intsMax = {};
+      scene.render(game);
+      const shut = { draws: scene.draws, carve: state.intsMax.uCarveN, locks: scene.cabin.interDraws };
+      const hx = A.hatchById(air, 'nR');
+      hx.want = true; hx.open = 1; hx.stair = 1;
+      A.updateAirlocks(air, { pOut: 0, block: null, ground: () => -GEAR_CLEAR * 1000, occupied: () => false }, 1 / 60);
+      state.intsMax = {};
+      scene.render(game);
+      const open = { draws: scene.draws, carve: state.intsMax.uCarveN, locks: scene.cabin.interDraws };
+      state.intsMax = maxWas;
+      ok(shut.carve === 0 && open.carve === 1 + game.interior.carve.length && open.locks >= 1
+        && open.draws >= shut.draws + 2 + open.locks && state.nan === nan0,
+        `люк открыт: обшивка вырезана по ${open.carve} коробкам (закрыт — по ${shut.carve}), створка и трап — ` +
+        `две сетки, шлюз сквозь проём — ${open.locks} вызовов; всего ${shut.draws} → ${open.draws}`);
+      // Пилот на ногах — ближняя плоскость в сантиметрах: грунт у ног и
+      // ступени трапа ближе четырёх метров.
+      game.walk.on = true;
+      scene.render(game);
+      const nearWalk = scene.proj[14];
+      game.walk.on = false;
+      scene.render(game);
+      const nearSeat = scene.proj[14];
+      ok(Math.abs(nearWalk) < 2e-4 && Math.abs(nearSeat) > 7e-3,
+        `ближняя плоскость: на ногах ${(Math.abs(nearWalk) / 2 * 1e5).toFixed(0)} см, в кресле ${(Math.abs(nearSeat) / 2 * 1000).toFixed(0)} м`);
+      A.resetAirlocks(air);
+      game.state.view = 'cockpit';
+    }
     game.interior = null;
     game.walk = null;
     game.walkEye = null;

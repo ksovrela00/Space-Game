@@ -32,8 +32,8 @@ import {
 } from './game/docking.js';
 import { isLandable, localDir, groundRadius, worldPoint } from './game/surface.js';
 import { cityCrash, cityPadUnder, applyCities } from './game/city.js';
-import { captureBody, carryShip, gravityField } from './game/gravity.js';
-import { entryState } from './game/entry.js';
+import { captureBody, carryShip, gravityField, gravityAt } from './game/gravity.js';
+import { entryState, airDensity, ENTRY } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
 import { makeChase, updateChase, placeChase, rotAround } from './game/chase.js';
 import { makeFlow, updateFlow } from './game/flow.js';
@@ -63,10 +63,18 @@ import {
 } from './ui/screens.js';
 import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
 import {
-  makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook,
+  makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
   crateSolids, WALK,
 } from './game/walker.js';
 import { drawWalkHud } from './ui/walkhud.js';
+import {
+  makeAirlocks, updateAirlocks, toggleHatch, closeAll, resetAirlocks, hatchNear, tunnelAt, pastSkin,
+  onStair, airSolids, lockStatus, roomAir, AIR,
+} from './game/airlock.js';
+import {
+  makeGroundFrame, groundToWorld, groundDirToWorld, worldToGround, groundY, waterUnder,
+  shipToGround, shipPointToGround, groundPointToShip, boxToGround, RECENTER, hullUnderside, undersideBoxes,
+} from './game/outside.js';
 import {
   burnThrust, burnQuantum, burnWarp, warpSettled, applyServerFuel, resetFuelBook,
   fuelLevel, fuelReserve,
@@ -216,6 +224,7 @@ const game = {
   walkEye: null,          // глаз идущего в осях корабля, м (null — сидит)
   walkRoomT: 0,           // сколько ещё показывать название помещения, с
   walkIntro: 0,           // сколько ещё показывать подсказку по клавишам, с
+  walkHatch: null,        // люк под рукой (js/game/airlock.js) — для подсказки и E
 };
 
 const dbg = makeDebug();
@@ -409,6 +418,21 @@ game.launch = () => {
 
 // --- посадка на поверхность ---------------------------------------------------
 
+/**
+ * Сесть там, где висишь, — без захода и касания. Не игровое действие:
+ * им сцены снимков (tools/screen.mjs) и прогон (tools/smoke.mjs) ставят
+ * корабль на грунт сразу, чтобы снимать стоянку, а не посадку.
+ */
+game.landHere = () => {
+  const z = landingContext(world, ship);
+  if (!z || game.state.mode !== ST.FLIGHT) return false;
+  ship.gear.out = true;
+  ship.gear.t = 1;
+  landAt(z);
+  game.zone = landingContext(world, ship);
+  return true;
+};
+
 function landAt(zone, belly = false) {
   settle(ship, zone);
   audioCue(game.audio, belly ? 'belly' : 'land');
@@ -555,6 +579,8 @@ function loadInterior() {
   if (!interiorJob) {
     interiorJob = import('./models/interior.js').then((m) => {
       game.interior = m.buildInterior(shipMesh);
+      // Шлюзы: давление, люки и трапы — по высоте корабля на шасси.
+      makeAirlocks(game.interior, SHIP.gearClear);
       syncCargo(true);
       return game.interior;
     }).catch((e) => {
@@ -625,6 +651,12 @@ game.sit = () => {
 /** Сел: мышь — обратно курсором, вид — тот, что был, порт — экраном. */
 function seated() {
   const st = game.state;
+  // Пилот в кресле — и шлюзы задраиваются сами: улететь с открытым люком
+  // и трапом до земли значит оставить трап на площадке.
+  if (game.interior && game.interior.air && game.interior.air.hatches.some((x) => x.want || x.open > 0)) {
+    closeAll(game.interior.air);
+    say(st, L('ЛЮКИ ЗАКРЫВАЮТСЯ'), '#ffcc66', 2);
+  }
   input.unlock();
   input.releaseAll();
   st.view = game.walk.prevView || 'cockpit';
@@ -635,6 +667,8 @@ function seated() {
 
 /** В кресло сразу, без шага: крушение, страховка, новая игра. */
 function seatPilot() {
+  // Шлюзы — сразу закрыты и под давлением: крушение, страховка, рестарт.
+  if (game.interior) resetAirlocks(game.interior.air);
   if (!game.walk.on) return;
   seatNow(game.walk);
   input.unlock();
@@ -647,7 +681,11 @@ function walkKeys() {
   const st = game.state;
   const w = game.walk;
   if (w.phase !== 'walk') return;
-  if (input.pressed('KeyE', 'KeyY')) {
+  // Люк под рукой — E открывает и закрывает (у пульта в шлюзе, в проёме,
+  // на трапе и под люком снаружи).
+  if (game.walkHatch && input.pressed('KeyE')) {
+    useHatch(game.walkHatch);
+  } else if (input.pressed('KeyE', 'KeyY')) {
     if (!game.sit() && input.pressed('KeyY')) {
       say(st, L('КРЕСЛО ПИЛОТА — В РУБКЕ: ПОДОЙДИТЕ К НЕМУ'), '#ffcc66', 2.5);
     }
@@ -674,7 +712,7 @@ function walkFrame(dt) {
   if (!I) return;
   // Под справкой, меню и картой ноги стоят: ввод сейчас не их.
   if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open) {
-    game.walkEye = walkerEye(w, I, _eyeM);
+    game.walkEye = w.out ? null : walkerEye(w, I, _eyeM);
     return;
   }
   syncCargo();
@@ -703,13 +741,243 @@ function walkFrame(dt) {
     lookX: lx * WALK.look + turn,
     lookY: -ly * WALK.look,
   };
-  const ev = updateWalker(w, I, ctl, dt);
+  const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
+  crossThreshold();
   if (ev.room) game.walkRoomT = 2.6;
   game.walkRoomT = Math.max(0, game.walkRoomT - dt);
   game.walkIntro = Math.max(0, game.walkIntro - dt);
   if (ev.seated) seated();
-  game.walkEye = w.on ? walkerEye(w, I, _eyeM) : null;
+  game.walkEye = w.on && !w.out ? walkerEye(w, I, _eyeM) : null;
+  game.walkHatch = w.on && w.phase === 'walk' && I.air
+    ? hatchNear(I.air, I, w.out ? walkerShipPos() : w.pos, !!w.out) : null;
+}
+
+// --- шлюзы и пилот за бортом -------------------------------------------------
+//
+// Шлюзы живут каждый кадр, сидит пилот или ходит: люки закрываются и после
+// того, как он сел (js/game/airlock.js). Отсюда им приходит то, чего сам
+// шлюз не знает: давление за бортом, грунт под трапом и запреты.
+
+/** Нарисованный грунт (по нему стоят ноги) или настоящий, если сцены нет. */
+const groundOf = (body, dir) => (scene ? scene.drawnGround(body, dir) : groundRadius(body, dir));
+
+/** Давление за бортом, бар: воздух тела на высоте корабля, в порту и в пустоте — ноль. */
+function outsidePressure() {
+  if (game.state.mode === ST.DOCKED) return 0;
+  let p = 0;
+  for (const b of world.bodies) {
+    if (!b.atmo) continue;
+    const alt = Math.hypot(ship.pos.x - b.pos.x, ship.pos.y - b.pos.y, ship.pos.z - b.pos.z) - b.radius;
+    if (alt < b.radius * ENTRY.top) p = Math.max(p, airDensity(b, Math.max(0, alt)));
+  }
+  return p;
+}
+
+// Выше этой скорости относительно воздуха панель люка сорвало бы потоком,
+// км/с: сотня метров в секунду — это триста шестьдесят километров в час.
+const HATCH_AIRSPEED = 0.1;
+
+/** Почему люки сейчас открывать нельзя (или null). */
+function hatchBlock(pOut) {
+  if (game.warp.phase === 'tunnel' || game.warp.phase === 'align') return L('ЛЮКИ ЗАБЛОКИРОВАНЫ: ВАРП');
+  const q = game.quantum.phase;
+  if (q === 'jump' || q === 'brake' || q === 'calib') return L('ЛЮКИ ЗАБЛОКИРОВАНЫ: КВАНТОВЫЙ ПРЫЖОК');
+  if (pOut > 0.01 && game.state.mode === ST.FLIGHT) {
+    const v = game.zone ? Math.hypot(game.zone.relVel.x, game.zone.relVel.y, game.zone.relVel.z) : ship.speed;
+    if (v > HATCH_AIRSPEED) return L('ЛЮКИ ЗАБЛОКИРОВАНЫ: НАПОР ВОЗДУХА');
+  }
+  return null;
+}
+
+const _gp = v3(), _gd = v3(), _gw = v3();
+
+/**
+ * Грунт под точкой (x, z) осей корабля — его высота в тех же осях, м, или
+ * null: тела рядом нет, или до грунта больше трёхсот метров (трапу до
+ * него не достать, а считать рельеф незачем).
+ */
+function groundShip(x, z) {
+  const zone = game.zone;
+  if (!zone || !zone.body || zone.alt > 0.3 || game.state.mode === ST.DOCKED) return null;
+  const body = zone.body, b = ship.basis, y = -8;
+  _gp.x = ship.pos.x + (b.right.x * x + b.up.x * y + b.fwd.x * z) / 1000;
+  _gp.y = ship.pos.y + (b.right.y * x + b.up.y * y + b.fwd.y * z) / 1000;
+  _gp.z = ship.pos.z + (b.right.z * x + b.up.z * y + b.fwd.z * z) / 1000;
+  const dir = localDir(body, _gp, _gd);
+  worldPoint(body, dir, groundOf(body, dir), _gw);
+  return ((_gw.x - ship.pos.x) * b.up.x + (_gw.y - ship.pos.y) * b.up.y + (_gw.z - ship.pos.z) * b.up.z) * 1000;
+}
+
+/** Стоит ли пилот в проёме или на трапе этого люка: закрывать его нельзя. */
+function hatchOccupied(hx) {
+  const w = game.walk, I = game.interior;
+  if (!w.on || !I) return false;
+  if (w.out) {
+    const p = walkerShipPos();
+    return onStair(hx, p) || Math.abs(Math.abs(p[0]) - hx.h.skin) < 0.8 && Math.abs(p[2] - hx.zc) < 2;
+  }
+  return tunnelAt(I.air, I, w.pos) === hx;
+}
+
+const _airEnv = { pOut: 0, block: null, ground: groundShip, occupied: hatchOccupied };
+
+/** Шаг шлюзов — каждый кадр. */
+function airFrame(dt) {
+  const I = game.interior;
+  if (!I || !I.air) return;
+  const st = game.state;
+  _airEnv.pOut = outsidePressure();
+  _airEnv.block = hatchBlock(_airEnv.pOut);
+  const ev = updateAirlocks(I.air, _airEnv, dt);
+  for (const e of ev) {
+    if (e.kind === 'hatch') audioCue(game.audio, 'door', { dur: AIR.hatchTime });
+    else if (e.kind === 'stair') audioCue(game.audio, 'door', { dur: AIR.stairTime });
+    else if (e.kind === 'cycle') {
+      const L0 = I.air.locks[e.id];
+      const dp = Math.abs((e.dir === 'in' ? AIR.cabin : I.air.pOut) - L0.p);
+      if (dp > 0.02) audioCue(game.audio, 'air', { gain: 0.15 + 0.3 * Math.min(1, dp), dur: dp / AIR.rate + 0.3 });
+    } else if (e.kind === 'rush') {
+      // Дверь открылась между разными давлениями — воздух рванул.
+      const k = Math.min(1, e.dp);
+      audioCue(game.audio, 'air', { gain: 0.2 + 0.4 * k, dur: 1 + 3 * k });
+    } else if (e.kind === 'forced' && game.walk.on) say(st, _airEnv.block + L(' · ЛЮКИ ЗАКРЫВАЮТСЯ'), '#ffcc66', 3);
+  }
+}
+
+/** E у люка: открыть или закрыть. */
+function useHatch(hx) {
+  const I = game.interior, st = game.state;
+  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx) });
+  if (res === 'occupied') { say(st, L('ЛЮК НЕ ЗАКРЫТЬ: ОТОЙДИТЕ ОТ ПРОЁМА'), '#ffcc66', 2.5); return; }
+  if (res) { say(st, res, '#ff7a66', 3); return; }
+  if (hx.want) {
+    say(st, I.air.pOut < 0.01 ? L('ШЛЮЗ: СТРАВЛИВАНИЕ · ЗА БОРТОМ ПУСТОТА') : L('ШЛЮЗ: ДАВЛЕНИЕ ПО ЗАБОРТНОМУ'),
+      '#9fd9ff', 3);
+  } else {
+    say(st, L('ЛЮК ЗАКРЫВАЕТСЯ'), '#9fd9ff', 2);
+  }
+}
+
+// --- за бортом: оси грунта (js/game/outside.js) --------------------------------
+
+const _outT = { R: new Float64Array(9), t: [0, 0, 0] };
+const _shipBoxes = [], _outSolids = [], _airBuf = [];
+let _tunnelSolids = null, _under = null;
+const _feetW = v3();
+const _wsp2 = [0, 0, 0];
+
+/** Ноги пилота за бортом — в осях корабля, м. */
+const _wsp = [0, 0, 0];
+function walkerShipPos() {
+  const w = game.walk;
+  if (!w.out) return w.pos;
+  shipToGround(w.out, ship, _outT);
+  return groundPointToShip(_outT, w.pos, _wsp);
+}
+
+/** Стойки шасси — коробками (оси корабля, м): мимо них ходят, а не сквозь. */
+function gearBoxes(out) {
+  if (!ship.gear || ship.gear.t < 0.5) return;
+  gearMesh.hardpoints.forEach((hp, i) => {
+    const len = (gearMesh.legLengths[i] + (ship.gear.drop ? ship.gear.drop[i] : 0)) * ship.gear.t * 1000;
+    const x = hp.x * 1000, y = hp.y * 1000, z = hp.z * 1000;
+    out.push({ lo: [x - 0.3, y - len, z - 0.3], hi: [x + 0.3, y, z + 0.3], gear: i });
+  });
+}
+
+const groundOut = (x, z) => groundY(game.walk.out, x, z, groundOf);
+const waterOut = (x, z) => waterUnder(game.walk.out, x, z);
+
+/** Мир за бортом на этот кадр: твёрдое корабля в осях грунта, грунт, вода, тяжесть. */
+function outsideFrame() {
+  const w = game.walk, G = w.out, I = game.interior;
+  shipToGround(G, ship, _outT);
+  if (!_tunnelSolids || _tunnelSolids.of !== I) {
+    const ids = new Set(I.hatches.map((h) => h.id));
+    _tunnelSolids = I.solids.filter((s) => (s.sill && ids.has(s.sill)) || s.hatchWall);
+    _tunnelSolids.of = I;
+  }
+  _shipBoxes.length = 0;
+  for (const s of _tunnelSolids) _shipBoxes.push(s);
+  for (const s of airSolids(I.air, _airBuf)) _shipBoxes.push(s);
+  gearBoxes(_shipBoxes);
+  // Днище — коробками вокруг пилота: на лёгком теле прыгают выше, чем
+  // висит корпус.
+  if (!_under) _under = hullUnderside(shipMesh);
+  undersideBoxes(_under, groundPointToShip(_outT, w.pos, _wsp2), 2.5, _shipBoxes);
+  _outSolids.length = _shipBoxes.length;
+  for (let i = 0; i < _shipBoxes.length; i++) _outSolids[i] = boxToGround(_outT, _shipBoxes[i], _outSolids[i] || {});
+  groundToWorld(G, w.pos, _feetW);
+  return outsideWorld(_outSolids, groundOut, waterOut, gravityAt(G.body, _feetW) * 1000);
+}
+
+/** Направление в осях корабля -> оси грунта (поворот _outT). */
+function shipDirToGround(d, out) {
+  const R = _outT.R;
+  out[0] = R[0] * d[0] + R[1] * d[1] + R[2] * d[2];
+  out[1] = R[3] * d[0] + R[4] * d[1] + R[5] * d[2];
+  out[2] = R[6] * d[0] + R[7] * d[1] + R[8] * d[2];
+  return out;
+}
+function groundDirToShip(d, out) {
+  const R = _outT.R;
+  out[0] = R[0] * d[0] + R[3] * d[1] + R[6] * d[2];
+  out[1] = R[1] * d[0] + R[4] * d[1] + R[7] * d[2];
+  out[2] = R[2] * d[0] + R[5] * d[1] + R[8] * d[2];
+  return out;
+}
+
+/** Взгляд и скорость — в новые оси (поворотом), чтобы шаг через порог не дёргал голову. */
+function reframe(w, rot) {
+  walkerLook(w, _wLook);
+  const f = rot(_wLook.fwd, [0, 0, 0]);
+  w.yaw = Math.atan2(f[0], f[2]);
+  w.pitch = Math.asin(Math.max(-1, Math.min(1, f[1])));
+  w.vel = rot(w.vel, [0, 0, 0]);
+}
+
+/**
+ * Порог люка: шаг за обшивку — в оси грунта, шаг с трапа в тоннель — в
+ * оси корабля. Переносится всё: ноги, скорость, взгляд.
+ */
+function crossThreshold() {
+  const w = game.walk, I = game.interior;
+  if (!w.on || w.phase !== 'walk' || !I || !I.air) return;
+  if (!w.out) {
+    const hx = pastSkin(I.air, w.pos);
+    if (!hx || !hx.exitOk || !game.zone || !game.zone.body) return;
+    const b = ship.basis, p = w.pos;
+    _feetW.x = ship.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
+    _feetW.y = ship.pos.y + (b.right.y * p[0] + b.up.y * p[1] + b.fwd.y * p[2]) / 1000;
+    _feetW.z = ship.pos.z + (b.right.z * p[0] + b.up.z * p[1] + b.fwd.z * p[2]) / 1000;
+    const G = makeGroundFrame(game.zone.body, _feetW, b.fwd);
+    shipToGround(G, ship, _outT);
+    reframe(w, shipDirToGround);
+    w.pos = worldToGround(G, _feetW);
+    w.out = G;
+    w.room = null;
+    game.walkRoomT = 3;
+    return;
+  }
+  shipToGround(w.out, ship, _outT);
+  const p = groundPointToShip(_outT, w.pos, [0, 0, 0]);
+  if (tunnelAt(I.air, I, p)) {
+    reframe(w, groundDirToShip);
+    w.pos = p;
+    w.out = null;
+    w.room = I.roomAt(p);
+    game.walkRoomT = 2.6;
+    return;
+  }
+  // Далеко от начала осей — перенести их к пилоту: кривизна тела.
+  if (Math.hypot(w.pos[0], w.pos[2]) > RECENTER) {
+    groundToWorld(w.out, w.pos, _feetW);
+    const fw = groundDirToWorld(w.out, [0, 0, 1]);
+    const G = makeGroundFrame(w.out.body, _feetW, fw);
+    w.pos = worldToGround(G, _feetW);
+    w.out = G;
+  }
 }
 
 /** Подсказки внизу кадра пилоту на ногах. */
@@ -726,6 +994,69 @@ function walkHints() {
         : L('WASD — ИДТИ · SHIFT — БЕГ · ПРОБЕЛ — ПРЫЖОК')) : null,
     fuel: fl === 'dry' ? L('ТОПЛИВО КОНЧИЛОСЬ') : fl === 'reserve' ? L('ТОПЛИВО НА РЕЗЕРВЕ') : null,
     touch: Q.touchUi,
+    hatch: hatchHint(),
+    lock: lockHint(),
+    press: pressHint(),
+    out: outHint(),
+  };
+}
+
+/** Подсказка у люка: что сделает E. */
+function hatchHint() {
+  const hx = game.walkHatch, I = game.interior;
+  if (!hx || !I || !I.air) return null;
+  const key = Q.touchUi ? L('«ЛЮК»') : 'E';
+  if (hx.want) {
+    if (hx.stair >= 1 && !hx.exitOk && !game.walk.out) {
+      return [key + L(' — ЗАКРЫТЬ ЛЮК · ЗА БОРТОМ НЕ НА ЧТО ВСТАТЬ'), AIR_AMBER];
+    }
+    return [key + L(' — ЗАКРЫТЬ ЛЮК'), AIR_AMBER];
+  }
+  if (I.air.block) return [I.air.block, AIR_RED];
+  return [key + L(' — ОТКРЫТЬ ЛЮК'), AIR_GREEN];
+}
+const AIR_AMBER = '#ffcc66', AIR_RED = '#ff7a66', AIR_GREEN = '#78e08f';
+
+/** Строка о шлюзе, когда пилот в нём: давление и что происходит. */
+function lockHint() {
+  const w = game.walk, I = game.interior;
+  if (!I || !I.air || w.out || !w.room || w.room.kind !== 'lock') return null;
+  const s = lockStatus(I.air, w.room.id);
+  const bar = s.p.toFixed(2) + L(' БАР');
+  if (s.state === 'sealed') return [L('ШЛЮЗ ЗАДРАЕН · ') + bar, AIR_GREEN];
+  if (s.state === 'cycle') return [(s.p > s.out ? L('СТРАВЛИВАНИЕ · ') : L('НАДДУВ · ')) + bar, AIR_AMBER];
+  return [(s.out < 0.01 ? L('ЛЮК ОТКРЫТ · ЗА БОРТОМ ПУСТОТА') : L('ЛЮК ОТКРЫТ · ЗА БОРТОМ ') + bar), AIR_RED];
+}
+
+/**
+ * Давление в помещении, где пилот, — если оно не корабельное: уходит за
+ * борт (отсек связан с открытым люком) или корабль его набирает. Пилоту
+ * в скафандре это не помеха — это видно, и только.
+ */
+function pressHint() {
+  const w = game.walk, I = game.interior;
+  if (!I || !I.air || w.out || !w.room || w.room.kind === 'lock') return null;
+  const r = roomAir(I.air, w.room.id);
+  if (!r || Math.abs(r.p - AIR.cabin) < 0.02) return null;
+  const bar = r.p.toFixed(2) + L(' БАР');
+  if (r.leak) return [L('РАЗГЕРМЕТИЗАЦИЯ · ') + bar, AIR_RED];
+  return [(r.p < AIR.cabin ? L('НАДДУВ · ') : L('СТРАВЛИВАНИЕ · ')) + bar, AIR_AMBER];
+}
+
+/** За бортом: где, тяжесть, воздух и до корабля. */
+function outHint() {
+  const w = game.walk;
+  if (!w.out) return null;
+  const G = w.out;
+  groundToWorld(G, w.pos, _feetW);
+  const g = gravityAt(G.body, _feetW) * 1000;
+  const p = airDensity(G.body, Math.max(0, Math.hypot(_feetW.x - G.body.pos.x, _feetW.y - G.body.pos.y,
+    _feetW.z - G.body.pos.z) - G.body.radius));
+  const d = Math.hypot(_feetW.x - ship.pos.x, _feetW.y - ship.pos.y, _feetW.z - ship.pos.z) * 1000;
+  return {
+    name: L('ЗА БОРТОМ') + ' · ' + G.body.name,
+    info: L('ТЯЖЕСТЬ ') + g.toFixed(1) + L(' М/С²') + ' · ' + (p > 0.005 ? L('ВОЗДУХ ') + p.toFixed(2) + L(' БАР') : L('ВАКУУМ')),
+    ship: d > 25 ? L('ДО КОРАБЛЯ ') + Math.round(d) + L(' М') : null,
   };
 }
 
@@ -1798,6 +2129,12 @@ function step(dt) {
 
   if (ship.landing) {
     game.statusLine = updateLandingComputer(ship, dt, zone);
+    // Под кораблём открытое море: компьютер садиться отказался, и ручки
+    // снова у пилота (js/game/landing.js).
+    if (ship.landing && ship.landing.abort) {
+      say(st, ship.landing.abort, '#ffcc66', 4);
+      stopLanding(ship);
+    }
   } else if (ship.docking) {
     game.statusLine = updateDockingComputer(ship, dt);
   } else if (!game.walk.on) {
@@ -2079,6 +2416,17 @@ function setupCamera() {
   cam.basis.right = { ...ship.basis.right };
   cam.basis.up = { ...ship.basis.up };
   cam.basis.fwd = { ...ship.basis.fwd };
+  if (game.walk.on && game.walk.out && game.interior) {
+    // За бортом: глаз и взгляд — в осях грунта (js/game/outside.js).
+    const w = game.walk, G = w.out;
+    const e = walkerEye(w, game.interior, _eyeM);
+    groundToWorld(G, e, cam.pos);
+    walkerLook(w, _wLook);
+    groundDirToWorld(G, _wLook.fwd, _camDir);
+    groundDirToWorld(G, _wLook.up, _camUp);
+    lookAlong(cam.basis, _camDir, _camUp);
+    return;
+  }
   if (game.walk.on && game.walkEye) {
     // Глаз идущего: точка в осях корабля, взгляд — его голова.
     const b = ship.basis, e = game.walkEye;
@@ -2341,12 +2689,14 @@ function frame(now) {
     game.touch.walk = game.walk.on;
     game.touch.seat = !!(game.interior && nearSeat(game.walk, game.interior));
     game.touch.stand = !!game.interior && !game.walk.on;
+    game.touch.hatch = !!game.walkHatch;
     touchUpdate(game.touch, [...touchPoints.values()], touchArea);
     touchApply(game.touch, ship);
   }
 
   handleKeys(dt);
   if (game.walk.on) walkFrame(dt);
+  airFrame(dt);
 
   acc += dt;
   let steps = 0;
@@ -2441,7 +2791,7 @@ function frame(now) {
   if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) prepareHud();
   // Софт мониторов — после приборов (он читает то же, что они), и только
   // когда кабина в кадре: рисовать восемь холстов для вида снаружи незачем.
-  if (game.displays && game.state.view === 'cockpit'
+  if (game.displays && game.state.view === 'cockpit' && !game.walk.out
       && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED || game.walk.on)) {
     updateDisplays(game.displays, game, now / 1000);
   }

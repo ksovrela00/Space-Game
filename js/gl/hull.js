@@ -100,8 +100,12 @@ float hullFrame(vec3 p, vec2 uv, vec2 fw) {
 }
 `;
 
-/** Сколько коробок выреза помещений помещается в шейдер. */
-export const CARVE_MAX = 6;
+/**
+ * Сколько коробок выреза помещается в шейдер: шесть — помещения
+ * (js/models/interior.js, carve), четыре — открытые люки (панель обшивки
+ * уходит, на её месте — проём в шлюз; js/game/airlock.js, hatchCut).
+ */
+export const CARVE_MAX = 10;
 
 export const HULL_GLSL = `
 in float vMat;
@@ -113,6 +117,9 @@ uniform float uHullInside;
 // Помещения корабля вырезаны из корпуса изнутри (js/models/interior.js,
 // carve): у модели пака под обшивкой лежат внутренние грани деталей, и
 // без выреза они резали бы комнаты пополам. Коробки — в метрах модели.
+// Ставятся только своему кораблю (у чужих uCarveN = 0): изнутри — всегда,
+// снаружи — пока открыт люк (сквозь проём видно шлюз, а не изнанку
+// обшивки), и с ними — панели открытых люков.
 uniform int uCarveN;
 uniform vec3 uCarveLo[${CARVE_MAX}];
 uniform vec3 uCarveHi[${CARVE_MAX}];

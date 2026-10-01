@@ -96,6 +96,8 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   buttons.push(btn(bx, by, 'wJump', 'ПРЫЖ', 'Space', false, null, true));
   buttons.push(btn(bx - step, by, 'wRun', 'БЕГ', 'ShiftLeft', true, null, true));
   buttons.push(btn(bx, by - step, 'wSit', 'СЕСТЬ', 'KeyE', false, 'seat', true));
+  // Люк под рукой (t.hatch) — та же клавиша E: открыть или закрыть.
+  buttons.push(btn(bx - step, by - step, 'wHatch', 'ЛЮК', 'KeyE', false, 'hatch', true));
   return { stick, thr, buttons, w, h };
 }
 
@@ -108,6 +110,7 @@ export const makeTouch = () => ({
   taps: new Set(),              // кнопки, нажатые в этом кадре
   layout: null,
   tow: false,                   // предложен ли буксир (ставит js/main.js)
+  hatch: false,                 // люк под рукой у пилота на ногах (ставит js/main.js)
   walk: false,                  // пилот на ногах: свой набор кнопок
   seat: false,                  // стоит у кресла — можно сесть
   stand: false,                 // можно встать (помещения собраны)

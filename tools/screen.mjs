@@ -137,6 +137,37 @@ const WALK_SCENE = (pos, yaw, pitch = 0, tons = 0) => `
   });
 `;
 
+// Шлюз на стоянке у моря (js/game/airlock.js): корабль на сухом ровном
+// месте океанического мира, люк hatch открыт и трап выдвинут сразу —
+// цикл в программном рендере занял бы минуты. then — что дальше: вид,
+// пилот на ногах и где он.
+const LOCK_SCENE = (hatch, then) => `
+  liftoff();
+  return standWhere(atmoWorld(),
+    (t, F, b, d) => {
+      if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
+      const g = F.growth(b, t, d.x, d.y, d.z);
+      return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
+    }, 0.02, 30, 60, 0)
+    .then(() => {
+      window.__hold = null;
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      frames(2);
+      GAME.landHere();
+      frames(2);
+      return GAME.loadInterior();
+    })
+    .then(() => {
+      const air = GAME.interior.air;
+      const hx = air.hatches.find((x) => x.id === '${hatch}');
+      hx.want = true;
+      air.locks[hx.lock].p = 1;
+      hx.open = 1; hx.stair = 1;
+      frames(2);
+      ${then}
+    });
+`;
+
 // --- сцены --------------------------------------------------------------------
 //
 // Сцена — это кусок кода, который выполняется В СТРАНИЦЕ после загрузки.
@@ -686,6 +717,45 @@ const SCENES = {
   walkengine: {
     title: 'машинное отделение: реакторы',
     run: WALK_SCENE([-0.2, -4.94, -25.4], 'Math.PI + 0.5', 0),
+  },
+  lockopen: {
+    url: '&surface=clipmap',
+    title: 'стоянка у моря: носовой люк открыт, трап на грунте',
+    run: LOCK_SCENE('nR', `
+      GAME.state.view = 'chase';
+      window.__hold = () => { GAME.camOrbit.yaw = -1.75; GAME.camOrbit.pitch = 0.08; };
+      window.__hold();
+      frames(6);`),
+  },
+  lockdoor: {
+    url: '&surface=clipmap',
+    title: 'из носового шлюза наружу: проём, трап, грунт',
+    run: LOCK_SCENE('nR', `
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [2.4, -9.0, 15.3];
+      w.yaw = Math.PI / 2 - 0.15;
+      w.pitch = -0.22;
+      frames(4);`),
+  },
+  walkout: {
+    url: '&surface=clipmap',
+    title: 'пилот на грунте: корабль, трап и бортовой люк',
+    run: LOCK_SCENE('sR', `
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      // На порог — шаг за обшивку переводит в оси грунта.
+      w.pos = [14.7, -7.97, -12.67];
+      w.yaw = Math.PI / 2;
+      frames(3);
+      if (w.out) { w.pos = [14, w.pos[1] - 5.0, -9]; w.vel = [0, -5, 0]; w.yaw = -0.92; w.pitch = 0.2; }
+      frames(12);`),
   },
   cockpitfuel: {
     title: 'кабина на малом топливе: столбик ТОПЛ и лампа',

@@ -20,9 +20,33 @@ import { terrainOf } from '../gl/terrain.js';
 export const isSolid = (b) => !!b && !!b.isBody &&
   b.kind !== 'star' && b.kind !== 'gas';
 
-// Садиться можно на тела без атмосферы: луны и голые планеты. Для планет
-// с атмосферой нужен аэродинамический спуск — это отдельная работа.
-export const isLandable = (b) => isSolid(b) && !b.atmo;
+// Садиться можно на любое тело с твёрдой поверхностью — и на голое, и
+// под воздухом. Раньше планеты с атмосферой были закрыты: касание их
+// грунта считалось ударом, каким бы мягким оно ни было, — и корабль
+// гибнул на первой же попытке. Ничего, кроме этого запрета, посадке там
+// не мешало: рельеф у них считается тем же кодом, тяжесть — той же
+// формулой, а нагрев (js/game/entry.js) растёт с кубом скорости и на
+// скоростях снижения его нет вовсе. Нельзя одно — садиться на ВОДУ
+// (waterAt): корабль не лодка.
+export const isLandable = (b) => isSolid(b);
+
+// Вода — это грунт ниже уровня моря: рельеф там — ровная сфера (js/gl/
+// terrain.js), и высота над ней ровно ноль. Сравнение строгое: у самой
+// кромки берег поднимается на миллиметры, и это уже суша.
+const SEA_EPS = 1e-12;
+
+/** Есть ли у тела жидкое море. */
+export const hasSea = (b) => isSolid(b) && !!terrainOf(b).kindCfg.liquid;
+
+/**
+ * Вода ли под направлением dirLocal (оси тела). На ней не садятся
+ * (касание — крушение), её не выбирает посадочный компьютер, и по ней
+ * не ходит пилот (js/game/walker.js).
+ */
+export function waterAt(body, dirLocal) {
+  if (!hasSea(body)) return false;
+  return terrainOf(body).displace(dirLocal.x, dirLocal.y, dirLocal.z) <= SEA_EPS;
+}
 
 const _frame = makeBasis();
 
@@ -181,14 +205,43 @@ export function findSite(body, dirLocal, spanKm = 4, out = v3()) {
     probe.z = dirLocal.z + _u.z * du + _v.z * dv;
     normalize(probe, probe);
     // Небольшой штраф за удаление от исходной точки, чтобы при равных
-    // склонах садиться там, куда и шли.
-    const s = slopeAt(body, probe) + (i === 0 ? 0 : 0.01);
+    // склонах садиться там, куда и шли. Вода — ровнее любой суши, и без
+    // запрета компьютер выбирал бы именно её: площадка в воде получает
+    // уклон заведомо больше любого допустимого.
+    const s = (wetSite(body, probe) ? WET : slopeAt(body, probe)) + (i === 0 ? 0 : 0.01);
     if (!best || s < best.slope) {
       best = { slope: s, x: probe.x, y: probe.y, z: probe.z, i };
     }
   }
   out.x = best.x; out.y = best.y; out.z = best.z;
-  return { dir: out, slope: slopeAt(body, out), moved: best.i !== 0 };
+  const wet = wetSite(body, out);
+  return { dir: out, slope: wet ? WET : slopeAt(body, out), moved: best.i !== 0, water: wet };
+}
+
+// «Уклон» площадки в воде: больше любого допуска (LAND.slope — 0.35 рад).
+const WET = 10;
+// Пяты шасси разнесены на тридцать метров от центра: площадка годится,
+// только если сухо и под ними. Проверяются центр и кольцо радиусом в
+// полкорпуса.
+const WET_RING = 0.035;          // км
+// Свои касательные: findSite зовёт эту функцию посреди обхода своих
+// (_u, _v), и общие сбили бы ему кольцо поиска.
+const _wp = v3(), _wu = v3(), _wv = v3();
+
+function wetSite(body, dirLocal) {
+  if (!hasSea(body)) return false;
+  if (waterAt(body, dirLocal)) return true;
+  tangents(dirLocal, _wu, _wv);
+  const k = WET_RING / body.radius;
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * Math.PI * 2;
+    _wp.x = dirLocal.x + (_wu.x * Math.cos(a) + _wv.x * Math.sin(a)) * k;
+    _wp.y = dirLocal.y + (_wu.y * Math.cos(a) + _wv.y * Math.sin(a)) * k;
+    _wp.z = dirLocal.z + (_wu.z * Math.cos(a) + _wv.z * Math.sin(a)) * k;
+    normalize(_wp, _wp);
+    if (waterAt(body, _wp)) return true;
+  }
+  return false;
 }
 
 /** Широта/долгота в градусах — для экрана после посадки. */

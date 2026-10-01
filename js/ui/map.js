@@ -27,7 +27,7 @@ import {
   temperatureOf, toCelsius, EARTH_MASS, starDistance,
 } from '../game/bodyinfo.js';
 import { DENSITY } from '../game/gravity.js';
-import { isLandable, isSolid } from '../game/surface.js';
+import { isLandable, isSolid, hasSea } from '../game/surface.js';
 import { LIMITS } from '../game/docking.js';
 import { canJump } from '../game/quantum.js';
 import { currentTarget } from '../game/nav.js';
@@ -591,7 +591,8 @@ const fmtTemp = (k) => {
 function landingNote(b) {
   if (b.kind === 'star') return L('исключена');
   if (!isSolid(b)) return L('поверхности нет');
-  if (!isLandable(b)) return L('нужен аэродинамический спуск');
+  if (!isLandable(b)) return L('исключена');
+  if (hasSea(b)) return L('возможна: на сушу, шасси и R/F');
   return L('возможна: шасси и R/F');
 }
 
