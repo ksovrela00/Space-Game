@@ -182,6 +182,9 @@ final class Players
         // корабль с одним прибором из двухместного гнезда (скажем, с
         // докинг-компьютером без посадочного) получал бы повторную вставку
         // того же прибора — и падение на уникальном ключе.
+        // Гнёзда, опустошённые на верфи, — решение пилота, а не пробел в
+        // комплектации: он за них получил кроны (Outfit::sell).
+        $bare = self::bareSlots($shipId);
         $put = false;
         foreach (Db::all(
             'SELECT `id`, `slot` FROM `equipment_type`
@@ -191,7 +194,7 @@ final class Players
             [$shipId]
         ) as $e) {
             $slot = (string) $e['slot'];
-            if (($busy[$slot] ?? 0) >= Specs::slotCap($slot)) {
+            if (($busy[$slot] ?? 0) >= Specs::slotCap($slot) || in_array($slot, $bare, true)) {
                 continue;
             }
             Db::insert('ship_equipment', ['ship_id' => $shipId, 'equipment_id' => (int) $e['id']]);
@@ -201,6 +204,23 @@ final class Players
         if ($put) {
             Loadout::forget($shipId);
         }
+    }
+
+    /** Гнёзда, которые пилот опустошил сам (ship.bare). */
+    public static function bareSlots(int $shipId): array
+    {
+        $v = json_decode((string) Db::one('SELECT `bare` FROM `ship` WHERE `id`=?', [$shipId]), true);
+        return is_array($v) ? array_values(array_filter($v, 'is_string')) : [];
+    }
+
+    /** Отметить гнездо опустошённым пилотом — или снять отметку. */
+    public static function markBare(int $shipId, string $slot, bool $bare): void
+    {
+        $list = array_values(array_diff(self::bareSlots($shipId), [$slot]));
+        if ($bare) {
+            $list[] = $slot;
+        }
+        Db::update('ship', ['bare' => $list ? json_encode($list) : null], '`id`=?', [$shipId]);
     }
 
     public static function state(int $playerId): array
@@ -422,6 +442,15 @@ final class Players
             Db::update('player', $set, '`id`=?', [$playerId]);
         }
 
+        // Сменилась система — значит, был варп-прыжок, и за него платят
+        // топливом. Считает сервер по каталогу: расстояние между звёздами
+        // он знает сам, а игре остаётся только сказать, где она теперь.
+        $warp = 0.0;
+        if (isset($set['system_id'])) {
+            $warp = Fuel::arrive($playerId,
+                $p['system_id'] === null ? null : (int) $p['system_id'], (int) $set['system_id']);
+        }
+
         // Состояние корабля живёт в своей таблице: корпус и бак принадлежат
         // КОРАБЛЮ, а не пилоту, и при смене корпуса останутся со старым.
         $shipSet = [];
@@ -439,9 +468,12 @@ final class Players
         // Игре остаётся то, что она одна и знает: где корабль, куда
         // повёрнут, у какого тела стоит. Эти числа ничего не стоят — на
         // них нельзя выиграть бой и нельзя не заплатить за ремонт.
-        if (isset($in['fuel'])) {
-            $shipSet['fuel_t'] = max(0.0, min((float) $ship['fuel_max'], $num($in['fuel'])));
-        }
+        //
+        // ТОПЛИВО — по той же причине, что и корпус: оно стоит денег, и
+        // полный бак из сохранения означал бы бесплатную заправку после
+        // каждого прыжка. Расход считает хаб (Hub::meter) и варп выше,
+        // заправку — Fuel::refuel. Поле `fuel` игра по-прежнему кладёт в
+        // сохранение — для автономного режима, — и здесь оно не читается.
         if (array_key_exists('gear', $in)) {
             $shipSet['gear_out'] = !empty($in['gear']) ? 1 : 0;
         }
@@ -449,6 +481,14 @@ final class Players
             Db::update('ship', $shipSet, '`id`=?', [$ship['id']]);
         }
 
-        return ['saved' => true, 'fields' => count($set) + count($shipSet)];
+        return [
+            'saved' => true,
+            'fields' => count($set) + count($shipSet),
+            // Бак — каким его видит сервер после этого сохранения: игра
+            // без сокета иначе не узнала бы о списанном варпе до
+            // следующей загрузки.
+            'fuel' => (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$ship['id']]),
+            'warpFuel' => round($warp, 3),
+        ];
     }
 }

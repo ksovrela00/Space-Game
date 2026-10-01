@@ -7379,5 +7379,323 @@ console.log('\n== наземный город ==');
   ok(onPad === 0, `площадки свободны во всех ${N} городах (${onPad} занятых точек)`);
 }
 
+// --- топливо: расход, прыжки, сверка с сервером ------------------------------
+//
+// Расход выводится из физики, а не подобран: тонны = масса · Δv / струя.
+// Здесь проверяется, что модель полёта честно считает Δv каждой группы
+// сопел, что прыжки не лезут в резерв, что галактика на заводском баке
+// связна и что игра сводит свой счёт с серверным, не прыгая назад.
+{
+  console.log('\n== топливо ==');
+  const F = await import('../js/game/fuel.js');
+  const { SHIP_MASS } = await import('../js/game/downwash.js');
+  const { canJump: canJ, jumpFuel } = await import('../js/game/quantum.js');
+  const { canWarp: canW } = await import('../js/game/warp.js');
+  const docF = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const catalog = JSON.parse(readFileSync('server/data/catalog.json', 'utf8'));
+
+  // Масса — одна на обе стороны: сервер берёт её из выгрузки меша.
+  const catMass = catalog.shipTypes.find((t) => t.code === 'challenger').massT;
+  ok(Math.abs(catMass - SHIP_MASS / 1000) < 0.06,
+    'масса корпуса в каталоге сервера — та же, что у игры: ' + catMass + ' т');
+
+  ok(SHIP.fuelCap === SHIP.fuelMax && SHIP.fuelReserve > 0 && SHIP.fuelReserve < SHIP.fuelCap / 4,
+    'бак ' + SHIP.fuelCap + ' т, резерв ' + SHIP.fuelReserve + ' т');
+  ok(Math.abs(F.thrustTons(1, 0, 0) - SHIP_MASS / 1000 / SHIP.exhaust) < 1e-12
+    && Math.abs(F.thrustTons(0, 1, 0) - SHIP_MASS / 1000 / SHIP.liftExhaust) < 1e-12
+    && Math.abs(F.thrustTons(0, 0, 1) - SHIP_MASS / 1000 / SHIP.rcsExhaust) < 1e-12,
+    'тонны на км/с = масса / струя, по каждой группе сопел своей струёй');
+
+  // Модель полёта считает Δv честно. Разгон с места до предела — ровно
+  // предел: гасители не добавляют маршевым лишнего.
+  const fly = (setup, secs, field = null) => {
+    const s = F.resetFuelBook(makeShip());
+    setup(s);
+    for (let i = 0; i < secs * 60; i++) { updateShip(s, STEP, field); F.burnThrust(s); }
+    return s;
+  };
+  let s = fly((x) => { x.throttle = 1; }, 5);
+  ok(Math.abs(s.work.main - SHIP.maxSpeed) < 1e-6 && s.work.lift === 0,
+    'разгон до предела: маршевые набрали ' + s.work.main.toFixed(4) + ' км/с при пределе '
+    + SHIP.maxSpeed);
+  ok(Math.abs((SHIP.fuelCap - s.fuel) - F.thrustTons(s.work.main, s.work.lift, s.work.rcs)) < 1e-9
+    && Math.abs(s.burned - (SHIP.fuelCap - s.fuel)) < 1e-9,
+    'списано ровно по формуле: ' + (SHIP.fuelCap - s.fuel).toFixed(4) + ' т');
+
+  // Зависание: вес держат подъёмные, и это их работа — g за секунду.
+  const g = 0.0065;
+  s = fly(() => {}, 10, { up: { x: 0, y: 1, z: 0 }, g });
+  ok(Math.abs(s.work.lift - g * 10) < 1e-9 && s.speed < 1e-9,
+    'зависание 10 с при 6.5 м/с²: подъёмные набрали ' + (s.work.lift * 1000).toFixed(1)
+    + ' м/с, корабль висит');
+  // Снижение ручкой F: движки тянут МЕНЬШЕ веса, а не больше.
+  s = fly((x) => { x.control.lift = -0.1; }, 0);
+  const down = F.resetFuelBook(makeShip());
+  down.gear.out = false;
+  for (let i = 0; i < 60; i++) {
+    down.control.lift = -0.1;
+    updateShip(down, STEP, { up: { x: 0, y: 1, z: 0 }, g });
+    F.burnThrust(down);
+  }
+  ok(down.work.lift < g * 1 && down.work.lift > 0,
+    'на снижении подъёмные работают меньше, чем на зависании: '
+    + (down.work.lift * 1000).toFixed(2) + ' против ' + (g * 1000).toFixed(1) + ' м/с за секунду');
+
+  // Разворот на ходу стоит заноса: маневровые гасят снос.
+  s = F.resetFuelBook(makeShip());
+  s.throttle = 1;
+  for (let i = 0; i < 600; i++) { updateShip(s, STEP); F.burnThrust(s); }
+  const rcs0 = s.work.rcs;
+  for (let i = 0; i < 300; i++) { s.control.yaw = 1; updateShip(s, STEP); F.burnThrust(s); }
+  ok(s.work.rcs - rcs0 > 0.3,
+    'разворот на полном ходу: маневровые погасили ' + (s.work.rcs - rcs0).toFixed(2) + ' км/с заноса');
+
+  // Пустой бак: сопла молчат все — ни тяги, ни гасителей, ни вращения.
+  s = makeShip();
+  s.fuel = 0;
+  s.throttle = 1;
+  s.control.boost = 1;
+  s.rot.yaw = 0.1;
+  for (let i = 0; i < 60; i++) { s.control.yaw = -1; s.control.boost = 1; updateShip(s, STEP); }
+  ok(s.speed < 1e-9 && !s.boosting && Math.abs(s.rot.yaw - 0.1) < 1e-12,
+    'с пустым баком нет ни тяги, ни форсажа, и вращение не гасится');
+  s = makeShip();
+  s.fuel = 0;
+  for (let i = 0; i < 60; i++) updateShip(s, STEP, { up: { x: 0, y: 1, z: 0 }, g });
+  ok(Math.abs(s.vel.y + g) < 1e-6 && s.damp,
+    'в поле тяжести сухой корабль падает с g, а выбор гасителей пилота не тронут');
+
+  // Состояние бака для приборов.
+  const probe = { fuel: SHIP.fuelCap };
+  const lv = (f) => { probe.fuel = f; return F.fuelLevel(probe); };
+  ok(lv(SHIP.fuelCap) === 'ok' && lv(SHIP.fuelCap * 0.2) === 'low'
+    && lv(SHIP.fuelReserve) === 'reserve' && lv(0) === 'dry',
+    'пороги бака: полный, меньше четверти, резерв, пусто');
+
+  // Квантовый прыжок не лезет в резерв; расход — по пути до точки выхода.
+  const wq = makeSystem(systemById(0));
+  updateWorld(wq, 0);
+  const qs = makeShip();
+  const st0 = wq.stations[0];
+  placeShip(qs, v3(st0.pos.x + 3000, st0.pos.y + 3000, st0.pos.z), makeBasis());
+  const target = wq.planets.find((p) => canJ(wq, { ...qs, fuel: undefined }, p).ok
+    && jumpFuel(qs, p) > 0.3);
+  if (target) {
+    const need = jumpFuel(qs, target);
+    qs.fuel = SHIP.fuelReserve + need + 0.01;
+    const yes = canJ(wq, qs, target);
+    qs.fuel = SHIP.fuelReserve + need - 0.01;
+    const no = canJ(wq, qs, target);
+    ok(yes.ok && !no.ok && no.fuel && /ТОПЛИВ/.test(no.reason),
+      'к ' + target.name + ' прыжок стоит ' + need.toFixed(2) + ' т: с запасом — можно, в резерв — нельзя («'
+      + no.reason + '»)');
+    ok(canJ(wq, { pos: qs.pos, basis: qs.basis }, target).ok,
+      'корабль без бака (проверки до характеристик) топливом не ограничен');
+  } else {
+    ok(false, 'не нашлось цели для проверки топлива прыжка');
+  }
+
+  // Варп: на заводском баке галактика СВЯЗНА (самое длинное нужное ребро
+  // помещается), но не вся напрямую — у карты есть дороги.
+  const gal = makeGalaxy(HOME_SEED).systems;
+  const inTree = new Set([gal[0]]);
+  let longest = 0;
+  while (inTree.size < gal.length) {
+    let best = null;
+    for (const a of inTree) {
+      for (const b of gal) {
+        if (inTree.has(b)) continue;
+        const d = systemDistance(a, b);
+        if (!best || d < best[0]) best = [d, b];
+      }
+    }
+    inTree.add(best[1]);
+    longest = Math.max(longest, best[0]);
+  }
+  const full = { fuel: SHIP.fuelCap };
+  ok(F.warpRange(full) >= longest,
+    'полный бак: варп до ' + F.warpRange(full).toFixed(1) + ' св. г., а для связной галактики нужно '
+    + longest.toFixed(1));
+  const far = gal.slice().sort((a, b) => systemDistance(gal[0], b) - systemDistance(gal[0], a))[0];
+  const near = gal.slice(1).sort((a, b) => systemDistance(gal[0], a) - systemDistance(gal[0], b))[0];
+  const ws = makeShip();
+  ws.fuel = SHIP.fuelCap;
+  ok(canW(ws, gal[0], near).ok && !canW(ws, gal[0], far).ok && canW(ws, gal[0], far).fuel,
+    'на заводском баке ' + near.name + ' (' + systemDistance(gal[0], near).toFixed(1) + ' св. г.) — можно, '
+    + far.name + ' (' + systemDistance(gal[0], far).toFixed(1) + ') — только с пересадкой');
+
+  // Экономичный привод и дополнительный бак — это и есть «купить лучше»:
+  // модуль в гнезде меняет и предел, и объём.
+  const withMods = (codes) => {
+    const mods = docF.modules.filter((m) => m.installed);
+    for (const c of codes) {
+      const m = docF.modules.find((x) => x.code === c);
+      const i = mods.findIndex((x) => x.slot === m.slot);
+      if (i >= 0) mods.splice(i, 1);
+      mods.push(m);
+    }
+    applyShipEquipment(mods);
+    applyShipSpec(flightModel(docF.shipTypes[0].spec));
+  };
+  withMods(['tank_x', 'warp_x']);
+  const capX = SHIP.fuelCap;
+  ws.fuel = SHIP.fuelCap;
+  const farOk = canW(ws, gal[0], far).ok;
+  applyModuleSpecs(docF.modules);
+  applyShipSpec(flightModel(docF.shipTypes[0].spec));
+  ok(capX === SHIP.fuelMax + 8 && farOk && SHIP.fuelCap === SHIP.fuelMax,
+    'с доп. баком и экономичным варпом бак ' + capX + ' т и ' + far.name + ' — напрямую; сняли — снова '
+    + SHIP.fuelCap + ' т');
+
+  // Сверка с сервером: его бак — после снимка n; то, что игра потратила
+  // после, вычитается, а долг по варпу — тоже, пока его не подтвердили.
+  const r = F.resetFuelBook(makeShip());
+  r.fuel = 9;
+  r.burned = 2.0;
+  F.applyServerFuel(r, 8.5, 1.9);
+  ok(Math.abs(r.fuel - 8.4) < 1e-9, 'ответ сервера за вычетом расхода после снимка: 8.5 − 0.1 = '
+    + r.fuel.toFixed(2));
+  F.burnWarp(r, 4, true);
+  const debt = r.warpDebt;
+  F.applyServerFuel(r, 8.4, 2.0);
+  ok(Math.abs(debt - 2) < 1e-9 && Math.abs(r.fuel - 6.4) < 1e-9,
+    'неподтверждённый варп (2 т) вычитается из ответа сервера: ' + r.fuel.toFixed(2));
+  F.warpSettled(r, 2);
+  F.applyServerFuel(r, 6.4, 2.0);
+  ok(r.warpDebt === 0 && Math.abs(r.fuel - 6.4) < 1e-9,
+    'сохранение подтвердило варп — долг погашен, число сервера принято как есть');
+  F.applyServerFuel(r, 50, null);
+  ok(r.fuel === SHIP.fuelCap, 'больше бака сервер не нальёт даже в ответе: ' + r.fuel);
+
+  // На телефоне клавиатуры нет, и буксир (U) — кнопка. Она есть, только
+  // когда прыжков уже нет: в остальное время касание в её месте — это
+  // осмотр камерой, а не вызов за шестьсот крон.
+  const T = await import('../js/ui/touch.js');
+  const lay = T.touchLayout(390, 844);
+  const tow = lay.buttons.find((b) => b.id === 'tow');
+  const tap = (offer) => {
+    const t = T.makeTouch();
+    t.tow = offer;
+    T.touchUpdate(t, [{ id: 1, x: tow.x, y: tow.y }], lay);
+    return t;
+  };
+  const hidden = tap(false), shown = tap(true);
+  ok(tow && tow.code === 'KeyU' && !hidden.taps.has('tow') && hidden.look.id === 1
+    && shown.taps.has('tow'),
+    'кнопка буксира жмёт U только на резерве, а без него её место — осмотр камерой');
+  ok(tow.x - tow.r >= 0 && tow.y - tow.r >= 0 && lay.buttons.every((b) => b === tow
+    || Math.hypot(b.x - tow.x, b.y - tow.y) >= b.r + tow.r),
+    'кнопка буксира на экране и ни на что не налезает');
+}
+
+// --- экран станции ---------------------------------------------------------------
+//
+// Разметку проверяем без браузера: экран — строка HTML из состояния, и
+// всё, что в ней считается (сколько можно купить, во что обойдётся
+// замена), видно по самим кнопкам.
+{
+  console.log('\n== экран станции ==');
+  const S = await import('../js/ui/station.js');
+  const { session: sess } = await import('../js/net/session.js');
+  const F = await import('../js/game/fuel.js');
+  const docF = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const wq = makeSystem(systemById(0));
+  updateWorld(wq, 0);
+  const port = wq.stations[0];
+  const ship = F.resetFuelBook(makeShip());
+  ship.dockedAt = port;
+  ship.fuel = 5;
+  const game = {
+    ship, sys: systemById(0), stats: { docks: 3 },
+    state: { mode: 'docked', messages: [] },
+    player: { balance: 1000, cargo: [{ code: 'water', name: 'ВОДА', tons: 4, avgPrice: 20 }] },
+    port: { tech: 5, fee: 90, repairRate: 15,
+      services: { market: true, board: true, repair: true, outfit: true } },
+    station: S.makeStation(),
+  };
+  game.station.at = port;
+  const was = sess.mode;
+  sess.mode = 'online';
+  try {
+    game.station.tab = 'market';
+    game.station.market = {
+      fuelPrice: 80,
+      goods: [
+        { code: 'water', name: 'ВОДА', category: 'сырьё', legal: true, price: 30, stock: 100 },
+        { code: 'medicine', name: 'МЕДИКАМЕНТЫ', category: 'техника', legal: true, price: 700, stock: 5 },
+        { code: 'stims', name: 'СТИМУЛЯТОРЫ', category: 'запрещённое', legal: false, price: 1450, stock: 0 },
+      ],
+    };
+    const html = S.stationHtml(game);
+    const maxOf = (code) => {
+      const m = html.match(new RegExp('data-code="' + code + '"[^>]*data-tons="([0-9.]+)"[^>]*>МАКС'));
+      return m ? +m[1] : null;
+    };
+    const free = SHIP.hold - 4;
+    ok(maxOf('water') === Math.min(free, Math.floor(1000 / 30 * 10) / 10),
+      'МАКС воды — сколько влезет в трюм: ' + maxOf('water') + ' т из свободных ' + free);
+    ok(maxOf('medicine') === 1.4, 'МАКС медикаментов — на сколько хватит денег: ' + maxOf('medicine') + ' т');
+    ok(/class="illegal"/.test(html) && /запрещено/.test(html), 'запрещённый товар помечен');
+    ok(/data-act="sell"[^>]*data-code="water"[^>]*data-tons="4"/.test(html)
+      && /\+40 кр/.test(html),
+      'своя вода продаётся целиком, и видно, в плюс ли рейс: +40 кр');
+    ok(/1 ПОРТ/.test(html) && /2 РЫНОК/.test(html) && /3 ВЕРФЬ/.test(html) && /4 ЗАПРАВКА/.test(html),
+      'четыре раздела с номерами клавиш');
+
+    game.station.tab = 'fuel';
+    const fuelHtml = S.stationHtml(game);
+    const room = SHIP.fuelCap - 5;
+    ok(fuelHtml.includes('ДО ПОЛНОГО · ' + (Math.round(room * 10) / 10).toLocaleString('ru-RU') + ' т · '
+      + Math.ceil(room * 80).toLocaleString('ru-RU') + ' кр'),
+      'заправка до полного: ' + room + ' т по 80 кр');
+    ok(/class="mark"/.test(fuelHtml), 'на шкале бака отмечен резерв');
+
+    // Верфь: заводской двигатель можно только заменить, лучший модуль
+    // столицы на верфи уровня 4 не продаётся, замена показывает зачёт.
+    const mod = (code) => docF.modules.find((m) => m.code === code);
+    game.station.tab = 'outfit';
+    game.station.outfit = {
+      open: true, resale: 0.6,
+      slots: [
+        { slot: 'engine', cap: 1, required: true,
+          installed: [{ code: 'engine', name: mod('engine').name, price: 12000, resale: 7200, spec: mod('engine').spec }],
+          offers: [{ code: 'engine_x', name: mod('engine_x').name, price: 31000, tech: 4, spec: mod('engine_x').spec,
+            sold: true, credit: 7200, net: 23800 }] },
+        { slot: 'drive', cap: 1, required: false,
+          installed: [{ code: 'quantum', name: mod('quantum').name, price: 26000, resale: 15600, spec: mod('quantum').spec }],
+          offers: [{ code: 'quantum_x', name: mod('quantum_x').name, price: 58000, tech: 5, spec: mod('quantum_x').spec,
+            sold: false, credit: 15600, net: 42400 }] },
+        { slot: 'tank', cap: 1, required: false, installed: [],
+          offers: [{ code: 'tank_x', name: mod('tank_x').name, price: 14000, tech: 4, spec: mod('tank_x').spec,
+            sold: true, credit: 0, net: 14000 }] },
+      ],
+    };
+    const fit = S.stationHtml(game);
+    ok(/только замена/.test(fit) && !/data-act="unfit"[^>]*data-code="engine"/.test(fit),
+      'маршевый двигатель продать нельзя — только заменить');
+    ok(/ПОСТАВИТЬ · 23[\s ]800 кр/.test(fit) && /с зачётом 7[\s ]200 кр/.test(fit),
+      'замена двигателя: 23 800 кр с зачётом заводского');
+    ok(/уровень 5/.test(fit) && !/data-code="quantum_x"/.test(fit),
+      'привод второго поколения здесь не продают — сказано, где');
+    ok(/ГНЕЗДО СВОБОДНО/.test(fit) && /data-act="fit"[^>]*data-code="tank_x"[^>]*disabled|disabled[^>]*data-act="fit"[^>]*data-code="tank_x"/.test(fit),
+      'в пустое гнездо бака можно поставить, но на тысячу крон — не хватит, и кнопка заперта');
+    ok(/data-act="unfit"[^>]*data-code="quantum"/.test(fit), 'квантовый привод продаётся');
+    ok(/струя 20[\s ]000 км\/с/.test(fit) && /струя 14[\s ]500 км\/с/.test(fit),
+      'двигатели сравниваются по струе: видно, что форсированный прожорливее');
+
+    // Без сервера — честно, а не пустые таблицы.
+    sess.mode = 'offline';
+    game.station.tab = 'market';
+    ok(/НЕТ СВЯЗИ С СЕРВЕРОМ/.test(S.stationHtml(game)), 'без сервера рынок говорит, что его нет');
+
+    // Клавиши 1–4 переключают разделы.
+    const keys = { pressed: (...c) => c.includes('Digit3') };
+    game.state.mode = 'hold';                    // перерисовка без DOM не нужна
+    ok(S.stationKeys(game, keys) && game.station.tab === 'outfit', 'клавиша 3 — верфь');
+  } finally {
+    sess.mode = was;
+  }
+}
+
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));
 process.exit(fails ? 1 : 0);

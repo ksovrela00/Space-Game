@@ -13,7 +13,7 @@ import { GlScene } from './gl/scene.js';
 import { buildCobra, buildGear, GUN_PORTS } from './models/ships.js';
 import { stationMesh } from './models/stations.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
-import { homeSystem, systemById } from './game/galaxy.js';
+import { homeSystem, systemById, systemDistance } from './game/galaxy.js';
 import {
   makeWarp, updateWarp, startWarp, stopWarp, canWarp, placeAtStar, finishWarp,
 } from './game/warp.js';
@@ -59,14 +59,20 @@ import { SCANNER_STEPS } from './game/loadout.js';
 import { devMode, soloMode } from './core/mode.js';
 import { useShipType, useShipEquipment } from './game/specs.js';
 import {
-  showDocked, showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
+  showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
+import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
+import {
+  burnThrust, burnQuantum, burnWarp, warpSettled, applyServerFuel, resetFuelBook,
+  fuelLevel, fuelReserve,
+} from './game/fuel.js';
 import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
 import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from './game/player.js';
 import {
   session, start as sessionStart, queueSave, flushOnExit,
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
+  rescue as serverRescue,
 } from './net/session.js';
 import { net, connect as netConnect, shoot, reportHit, reportImpact }
   from './net/socket.js';
@@ -126,7 +132,7 @@ if (wantGl) {
 if (!scene) renderer = new Renderer(screenCanvas, { camera });
 
 let world = makeSystem(sys);
-const ship = makeShip();
+const ship = resetFuelBook(makeShip());
 const shipMesh = buildCobra();
 
 const gearMesh = buildGear();
@@ -192,6 +198,11 @@ const game = {
   landHold: 0,           // сколько уже держат клавишу взлёта на грунте
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
   restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
+  rescueArmed: 0,        // сколько ещё ждём подтверждения буксира, с
+  station: makeStation(), // экран порта: раздел, прайс, верфь (js/ui/station.js)
+  // Что уже сказано о баке: предупреждаем на КАЖДОМ пороге один раз, а
+  // не каждый кадр, пока топлива мало.
+  fuelSaid: 'ok',
 };
 
 const dbg = makeDebug();
@@ -313,8 +324,14 @@ function dockAt(station, restoring = false) {
   ship.throttle = 0;
   // БЕСПЛАТНЫЙ РЕМОНТ остался только в автономной игре. С сервером у
   // корпуса появилась цена (station.repair), и чинить его даром за сам
-  // факт стыковки значило бы обесценить и удары, и деньги разом.
-  if (!isOnline()) ship.hull = SHIP.maxHull;
+  // факт стыковки значило бы обесценить и удары, и деньги разом. С баком
+  // то же самое: с сервером заправка стоит денег (station.refuel), без
+  // него порт заправляет даром — торговать там не с кем.
+  if (!isOnline()) {
+    ship.hull = SHIP.maxHull;
+    ship.fuel = SHIP.fuelCap;
+  }
+  game.fuelSaid = 'ok';
   game.state.mode = ST.DOCKED;
   audioCue(game.audio, 'dock');
   audioReset(game.audio, ship);
@@ -328,7 +345,9 @@ function dockAt(station, restoring = false) {
     serverDock(sys.id, station.id).then((r) => {
       if (!r) return;
       game.port = r.station;
-      applyServer(game.player, session.player);
+      // Состояние целиком: деньги после сбора, а если стыковка оказалась
+      // в новой системе — и бак после варпа, который сервер списал тут же.
+      syncFromServer(game);
       if (r.fee > 0) {
         say(game.state, L('СТЫКОВОЧНЫЙ СБОР · ') + r.fee + L(' кр'), '#ffcc66', 3);
       }
@@ -418,6 +437,10 @@ game.takeoff = () => {
 game.respawn = () => {
   hideOverlay();
   ship.hull = SHIP.maxHull;
+  // Страховка возвращает корабль с резервом в баке, не больше: так же
+  // поступает сервер (Combat::respawn), иначе разбиться было бы дешевле,
+  // чем заправиться.
+  ship.fuel = Math.max(ship.fuel, fuelReserve());
   const st = game.lastStation || (world.home && world.home.station);
   if (st) dockAt(st);
   else { game.state.mode = ST.FLIGHT; }
@@ -452,6 +475,8 @@ game.restart = () => {
   ship.zeroHold = 0;
   ship.boost = 1;
   ship.boosting = false;
+  ship.fuel = SHIP.fuelCap;
+  resetFuelBook(ship);
   placeShip(ship, v3(), makeBasis());
 
   // Начать заново — значит и вернуться домой: в чужой системе нет ни
@@ -642,6 +667,9 @@ function savePayload() {
     basis: ship.basis,
     hull: ship.hull,
     shield: ship.shield,
+    // Бак — для автономной игры: сервер это поле не читает вовсе, топливо
+    // у него своё (server/src/Players.php, save), как и корпус.
+    fuel: ship.fuel,
     // Цель хранится идентификатором, а не номером в списке: список
     // теперь меняется на ходу (у ближнего тела появляются маркеры), и
     // номер после загрузки указывал бы в произвольное место.
@@ -728,7 +756,12 @@ function applyState(s) {
     game.audio.on = s.audio.on !== false;
     game.audio.vol = typeof s.audio.vol === 'number' ? s.audio.vol : game.audio.vol;
   }
-  if (typeof s.fuel === 'number') ship.fuel = s.fuel;
+  if (typeof s.fuel === 'number') ship.fuel = clamp(s.fuel, 0, SHIP.fuelCap);
+  // Состояние пришло — долги по варпу сервер уже учёл в нём (или их не
+  // было вовсе): считать их поверх значило бы списать прыжок дважды.
+  if (!ship.work) resetFuelBook(ship);
+  ship.warpDebt = 0;
+  game.fuelSaid = fuelLevel(ship);
 
   if (s.landed && s.landed.pose) {
     const body = world.bodies.find((b) => b.id === s.landed.id);
@@ -968,6 +1001,82 @@ function applyNetEvent(ev) {
   }
   if (ev.t === 'boom') {
     say(game.state, L('ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ'), '#ffcc66', 3);
+    return;
+  }
+  if (ev.t === 'fuel') {
+    // Бак по счёту сервера — он главнее своего: свой был предсказанием по
+    // тем же формулам (js/game/fuel.js), а в базе бак пишет только сервер.
+    applyServerFuel(ship, ev.fuel, ev.burnedAt);
+  }
+}
+
+/**
+ * Аварийный буксир: корабль с пустым баком — в порт.
+ *
+ * С сервером буксир — его решение (Fuel::rescue): он переставляет пилота
+ * в порт, берёт тариф и доливает бак до резерва, а игра забирает
+ * состояние, как после гибели. Без сервера тот же выход из тупика —
+ * даром: платить некому.
+ */
+game.rescue = async () => {
+  game.rescueArmed = 0;
+  if (ship.dockedAt) return;
+  const st = game.lastStation || (world.home && world.home.station);
+  if (!isOnline()) {
+    if (!st) return;
+    stopQuantum(game.quantum);
+    ship.fuel = Math.max(ship.fuel, fuelReserve());
+    ship.landedAt = null;
+    say(game.state, L('БУКСИР ДОТЯНУЛ ДО ПОРТА'), '#ffcc66', 5);
+    dockAt(st, true);
+    return;
+  }
+  try {
+    const r = await serverRescue();
+    const state = session.player;
+    if (!state) throw new Error(L('нет связи с сервером'));
+    stopQuantum(game.quantum);
+    stopWarp(game.warp);
+    applyState(serverToSave(state));
+    syncFromServer(game, state);
+    save();
+    if (game.state.mode === ST.DOCKED) showDocked(game);
+    say(game.state, L('БУКСИР ДОТЯНУЛ ДО ПОРТА · −') + r.fee + L(' кр'), '#ffcc66', 6);
+  } catch (e) {
+    say(game.state, L('БУКСИР: ') + e.message, '#ff7a66', 4);
+  }
+};
+
+/**
+ * U — вызвать буксир. Вызов необратим и стоит денег, поэтому с
+ * подтверждения: первое нажатие только говорит, во что он обойдётся.
+ */
+function rescueKey() {
+  if (!input.pressed('KeyU') || ship.dockedAt) return;
+  if (game.warp.phase === 'tunnel') return;
+  if (game.rescueArmed > 0) { game.rescue(); return; }
+  game.rescueArmed = RESTART_CONFIRM;
+  say(game.state, isOnline()
+    ? L('U ЕЩЁ РАЗ — АВАРИЙНЫЙ БУКСИР ДО ПОРТА · ДО 600 КР')
+    : L('U ЕЩЁ РАЗ — АВАРИЙНЫЙ БУКСИР ДО ПОРТА'), '#ffcc66', RESTART_CONFIRM);
+}
+
+/**
+ * Сказать о баке, когда он переходит порог: мало, резерв, пусто.
+ * Один раз на порог — и снова, только если его заправили и он опустился
+ * опять.
+ */
+function fuelWatch() {
+  const lvl = fuelLevel(ship);
+  const rank = { ok: 0, low: 1, reserve: 2, dry: 3 };
+  if (rank[lvl] < rank[game.fuelSaid]) { game.fuelSaid = lvl; return; }
+  if (lvl === game.fuelSaid) return;
+  game.fuelSaid = lvl;
+  if (lvl === 'low') say(game.state, L('ТОПЛИВО НА ИСХОДЕ · МЕНЬШЕ ЧЕТВЕРТИ БАКА'), '#ffcc66', 4);
+  else if (lvl === 'reserve') {
+    say(game.state, L('ТОПЛИВО: РЕЗЕРВ · ПРЫЖКОВ НЕТ, ДО ПОРТА НА ДВИГАТЕЛЯХ'), '#ff7a66', 6);
+  } else if (lvl === 'dry') {
+    say(game.state, L('ТОПЛИВО КОНЧИЛОСЬ · ДВИГАТЕЛИ ОСТАНОВЛЕНЫ · U — БУКСИР'), '#ff7a66', 8);
   }
 }
 
@@ -1080,9 +1189,13 @@ function handleKeys(dt) {
   if (st.mode === ST.MAP) { mapInput(game, input); return; }
 
   if (st.mode === ST.DOCKED) {
+    // 1–4 — разделы экрана станции (js/ui/station.js).
+    if (stationKeys(game, input)) return;
     if (input.pressed('Space', 'Enter')) game.launch();
     return;
   }
+  // Буксир вызывают и с грунта: пустой бак на луне — тот же тупик.
+  if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) rescueKey();
   if (st.mode === ST.LANDED) {
     // Одна клавиша на два действия, и разводятся они временем:
     // коротко нажал — зафиксировал корабль, подержал три секунды —
@@ -1411,6 +1524,11 @@ function step(dt) {
       // значат. Оставь перестановку на выход — и всё, что успеет
       // сохраниться или посчитаться за оставшиеся пятнадцать секунд,
       // будет посчитано для точки, которой нет ни в одной системе.
+      // Варп платит топливом по расстоянию между звёздами — так же, как
+      // спишет сервер, когда сохранение скажет ему о новой системе
+      // (Fuel::arrive). До тех пор это долг: в баке сервера прыжка ещё нет.
+      burnWarp(ship, systemDistance(w.from, w.to), isOnline());
+      fuelWatch();
       enterSystem(w.to);
       placeAtStar(w, ship, world.star);
       game.nearest = nearestBody(world, ship.pos);
@@ -1433,6 +1551,10 @@ function step(dt) {
   if (q.phase === 'jump' || q.phase === 'brake') {
     const ev = updateQuantum(q, ship, world, dt);
     game.stats.flownKm += ship.speed * dt;
+    // Квантовый ход — по пройденному пути, как его меряет и сервер (по
+    // снимкам положения, Hub::meter).
+    burnQuantum(ship, ship.speed * dt);
+    fuelWatch();
     game.entry = null;
     game.zone = null;
     if (ev === 'arrive') {
@@ -1478,6 +1600,9 @@ function step(dt) {
   }
 
   updateShip(ship, dt, gravityField(game.capture, ship));
+  // Топливо — по работе сопел этого шага (ship.dv, js/game/fuel.js).
+  burnThrust(ship);
+  fuelWatch();
   game.stats.flownKm += ship.speed * dt;
 
   // Вход в атмосферу: считается по скорости ОТНОСИТЕЛЬНО воздуха.
@@ -1960,6 +2085,10 @@ function frame(now) {
   // сенсорные оси гасятся этим флагом.
   input.enabled = !game.menu.open;
   if (Q.touchUi && !game.menu.open) {
+    // Буксир предлагается на резерве и с пустым баком — там, где прыжков
+    // уже нет (js/ui/touch.js, кнопка 'tow').
+    const fl = fuelLevel(ship);
+    game.touch.tow = !ship.dockedAt && (fl === 'reserve' || fl === 'dry');
     touchUpdate(game.touch, [...touchPoints.values()], touchArea);
     touchApply(game.touch, ship);
   }
@@ -2035,6 +2164,7 @@ function frame(now) {
 
   updateMessages(game.state, dt);
   if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
+  if (game.rescueArmed > 0) game.rescueArmed = Math.max(0, game.rescueArmed - dt);
   updateCamOrbit(dt);
   // Пыль идёт по времени игрока, как и звук: это картинка, а не физика
   // корабля, и от шага интегрирования зависеть не должна.
@@ -2232,6 +2362,9 @@ async function boot() {
   // применять сначала кэш, а потом поверх серверное — значит на секунду
   // показать игроку чужое положение корабля.
   let restored = false;
+  // Ответ на сохранение несёт то, сколько сервер списал за варп: этим
+  // гасится долг, который игра записала себе у звезды (js/game/fuel.js).
+  session.onSaved = (r) => { if (r && r.warpFuel > 0) warpSettled(ship, r.warpFuel); };
   if (!solo) {
     const mode = await sessionStart();
     if (mode === 'none') {
@@ -2258,6 +2391,9 @@ async function boot() {
         // Осанка корабля, а не только след: без неё чужой корабль нечем
         // развернуть, и на месте он смотрел бы в никуда.
         fwd: ship.basis.fwd, up: ship.basis.up,
+        // Работа сопел — измерение, из которого топливо считает сервер, и
+        // то, сколько игра уже списала сама: по нему сверяется ответ.
+        work: ship.work, burned: ship.burned,
         mode: game.state.mode === ST.DOCKED ? 'docked'
           : game.state.mode === ST.LANDED ? 'landed'
             : game.warp.phase === 'tunnel' ? 'warp' : 'flight',

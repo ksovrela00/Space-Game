@@ -888,6 +888,323 @@ $healed = Api::call('catalog.specs');
 ok(count($healed['shipTypes'][0]['spec']) === count(Specs::source()['shipTypes'][0]['spec']),
     'после заливки модель снова целая: ' . count($healed['shipTypes'][0]['spec']) . ' чисел');
 
+// --- топливо -----------------------------------------------------------------
+
+section('топливо');
+
+// Проверки выше гоняли пилота по портам и могли снять ему модули —
+// начинаем с заводского корабля в родном порту и с деньгами на верфь.
+$shipId = (int) Db::one('SELECT `id` FROM `ship` WHERE `owner_id`=?', [$pid]);
+Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=?', [$shipId]);
+Db::update('ship', ['bare' => null, 'fuel_t' => 12, 'hull' => 100], '`id`=?', [$shipId]);
+Players::ensureStock($shipId);
+Loadout::forget();
+Ledger::add($pid, 'ПРОВЕРКА: СРЕДСТВА НА ВЕРФЬ', 300000, 'test');
+Db::update('player', ['system_id' => 0, 'docked_body' => $home['dockedBody'],
+    'last_station' => $home['dockedBody']], '`id`=?', [$pid]);
+
+$massT = (float) Db::one("SELECT `mass_t` FROM `ship_type` WHERE `code`='challenger'");
+$catMass = 0.0;
+foreach ($catalog['shipTypes'] as $st) {
+    if ($st['code'] === 'challenger') {
+        $catMass = (float) $st['massT'];
+    }
+}
+ok($massT > 1000 && abs($massT - $catMass) < 0.05,
+    'масса корпуса в базе — из выгрузки меша: ' . $massT . ' т');
+
+$fm = Fuel::model($shipId);
+ok(abs($fm['cap'] - 12) < 1e-9 && abs($fm['reserve'] - 1.2) < 1e-9
+    && $fm['exhaust'] > 0 && $fm['liftExhaust'] > 0 && $fm['rcsExhaust'] > 0
+    && $fm['quantumFuel'] > 0 && $fm['warpFuel'] > 0,
+    'модель бака собрана из корпуса и модулей: бак ' . $fm['cap'] . ' т, резерв '
+    . $fm['reserve'] . ' т, струя ' . $fm['exhaust'] . ' км/с');
+
+// Формула — масса · Δv / струя. Сверяем с рукой: разогнаться до предела
+// и остановиться (2 × 1.2 км/с) стоит 1682 · 2.4 / 20 000 ≈ 0.2 т.
+$trip = Fuel::thrustTons($fm, 2.4, 0, 0);
+ok(abs($trip - $massT * 2.4 / $fm['exhaust']) < 1e-9 && $trip > 0.15 && $trip < 0.25,
+    'разгон до предела и остановка стоят ' . round($trip, 3) . ' т');
+ok(abs(Fuel::quantumTons($fm, 5e6) - 5 * $fm['quantumFuel']) < 1e-9,
+    'квантовый ход в 5 млн км стоит ' . Fuel::quantumTons($fm, 5e6) . ' т');
+
+// Предел варпа выведен из галактики: самое длинное ребро, без которого
+// она распадается на части, обязано помещаться в бак за вычетом резерва.
+$sys = Db::all('SELECT `id`,`pos_x`,`pos_y`,`pos_z` FROM `star_system`');
+$d = static fn($a, $b) => sqrt(($a['pos_x'] - $b['pos_x']) ** 2 + ($a['pos_y'] - $b['pos_y']) ** 2
+    + ($a['pos_z'] - $b['pos_z']) ** 2);
+$inTree = [$sys[0]['id'] => true];
+$longest = 0.0;
+while (count($inTree) < count($sys)) {
+    $best = null;
+    foreach ($sys as $a) {
+        if (!isset($inTree[$a['id']])) {
+            continue;
+        }
+        foreach ($sys as $b) {
+            if (isset($inTree[$b['id']])) {
+                continue;
+            }
+            if ($best === null || $d($a, $b) < $best[0]) {
+                $best = [$d($a, $b), $b['id']];
+            }
+        }
+    }
+    $inTree[$best[1]] = true;
+    $longest = max($longest, $best[0]);
+}
+$range = ($fm['cap'] - $fm['reserve']) / $fm['warpFuel'];
+ok($range >= $longest,
+    'на заводском баке вся галактика связна: предел прыжка ' . round($range, 1)
+    . ' св. г., нужное ребро ' . round($longest, 1));
+
+// ТОПЛИВО ИЗ СОХРАНЕНИЯ НЕ ПИШЕТСЯ — как и корпус: полный бак из
+// сохранения значил бы бесплатную заправку после каждого прыжка.
+Db::update('ship', ['fuel_t' => 5], '`id`=?', [$shipId]);
+Api::call('player.save', ['fuel' => 12, 'system' => 0], $token);
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 5) < 1e-9,
+    'топливо из сохранения не растёт: 5 т так и осталось');
+Api::call('player.save', ['fuel' => 0], $token);
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 5) < 1e-9,
+    'и не убывает: расход считает сервер, а не сохранение');
+
+// ВАРП списывает база: сменилась система в сохранении — прыжок был.
+Db::update('ship', ['fuel_t' => 12], '`id`=?', [$shipId]);
+Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+$ly = Galaxy::distance(0, 1);
+$jump = Api::call('player.save', ['system' => 1, 'docked' => null, 'last' => null], $token);
+$left = (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]);
+ok(abs($left - (12 - $ly * $fm['warpFuel'])) < 0.002 && abs($jump['fuel'] - $left) < 1e-9,
+    'варп в соседнюю систему (' . round($ly, 1) . ' св. г.) стоил '
+    . round(12 - $left, 2) . ' т, и сохранение вернуло бак игре');
+Api::call('player.save', ['system' => 1], $token);
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - $left) < 1e-9,
+    'повторное сохранение в той же системе прыжком не считается');
+
+// Встать в порт другой системы, не сохранившись, — тот же прыжок: иначе
+// варп был бы бесплатным для того, кто не сохраняется до стыковки.
+Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
+$back = (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]);
+ok(abs($back - ($left - $ly * $fm['warpFuel'])) < 0.002,
+    'стыковка в другой системе списала обратный прыжок: осталось ' . round($back, 2) . ' т');
+
+// ЗАПРАВКА: по цене водорода на рынке этого порта.
+$homeBody = Galaxy::body(0, (int) $home['dockedBody']);
+$h2 = (int) Db::one("SELECT m.`price` FROM `market` m JOIN `commodity` c ON c.`id`=m.`commodity_id`
+                     WHERE c.`code`='hydrogen' AND m.`station_id`=?", [$homeBody['id']]);
+ok($h2 > 0 && Fuel::price((int) $homeBody['id']) === $h2,
+    'тонна топлива стоит столько же, сколько тонна водорода на рынке порта: ' . $h2 . ' кр');
+
+Db::update('ship', ['fuel_t' => 4], '`id`=?', [$shipId]);
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$fill = Api::call('station.refuel', [], $token);
+ok(abs($fill['fuel'] - 12) < 1e-9 && $fill['cost'] === (int) ceil(8 * $h2)
+    && $fill['balance'] === $before - $fill['cost'],
+    'заправка до полного: 8 т за ' . $fill['cost'] . ' кр');
+ok(str_contains((string) Db::one(
+    'SELECT `label` FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1', [$pid]), 'ЗАПРАВКА'),
+    'заправка видна строкой в ленте');
+denies('tank_full', fn() => Api::call('station.refuel', [], $token), 'полный бак не заправляют');
+
+Db::update('ship', ['fuel_t' => 10], '`id`=?', [$shipId]);
+$part = Api::call('station.refuel', ['tons' => 1], $token);
+ok(abs($part['fuel'] - 11) < 1e-9 && $part['cost'] === $h2, 'долить тонну: ' . $part['cost'] . ' кр');
+$over = Api::call('station.refuel', ['tons' => 50], $token);
+ok(abs($over['fuel'] - 12) < 1e-9 && abs($over['tons'] - 1) < 1e-9,
+    'больше бака не нальют: из пятидесяти тонн влезла одна');
+denies('bad_request', fn() => Api::call('station.refuel', ['tons' => -3], $token),
+    'отрицательный тоннаж отвергается');
+
+// Денег не хватает — не нальют ни грамма, а скажут, сколько нужно.
+Db::update('ship', ['fuel_t' => 2], '`id`=?', [$shipId]);
+$rich = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+Ledger::add($pid, 'ПРОВЕРКА: ОПУСТОШИТЬ СЧЁТ', -($rich - 50), 'test');
+denies('no_funds', fn() => Api::call('station.refuel', [], $token), 'без денег не заправляют');
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 2) < 1e-9,
+    'и бак при отказе не тронут');
+Ledger::add($pid, 'ПРОВЕРКА: ВЕРНУТЬ СЧЁТ', $rich - 50, 'test');
+
+Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+denies('not_docked', fn() => Api::call('station.refuel', [], $token), 'в полёте не заправляют');
+
+// БУКСИР: из пустоты — в последний порт, бак до резерва.
+Db::update('ship', ['fuel_t' => 0.3], '`id`=?', [$shipId]);
+Db::update('player', ['last_station' => $home['dockedBody']], '`id`=?', [$pid]);
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$tow = Api::call('ship.rescue', [], $token);
+$p = Players::byId($pid);
+ok((int) $p['docked_body'] === (int) $home['dockedBody'] && abs($tow['fuel'] - 1.2) < 1e-9
+    && $tow['fee'] === Content::RESCUE_FEE && $tow['balance'] === $before - Content::RESCUE_FEE,
+    'буксир дотянул до последнего порта за ' . $tow['fee'] . ' кр и долил бак до резерва');
+denies('docked', fn() => Api::call('ship.rescue', [], $token), 'из порта буксир не вызывают');
+
+// Без денег буксир всё равно приходит — и забирает только то, что есть.
+Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+$rich = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+Ledger::add($pid, 'ПРОВЕРКА: ОПУСТОШИТЬ СЧЁТ', -($rich - 100), 'test');
+$tow = Api::call('ship.rescue', [], $token);
+ok($tow['fee'] === 100 && $tow['balance'] === 0, 'без денег буксир берёт, сколько есть, и в долг не уводит');
+Ledger::add($pid, 'ПРОВЕРКА: ВЕРНУТЬ СЧЁТ', $rich - 100, 'test');
+
+// Сверх резерва буксир не доливает: иначе он был бы дешёвой заправкой.
+Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Db::update('ship', ['fuel_t' => 7], '`id`=?', [$shipId]);
+$tow = Api::call('ship.rescue', [], $token);
+ok(abs($tow['fuel'] - 7) < 1e-9, 'топлива больше резерва буксир не трогает: 7 т');
+
+// Гибель — страховка возвращает корабль с резервом, но не с полным баком.
+Db::update('ship', ['fuel_t' => 0], '`id`=?', [$shipId]);
+Combat::respawn($pid);
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 1.2) < 1e-9,
+    'после гибели в баке резерв: 1.2 т');
+Db::update('ship', ['fuel_t' => 12], '`id`=?', [$shipId]);
+
+// --- верфь -------------------------------------------------------------------
+
+section('верфь');
+
+$yard = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`, st.`tech`
+                 FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
+                 WHERE st.`has_outfit`=1 AND st.`tech`=5 ORDER BY b.`system_id`, b.`local_id` LIMIT 1");
+$yard4 = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
+                  FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
+                  WHERE st.`has_outfit`=1 AND st.`tech`=4 LIMIT 1");
+$noYard = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
+                   FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
+                   WHERE st.`has_outfit`=0 LIMIT 1");
+$dockAt = static function (array $st) use ($pid): void {
+    Db::update('player', ['system_id' => (int) $st['system_id'], 'docked_body' => (int) $st['local_id']],
+        '`id`=?', [$pid]);
+};
+$dockAt($yard);
+
+$offer = Api::call('outfit.list', [], $token);
+$slot = static function (array $offer, string $name): ?array {
+    foreach ($offer['slots'] as $s) {
+        if ($s['slot'] === $name) {
+            return $s;
+        }
+    }
+    return null;
+};
+$eng = $slot($offer, 'engine');
+$engX = null;
+foreach ($eng['offers'] as $o) {
+    if ($o['code'] === 'engine_x') {
+        $engX = $o;
+    }
+}
+ok($offer['open'] === true && $eng['required'] === true && $eng['installed'][0]['code'] === 'engine'
+    && $engX !== null && $engX['sold'] === true
+    && $engX['credit'] === (int) floor(12000 * Content::RESALE) && $engX['net'] === 31000 - $engX['credit'],
+    'верфь «' . $yard['name'] . '»: форсированный двигатель за ' . $engX['net']
+    . ' кр с зачётом заводского');
+$tank = $slot($offer, 'tank');
+ok($tank !== null && $tank['installed'] === [] && $tank['offers'][0]['code'] === 'tank_x',
+    'пустое с завода гнездо бака видно и предлагается');
+ok($slot($offer, 'gun') === null, 'оружия на верфи нет');
+
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$buy = Api::call('outfit.buy', ['code' => 'engine_x'], $token);
+$after = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$rows = Db::all('SELECT `label`,`amount` FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 2', [$pid]);
+ok($buy['removed'] === 'engine' && $after === $before - $buy['cost'] && $buy['cost'] === $engX['net']
+    && str_contains($rows[0]['label'], 'УСТАНОВЛЕН') && str_contains($rows[1]['label'], 'СДАН'),
+    'замена двигателя: сдан заводской, поставлен форсированный — две строки в ленте');
+$state = Api::call('player.state', [], $token);
+$engines = array_values(array_filter($state['ship']['equipment'], fn($e) => $e['slot'] === 'engine'));
+ok(count($engines) === 1 && $engines[0]['code'] === 'engine_x'
+    && abs(Loadout::flight($shipId)['maxSpeed'] - 1.8) < 1e-9
+    && abs(Fuel::model($shipId)['exhaust'] - 14500) < 1e-9,
+    'в гнезде один двигатель — новый, и корабль летит и тратит по его числам');
+denies('installed', fn() => Api::call('outfit.buy', ['code' => 'engine_x'], $token),
+    'второй раз тот же модуль не ставят');
+denies('required', fn() => Api::call('outfit.sell', ['code' => 'engine_x'], $token),
+    'двигатель нельзя продать — только заменить');
+
+// Бак: поставили — объём вырос, сняли — лишнее топливо станция выкупила.
+Api::call('outfit.buy', ['code' => 'tank_x'], $token);
+ok(abs(Fuel::model($shipId)['cap'] - 20) < 1e-9, 'с дополнительным баком объём 20 т');
+Api::call('station.refuel', [], $token);
+$yardBody = Galaxy::body((int) $yard['system_id'], (int) $yard['local_id']);
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+$sold = Api::call('outfit.sell', ['code' => 'tank_x'], $token);
+$refund = (int) floor(8 * Fuel::price((int) $yardBody['id']));
+ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 12) < 1e-9
+    && $sold['refund'] === $refund
+    && (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid])
+        === $before + (int) floor(14000 * Content::RESALE) + $refund,
+    'снятый бак: топливо сверх 12 т выкуплено за ' . $refund . ' кр');
+
+// Щит: сняли — его нет, и дозаливка не возвращает его даром.
+$before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+Api::call('outfit.sell', ['code' => 'shield'], $token);
+$state = Api::call('player.state', [], $token);
+ok(!in_array('shield', array_column($state['ship']['equipment'], 'slot'), true)
+    && (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid])
+        === $before + (int) floor(15000 * Content::RESALE)
+    && (float) Db::one('SELECT `shield` FROM `ship` WHERE `id`=?', [$shipId]) === 0.0,
+    'проданный щит не возвращается при входе: гнездо пусто по воле пилота, щит на нуле');
+Api::call('outfit.buy', ['code' => 'shield_x'], $token);
+Api::call('player.state', [], $token);
+$shields = array_values(array_filter(Api::call('player.state', [], $token)['ship']['equipment'],
+    fn($e) => $e['slot'] === 'shield'));
+ok(count($shields) === 1 && $shields[0]['code'] === 'shield_x'
+    && !in_array('shield', Players::bareSlots($shipId), true)
+    && in_array('tank', Players::bareSlots($shipId), true),
+    'купленный щит встаёт один, отметка «пусто» с его гнезда снята (у бака — осталась)');
+
+// Компьютеров два в одном гнезде: продал оба, купил один — второй даром не приходит.
+Api::call('outfit.sell', ['code' => 'land'], $token);
+Api::call('outfit.sell', ['code' => 'dock'], $token);
+Api::call('outfit.buy', ['code' => 'dock'], $token);
+$comps = array_column(array_values(array_filter(Api::call('player.state', [], $token)['ship']['equipment'],
+    fn($e) => $e['slot'] === 'computer')), 'code');
+ok($comps === ['dock'], 'продал два компьютера, купил один — второй не дозаливается: ' . implode(',', $comps));
+Api::call('outfit.buy', ['code' => 'land'], $token);
+
+// Трюм: с грузом не снять, и меньше груза не поставить.
+$water = (int) Db::one("SELECT `id` FROM `commodity` WHERE `code`='water'");
+Api::call('outfit.buy', ['code' => 'hold_x'], $token);
+Cargo::add($shipId, $water, 30, 30);
+denies('cargo_aboard', fn() => Api::call('outfit.sell', ['code' => 'hold_x'], $token),
+    'трюм с грузом не продают');
+denies('no_room', fn() => Api::call('outfit.buy', ['code' => 'hold'], $token),
+    '30 т груза в 20-тонный трюм не переставить');
+Db::run('DELETE FROM `cargo` WHERE `ship_id`=?', [$shipId]);
+Api::call('outfit.buy', ['code' => 'hold'], $token);
+
+// Где что продают: столичный привод — только в столице, без верфи — ничего.
+if ($yard4) {
+    $dockAt($yard4);
+    $q = $slot(Api::call('outfit.list', [], $token), 'drive');
+    $qx = array_values(array_filter($q['offers'], fn($o) => $o['code'] === 'quantum_x'))[0] ?? null;
+    ok($qx !== null && $qx['sold'] === false, 'на верфи уровня 4 («' . $yard4['name']
+        . '») привод второго поколения не продают');
+    denies('no_tech', fn() => Api::call('outfit.buy', ['code' => 'quantum_x'], $token),
+        'и купить его там нельзя');
+}
+if ($noYard) {
+    $dockAt($noYard);
+    $off = Api::call('outfit.list', [], $token);
+    ok($off['open'] === false, 'в порту без верфи («' . $noYard['name'] . '») список есть, но закрыт');
+    denies('no_outfit', fn() => Api::call('outfit.buy', ['code' => 'scanner_x'], $token),
+        'и ничего не продают');
+    denies('no_outfit', fn() => Api::call('outfit.sell', ['code' => 'lamp'], $token),
+        'и ничего не принимают');
+}
+Api::call('player.save', ['system' => (int) ($noYard['system_id'] ?? 0), 'docked' => null], $token);
+denies('not_docked', fn() => Api::call('outfit.list', [], $token), 'в полёте верфи нет');
+
+// Вернуть заводской двигатель: следующие наборы считают по нему.
+$dockAt($yard);
+Api::call('outfit.buy', ['code' => 'engine'], $token);
+Db::update('player', ['system_id' => 0, 'docked_body' => $home['dockedBody']], '`id`=?', [$pid]);
+
+$sum = (int) Db::one('SELECT COALESCE(SUM(`amount`),0) FROM `ledger` WHERE `player_id`=?', [$pid]);
+$balance = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
+ok($sum === $balance, 'после заправок, буксира и верфи баланс сходится с лентой');
+
 // --- итог --------------------------------------------------------------------
 
 echo PHP_EOL . ($fails === 0

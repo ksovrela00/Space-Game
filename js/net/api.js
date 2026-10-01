@@ -152,6 +152,17 @@ export function saveBeacon(payload) {
 export const dock = (system, station) => call('station.dock', { system, station });
 export const repair = () => call('station.repair');
 
+/** Заправка: `tons` — сколько налить; без него — до полного бака. */
+export const refuel = (tons = null) => call('station.refuel', tons === null ? {} : { tons });
+
+/** Аварийный буксир в порт: корабль с пустым баком в пустоте. */
+export const rescue = () => call('ship.rescue');
+
+/** Верфь порта: что стоит на корабле и что здесь можно поставить. */
+export const outfit = () => call('outfit.list');
+export const outfitBuy = (code) => call('outfit.buy', { code });
+export const outfitSell = (code) => call('outfit.sell', { code });
+
 /**
  * Удар о грунт, когда сокета нет.
  *

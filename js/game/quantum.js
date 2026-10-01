@@ -20,6 +20,7 @@
 import { v3, set, normalize } from '../core/vec3.js';
 import { lookAlong, aimAngles } from '../core/basis.js';
 import { bodyPosAt, nearestBody } from './world.js';
+import { quantumTons, affords, fuelReserve } from './fuel.js';
 import { L } from '../core/lang.js';
 
 /**
@@ -193,12 +194,38 @@ function segDist(from, dx, dy, dz, s0, s1, p) {
   return Math.hypot(ax + ex * t - p.x, ay + ey * t - p.y, az + ez * t - p.z);
 }
 
-/** Можно ли прыгать: есть цель, корабль в полёте, коридор чист. */
+/** Сколько топлива уйдёт на прыжок к цели, т: по пути до точки выхода. */
+export function jumpFuel(ship, target) {
+  exitPoint(target, ship.pos, _fuelP);
+  return quantumTons(Math.hypot(_fuelP.x - ship.pos.x, _fuelP.y - ship.pos.y, _fuelP.z - ship.pos.z));
+}
+const _fuelP = v3();
+
+/**
+ * Можно ли прыгать: есть цель, корабль в полёте, коридор чист и топлива
+ * хватит, не залезая в резерв.
+ *
+ * Топливо проверяется ДО калибровки, как и коридор: держать прицел три
+ * секунды, чтобы узнать «не хватает», — то же издевательство. Корабль
+ * без бака (проверки, собранные до характеристик) топливом не
+ * ограничен: считать его нечем.
+ */
 export function canJump(world, ship, target) {
   if (!target) return { ok: false, reason: L('ЦЕЛЬ НЕ ВЫБРАНА') };
   if (ship.landedAt || ship.dockedAt) return { ok: false, reason: L('ПРИВОД НЕ РАБОТАЕТ НА СТОЯНКЕ') };
   const block = corridorBlock(world, ship.pos, target, quantumSpeed(ship));
   if (block) return { ok: false, reason: L('КОРИДОР ПЕРЕКРЫТ: ') + block.name, block };
+  if (typeof ship.fuel === 'number') {
+    const need = jumpFuel(ship, target);
+    if (!affords(ship, need)) {
+      const spare = Math.max(0, ship.fuel - fuelReserve());
+      return {
+        ok: false, fuel: true, need,
+        reason: L('МАЛО ТОПЛИВА: ПРЫЖОК ') + need.toFixed(2) + L(' Т, СВЕРХ РЕЗЕРВА ')
+          + spare.toFixed(2) + L(' Т'),
+      };
+    }
+  }
   return { ok: true };
 }
 

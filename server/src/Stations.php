@@ -78,6 +78,11 @@ final class Stations
 
             $fee = (int) $info['fee'];
             Ledger::require($playerId, $fee);
+            // Встал в порт ДРУГОЙ системы — значит, прилетел туда варпом,
+            // даже если сохранение об этом ещё не рассказало. Платят за
+            // прыжок и здесь: иначе довольно было бы не сохраняться до
+            // стыковки, и варп ничего бы не стоил.
+            Fuel::arrive($playerId, $p['system_id'] === null ? null : (int) $p['system_id'], $sys);
             Db::update('player', [
                 'system_id' => $sys,
                 'docked_body' => $localId,

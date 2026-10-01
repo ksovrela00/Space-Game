@@ -22,6 +22,7 @@ import { HULL_SIZE } from '../models/ships.js';
 import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.js';
 import { fmtTime, fmtSpeed } from './hud.js';
 import { modules } from '../game/loadout.js';
+import { fuelCap, fuelLevel } from '../game/fuel.js';
 import { session } from '../net/session.js';
 import { L, numLocale } from '../core/lang.js';
 
@@ -143,7 +144,8 @@ const hullColor = (frac) => (frac > 0.6 ? GREEN : frac > 0.3 ? AMBER : RED);
 function drawShip(ctx, b, game, fs) {
   const { ship } = game;
   const hullFrac = ship.hull / SHIP.maxHull;
-  const fuelFrac = ship.fuel / SHIP.fuelMax;
+  const fuelFrac = ship.fuel / fuelCap();
+  const fuelC = { ok: AMBER, low: AMBER, reserve: RED, dry: RED }[fuelLevel(ship)];
   const m = (km) => (km * 1000).toFixed(1) + L(' м');
 
   // Содержимое описывается СПИСКОМ, а не рисуется на месте: одна и та же
@@ -173,8 +175,8 @@ function drawShip(ctx, b, game, fs) {
     left.push({ t: 'row', a: L('ЩИТЫ'), b: L('НЕ УСТАНОВЛЕНЫ'), c: CY_DIM });
   }
   left.push({ t: 'row', a: L('ТОПЛИВО'),
-    b: ship.fuel.toFixed(1) + ' / ' + SHIP.fuelMax.toFixed(1) + L(' т'), c: AMBER });
-  left.push({ t: 'bar', frac: fuelFrac, c: AMBER });
+    b: ship.fuel.toFixed(1) + ' / ' + fuelCap().toFixed(1) + L(' т'), c: fuelC });
+  left.push({ t: 'bar', frac: fuelFrac, c: fuelC });
 
   // Значения берутся из настоящих констант, а не переписаны сюда: иначе
   // карточка начнёт врать в тот день, когда двигатель перенастроят.

@@ -12,6 +12,7 @@
                 "tumbleDamp": 0.6,
                 "maxHull": 100,
                 "fuelMax": 12,
+                "fuelReserve": 1.2,
                 "hitRadius": 0.035
             }
         }
@@ -105,6 +106,7 @@
             "slot": "engine",
             "spec": {
                 "flight": {
+                    "exhaust": 20000,
                     "maxSpeed": 1.2,
                     "accel": 0.45,
                     "brake": 0.75,
@@ -114,7 +116,8 @@
                 }
             },
             "price": 12000,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "engine_x",
@@ -122,6 +125,7 @@
             "slot": "engine",
             "spec": {
                 "flight": {
+                    "exhaust": 14500,
                     "maxSpeed": 1.8,
                     "accel": 0.62,
                     "brake": 0.95,
@@ -131,7 +135,8 @@
                 }
             },
             "price": 31000,
-            "installed": false
+            "installed": false,
+            "tech": 4
         },
         {
             "code": "rcs",
@@ -142,11 +147,30 @@
                     "lateral": 0.5,
                     "tipAccel": 4.9,
                     "rotRamp": 1.4,
-                    "rcsLag": 0.25
+                    "rcsLag": 0.25,
+                    "rcsExhaust": 12000
                 }
             },
             "price": 6000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "rcs_x",
+            "name": "УСИЛЕННЫЕ МАНЕВРОВЫЕ",
+            "slot": "rcs",
+            "spec": {
+                "flight": {
+                    "lateral": 0.65,
+                    "tipAccel": 7,
+                    "rotRamp": 1.1,
+                    "rcsLag": 0.2,
+                    "rcsExhaust": 10000
+                }
+            },
+            "price": 16000,
+            "installed": false,
+            "tech": 4
         },
         {
             "code": "lift",
@@ -155,11 +179,13 @@
             "spec": {
                 "flight": {
                     "liftTWR": 3,
-                    "liftMin": 0.004
+                    "liftMin": 0.004,
+                    "liftExhaust": 16000
                 }
             },
             "price": 5000,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "boost",
@@ -175,7 +201,25 @@
                 }
             },
             "price": 9000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "boost_x",
+            "name": "ФОРСАЖ С НАКОПИТЕЛЕМ",
+            "slot": "boost",
+            "spec": {
+                "flight": {
+                    "boostMax": 3,
+                    "boostRamp": 1.5,
+                    "boostBurn": 16,
+                    "boostFill": 10,
+                    "boostArm": 0.25
+                }
+            },
+            "price": 21000,
+            "installed": false,
+            "tech": 4
         },
         {
             "code": "quantum",
@@ -196,21 +240,68 @@
                 "clearPad": 10,
                 "minSpeed": 1.2,
                 "flight": {
-                    "quantumSpeed": 60000
+                    "quantumSpeed": 60000,
+                    "quantumFuel": 0.2
                 }
             },
             "price": 26000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "quantum_x",
+            "name": "КВАНТОВЫЙ ПРИВОД II",
+            "slot": "drive",
+            "spec": {
+                "rampIn": 2,
+                "rampOut": 5,
+                "spool": 2.2,
+                "alignDeg": 3,
+                "fade": 0.5,
+                "exitAlt": 250,
+                "exitFrac": 0.05,
+                "exitStation": 40,
+                "exitPeer": 20,
+                "peerMatch": 2,
+                "exitMin": 2,
+                "clearPad": 10,
+                "minSpeed": 1.2,
+                "flight": {
+                    "quantumSpeed": 90000,
+                    "quantumFuel": 0.15
+                }
+            },
+            "price": 58000,
+            "installed": false,
+            "tech": 5
         },
         {
             "code": "warp",
             "name": "ВАРП-ПРИВОД",
             "slot": "warp",
             "spec": {
-                "interstellar": true
+                "interstellar": true,
+                "flight": {
+                    "warpFuel": 0.5
+                }
             },
             "price": 48000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "warp_x",
+            "name": "ЭКОНОМИЧНЫЙ ВАРП-ПРИВОД",
+            "slot": "warp",
+            "spec": {
+                "interstellar": true,
+                "flight": {
+                    "warpFuel": 0.34
+                }
+            },
+            "price": 95000,
+            "installed": false,
+            "tech": 5
         },
         {
             "code": "dock",
@@ -220,7 +311,8 @@
                 "range": 120
             },
             "price": 3500,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "land",
@@ -230,7 +322,8 @@
                 "airless": true
             },
             "price": 3000,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "lamp",
@@ -244,7 +337,8 @@
                 "power": 1.15
             },
             "price": 2600,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "scanner",
@@ -261,7 +355,27 @@
                 ]
             },
             "price": 4200,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "scanner_x",
+            "name": "ДАЛЬНИЙ СКАНЕР",
+            "slot": "scanner",
+            "spec": {
+                "steps": [
+                    5,
+                    25,
+                    120,
+                    600,
+                    3000,
+                    20000,
+                    100000
+                ]
+            },
+            "price": 11000,
+            "installed": false,
+            "tech": 4
         },
         {
             "code": "gear",
@@ -274,7 +388,8 @@
                 }
             },
             "price": 1800,
-            "installed": true
+            "installed": true,
+            "tech": 1
         },
         {
             "code": "hold",
@@ -286,7 +401,34 @@
                 }
             },
             "price": 7000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "hold_x",
+            "name": "РАСШИРЕННЫЙ ТРЮМ",
+            "slot": "hold",
+            "spec": {
+                "flight": {
+                    "hold": 36
+                }
+            },
+            "price": 24000,
+            "installed": false,
+            "tech": 4
+        },
+        {
+            "code": "tank_x",
+            "name": "ДОПОЛНИТЕЛЬНЫЙ БАК",
+            "slot": "tank",
+            "spec": {
+                "flight": {
+                    "fuelTank": 8
+                }
+            },
+            "price": 14000,
+            "installed": false,
+            "tech": 4
         },
         {
             "code": "shield",
@@ -300,7 +442,23 @@
                 }
             },
             "price": 15000,
-            "installed": true
+            "installed": true,
+            "tech": 1
+        },
+        {
+            "code": "shield_x",
+            "name": "УСИЛЕННЫЕ ЩИТЫ",
+            "slot": "shield",
+            "spec": {
+                "flight": {
+                    "maxShield": 70,
+                    "shieldRegen": 6,
+                    "shieldDelay": 4
+                }
+            },
+            "price": 38000,
+            "installed": false,
+            "tech": 5
         }
     ],
     "combat": {

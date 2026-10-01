@@ -145,7 +145,8 @@ const CARD = {
   lift: (s) => '×' + s.liftTWR + L(' к весу'),
   boost: (s) => '×' + s.boostMax + ', ' + s.boostBurn + L(' с'),
   drive: (s) => (s.quantumSpeed / 1000).toFixed(0) + L(' тыс. км/с'),
-  warp: () => L('МЕЖСИСТЕМНЫЙ'),
+  warp: (s) => (s.warpFuel > 0 ? s.warpFuel + L(' т на св. год') : L('МЕЖСИСТЕМНЫЙ')),
+  tank: (s) => '+' + s.fuelTank + L(' т'),
   computer: () => L('ЕСТЬ'),
   scanner: (s) => (s.steps && s.steps.length
     ? s.steps[s.steps.length - 1].toLocaleString(numLocale()) + L(' км')
@@ -157,6 +158,44 @@ const CARD = {
     ? s.maxShield + L(' ед., +') + s.shieldRegen + L('/с через ') + s.shieldDelay + L(' с')
     : L('НЕТ')),
 };
+
+/**
+ * Вторая строка модуля на верфи: то, по чему два модуля одного гнезда
+ * СРАВНИВАЮТ. Карточке хватает одного числа («1.20 км/с»), а выбирая
+ * двигатель, надо видеть и разгон, и то, во что он обходится топливом.
+ */
+const DETAIL = {
+  engine: (s) => L('разгон ') + s.accel.toFixed(2) + L(' км/с² · струя ')
+    + s.exhaust.toLocaleString(numLocale()) + L(' км/с'),
+  rcs: (s) => L('оконечности ') + (s.tipAccel / 9.81).toFixed(1) + L(' g · занос ')
+    + s.lateral.toFixed(2) + L(' км/с²'),
+  lift: (s) => L('струя ') + s.liftExhaust.toLocaleString(numLocale()) + L(' км/с'),
+  boost: (s) => L('заряд ') + s.boostBurn + L(' с · восстановление ') + s.boostFill + L(' с'),
+  drive: (s) => s.quantumFuel + L(' т на млн км · калибровка ') + s.spool + L(' с'),
+  scanner: (s) => (s.steps || []).length + L(' ступеней'),
+};
+
+/** Строка модуля: то же, что в карточке корабля. */
+export function describeModule(m) {
+  const spec = moduleSpec(m);
+  const fmt = CARD[m.slot];
+  try {
+    return fmt ? fmt(spec) : plain(spec);
+  } catch (e) {
+    return L('ЧИСЛА НЕ ЧИТАЮТСЯ');
+  }
+}
+
+/** Вторая строка модуля на верфи — или пусто, если сравнивать нечего. */
+export function moduleDetail(m) {
+  const fmt = DETAIL[m.slot];
+  if (!fmt) return '';
+  try {
+    return fmt(moduleSpec(m));
+  } catch (e) {
+    return '';
+  }
+}
 
 /** Общий вид для гнезда, о котором карточка ничего не знает. */
 const plain = (spec) => Object.entries(spec)

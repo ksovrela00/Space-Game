@@ -76,7 +76,18 @@ const RCS_BAND = 3.2;
  * геометрию корпуса, а корпус — файл модели у клиента. Серверу для его
  * дела (урон, трюм, щит) эти величины не нужны вовсе.
  */
+// Ключи, пришедшие с прошлой лётной моделью (см. applyShipSpec).
+let specKeys = [];
+
 export function applyShipSpec(spec) {
+  // Числа, которых в НОВОЙ модели нет, обязаны уйти, а не дожить от
+  // прошлой. Модель собирается из модулей в гнёздах, и снятый на верфи
+  // модуль уносит свои числа с собой: продал дополнительный бак — объём
+  // обязан стать прежним, продал щит — щита у корабля нет. Одно
+  // Object.assign оставило бы их на месте, и корабль летал бы с баком и
+  // щитом, которых у него больше нет.
+  for (const k of specKeys) if (!(k in spec)) delete SHIP[k];
+  specKeys = Object.keys(spec);
   Object.assign(SHIP, spec);
 
   // Просветы — свойство КОРПУСА, а не настройка, поэтому берутся из
@@ -114,6 +125,12 @@ export function applyShipSpec(spec) {
   SHIP.rcsLag = SHIP.rcsLag > 0 ? SHIP.rcsLag : 0;
   SHIP.rcsBand = Math.max(RCS_BAND * SHIP.rcsLag, 1e-3);
 
+  // Объём бака складывается: корпусной плюс дополнительный, если он стоит
+  // в гнезде. Так же считает сервер (Fuel::model) — по этому числу он и
+  // заправляет, и разойдись они, шкала показывала бы полный бак, в
+  // который сервер доливает ещё.
+  SHIP.fuelCap = SHIP.fuelMax + (SHIP.fuelTank > 0 ? SHIP.fuelTank : 0);
+
   return SHIP;
 }
 
@@ -138,6 +155,13 @@ function spinAxis(ship, axis, target, accel, dt) {
   T[axis] += (u - T[axis]) * lagK;
   r[axis] += T[axis] * accel * dt;
   ship.rcs[axis] = Math.abs(T[axis]) > 0.12 ? Math.sign(T[axis]) : 0;
+  // Работа маневровых в пересчёте на линейную скорость, км/с — по ней
+  // считается топливо (js/game/fuel.js). Сопла стоят на оконечностях
+  // (плечо r = TIP_ARM), момент инерции бруска I = m·r²/3, значит сила
+  // F = I·ε/r = m·r·ε/3, и Δv = r·ε/3·dt. Это сотые доли того, что уходит
+  // на занос: развернуть корабль почти ничего не стоит, остановить снос
+  // после разворота — стоит.
+  ship.dv.rcs += Math.abs(T[axis]) * accel * TIP_ARM[axis] / 3 * dt;
 }
 
 export function makeShip() {
@@ -181,7 +205,11 @@ export function makeShip() {
     liftHold: 0,
     hull: SHIP.maxHull,
     shield: SHIP.maxShield,
-    fuel: SHIP.fuelMax,
+    fuel: SHIP.fuelCap,
+    // Сколько скорости набрала каждая группа сопел за ПОСЛЕДНИЙ шаг, км/с:
+    // маршевые, подъёмные (с компенсатором веса), маневровые (занос и
+    // вращение). Из этого считается топливо (js/game/fuel.js, burnThrust).
+    dv: { main: 0, lift: 0, rcs: 0 },
     dockedAt: null,
     // Корабль зафиксирован на грунте: стойки на замках, движки
     // заглушены. Касание этого ещё не значит — фиксирует пилот.
@@ -240,6 +268,17 @@ export function clearControls(ship) {
  */
 export function updateShip(ship, dt, field = null) {
   const c = ship.control;
+  const dv = ship.dv || (ship.dv = { main: 0, lift: 0, rcs: 0 });
+  dv.main = 0; dv.lift = 0; dv.rcs = 0;
+
+  // ПУСТОЙ БАК: сопла молчат — все, и маршевые, и подъёмные, и
+  // маневровые. Корабль становится телом: летит, куда летел, вращается,
+  // как вращался, и в поле тяжести падает — компенсатору высоты держать
+  // вес нечем. Это не наказание, а то, что значит «топливо кончилось»;
+  // выход из него — аварийный буксир (server/src/Fuel.php, rescue).
+  // Корабль без числа в баке (проверки, собранные до характеристик)
+  // сухим не считается: бака у него просто нет.
+  const dry = typeof ship.fuel === 'number' && ship.fuel <= 0;
 
   // Форсаж. Заряд тратится только пока клавиша зажата И есть что
   // тратить; восстанавливается всегда, когда не тратится.
@@ -247,7 +286,7 @@ export function updateShip(ship, dt, field = null) {
   if (ship.boost <= 0) ship.boostLock = true;
   // Снимается замок на ОТПУЩЕННОЙ клавише и с накопленным зарядом.
   else if (ship.boostLock && !c.boost && ship.boost >= SHIP.boostArm) ship.boostLock = false;
-  ship.boosting = c.boost > 0 && !ship.boostLock && ship.boost > 0 && ship.stun <= 0;
+  ship.boosting = c.boost > 0 && !ship.boostLock && ship.boost > 0 && ship.stun <= 0 && !dry;
   // Рывок засчитывается на переходе «не жал -> поехали», а не на
   // удержании: держать клавишу можно десять секунд, а рвёт один раз.
   // Гаснет он с тем же темпом, что у привода, — это один и тот же приём.
@@ -283,6 +322,10 @@ export function updateShip(ship, dt, field = null) {
     const k = Math.max(0, 1 - SHIP.tumbleDamp * dt);
     r.pitch *= k; r.yaw *= k; r.roll *= k;
     q.pitch = q.yaw = q.roll = 0;       // управления нет — и сопла молчат
+    ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
+  } else if (dry) {
+    // Вращение без маневровых ничем не гасится: оно просто продолжается.
+    q.pitch = q.yaw = q.roll = 0;
     ship.torq.pitch = ship.torq.yaw = ship.torq.roll = 0;
   } else {
     // Ручка задаёт угловую СКОРОСТЬ, маневровые дают МОМЕНТ — с
@@ -350,7 +393,7 @@ export function updateShip(ship, dt, field = null) {
   const la = u;
   // На отрыве движки какое-то время работают сами: см. ship.liftHold.
   if (ship.liftHold > 0) ship.liftHold = Math.max(0, ship.liftHold - dt);
-  const lift = ship.liftHold > 0 ? 1 : c.lift;
+  const lift = dry ? 0 : (ship.liftHold > 0 ? 1 : c.lift);
   const liftOn = lift !== 0;
 
   // Автоматика летает ТОЛЬКО с гасителями. Докинг-компьютер и
@@ -360,6 +403,10 @@ export function updateShip(ship, dt, field = null) {
   // клавишах: автоматику заводит и сеть, и меню, а гасители нужны ей
   // всегда.
   if (ship.docking || ship.landing || ship.autopilot) ship.damp = true;
+  // Гасители — это работа сопел, и без топлива их нет: модель та же, что
+  // с выключенными, только без тяги. Выбор пилота (ship.damp) при этом не
+  // трогаем — заправился, и всё вернулось, как было.
+  const damp = ship.damp && !dry;
 
   // Направление тяги — всегда нос, независимо от шасси.
   const fx = f.x, fy = f.y, fz = f.z;
@@ -375,7 +422,7 @@ export function updateShip(ship, dt, field = null) {
   const cur = ship.vel.x * fx + ship.vel.y * fy + ship.vel.z * fz;
   const aBoost = ship.boosting ? SHIP.boostAccel : 1;
 
-  if (!ship.damp) {
+  if (!damp) {
     // --- ГАСИТЕЛИ ИНЕРЦИИ СНЯТЫ ---------------------------------------
     //
     // Здесь выключено разом всё, что делает модель аркадной:
@@ -393,19 +440,21 @@ export function updateShip(ship, dt, field = null) {
     // Предел скорости при этом остаётся пределом ДВИГАТЕЛЯ: дальше него
     // он не толкает. Но и не тормозит — набранное сверх предела
     // (форсажем, тяготением, отскоком) корабль несёт сам.
-    let step = SHIP.accel * aBoost * ship.throttle * dt;
+    let step = dry ? 0 : SHIP.accel * aBoost * ship.throttle * dt;
     const limF = lim, limB = lim * SHIP.reverse;
     if (step > 0) step = Math.max(0, Math.min(step, limF - cur));
     else if (step < 0) step = Math.min(0, Math.max(step, -limB - cur));
     ship.vel.x += fx * step;
     ship.vel.y += fy * step;
     ship.vel.z += fz * step;
+    dv.main += Math.abs(step);
 
     // Подъёмные движки — такая же чистая тяга, вдоль «верха» корпуса.
     if (liftOn) {
       ship.vel.x += la.x * liftAcc * dt;
       ship.vel.y += la.y * liftAcc * dt;
       ship.vel.z += la.z * liftAcc * dt;
+      dv.lift += Math.abs(liftAcc) * dt;
     }
 
     // И тяжесть. В обычном режиме её не видно вовсе — вес держат
@@ -432,6 +481,17 @@ export function updateShip(ship, dt, field = null) {
   ship.vel.x += fx * step;
   ship.vel.y += fy * step;
   ship.vel.z += fz * step;
+  dv.main += Math.abs(step);
+
+  // Подъёмные с компенсатором: вес держат они же, и работа у них — сумма
+  // того, что держит вес, и того, что просит ручка. Складываются ВЕКТОРЫ:
+  // вес — по местной вертикали, ход ручки — по «верху» корпуса, и на
+  // снижении (F) движки тянут меньше веса, а не больше.
+  {
+    const gx = up ? up.x * g : 0, gy = up ? up.y * g : 0, gz = up ? up.z * g : 0;
+    const lx = gx + la.x * liftAcc, ly = gy + la.y * liftAcc, lz = gz + la.z * liftAcc;
+    dv.lift += Math.hypot(lx, ly, lz) * dt;
+  }
 
   // Теперь отделяем вертикаль — её гасить нечем, кроме тяги и подъёмных.
   let vUp = 0;
@@ -466,6 +526,7 @@ export function updateShip(ship, dt, field = null) {
     ship.vel.x -= px * k;
     ship.vel.y -= py * k;
     ship.vel.z -= pz * k;
+    dv.rcs += perp * k;
   }
 
   if (liftOn) {

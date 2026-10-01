@@ -28,6 +28,7 @@ import { SHIP } from '../game/ship.js';
 import { fmtDist, fmtSpeed, fmtTime } from './hud.js';
 import { targetLabel, targetKind, currentTarget } from '../game/nav.js';
 import { gearLabel } from '../game/landing.js';
+import { fuelCap, fuelReserve, fuelLevel } from '../game/fuel.js';
 import { L } from '../core/lang.js';
 
 const TAU = Math.PI * 2;
@@ -116,8 +117,8 @@ function splitUnit(s) {
 /**
  * Скорость — круглой шкалой, а не числом: по стрелке видно, сколько до
  * предела и где начинается форсаж, не читая цифр. Справа — столбики
- * тяги и заряда форсажа; снизу — высота и вертикальная скорость, когда
- * корабль в чьём-то тяготении.
+ * тяги, заряда форсажа и топлива; снизу — высота и вертикальная
+ * скорость, когда корабль в чьём-то тяготении.
  */
 function flightScreen(ctx, W, H, game) {
   const ship = game.ship;
@@ -172,7 +173,7 @@ function flightScreen(ctx, W, H, game) {
   ctx.font = f(22);
   ctx.fillText(unit, cx, cy + 48);
 
-  // Столбики: тяга (с реверсом вниз от нуля) и заряд форсажа.
+  // Столбики: тяга (с реверсом вниз от нуля), заряд форсажа и бак.
   const bar = (x, label, frac, color, note, zero = 0) => {
     const top = 62, bot = 262, hgt = bot - top;
     ctx.strokeStyle = 'rgba(79,179,224,0.45)';
@@ -195,10 +196,18 @@ function flightScreen(ctx, W, H, game) {
     ctx.fillText(note, x + 22, top - 8);
   };
   const back = ship.throttle < -0.001;
-  bar(318, L('ТЯГА'), ship.throttle, back ? AMBER : CY,
+  bar(300, L('ТЯГА'), ship.throttle, back ? AMBER : CY,
     Math.round(Math.abs(ship.throttle) * 100) + '%', 0.2);
-  bar(410, L('ФОРС'), ship.boost, ship.boosting ? AMBER : (ship.boostLock ? RED : CY),
+  bar(372, L('ФОРС'), ship.boost, ship.boosting ? AMBER : (ship.boostLock ? RED : CY),
     Math.round(ship.boost * 100) + '%');
+  // Бак — тоннами, как и в приборах от третьего лица: прыжки стоят тонн.
+  // Черта на столбике — резерв: ниже неё привод и варп не включатся.
+  const fuel = fuelLevel(ship);
+  const cap = fuelCap() || 1;
+  bar(444, L('ТОПЛ'), ship.fuel / cap, fuel === 'ok' ? CY : (fuel === 'low' ? AMBER : RED),
+    ship.fuel.toFixed(1));
+  ctx.fillStyle = RED;
+  ctx.fillRect(440, 262 - 200 * clamp(fuelReserve() / cap, 0, 1) - 1, 52, 2);
 
   // Высота — когда под нами чьё-то тяготение.
   const b = game.capture;
@@ -599,6 +608,9 @@ function systemsScreen(ctx, W, H, game) {
   if (SHIP.maxShield > 0) {
     row(L('ЩИТ'), Math.round(clamp(ship.shield / SHIP.maxShield, 0, 1) * 100) + '%', CY);
   }
+  const fuel = fuelLevel(ship);
+  row(L('ТОПЛИВО'), ship.fuel.toFixed(1) + ' / ' + fuelCap().toFixed(0) + L(' т'),
+    fuel === 'ok' ? GREEN : (fuel === 'low' ? AMBER : RED));
   const phase = q ? q.phase : 'idle';
   row(L('ПРИВОД'), phase === 'idle' ? L('ГОТОВ')
     : (phase === 'calib' ? L('КАЛИБРОВКА') : (phase === 'brake' ? L('ГАШЕНИЕ') : L('ПРЫЖОК'))),
@@ -651,8 +663,12 @@ function annRight(ctx, W, H, game) {
   const q = game.quantum;
   const phase = q ? q.phase : 'idle';
   const low = ship.hull / (SHIP.maxHull || 100) < 0.4;
+  // Лампа топлива: янтарная — меньше четверти, красная — резерв, мигает —
+  // бак пуст и сопла молчат.
+  const fuel = fuelLevel(ship);
   annunciators(ctx, W, H, [
     [L('КОРПУС'), low ? RED : null, true],
+    [L('ТОПЛИВО'), fuel === 'ok' ? null : (fuel === 'low' ? AMBER : RED), fuel === 'dry'],
     [L('ПРИВОД'), phase === 'idle' ? null : (phase === 'calib' ? AMBER : CY), phase === 'calib'],
     [L('ФАРЫ'), ship.lights ? '#ffe9a8' : null, false],
   ], game.now || 0);

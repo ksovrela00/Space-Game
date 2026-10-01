@@ -41,8 +41,12 @@ final class Schema
      *     `anchor_pose`. Мировых координат одних мало: время мира
      *     идёт и без игрока, и при входе записанная точка указывала бы
      *     внутрь планеты (js/game/anchor.js).
+     * 9 — топливо и верфь: масса корпуса `ship_type.mass_t` (по ней
+     *     сервер считает расход), уровень техники модуля
+     *     `equipment_type.tech` (где его продают) и `ship.bare` —
+     *     гнёзда, которые пилот опустошил сам.
      */
-    public const VERSION = 8;
+    public const VERSION = 9;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -206,6 +210,10 @@ final class Schema
                 -- типа бывают разными. Берутся они через Loadout.
                 `hull_max` DOUBLE NOT NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
+                -- Масса корпуса, т: из объёма обводов модели, как и
+                -- габариты (tools/export.mjs). По ней сервер считает
+                -- расход топлива — масса · Δv / скорость струи.
+                `mass_t` DECIMAL(10,1) NOT NULL DEFAULT 0,
                 -- Габариты из самой модели корпуса, метры.
                 `length_m` DOUBLE NOT NULL,
                 `width_m` DOUBLE NOT NULL,
@@ -237,6 +245,9 @@ final class Schema
                 `price` BIGINT NOT NULL DEFAULT 0,
                 `mass_t` DECIMAL(10,3) NOT NULL DEFAULT 0,
                 `stock` TINYINT(1) NOT NULL DEFAULT 0,
+                -- Уровень техники, с которого модуль продаётся на верфи:
+                -- второй квантовый привод есть только в столицах.
+                `tech` TINYINT NOT NULL DEFAULT 1,
                 UNIQUE KEY `code` (`code`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
@@ -316,6 +327,12 @@ final class Schema
                 `hit_at` DATETIME NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
                 `gear_out` TINYINT(1) NOT NULL DEFAULT 0,
+                -- Гнёзда, которые пилот опустошил САМ, продав модуль на
+                -- верфи: JSON-список. Дозаливка заводского набора
+                -- (Players::ensureStock) их не трогает — иначе проданный
+                -- щит возвращался бы даром при следующем входе, а кроны за
+                -- него оставались бы у пилота.
+                `bare` TEXT NULL,
                 `created_at` DATETIME NOT NULL,
                 KEY `owner` (`owner_id`),
                 CONSTRAINT `ship_type` FOREIGN KEY (`type_id`)
@@ -448,9 +465,16 @@ final class Schema
         return [
             'ship_type' => [
                 'spec' => 'TEXT NULL',
+                // Версия 9: масса корпуса для расхода топлива.
+                'mass_t' => 'DECIMAL(10,1) NOT NULL DEFAULT 0',
+            ],
+            'equipment_type' => [
+                'tech' => 'TINYINT NOT NULL DEFAULT 1',
             ],
             'ship' => [
                 'hit_at' => 'DATETIME NULL',
+                // Версия 9: гнёзда, опустошённые на верфи.
+                'bare' => 'TEXT NULL',
             ],
             // Версия 8: место в полёте в осях тела.
             'player' => [

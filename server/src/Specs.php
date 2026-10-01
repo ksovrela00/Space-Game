@@ -80,6 +80,17 @@ final class Specs
         return max(1, (int) ($caps[$slot] ?? 1));
     }
 
+    /**
+     * Гнёзда, которые на верфи можно заменить, но не опустошить.
+     *
+     * Список — данные, а не код (server/data/specs.php, `required`): какие
+     * приборы кораблю необходимы, решает тот же файл, что и их числа.
+     */
+    public static function required(): array
+    {
+        return array_values(self::source()['required'] ?? []);
+    }
+
     /** Лётная модель без того, что лежит столбцами: ровно это идёт в `spec`. */
     public static function specRest(array $spec): array
     {
@@ -156,6 +167,7 @@ final class Specs
                 'spec' => $row['spec'],
                 'price' => $row['price'],
                 'installed' => (bool) $row['stock'],
+                'tech' => $row['tech'],
             ];
         }
 
@@ -218,6 +230,9 @@ final class Specs
                 'spec' => $spec,
                 'price' => (int) ($m['price'] ?? 0),
                 'stock' => !empty($m['installed']),
+                // С какого уровня техники модуль продают на верфи.
+                // Заводской — везде, где верфь вообще есть.
+                'tech' => max(1, min(5, (int) ($m['tech'] ?? 1))),
             ];
         }
 
@@ -233,6 +248,7 @@ final class Specs
                 // `stock` значит «стоит на корабле с завода»: у оружия это
                 // ready — сделано ли оно вообще.
                 'stock' => !empty($w['ready']),
+                'tech' => 1,
             ];
         }
 
@@ -271,7 +287,7 @@ final class Specs
 
         $weapons = [];
         $modules = [];
-        foreach (Db::all('SELECT `code`,`name`,`slot`,`spec`,`price`,`stock` FROM `equipment_type` ORDER BY `id`') as $row) {
+        foreach (Db::all('SELECT `code`,`name`,`slot`,`spec`,`price`,`stock`,`tech` FROM `equipment_type` ORDER BY `id`') as $row) {
             $spec = json_decode((string) $row['spec'], true);
             if (!is_array($spec)) {
                 $spec = [];
@@ -292,6 +308,7 @@ final class Specs
                 'spec' => $spec,
                 'price' => (int) $row['price'],
                 'installed' => (bool) $row['stock'],
+                'tech' => (int) $row['tech'],
             ];
         }
 

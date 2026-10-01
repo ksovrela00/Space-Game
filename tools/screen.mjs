@@ -67,6 +67,56 @@ if (!chrome) {
   process.exit(1);
 }
 
+// Экран станции с ответами сервера. Снимок идёт без сервера (offline=1),
+// поэтому прайс и верфь подставляются здесь — такими, какими их отдаёт
+// server/src/Market.php и Outfit.php. Проверяется ВЁРСТКА экрана, а не
+// экономика: её проверяет серверный набор.
+const PORT_SCENE = (tab) => `
+  liftoff();
+  return GAME.rescue().then(() => Promise.all([
+    import('./js/net/session.js'), import('./js/ui/station.js'), import('./js/game/specs.js'),
+  ])).then(([Sess, S, Sp]) => {
+    Sess.session.mode = 'online';
+    // Бак и корпус — после буксира: без сервера порт заправляет и чинит
+    // даром, а снимок должен показать, как выглядит неполный бак.
+    GAME.ship.fuel = 4.6;
+    GAME.ship.hull = 72;
+    GAME.player.balance = 41250;
+    GAME.player.cargo = [{ code: 'grain', name: 'ЗЕРНО', tons: 6, avgPrice: 52 },
+      { code: 'water', name: 'ВОДА', tons: 4, avgPrice: 41 }];
+    GAME.port = { tech: 5, fee: 96, repairRate: 15,
+      services: { market: true, board: true, repair: true, outfit: true } };
+    const goods = [
+      ['water', 'ВОДА', 'сырьё', 36, 22], ['ore', 'ЖЕЛЕЗНАЯ РУДА', 'сырьё', 74, 0],
+      ['grain', 'ЗЕРНО', 'продовольствие', 51, 96.4], ['hydrogen', 'ВОДОРОД', 'топливо', 74, 18.2],
+      ['minerals', 'МИНЕРАЛЫ', 'сырьё', 121, 0], ['biomass', 'БИОМАТЕРИАЛ', 'продовольствие', 102, 77.5],
+      ['rare_metals', 'РЕДКИЕ МЕТАЛЛЫ', 'сырьё', 512, 0], ['machines', 'МАШИНЫ', 'техника', 336, 88.1],
+      ['helium3', 'ГЕЛИЙ-3', 'топливо', 690, 0], ['electronics', 'ЭЛЕКТРОНИКА', 'техника', 488, 104],
+      ['medicine', 'МЕДИКАМЕНТЫ', 'техника', 612, 61.9], ['stims', 'СТИМУЛЯТОРЫ', 'запрещённое', 2010, 0],
+    ].map(([code, name, category, price, stock]) => ({
+      code, name, category, price, stock, legal: code !== 'stims' }));
+    const doc = Sp.specsDoc();
+    const bySlot = new Map();
+    for (const m of doc.modules) {
+      if (!bySlot.has(m.slot)) bySlot.set(m.slot, { slot: m.slot, cap: m.slot === 'computer' ? 2 : 1,
+        required: ['engine', 'rcs', 'lift'].includes(m.slot), installed: [], offers: [] });
+      const sl = bySlot.get(m.slot);
+      if (m.installed) sl.installed.push({ code: m.code, name: m.name, price: m.price,
+        resale: Math.floor(m.price * 0.6), spec: m.spec });
+    }
+    for (const m of doc.modules) {
+      if (m.installed) continue;
+      const sl = bySlot.get(m.slot);
+      const credit = sl.cap === 1 && sl.installed.length ? sl.installed[0].resale : 0;
+      sl.offers.push({ code: m.code, name: m.name, price: m.price, tech: m.tech, spec: m.spec,
+        sold: m.tech <= 5, credit, net: m.price - credit });
+    }
+    GAME.station.market = { fuelPrice: 74, goods };
+    GAME.station.outfit = { open: true, resale: 0.6, slots: [...bySlot.values()] };
+    S.stationAct(GAME, 'tab', { tab: '${tab}' });
+  });
+`;
+
 // --- сцены --------------------------------------------------------------------
 //
 // Сцена — это кусок кода, который выполняется В СТРАНИЦЕ после загрузки.
@@ -569,6 +619,40 @@ const SCENES = {
   map: {
     title: 'карта системы',
     run: 'liftoff(); press("KeyM");',
+  },
+  portmarket: {
+    title: 'экран станции: рынок',
+    run: PORT_SCENE('market'),
+  },
+  portoutfit: {
+    title: 'экран станции: верфь',
+    run: PORT_SCENE('outfit'),
+  },
+  portfuel: {
+    title: 'экран станции: заправка и ремонт',
+    run: PORT_SCENE('fuel'),
+  },
+  fuel: {
+    title: 'полёт на резерве: шкала топлива и подсказка про буксир',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 14);
+      GAME.ship.fuel = 1.1;
+      GAME.state.view = 'chase';
+      frames(6);
+    `,
+  },
+  cockpitfuel: {
+    title: 'кабина на малом топливе: столбик ТОПЛ и лампа',
+    run: `
+      liftoff();
+      const st = GAME.world.stations[0];
+      aimAt(st, 14);
+      GAME.ship.fuel = 2.4;
+      GAME.state.view = 'cockpit';
+      frames(30);
+    `,
   },
   menu: {
     title: 'меню пилота',

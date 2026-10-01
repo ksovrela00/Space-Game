@@ -28,6 +28,11 @@ final class Api
             'station.info' => [[self::class, 'stationInfo'], false],
             'station.dock' => [[self::class, 'stationDock'], true],
             'station.repair' => [[self::class, 'stationRepair'], true],
+            'station.refuel' => [[self::class, 'stationRefuel'], true],
+            'ship.rescue' => [[self::class, 'shipRescue'], true],
+            'outfit.list' => [[self::class, 'outfitList'], true],
+            'outfit.buy' => [[self::class, 'outfitBuy'], true],
+            'outfit.sell' => [[self::class, 'outfitSell'], true],
             'catalog.commodities' => [[self::class, 'commodities'], false],
             'catalog.ships' => [[self::class, 'shipTypes'], false],
             // Характеристики корабля, оружия и модулей. Без токена
@@ -178,6 +183,40 @@ final class Api
     public static function stationRepair(array $in, ?int $playerId): array
     {
         return Stations::repair($playerId);
+    }
+
+    /**
+     * Заправка. `tons` — сколько налить; нет его — до полного бака.
+     * Цену и то, сколько вообще влезет, считает сервер (Fuel::refuel).
+     */
+    public static function stationRefuel(array $in, ?int $playerId): array
+    {
+        $tons = isset($in['tons']) && is_numeric($in['tons']) ? (float) $in['tons'] : null;
+        if ($tons !== null && !(is_finite($tons) && $tons > 0)) {
+            throw ApiError::bad('тоннаж должен быть больше нуля');
+        }
+        return Fuel::refuel($playerId, $tons);
+    }
+
+    /** Аварийный буксир в порт (Fuel::rescue). */
+    public static function shipRescue(array $in, ?int $playerId): array
+    {
+        return Fuel::rescue($playerId);
+    }
+
+    public static function outfitList(array $in, ?int $playerId): array
+    {
+        return Outfit::offer($playerId);
+    }
+
+    public static function outfitBuy(array $in, ?int $playerId): array
+    {
+        return Outfit::buy($playerId, self::str($in, 'code'));
+    }
+
+    public static function outfitSell(array $in, ?int $playerId): array
+    {
+        return Outfit::sell($playerId, self::str($in, 'code'));
     }
 
     public static function commodities(array $in, ?int $playerId): array

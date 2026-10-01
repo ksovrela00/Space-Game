@@ -78,6 +78,14 @@ let getPose = null;      // откуда брать своё положение
 let stopped = false;
 let pingAt = 0;          // когда ушёл последний ping
 let pingDue = 0;         // когда пора слать следующий
+// Номер снимка положения и то, сколько топлива игра успела списать к
+// его отправке (ship.burned). Сервер присылает бак «после снимка n», и
+// по этой записи игра вычитает то, что потратила, пока ответ шёл назад
+// (js/game/fuel.js, applyServerFuel). Окна в 64 снимка — тринадцать
+// секунд — хватает с запасом на любую задержку.
+let seq = 0;
+const BURN_RING = 64;
+const burnAt = new Array(BURN_RING).fill(null);
 
 const url = () => 'ws://' + (location.hostname || 'localhost') + ':' + PORT;
 
@@ -171,6 +179,16 @@ function open() {
       net.peers = net.peers.filter((p) => p.id !== msg.id);
       net.rev++;
       net.left = msg.id;
+    } else if (msg.t === 'fuel') {
+      // Бак по счёту сервера. Идёт в ту же очередь, что и бой: разбирает
+      // её игра, в своём темпе, — и к числу приложено, сколько игра
+      // списала к отправке снимка n, чтобы вычесть расход после него.
+      const at = burnAt[(msg.n | 0) % BURN_RING];
+      net.events.push({
+        t: 'fuel', fuel: msg.fuel, cap: msg.cap, n: msg.n | 0,
+        burnedAt: at && at.n === (msg.n | 0) ? at.b : null,
+      });
+      if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
                || msg.t === 'boom' || msg.t === 'impact') {
       // Очередь не копим бесконечно: если игра почему-то перестала её
@@ -236,6 +254,9 @@ function pushPose() {
   const p = getPose();
   if (!p) return;
   lastSend = now;
+  seq++;
+  const w = p.work || { main: 0, lift: 0, rcs: 0 };
+  burnAt[seq % BURN_RING] = { n: seq, b: p.burned || 0 };
   send({
     t: 'pos', sys: p.sys,
     // Округляем до метра: дальше идут разряды, которых не видит ни один
@@ -248,6 +269,12 @@ function pushPose() {
     // это сотые доли градуса.
     fx: +p.fwd.x.toFixed(4), fy: +p.fwd.y.toFixed(4), fz: +p.fwd.z.toFixed(4),
     ux: +p.up.x.toFixed(4), uy: +p.up.y.toFixed(4), uz: +p.up.z.toFixed(4),
+    // Работа сопел с начала связи, км/с: маршевые, подъёмные, маневровые.
+    // Это ИЗМЕРЕНИЕ, а не расход: тонны из него считает сервер своими
+    // числами и не больше, чем двигатель может дать (server/src/Hub.php,
+    // meter). Пять знаков — это сантиметры в секунду.
+    wm: +w.main.toFixed(5), wl: +w.lift.toFixed(5), wr: +w.rcs.toFixed(5),
+    n: seq,
   });
 }
 

@@ -16,7 +16,8 @@
  *   клиент -> сервер
  *     {"t":"hello","token":"..."}            вход по тому же токену, что и API
  *     {"t":"pos","sys":0,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight",
- *      "fx":..,"fy":..,"fz":..,"ux":..,"uy":..,"uz":..}   куда смотрит и где верх
+ *      "fx":..,"fy":..,"fz":..,"ux":..,"uy":..,"uz":..,   куда смотрит и где верх
+ *      "wm":..,"wl":..,"wr":..,"n":17}   работа сопел с начала связи, км/с, и номер снимка
  *     {"t":"ping"}
  *     {"t":"shot","w":"laser_g","x":..,"y":..,"z":..,"dx":..,"dy":..,"dz":..}
  *     {"t":"hit","id":7,"w":"laser_g"}      попадание по пилоту 7
@@ -35,6 +36,7 @@
  *     {"t":"hurt","by":7,"dmg":3,"hull":61,"dead":false}   попали В НАС
  *     {"t":"hitok","id":7,"hull":61,"dead":false}          попали МЫ
  *     {"t":"boom","id":7}                    чей-то корабль уничтожен
+ *     {"t":"fuel","fuel":8.4,"cap":12,"n":17}  бак по счёту сервера после снимка n
  *     {"t":"error","code":"auth","message":"..."}
  *
  * Положение НЕ ПРОВЕРЯЕТСЯ: сервер не считает физику и знает лишь то, что
@@ -70,6 +72,27 @@ final class Hub
 
     /** Больше — молчащий клиент считается мёртвым, с. */
     public const IDLE_TIMEOUT = 90;
+
+    /**
+     * Запас предела расхода: во сколько раз больше того, что двигатель
+     * может дать за прошедшее время, и сколько секунд сверху.
+     *
+     * Время на сервере — время прихода снимков, а игра считает своим
+     * шагом физики; после рывка сети два снимка приходят разом, и между
+     * ними по часам хаба проходит миллисекунда. Без запаса честный разгон
+     * срезался бы пределом.
+     */
+    public const METER_SLACK = 1.5;
+    public const METER_SLACK_S = 0.5;
+
+    /**
+     * Когда расход уходит в базу: накопилось столько тонн — или прошло
+     * столько секунд. Писать на каждый снимок незачем (пять запросов в
+     * секунду на пилота), а копить долго нельзя: заправка в порту читает
+     * бак из базы.
+     */
+    public const FLUSH_T = 0.05;
+    public const FLUSH_EVERY = 2.0;
 
     /** @var array<int, array> id соединения => состояние */
     private array $peers = [];
@@ -151,6 +174,15 @@ final class Hub
             'regen' => 0.0, 'delay' => 0.0,
             'shieldAt' => $now, 'statAt' => 0.0,
             'moved' => false,
+            // Топливо (server/src/Fuel.php): модель бака, счётчики работы
+            // сопел из прошлого снимка и то, что ещё не ушло в базу.
+            'ship' => null, 'fm' => null, 'fuel' => null,
+            'work' => null, 'seq' => 0, 'meterAt' => null,
+            // Можно ли мерить прыжок от прошлого места. Нельзя до первого
+            // снимка (прошлое место — ноль координат) и после того, как
+            // сервер сам переставил корабль (гибель, буксир).
+            'qOk' => false,
+            'pend' => 0.0, 'flushAt' => $now,
         ];
     }
 
@@ -158,6 +190,11 @@ final class Hub
     {
         $key = $this->key($conn);
         $peer = $this->peers[$key] ?? null;
+        // Накопленный расход — в базу: ушёл пилот или нет, топливо он
+        // потратил.
+        if ($peer !== null) {
+            $this->flushFuel($peer, $now, false);
+        }
         unset($this->peers[$key]);
         if ($peer && $peer['player'] !== null) {
             // Остальным в той же системе говорим об уходе сразу, а не
@@ -206,6 +243,7 @@ final class Hub
                 $peer['posAt'] = $now;
                 $wasSys = $peer['sys'];
                 $wasHere = !self::between($peer);
+                $was = ['x' => $peer['x'], 'y' => $peer['y'], 'z' => $peer['z'], 'mode' => $peer['mode']];
                 $peer['sys'] = isset($msg['sys']) ? (int) $msg['sys'] : $peer['sys'];
                 $peer['x'] = self::num($msg['x'] ?? 0);
                 $peer['y'] = self::num($msg['y'] ?? 0);
@@ -223,6 +261,7 @@ final class Hub
                 $peer['mode'] = in_array($mode, ['flight', 'docked', 'landed', 'warp'], true)
                     ? $mode : 'flight';
                 $peer['moved'] = true;
+                $this->meter($peer, $msg, $now, $wasSys, $was);
 
                 // Пропал из системы — говорим об этом СРАЗУ, а не ждём,
                 // пока сосед сам забудет по истечении срока. Пропасть
@@ -436,7 +475,7 @@ final class Hub
             Combat::respawn($victimId);
             foreach ($this->peers as $k => $p) {
                 if ($p['player'] === $victimId) {
-                    $this->loadStats($this->peers[$k], $now);
+                    $this->loadStats($this->peers[$k], $now, true);
                 }
             }
             $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $victimId], $victimId);
@@ -494,7 +533,7 @@ final class Hub
             Combat::respawn((int) $peer['player']);
             foreach ($this->peers as $k => $p) {
                 if ($p['player'] === $peer['player']) {
-                    $this->loadStats($this->peers[$k], $now);
+                    $this->loadStats($this->peers[$k], $now, true);
                 }
             }
             $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $peer['player']], $peer['player']);
@@ -546,9 +585,14 @@ final class Hub
      * Нужно не только при входе: корпус чинят в порту, и без обновления
      * сосед ещё десять минут висел бы битым в чужих приборах.
      */
-    private function loadStats(array &$peer, float $now): void
+    private function loadStats(array &$peer, float $now, bool $moved = false): void
     {
         $peer['statAt'] = $now;
+        // Корабль переставил сервер (гибель): отрезок до нового места —
+        // не прыжок, и мерить его нечего.
+        if ($moved) {
+            $peer['qOk'] = false;
+        }
         $row = Db::row(
             'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
              FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
@@ -558,6 +602,11 @@ final class Hub
         if ($row === null) {
             return;
         }
+        // Хаб — отдельный процесс, и память модулей (Loadout) у него своя:
+        // верфь меняет их запросом в другом процессе, и без этого хаб до
+        // перезапуска считал бы щит и расход по снятому модулю.
+        $peer['ship'] = (int) $row['id'];
+        Loadout::forget($peer['ship']);
         // Щит соседа — с его модуля: у двоих на одинаковых корпусах щиты
         // могут быть разные, и в приборах это должно быть видно.
         $row += Loadout::shield((int) $row['id']);
@@ -571,6 +620,115 @@ final class Hub
         // microtime процесса, и смешивать эти шкалы нельзя.
         $peer['shield'] = Combat::shieldNow($row);
         $peer['shieldAt'] = $now;
+        // Бак — тоже отсюда: его меняют мимо хаба заправка, верфь и варп
+        // (Players::save), и игра обязана узнать об этом, не перезаходя.
+        $peer['fm'] = Fuel::model($peer['ship']);
+        $peer['fuel'] = $peer['fm']['fuel'];
+        $this->sendFuel($peer);
+    }
+
+    /**
+     * Замер расхода топлива по снимку.
+     *
+     * Двигатели — по счётчикам, которые шлёт игра: сколько скорости
+     * набрала каждая группа сопел с начала связи. Считаем разницу с
+     * прошлым снимком, а не сами числа: снимки, пришедшие чаще POS_RATE,
+     * отбрасываются, и с разницами их работа пропала бы вместе с ними.
+     * Предел — сколько группа вообще может дать за прошедшее время
+     * (Fuel::model), с запасом METER_SLACK.
+     *
+     * Квантовый прыжок — по самим положениям, игре тут сообщать нечего:
+     * отрезок, пройденный быстрее jumpGate, и есть прыжок. Не мерим то,
+     * что прыжком не является: смену системы (варп считает база), тоннель
+     * (рывок в миллион км/с — это варп, а не квантовый привод), стоянку и
+     * док (корабль едет с телом, а не летит).
+     */
+    private function meter(array &$peer, array $msg, float $now, ?int $wasSys, array $was): void
+    {
+        $m = $peer['fm'];
+        if ($m === null) {
+            return;
+        }
+        $dt = $peer['meterAt'] === null ? 0.0 : max(0.0, $now - $peer['meterAt']);
+        $peer['meterAt'] = $now;
+        $span = ($dt + self::METER_SLACK_S) * self::METER_SLACK;
+        $tons = 0.0;
+
+        if (isset($msg['wm'], $msg['wl'], $msg['wr'])) {
+            $w = [self::num($msg['wm']), self::num($msg['wl']), self::num($msg['wr'])];
+            $prev = $peer['work'];
+            $peer['work'] = $w;
+            // Счётчики пошли вниз — игра начала их заново (перезагрузка
+            // вкладки при живом сокете не бывает, а вот сброс — бывает).
+            // Это новая точка отсчёта, а не отрицательный расход.
+            if ($prev !== null && $dt > 0
+                && $w[0] >= $prev[0] && $w[1] >= $prev[1] && $w[2] >= $prev[2]) {
+                $tons += Fuel::thrustTons($m,
+                    min($w[0] - $prev[0], $m['mainAccel'] * $span),
+                    min($w[1] - $prev[1], $m['liftAccel'] * $span),
+                    min($w[2] - $prev[2], $m['rcsAccel'] * $span));
+            }
+        }
+
+        $still = ['docked', 'landed', 'warp'];
+        if ($peer['qOk'] && $dt > 0 && $wasSys !== null && $wasSys === $peer['sys']
+            && !in_array($was['mode'], $still, true) && !in_array($peer['mode'], $still, true)) {
+            $seg = sqrt(($peer['x'] - $was['x']) ** 2 + ($peer['y'] - $was['y']) ** 2
+                + ($peer['z'] - $was['z']) ** 2);
+            if ($seg > $m['jumpGate'] * $dt) {
+                // Больше, чем привод проходит за это время, не спишется:
+                // отладочный телепорт через полсистемы прыжком не является.
+                $tons += Fuel::quantumTons($m, min($seg, $m['quantumSpeed'] * $span));
+            }
+        }
+        $peer['qOk'] = true;
+        if (isset($msg['n']) && is_numeric($msg['n'])) {
+            $peer['seq'] = (int) $msg['n'];
+        }
+        $peer['pend'] += $tons;
+
+        // В док или на грунт — сразу в базу: там заправка, и она читает
+        // бак из базы, а не из памяти хаба.
+        $parked = in_array($peer['mode'], ['docked', 'landed'], true)
+            && !in_array($was['mode'], ['docked', 'landed'], true);
+        if ($peer['pend'] >= self::FLUSH_T || $parked
+            || ($peer['pend'] > 0 && $now - $peer['flushAt'] >= self::FLUSH_EVERY)) {
+            $this->flushFuel($peer, $now);
+        }
+    }
+
+    /** Накопленный расход — в базу, и игре — бак по счёту сервера. */
+    private function flushFuel(array &$peer, float $now, bool $tell = true): void
+    {
+        $peer['flushAt'] = $now;
+        // База держит килограммы: дробную часть оставляем копиться.
+        $t = floor($peer['pend'] * 1000) / 1000;
+        if ($t <= 0 || $peer['ship'] === null) {
+            return;
+        }
+        $peer['pend'] -= $t;
+        $peer['fuel'] = Fuel::burn($peer['ship'], $t);
+        if ($tell) {
+            $this->sendFuel($peer);
+        }
+    }
+
+    /**
+     * Бак игре. Вместе с ним — номер последнего учтённого снимка: игра
+     * вычтет то, что потратила после него, и число на шкале не прыгнет
+     * назад на ту долю секунды, что снимок шёл до сервера и обратно.
+     */
+    private function sendFuel(array $peer): void
+    {
+        if ($peer['fm'] === null || $peer['fuel'] === null) {
+            return;
+        }
+        $this->send($peer['conn'], [
+            't' => 'fuel',
+            'fuel' => round(max(0.0, $peer['fuel'] - $peer['pend']), 3),
+            'cap' => $peer['fm']['cap'],
+            'n' => $peer['seq'],
+        ]);
     }
 
     /** Щит соседа на данный момент: он отрастает и между попаданиями. */

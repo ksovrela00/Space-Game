@@ -60,18 +60,24 @@ final class Seeder
         foreach ($specs['shipTypes'] as $t) {
             $spec = $t['spec'];
             $dim = $size[$t['code']] ?? [];
+            // Без массы расход топлива на сервере — ноль, то есть бак,
+            // который не пустеет. Молча это не заметить, поэтому отказ.
+            if (!(($dim['massT'] ?? 0) > 0)) {
+                throw new RuntimeException('в выгрузке нет массы корпуса «' . $t['code']
+                    . '»: выполните npm run api:setup (он выгружает каталог заново)');
+            }
             Db::run(
                 'INSERT INTO `ship_type`
                    (`code`,`name`,`title`,`hull_max`,
-                    `fuel_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)
+                    `fuel_t`,`mass_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
-                   `hull_max`=VALUES(`hull_max`), `fuel_t`=VALUES(`fuel_t`),
+                   `hull_max`=VALUES(`hull_max`), `fuel_t`=VALUES(`fuel_t`), `mass_t`=VALUES(`mass_t`),
                    `length_m`=VALUES(`length_m`), `width_m`=VALUES(`width_m`),
                    `height_m`=VALUES(`height_m`), `price`=VALUES(`price`), `spec`=VALUES(`spec`)',
                 [
                     $t['code'], $t['name'], $t['title'] ?? '',
-                    $spec['maxHull'], $spec['fuelMax'],
+                    $spec['maxHull'], $spec['fuelMax'], $dim['massT'],
                     $dim['lengthM'] ?? 0, $dim['widthM'] ?? 0, $dim['heightM'] ?? 0,
                     (int) ($t['price'] ?? 0),
                     // В `spec` едет лётная модель БЕЗ тех чисел, что легли
@@ -84,16 +90,18 @@ final class Seeder
 
         foreach (Specs::equipmentRows($specs) as $e) {
             Db::run(
-                'INSERT INTO `equipment_type` (`code`,`name`,`slot`,`spec`,`price`,`stock`)
-                 VALUES (?,?,?,?,?,?)
+                'INSERT INTO `equipment_type` (`code`,`name`,`slot`,`spec`,`price`,`stock`,`tech`)
+                 VALUES (?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `slot`=VALUES(`slot`),
-                   `spec`=VALUES(`spec`), `price`=VALUES(`price`), `stock`=VALUES(`stock`)',
+                   `spec`=VALUES(`spec`), `price`=VALUES(`price`), `stock`=VALUES(`stock`),
+                   `tech`=VALUES(`tech`)',
                 [
                     $e['code'], $e['name'], $e['slot'],
                     json_encode($e['spec'], JSON_UNESCAPED_UNICODE),
                     $e['price'],
                     // `stock` здесь значит «стоит на корабле с завода».
                     $e['stock'] ? 1 : 0,
+                    $e['tech'],
                 ]
             );
             $n['equipment_type']++;

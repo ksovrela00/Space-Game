@@ -18,6 +18,7 @@
 import { v3, normalize } from '../core/vec3.js';
 import { aimAngles, lookAlong } from '../core/basis.js';
 import { systemDir, systemDistance, warpSeconds } from './galaxy.js';
+import { warpTons, affords, fuelReserve } from './fuel.js';
 import { L } from '../core/lang.js';
 
 export const WARP = {
@@ -91,6 +92,21 @@ export function canWarp(ship, from, to) {
   if (!from || to.seed === from.seed) return { ok: false, reason: L('ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ') };
   if (ship.dockedAt) return { ok: false, reason: L('СНАЧАЛА ОТСТЫКОВКА') };
   if (ship.landedAt) return { ok: false, reason: L('СНАЧАЛА ВЗЛЁТ') };
+  // Топливо — по расстоянию между звёздами, так же, как спишет сервер
+  // (Fuel::arrive). Резерв не трогается: он — на подход к порту по ту
+  // сторону прыжка. Проверка стоит и на входе в тоннель (updateWarp): за
+  // четыре секунды центровки двигатели тоже тратят.
+  if (typeof ship.fuel === 'number') {
+    const need = warpTons(systemDistance(from, to));
+    if (!affords(ship, need)) {
+      const spare = Math.max(0, ship.fuel - fuelReserve());
+      return {
+        ok: false, fuel: true, need,
+        reason: L('МАЛО ТОПЛИВА: ВАРП ') + need.toFixed(1) + L(' Т, СВЕРХ РЕЗЕРВА ')
+          + spare.toFixed(1) + L(' Т'),
+      };
+    }
+  }
   return { ok: true };
 }
 

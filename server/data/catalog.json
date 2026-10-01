@@ -1,13 +1,14 @@
 {
  "version": 2,
- "generatedAt": "2026-09-30T13:05:09.235Z",
+ "generatedAt": "2026-09-30T15:42:16.486Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
    "code": "challenger",
    "lengthM": 65,
    "widthM": 67.1,
-   "heightM": 19.3
+   "heightM": 19.3,
+   "massT": 1682.2
   }
  ],
  "systems": [

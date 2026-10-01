@@ -295,6 +295,8 @@ const { net } = await import('../js/net/socket.js');
 const { setLang } = await import('../js/core/lang.js');
 const { Q } = await import('../js/core/quality.js');
 const { chaseRates } = await import('../js/game/chase.js');
+const F = await import('../js/game/fuel.js');
+const { systemDistance } = await import('../js/game/galaxy.js');
 
 // Навести нос на точку выхода привода. В игре это делает игрок ручкой;
 // здесь достаточно поставить базис — проверяется не пилотирование, а
@@ -907,6 +909,10 @@ await step('поток за бортом: еле виден обычным хо�
 });
 
 await step('квантовый привод (B) доводит до цели', () => {
+  // Бак полный: проверяется привод, а не то, сколько топлива оставили
+  // шаги выше.
+  game.ship.fuel = SHIP.fuelCap;
+  const fuel0 = game.ship.fuel;
   // Цель выставляем напрямую: нажатия обрабатываются только внутри кадра,
   // и цикл «жать Tab до нужного имени» без прогона кадров зависал.
   game.nav.index = game.nav.list.findIndex((x) => x.name === 'Lave V');
@@ -969,6 +975,13 @@ await step('квантовый привод (B) доводит до цели', (
     throw new Error(`не долетели: ${(d0 / 1e3).toFixed(0)} -> ${(d1 / 1e3).toFixed(0)} тыс. км`);
   }
   if (!(game.ship.speed < 0.001)) throw new Error('скорость на выходе ' + game.ship.speed);
+  // Ход стоит топлива — не меньше, чем по прямой от старта до цели.
+  const burnt = fuel0 - game.ship.fuel;
+  const least = F.quantumTons((d0 - d1) * 0.95);
+  if (!(burnt >= least)) {
+    throw new Error('квантовый ход почти не стоил топлива: ' + burnt.toFixed(3) + ' т при минимуме '
+      + least.toFixed(3));
+  }
 });
 
 
@@ -1616,6 +1629,71 @@ await step('отладочный оверлей (~) показывает сос�
   if (line.indexOf('сервер:') < 0) throw new Error('в строке связи нет состояния сервера: ' + line);
 });
 
+await step('топливо: расход в полёте, шкала в приборах, резерв, пустой бак, буксир', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  // Уходим в пустоту: тяготение тела добавило бы работу подъёмным, а
+  // здесь проверяется, что списано ровно то, что сделали сопла.
+  game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
+  game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
+  game.ship.speed = 0; game.ship.throttle = 0;
+  game.ship.fuel = SHIP.fuelCap;
+  frames(2);
+  const f0 = game.ship.fuel, w0 = { ...game.ship.work };
+  holdDown('ShiftLeft'); frames(60); release('ShiftLeft'); frames(30);
+  const dw = { main: game.ship.work.main - w0.main, lift: game.ship.work.lift - w0.lift,
+    rcs: game.ship.work.rcs - w0.rcs };
+  if (!(dw.main > 0.1)) throw new Error('маршевые не набрали скорости: ' + dw.main);
+  const want = F.thrustTons(dw.main, dw.lift, dw.rcs);
+  if (Math.abs((f0 - game.ship.fuel) - want) > 1e-9) {
+    throw new Error('списано ' + (f0 - game.ship.fuel) + ' т вместо ' + want);
+  }
+
+  // Шкала в приборах от третьего лица — тоннами.
+  const view = game.state.view;
+  if (view !== 'chase') { key('KeyV'); frames(1); }
+  texts = []; frames(2);
+  let shown = texts.map((t) => t.s); texts = null;
+  if (!shown.includes('ТОПЛИВО')) throw new Error('в приборах нет шкалы топлива');
+  if (!shown.includes(game.ship.fuel.toFixed(1) + ' т')) throw new Error('у шкалы нет тонн');
+
+  // Резерв: о нём говорят один раз, прыжок не начинается, и приборы
+  // называют выход — буксир.
+  game.state.messages.length = 0;
+  game.ship.fuel = SHIP.fuelReserve * 0.9;
+  frames(3);
+  if (!game.state.messages.some((m) => /РЕЗЕРВ/.test(m.text))) throw new Error('о резерве не сказано');
+  const said = game.state.messages.length;
+  frames(10);
+  if (game.state.messages.length !== said) throw new Error('о резерве твердят каждый кадр');
+  texts = []; frames(2);
+  shown = texts.map((t) => t.s); texts = null;
+  if (!shown.includes('U — АВАРИЙНЫЙ БУКСИР')) throw new Error('приборы не называют буксир');
+  game.nav.index = game.nav.list.findIndex((x) => x.name === 'Lave V');
+  aimAt(game.nav.list[game.nav.index]);
+  key('KeyB'); frames(3);
+  if (game.quantum.phase !== 'idle') throw new Error('прыжок начался из резерва');
+  if (!game.state.messages.some((m) => /МАЛО ТОПЛИВА/.test(m.text))) {
+    throw new Error('отказ прыжка не объяснён');
+  }
+
+  // Пусто: сопла молчат — тяга ручкой ничего не меняет.
+  game.ship.fuel = 0;
+  const v0 = game.ship.speed;
+  holdDown('ShiftLeft'); frames(30); release('ShiftLeft');
+  if (Math.abs(game.ship.speed - v0) > 1e-9) throw new Error('без топлива корабль разгоняется');
+  if (!game.state.messages.some((m) => /КОНЧИЛОСЬ/.test(m.text))) throw new Error('о пустом баке не сказано');
+
+  // Буксир: U — предупреждение, U ещё раз — в порт. Без сервера даром.
+  key('KeyU'); frames(2);
+  if (game.state.mode !== 'flight') throw new Error('буксир пришёл с первого нажатия');
+  key('KeyU'); frames(5);
+  if (game.state.mode !== 'docked') throw new Error('буксир не дотянул: режим ' + game.state.mode);
+  if (game.ship.fuel !== SHIP.fuelCap) throw new Error('в автономном порту бак не залит: ' + game.ship.fuel);
+  key('Space'); frames(5);
+  if (game.state.mode !== 'flight') throw new Error('после буксира не вылетели');
+  if (view !== game.state.view) { key('KeyV'); frames(1); }
+});
+
 await step('докинг-компьютер доводит до стыковки', () => {
   const st = game.world.home.station;
   // Ставим корабль в 15 км от порта и целимся в станцию
@@ -1627,6 +1705,43 @@ await step('докинг-компьютер доводит до стыковки
   key('KeyC');
   frames(60 * 130, 16.7);
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode + ', фаза ' + (game.ship.docking && game.ship.docking.phase) + ', причина: ' + game.crashReason);
+});
+
+await step('экран станции: разделы, клавиши 1–4, автономная заправка, английский', () => {
+  if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+  const html = () => nodes.panel.innerHTML;
+  for (const want of ['СТЫКОВКА', '1 ПОРТ', '2 РЫНОК', '3 ВЕРФЬ', '4 ЗАПРАВКА', 'ВЫЛЕТ']) {
+    if (html().indexOf(want) < 0) throw new Error('на экране порта нет «' + want + '»');
+  }
+  if (!nodes.panel.classList.contains('station')) throw new Error('панель без разметки станции');
+  if (game.ship.fuel !== SHIP.fuelCap) throw new Error('в автономном порту бак не залит');
+  key('Digit2'); frames(1);
+  if (!/НЕТ СВЯЗИ С СЕРВЕРОМ/.test(html())) throw new Error('рынок без сервера не сказал, что его нет');
+  key('Digit3'); frames(1);
+  if (!/Модули ставит верфь/.test(html())) throw new Error('верфь без сервера не объяснилась');
+  key('Digit4'); frames(1);
+  if (!/class="fuelbar/.test(html()) || !/заправляет даром/.test(html())) {
+    throw new Error('раздел заправки не нарисован');
+  }
+  // Английский: во всех четырёх разделах ни одной русской буквы.
+  const CYR = /[А-Яа-яЁё]/;
+  try {
+    setLang('en');
+    for (let i = 1; i <= 4; i++) {
+      key('Digit' + i); frames(1);
+      const text = html().replace(/<[^>]+>/g, ' ');
+      if (CYR.test(text)) {
+        throw new Error('в разделе ' + i + ' осталось русское: ' + (text.match(/[^ ]*[А-Яа-яЁё][^ ]*/) || [''])[0]);
+      }
+    }
+  } finally {
+    setLang('ru');
+  }
+  key('Digit1'); frames(1);
+  if (!/Планета/.test(html())) throw new Error('раздел порта не вернулся');
+  // Справка поверх порта — в своей рамке, а не в широкой станционной.
+  key('KeyH'); frames(2);
+  key('KeyH'); frames(2);
 });
 
 await step('в порту меню пилота не открывается', () => {
@@ -2167,7 +2282,9 @@ await step('варп-прыжок (J) в другую систему целик�
   game.ship.throttle = 0;
   frames(2);
 
+  game.ship.fuel = SHIP.fuelCap;
   const fromName = game.sys.name;
+  const fromSys = game.sys;
   const oldWorld = game.world;
   const oldBodies = game.world.bodies.concat(game.world.stations);
 
@@ -2212,6 +2329,13 @@ await step('варп-прыжок (J) в другую систему целик�
 
   if (game.sys.name === fromName) throw new Error('система не сменилась');
   if (game.sys.name !== toName) throw new Error('прилетели не туда: ' + game.sys.name);
+  // Прыжок стоит топлива по расстоянию между звёздами — и почти только
+  // его: на центровке двигатели почти не работали.
+  const warpCost = F.warpTons(systemDistance(fromSys, game.sys));
+  const warpBurnt = SHIP.fuelCap - game.ship.fuel;
+  if (!(warpBurnt >= warpCost - 1e-9 && warpBurnt < warpCost + 0.3)) {
+    throw new Error('варп стоил ' + warpBurnt.toFixed(2) + ' т, а по расстоянию — ' + warpCost.toFixed(2));
+  }
   if (game.world === oldWorld) throw new Error('мир тот же самый объект');
 
   // Ни одной ссылки на тела старой системы: это и утечка памяти, и

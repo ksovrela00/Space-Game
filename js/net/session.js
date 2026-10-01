@@ -37,6 +37,10 @@ export const session = {
   sending: false,
   lastSent: 0,        // отметка времени последней удачной отправки
   fails: 0,
+  // Кому отдать ответ на сохранение. В нём бак по счёту сервера и то,
+  // сколько он списал за варп, — игра гасит этим свой долг по прыжку
+  // (js/game/fuel.js, warpSettled).
+  onSaved: null,
 };
 
 export const isOnline = () => session.mode === 'online';
@@ -89,7 +93,8 @@ export async function flush() {
   const payload = session.dirty;
   session.sending = true;
   try {
-    await api.save(payload);
+    const r = await api.save(payload);
+    if (session.onSaved && r) session.onSaved(r);
     // Чистим ТОЛЬКО если за время отправки ничего нового не накопилось.
     if (session.dirty === payload) session.dirty = null;
     session.lastSent = Date.now();
@@ -153,6 +158,34 @@ export async function repair() {
   const r = await api.repair();
   await refresh();
   return r;
+}
+
+/**
+ * Действие в порту с ценой: заправка, сделка, верфь.
+ *
+ * Всё одинаково: без связи — отказ словами, а не молчание; после ответа
+ * состояние перечитывается целиком — деньги, трюм, модули и бак меняются
+ * разом, и собирать их по кусочкам из ответов значило бы однажды
+ * забыть один.
+ */
+async function act(fn) {
+  if (!isOnline()) throw Object.assign(new Error(L('нет связи с сервером')), { code: 'offline' });
+  const r = await fn();
+  await refresh();
+  return r;
+}
+
+export const refuel = (tons = null) => act(() => api.refuel(tons));
+export const buyGoods = (code, tons) => act(() => api.buy(code, tons));
+export const sellGoods = (code, tons) => act(() => api.sell(code, tons));
+export const buyModule = (code) => act(() => api.outfitBuy(code));
+export const sellModule = (code) => act(() => api.outfitSell(code));
+export const rescue = () => act(() => api.rescue());
+
+/** Прайс порта и верфь — чтения, состояние от них не меняется. */
+export async function readPort(what) {
+  if (!isOnline()) throw Object.assign(new Error(L('нет связи с сервером')), { code: 'offline' });
+  return what === 'outfit' ? api.outfit() : api.prices();
 }
 
 /** Перечитать состояние (после сделки, ремонта, подряда). */

@@ -73,6 +73,12 @@ if (Db::one("SELECT COUNT(*) FROM information_schema.tables
 if ((int) Db::one("SELECT COUNT(*) FROM `equipment_type` WHERE `slot`='gun'") === 0) {
     Seeder::all(Seeder::readCatalog(__DIR__ . '/../data/catalog.json'), true);
 }
+// И топливо: масса корпуса и модули бака завелись позже (схема 9).
+Schema::migrate();
+if ((float) Db::one("SELECT MAX(`mass_t`) FROM `ship_type`") <= 0
+    || Db::one("SELECT `id` FROM `equipment_type` WHERE `code`='tank_x'") === null) {
+    Seeder::all(Seeder::readCatalog(__DIR__ . '/../data/catalog.json'), true);
+}
 
 Db::run('DELETE FROM `player`');
 
@@ -483,6 +489,134 @@ $hub2->close($r2, $t);
 $after = $r1->last('roster')['list'] ?? [];
 ok(count($after) === 1 && ($after[0]['name'] ?? '') === 'АЛЬФА',
     'ушедший пропадает из списка даже у тех, кто был в другой системе');
+
+// --- топливо: замер расхода ------------------------------------------------------
+//
+// Расход двигателей хаб считает по счётчикам, которые шлёт игра, а
+// квантовый — по самим положениям. В базу он уходит пачками, и игра
+// получает бак по счёту сервера вместе с номером учтённого снимка.
+
+echo PHP_EOL . '== сокет: топливо ==' . PHP_EOL;
+
+$hub3 = new Hub();
+$t = 5000.0;
+$shipA = (int) Db::one('SELECT `id` FROM `ship` WHERE `owner_id`=?', [$a['player_id']]);
+$fuelA = static fn() => (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipA]);
+Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=?', [$shipA]);
+Players::ensureStock($shipA);
+Loadout::forget();
+Db::update('ship', ['fuel_t' => 10], '`id`=?', [$shipA]);
+$fm = Fuel::model($shipA);
+
+$f1 = new FakeConn('f1');
+$hub3->open($f1, $t);
+$hub3->message($f1, json_encode(['t' => 'hello', 'token' => $a['token']]), $t);
+$msg = $f1->last('fuel');
+ok($msg !== null && abs($msg['fuel'] - 10) < 1e-9 && abs($msg['cap'] - 12) < 1e-9,
+    'при входе игра узнаёт бак по счёту сервера: 10 из 12 т');
+
+$pos = static function (float $x, array $extra, float $at) use ($hub3, $f1): void {
+    $hub3->message($f1, json_encode($extra + ['t' => 'pos', 'sys' => 0, 'x' => $x, 'y' => 0, 'z' => 0,
+        'v' => 0, 'mode' => 'flight']), $at);
+};
+$w = static fn($m, $l, $r, $n) => ['wm' => $m, 'wl' => $l, 'wr' => $r, 'n' => $n];
+
+$t += 1;
+$pos(0, $w(0, 0, 0, 1), $t);
+ok(abs($fuelA() - 10) < 1e-9, 'первый снимок — только точка отсчёта');
+
+$t += 1;
+$pos(1, $w(1.0, 0, 0, 2), $t);
+$want = 10 - $fm['mass'] * 1.0 / $fm['exhaust'];
+ok(abs($fuelA() - $want) < 0.002 && ($f1->last('fuel')['n'] ?? 0) === 2
+    && abs($f1->last('fuel')['fuel'] - $fuelA()) < 0.002,
+    'разгон на 1 км/с списан: ' . round(10 - $fuelA(), 3) . ' т, игре ушёл бак после снимка 2');
+
+// Больше, чем двигатель может дать за секунду, не спишется, что бы ни
+// прислала игра: предел — это защита и от ошибки в ней, и от подделки.
+$was = $fuelA();
+$t += 1;
+$pos(2, $w(1001.0, 0, 0, 3), $t);
+$cap = $fm['mainAccel'] * (1 + Hub::METER_SLACK_S) * Hub::METER_SLACK;
+ok(abs(($was - $fuelA()) - $fm['mass'] * $cap / $fm['exhaust']) < 0.002,
+    'заявленные 1000 км/с срезаны пределом двигателя до ' . round($cap, 2) . ' км/с');
+
+// Подъёмные и маневровые — каждая группа по своей струе. Числа взяты
+// под их пределами: у подъёмных он — тяжесть газового гиганта.
+$was = $fuelA();
+$t += 1;
+$pos(3, $w(1001.0, 0.3, 0.5, 4), $t);
+$want = $fm['mass'] * (0.3 / $fm['liftExhaust'] + 0.5 / $fm['rcsExhaust']);
+ok(abs(($was - $fuelA()) - $want) < 0.002,
+    'подъёмные и маневровые списаны по своим струям: ' . round($want, 3) . ' т');
+
+// Счётчики пошли заново — это новая точка отсчёта, а не расход.
+$was = $fuelA();
+$t += 1;
+$pos(4, $w(0, 0, 0, 5), $t);
+$t += 1;
+$pos(5, $w(0, 0, 0, 6), $t);
+ok(abs($was - $fuelA()) < 1e-9, 'обнулённые счётчики ничего не списывают');
+
+// КВАНТОВЫЙ ХОД хаб меряет сам: двадцать пять снимков по 12 000 км за
+// 0.2 с — это 60 000 км/с, прыжок. Игра о нём не сообщает ничего.
+$was = $fuelA();
+$x = 5.0;
+for ($i = 1; $i <= 25; $i++) {
+    $t += 0.2;
+    $x += 12000;
+    $pos($x, $w(0, 0, 0, 6 + $i), $t);
+}
+$t += 0.2;
+$pos($x, $w(0, 0, 0, 40) + ['mode' => 'docked'], $t);
+$want = Fuel::quantumTons($fm, 25 * 12000);
+ok(abs(($was - $fuelA()) - $want) < 0.002,
+    'квантовый ход в 300 тыс. км измерен по положениям: ' . round($was - $fuelA(), 3) . ' т');
+ok(($f1->last('fuel')['n'] ?? 0) === 40, 'в доке расход ушёл в базу сразу, не дожидаясь срока');
+
+// Обычный полёт прыжком не считается, как и тоннель варпа, и смена системы.
+$was = $fuelA();
+for ($i = 1; $i <= 5; $i++) {
+    $t += 0.2;
+    $x += 0.2;
+    $pos($x, $w(0, 0, 0, 40 + $i), $t);
+}
+for ($i = 1; $i <= 5; $i++) {
+    $t += 0.2;
+    $x += 1e6;
+    $pos($x, $w(0, 0, 0, 50 + $i) + ['mode' => 'warp'], $t);
+}
+$t += 0.2;
+$pos(9e7, $w(0, 0, 0, 60) + ['sys' => 3], $t);
+$t += 3;
+$pos(9e7, $w(0, 0, 0, 61) + ['sys' => 3], $t);
+ok(abs($was - $fuelA()) < 1e-9, 'полёт на двигателях, тоннель и смена системы квантовым ходом не считаются');
+
+// Ушёл — накопленное не пропало.
+$was = $fuelA();
+$t += 0.5;
+$pos(9e7, $w(0.2, 0, 0, 62) + ['sys' => 3], $t);
+ok(abs($was - $fuelA()) < 1e-9, 'малый расход копится в памяти, не дёргая базу');
+$hub3->close($f1, $t);
+ok(abs(($was - $fuelA()) - $fm['mass'] * 0.2 / $fm['exhaust']) < 0.002,
+    'на выходе накопленное ушло в базу: ' . round($was - $fuelA(), 3) . ' т');
+
+// Верфь меняет модули запросом в ДРУГОМ процессе. Хаб обязан это увидеть
+// при очередном перечитывании, а не после перезапуска.
+$f2 = new FakeConn('f2');
+$hub3->open($f2, $t);
+$hub3->message($f2, json_encode(['t' => 'hello', 'token' => $a['token']]), $t);
+Loadout::flight($shipA);                                   // память хаба «прогрета»
+$tankId = (int) Db::one("SELECT `id` FROM `equipment_type` WHERE `code`='tank_x'");
+Db::insert('ship_equipment', ['ship_id' => $shipA, 'equipment_id' => $tankId]);
+$t += Hub::STAT_EVERY + 1;
+$hub3->message($f2, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 0]), $t);
+$hub3->tick($t);
+ok(abs(($f2->last('fuel')['cap'] ?? 0) - 20) < 1e-9,
+    'поставленный мимо хаба бак он видит при перечитывании: объём 20 т');
+Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=? AND `equipment_id`=?', [$shipA, $tankId]);
+Loadout::forget();
+$hub3->close($f2, $t);
 
 echo PHP_EOL . ($fails === 0
     ? "ХАБ: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ($checks)"

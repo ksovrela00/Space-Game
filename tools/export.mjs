@@ -20,6 +20,7 @@ import { makeSystem } from '../js/game/world.js';
 import { isLandable } from '../js/game/surface.js';
 import { cityRecord } from '../js/game/city.js';
 import { HULL_SIZE } from '../js/models/ships.js';
+import { SHIP_MASS } from '../js/game/downwash.js';
 
 const out = process.argv[2] || 'server/data/catalog.json';
 
@@ -102,16 +103,20 @@ const catalog = {
   version: 2,
   generatedAt: new Date().toISOString(),
   galaxySeed: g.seed,
-  // ГАБАРИТЫ корпуса, и только они: остальные числа корабля — урон,
-  // скорость, щит, цена — живут в бэкенде (server/data/specs.php) и
-  // выгружать их отсюда нечего. Габариты же диктует сам меш: сменили
-  // модель — поменялись сами, и вписать их руками значило бы завести
-  // второй ответ на вопрос, какой корабль длины.
+  // ГАБАРИТЫ и МАССА корпуса, и только они: остальные числа корабля —
+  // урон, скорость, щит, цена — живут в бэкенде (server/data/specs.php) и
+  // выгружать их отсюда нечего. Габариты и массу же диктует сам меш:
+  // сменили модель — поменялись сами, и вписать их руками значило бы
+  // завести второй ответ на вопрос, какой корабль длины и сколько он
+  // весит. Масса нужна серверу для расхода топлива (server/src/Fuel.php):
+  // тонны на км/с — это масса, делённая на скорость струи, и считать их
+  // обязаны обе стороны по одной и той же массе.
   shipTypes: [{
     code: 'challenger',
     lengthM: num(HULL_SIZE.z * 1000, 1),
     widthM: num(HULL_SIZE.x * 1000, 1),
     heightM: num(HULL_SIZE.y * 1000, 1),
+    massT: num(SHIP_MASS / 1000, 1),
   }],
   systems,
 };

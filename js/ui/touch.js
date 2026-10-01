@@ -62,8 +62,8 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   const bx = thr.x - TOUCH.thrW / 2 - pad - TOUCH.btnR;
   const by = h - B - pad - TOUCH.btnR;
   const step = TOUCH.btnR * 2 + 12;
-  const btn = (x, y, id, label, code, hold = false) =>
-    ({ x, y, r: TOUCH.btnR, id, label, code, hold });
+  const btn = (x, y, id, label, code, hold = false, only = null) =>
+    ({ x, y, r: TOUCH.btnR, id, label, code, hold, only });
   const buttons = [
     btn(bx, by, 'boost', 'ФОРС', 'Space', true),
     btn(bx - step, by, 'rollL', '↺', 'KeyQ', true),
@@ -82,6 +82,10 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   const liftX = stick.x + TOUCH.stickR + pad + TOUCH.btnR;
   buttons.push(btn(liftX, by, 'liftDn', '▼', 'KeyF', true));
   buttons.push(btn(liftX, by - step, 'liftUp', '▲', 'KeyR', true));
+  // Аварийный буксир (U) — только когда бак на резерве или пуст (t.tow):
+  // на телефоне клавиатуры нет, и без кнопки пустой бак был бы тупиком.
+  // Всё остальное время её нет вовсе — ни на экране, ни под пальцем.
+  buttons.push(btn(liftX, by - step * 2, 'tow', 'БУКС', 'KeyU', false, 'tow'));
   return { stick, thr, buttons, w, h };
 }
 
@@ -93,7 +97,11 @@ export const makeTouch = () => ({
   press: new Map(),             // id касания -> id кнопки
   taps: new Set(),              // кнопки, нажатые в этом кадре
   layout: null,
+  tow: false,                   // предложен ли буксир (ставит js/main.js)
 });
+
+/** Работает ли кнопка сейчас: у некоторых есть условие (b.only). */
+const offered = (t, b) => !b.only || !!t[b.only];
 
 const hitCircle = (p, c) => Math.hypot(p.x - c.x, p.y - c.y) <= c.r * 1.25;
 const hitRect = (p, r) =>
@@ -149,7 +157,7 @@ export function touchUpdate(t, points, layout) {
       continue;
     }
     let hit = null;
-    for (const b of layout.buttons) if (hitCircle(p, b)) { hit = b; break; }
+    for (const b of layout.buttons) if (offered(t, b) && hitCircle(p, b)) { hit = b; break; }
     if (hit) {
       t.press.set(p.id, hit.id);
       // Короткое нажатие засчитывается в момент КАСАНИЯ, а не отпускания:
@@ -190,6 +198,7 @@ export function touchApply(t, ship) {
   if (!t.layout) return t;
   const held = new Set([...t.press.values()]);
   for (const b of t.layout.buttons) {
+    if (!offered(t, b)) continue;
     if (b.hold) input.hold(b.code, held.has(b.id));
     else if (t.taps.has(b.id)) input.tap(b.code);
   }
@@ -255,6 +264,7 @@ export function touchDraw(ctx, t, layout, game) {
   ctx.font = '10px Consolas, monospace';
   const held = new Set([...t.press.values()]);
   for (const b of layout.buttons) {
+    if (!offered(t, b)) continue;
     const on = held.has(b.id);
     const lit = on || (b.id === 'gear' && ship && ship.gear.out)
       || (b.id === 'boost' && ship && ship.boosting);

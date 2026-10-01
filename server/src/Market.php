@@ -41,6 +41,9 @@ final class Market
                 ['world' => $station['parent_type']]
             ),
             'goods' => $rows,
+            // Цена тонны топлива — та, по которой заправит этот порт
+            // (Fuel::price): экран заправки показывает её до покупки.
+            'fuelPrice' => Fuel::price((int) $station['id']),
         ];
     }
 

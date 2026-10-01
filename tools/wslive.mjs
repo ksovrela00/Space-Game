@@ -159,6 +159,24 @@ try {
   b.send({ t: 'pos', sys: 0, x: 500, y: 0, z: 0, v: 0.2, mode: 'flight' });
   await until(() => sees(a, TEMP[1]), 'возвращения соседа');
 
+  // Топливо: расход двигателей сервер считает сам — по счётчикам работы
+  // сопел в снимке положения — и сам пишет в базу. Проверяется вся
+  // цепочка: сокет, хаб, база и то, что игра получает назад.
+  await until(() => a.last('fuel') !== null, 'бака от сервера при входе');
+  const fuel0 = a.last('fuel') ? a.last('fuel').fuel : 0;
+  a.send({ t: 'pos', sys: 0, x: 100, y: 0, z: 0, v: 0.4, mode: 'flight', wm: 0, wl: 0, wr: 0, n: 1 });
+  await wait(300);
+  a.send({ t: 'pos', sys: 0, x: 101, y: 0, z: 0, v: 1.5, mode: 'flight', wm: 1.5, wl: 0, wr: 0, n: 2 });
+  await until(() => (a.last('fuel') || {}).n === 2, 'бака после разгона');
+  const fuel1 = a.last('fuel') ? a.last('fuel').fuel : fuel0;
+  ok(fuel0 - fuel1 > 0.1 && fuel0 - fuel1 < 0.15,
+    'разгон на 1.5 км/с списан сервером: ' + (fuel0 - fuel1).toFixed(3) + ' т (масса · Δv / струя)');
+  const st = await (await fetch(API + '?r=player.state', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Auth-Token': t1 }, body: '{}',
+  })).json();
+  ok(st.ok && Math.abs(st.data.ship.fuelT - fuel1) < 0.002,
+    'и записан в базу: бак ' + (st.ok ? st.data.ship.fuelT : '—') + ' т');
+
   // Уход: сообщение приходит сразу.
   b.close();
   await until(() => a.last('leave') !== null, 'сообщения об уходе');

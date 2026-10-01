@@ -180,6 +180,10 @@ SERVER_SPECS.modules.find((m) => m.slot === 'engine').spec.flight.maxSpeed = SER
 
 const calls = [];
 let saved = null;
+// Цена топлива у поддельного порта и варп, который он «списал» при
+// следующем сохранении.
+const FUEL_PRICE = 80;
+let SERVER_WARP = 0;
 
 globalThis.fetch = async (url, opts = {}) => {
   const href = String(url);
@@ -225,7 +229,50 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (route === 'player.save') {
     saved = body.save;
-    return reply({ saved: true, fields: 12 });
+    // Сервер подтверждает варп, о котором узнал из сохранения: игра гасит
+    // этим свой долг по прыжку.
+    const warpFuel = SERVER_WARP;
+    SERVER_WARP = 0;
+    return reply({ saved: true, fields: 12, fuel: SERVER_STATE.ship.fuelT, warpFuel });
+  }
+  // --- порт: заправка, рынок, верфь. Поддельный сервер меняет СВОЁ
+  // состояние, и игра обязана узнать об этом из него, а не посчитать сама.
+  if (route === 'market.prices') {
+    return reply({ station: { name: 'ПОРТ', tech: 5 }, fuelPrice: FUEL_PRICE, goods: [
+      { code: 'water', name: 'ВОДА', category: 'сырьё', legal: true, base_price: 30, price: 30, stock: 100 },
+      { code: 'grain', name: 'ЗЕРНО', category: 'продовольствие', legal: true, base_price: 65, price: 60, stock: 50 },
+    ] });
+  }
+  if (route === 'station.refuel') {
+    const room = 12 - SERVER_STATE.ship.fuelT;
+    const tons = typeof body.tons === 'number' ? Math.min(body.tons, room) : room;
+    const cost = Math.ceil(tons * FUEL_PRICE);
+    SERVER_STATE.ship.fuelT += tons;
+    SERVER_STATE.player.balance -= cost;
+    return reply({ fuel: SERVER_STATE.ship.fuelT, cap: 12, tons, price: FUEL_PRICE, cost,
+      balance: SERVER_STATE.player.balance });
+  }
+  if (route === 'market.buy') {
+    const sum = Math.round(30 * body.tons);
+    SERVER_STATE.player.balance -= sum;
+    SERVER_STATE.cargo.push({ commodity_id: 1, code: body.code, name: 'ВОДА', category: 'сырьё',
+      legal: true, tons: body.tons, avg_price: 30 });
+    return reply({ code: body.code, tons: body.tons, price: 30, sum: -sum,
+      balance: SERVER_STATE.player.balance });
+  }
+  if (route === 'outfit.list') {
+    return reply({ open: true, resale: 0.6, balance: SERVER_STATE.player.balance, slots: [] });
+  }
+  if (route === 'outfit.buy') {
+    // Заменили двигатель: состояние пилота приходит с новым набором
+    // модулей, и корабль обязан пересобраться по нему.
+    SERVER_STATE.ship.equipment = SERVER_SPECS.modules
+      .filter((m) => m.installed && m.slot !== 'engine').concat([
+        SERVER_SPECS.modules.find((m) => m.code === body.code)])
+      .map((m) => ({ code: m.code, name: m.name, slot: m.slot, spec: m.spec, level: 1, health: 100 }));
+    SERVER_STATE.player.balance -= 23800;
+    return reply({ installed: body.code, removed: 'engine', cost: 23800,
+      balance: SERVER_STATE.player.balance, fuel: SERVER_STATE.ship.fuelT, refund: 0 });
   }
   if (route === 'station.dock') {
     return reply({ station: { systemId: 0, localId: body.station, name: 'ПОРТ', tech: 4,
@@ -343,6 +390,68 @@ if (CASE === 'server') {
   ok(saved !== null, 'сохранение ушло на сервер');
   ok(saved && typeof saved.system === 'number' && 'hull' in saved && 'player' in saved,
     'на сервер уходит тот же снимок, что и в браузер');
+
+  // --- ПОРТ ЧЕРЕЗ СЕРВЕР: заправка, рынок, верфь.
+  //
+  // Экран станции ничего не считает сам: он шлёт «что и сколько», а бак,
+  // деньги, трюм и модули берёт из состояния, которое вернул сервер.
+  {
+    const S = await import('../js/ui/station.js');
+    const { SHIP } = await import('../js/game/ship.js');
+    const settle = () => new Promise((r) => setTimeout(r, 10));
+    game.ship.dockedAt = game.world.stations[0];
+    game.state.mode = 'docked';
+    game.port = { tech: 5, fee: 68, repairRate: 18,
+      services: { market: true, board: true, repair: true, outfit: true } };
+    SERVER_STATE.ship.fuelT = 4;
+    game.ship.fuel = 4;
+    S.showDocked(game);
+    S.stationAct(game, 'tab', { tab: 'fuel' });
+    await settle();
+    ok(/ДО ПОЛНОГО · 8 т · 640/.test(nodes.panel.innerHTML),
+      'цену заправки экран взял у сервера: 8 т по ' + FUEL_PRICE + ' кр');
+    const before = game.player.balance;
+    S.stationAct(game, 'refuel', { tons: 'full' });
+    await settle();
+    ok(calls.some((u) => u.indexOf('station.refuel') >= 0) && game.ship.fuel === 12
+      && game.player.balance === before - 640,
+      'заправка прошла через сервер: бак ' + game.ship.fuel + ' т, счёт ' + game.player.balance);
+    ok(/ЗАПРАВКА: 8 т/.test(nodes.panel.innerHTML), 'и экран сказал, сколько налито и почём');
+
+    S.stationAct(game, 'tab', { tab: 'market' });
+    await settle();
+    S.stationAct(game, 'buy', { code: 'water', name: 'ВОДА', tons: '2' });
+    await settle();
+    const water = game.player.cargo.find((c) => c.code === 'water');
+    ok(water && water.tons === 2, 'купленная вода легла в трюм по ответу сервера');
+
+    S.stationAct(game, 'fit', { code: 'engine_x', name: 'ФОРСИРОВАННЫЙ ДВИГАТЕЛЬ' });
+    await settle();
+    const fx = SERVER_SPECS.modules.find((m) => m.code === 'engine_x').spec.flight;
+    ok(SHIP.maxSpeed === fx.maxSpeed && SHIP.exhaust === fx.exhaust,
+      'после замены двигателя корабль пересобран по новому: ' + SHIP.maxSpeed + ' км/с, струя '
+      + SHIP.exhaust + ' км/с');
+
+    // Бак по сокету: число сервера за вычетом того, что игра потратила
+    // после снимка, по которому он считал.
+    const { net } = await import('../js/net/socket.js');
+    game.ship.burned += 0.25;
+    net.events.push({ t: 'fuel', fuel: 7.5, cap: 12, n: 3, burnedAt: game.ship.burned - 0.25 });
+    frames(1);
+    ok(Math.abs(game.ship.fuel - 7.25) < 1e-9, 'бак из сокета сведён со своим расходом: ' + game.ship.fuel);
+
+    // Долг по варпу гасится ответом на сохранение. Отправку зовём прямо:
+    // очередь сохранений меряет настоящее время, а не время стенда.
+    const { flush } = await import('../js/net/session.js');
+    game.ship.warpDebt = 3.35;
+    SERVER_WARP = 3.35;
+    game.ship.dockedAt = null;
+    game.state.mode = 'flight';
+    frames(60 * 6);
+    await flush();
+    await settle();
+    ok(game.ship.warpDebt === 0, 'сохранение подтвердило варп — долг по прыжку погашен');
+  }
 
   // Закрытие вкладки: последнее сохранение маячком.
   for (const fn of winListeners.beforeunload || []) fn();

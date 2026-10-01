@@ -128,6 +128,69 @@ html, body {
 .langs { margin: 0 0 14px; }
 .btn.on { color: #d8f2ff; border-color: #4fb3e0; background: rgba(79,179,224,0.12); }
 
+/* Экран станции. Шире обычной панели: рынок — таблица в шесть столбцов,
+   и в 760 точках цена налезала бы на кнопки. */
+.panel.station { max-width: min(1000px, 96vw); width: 1000px; }
+.st-sum { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 12px; letter-spacing: 2px;
+  color: #5e9dc0; margin: 0 0 12px; }
+.st-sum b { color: #d8f2ff; font-weight: normal; }
+.st-sum b.low, .fuelbar.low .fill { color: #ffcc66; }
+.st-sum b.bad { color: #ff8866; }
+.st-tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid #1d5f86; margin-bottom: 12px; }
+.st-tabs .tab {
+  font-family: inherit; font-size: 13px; letter-spacing: 3px; cursor: pointer;
+  padding: 8px 16px; color: #7fb6d4; background: transparent;
+  border: 1px solid #1d5f86; border-bottom: none;
+}
+.st-tabs .tab.on { color: #061520; background: #4fb3e0; border-color: #4fb3e0; }
+.st-body { min-height: 180px; }
+.st-body h3 { font-size: 13px; letter-spacing: 3px; font-weight: normal; color: #ffcc66; margin: 14px 0 6px; }
+.st-note { font-size: 12px; letter-spacing: 1px; color: #8fc7e6; margin: 8px 0 0; }
+.st-note.good { color: #78e08f; }
+.st-note.warn { color: #ff8866; }
+.st-foot { border-top: 1px solid #1d5f86; margin-top: 12px; padding-top: 4px; }
+.rows .dim { color: #5e7f94; font-size: 11px; }
+.rows .dim.good { color: #78e08f; }
+.rows .dim.warn { color: #ff8866; }
+.rows td.num { text-align: right; white-space: nowrap; }
+.rows td.acts { white-space: nowrap; }
+.rows tr.head td { color: #5e9dc0; font-size: 11px; letter-spacing: 2px; border-bottom: 1px solid #12405e; }
+.rows.trade td, .rows.fit td { padding: 5px 10px 5px 0; border-bottom: 1px solid rgba(29,95,134,.35); }
+.rows tr.illegal td:first-child { color: #ff8866; }
+.rows tr.mine td:first-child { color: #d8f2ff; }
+.btn.small { padding: 5px 10px; font-size: 12px; letter-spacing: 1px; margin: 2px 4px 2px 0; }
+.btn:disabled { opacity: .35; cursor: default; }
+.btn:disabled:hover { background: #4fb3e0; }
+.btn.ghost:disabled:hover { background: transparent; color: #7fb6d4; border-color: #1d5f86; }
+.fuelbar { position: relative; height: 14px; border: 1px solid #1d5f86; margin: 4px 0 6px; }
+.fuelbar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: #4fb3e0; }
+.fuelbar.low .fill { background: #ffcc66; }
+.fuelbar.bad .fill { background: #ff8866; }
+/* Черта резерва: ниже неё прыжков нет, только двигатели до порта. */
+.fuelbar .mark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: #ff8866; }
+/* Подписи столбцов внутри ячеек — только на узком экране, где шапки нет. */
+.rows .lbl { display: none; }
+
+/* Узкий экран (телефон стоя): шесть столбцов рынка в 360 точек не
+   влезают, и кнопки уезжали за край. Строка товара становится двумя:
+   товар, цена, склад и трюм — сверху, купить и продать — снизу. Шапки
+   нет, поэтому подписи переезжают в ячейки. Верфь — так же: название и
+   число сверху, кнопка снизу. */
+@media (max-width: 640px) {
+  .panel.station { padding: 14px 12px; }
+  .rows.trade, .rows.trade tbody, .rows.fit, .rows.fit tbody { display: block; }
+  .rows.trade tr { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; column-gap: 6px;
+    align-items: end; padding: 6px 0; border-bottom: 1px solid rgba(29,95,134,.35); }
+  .rows.trade tr.head { display: none; }
+  .rows.trade td, .rows.fit td { border-bottom: none; padding: 1px 0; }
+  .rows.trade td.acts { grid-column: span 2; }
+  .rows .lbl { display: block; color: #5e7f94; font-size: 10px; letter-spacing: 1px; }
+  .rows.fit tr { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; padding: 5px 0;
+    border-bottom: 1px solid rgba(29,95,134,.35); }
+  .rows.fit td.acts { grid-column: 1 / -1; }
+  .rows.fit td.grp { grid-column: 1 / -1; }
+}
+
 /* Мелкий экран: телефон в горизонте — это 393 точки высоты, и стартовый
    экран с полным списком клавиш в них не помещается. На сенсорном
    управлении этот список к тому же не нужен: там всё на кнопках. */
@@ -142,6 +205,8 @@ html, body {
 @media (pointer: coarse) {
   /* Пальцем в мелкую кнопку не попасть: минимальная цель — 44 точки. */
   .btn { padding: 12px 22px; min-height: 44px; }
+  .btn.small { padding: 8px 12px; min-height: 40px; }
+  .st-tabs .tab { padding: 12px 14px; }
   #screen, #hud { cursor: default; }
   .keys { display: none; }
 }

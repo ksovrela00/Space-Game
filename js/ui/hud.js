@@ -10,6 +10,7 @@ import { gearLabel, landedInfo, LAND } from '../game/landing.js';
 import { SLOT } from '../models/stations.js';
 import { targetLabel, targetKind } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
+import { fuelCap, fuelLevel } from '../game/fuel.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK } from './theme.js';
 import { Q } from '../core/quality.js';
@@ -696,6 +697,14 @@ function drawShipColumn(ctx, px, py, game, approach) {
     note: Math.round(Math.abs(ship.throttle) * 100) + '%' });
   rows.push({ kind: 'gauge', label: L('ФОРСАЖ'), frac: ship.boost,
     color: ship.boosting ? AMBER : (ship.boostLock ? RED : CY) });
+  // Бак — тоннами, а не процентами: прыжок стоит тонн (0.2 т на миллион
+  // км, 0.5 на световой год), и процент от двенадцати из головы в них не
+  // переводится. Цвет — по порогам js/game/fuel.js: янтарь — меньше
+  // четверти, красный — резерв, где прыжков уже нет.
+  const fuel = fuelLevel(ship);
+  rows.push({ kind: 'gauge', label: L('ТОПЛИВО'), frac: ship.fuel / fuelCap(),
+    color: fuel === 'ok' ? CY : (fuel === 'low' ? AMBER : RED),
+    note: ship.fuel.toFixed(1) + L(' т') });
   rows.push({ kind: 'gauge', label: L('КОРПУС'), frac: ship.hull / SHIP.maxHull,
     color: ship.hull > 40 ? GREEN : RED });
   if (SHIP.maxShield > 0) {
@@ -708,6 +717,11 @@ function drawShipColumn(ctx, px, py, game, approach) {
     rows.push({ kind: 'note', text: L('ГАСИТЕЛИ ВЫКЛ'), color: AMBER });
   }
   if (ship.lights) rows.push({ kind: 'note', text: L('ФАРЫ'), color: '#ffe9a8' });
+  // В резерве прыжков нет, а до порта может быть миллион километров: о
+  // выходе из тупика надо сказать тут же, а не в справке.
+  if (fuel === 'reserve' || fuel === 'dry') {
+    rows.push({ kind: 'note', text: L('U — АВАРИЙНЫЙ БУКСИР'), color: RED });
+  }
   if (ship.gear.t > 0.005 || ship.gear.out) {
     rows.push({ kind: 'note', text: gearLabel(ship),
       color: ship.gear.out && ship.gear.t >= 0.995 ? GREEN : AMBER });
