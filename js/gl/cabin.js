@@ -833,8 +833,15 @@ export class CabinView {
       const pk = packed(m, EYE);
       rooms[r.id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
     }
+    const frames = {};
+    for (const [id, m] of Object.entries(interior.doorFrames || {})) {
+      if (!m.tris) continue;
+      const pk = packed(m, EYE);
+      frames[id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
+    }
     this.inter = {
       rooms,
+      frames,
       door: uploadInterior(gl, packed(interior.doorMesh)),
       crate: uploadInterior(gl, packed(interior.crateMesh)),
     };
@@ -844,7 +851,8 @@ export class CabinView {
   disposeInterior() {
     if (!this.inter) return;
     const gl = this.gl;
-    const parts = [...Object.values(this.inter.rooms).map((r) => r.part), this.inter.door, this.inter.crate];
+    const parts = [...Object.values(this.inter.rooms).map((r) => r.part),
+      ...Object.values(this.inter.frames).map((r) => r.part), this.inter.door, this.inter.crate];
     for (const p of parts) { gl.deleteBuffer(p.buf); gl.deleteVertexArray(p.vao); }
     this.inter = null;
     this.interOf = null;
@@ -1149,6 +1157,16 @@ export class CabinView {
       gl.bindVertexArray(r.part.vao);
       gl.drawArrays(gl.TRIANGLES, 0, r.part.count);
       this.draws++; this.interDraws++; this.interTris += r.part.count / 3;
+    }
+    // Рамы дверей со стороны без рамы: рама стоит на стене комнаты a, и
+    // когда та не видна (дверь закрыта), из комнаты b её рисуют отдельно —
+    // иначе вокруг створки светится щель в толщину перегородки.
+    for (const d of I.doors) {
+      const f = R.frames[d.id];
+      if (!f || vis.includes(d.rooms[0]) || !vis.includes(d.rooms[1]) || !boxInView(this.pv, f.lo, f.hi)) continue;
+      gl.bindVertexArray(f.part.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, f.part.count);
+      this.draws++; this.interDraws++; this.interTris += f.part.count / 3;
     }
     // Двери: створка едет вдоль стены на свою ширину.
     for (const d of I.doors) {

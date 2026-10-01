@@ -411,6 +411,33 @@ if (CASE === 'onfoot' || CASE === 'outside' || CASE === 'rider') {
   if (CASE === 'rider') {
     ok(saved && saved.ship === null && saved.me.aboard === 77 && saved.system === RIDE_SYS,
       'свой корабль из другой системы сервер не переписывает: ship = null, пилот на борту #77');
+
+    // Хозяин вышел из игры. Пока сервер его ждёт (Hub::GRACE), корабль
+    // стоит под ногами, и пассажиру об этом говорят — по составу сети:
+    // хозяина в нём больше нет.
+    const { net } = await import('../js/net/socket.js');
+    const said = (part) => game.state.messages.some((m) => m.text.indexOf(part) >= 0);
+    const wasState = net.state;
+    net.state = 'live';
+    net.roster = [{ id: 1, name: 'ПИЛОТ', sys: RIDE_SYS }];
+    frames(3);
+    ok(said('ЖДЁМ ЕГО') && w.on && w.vessel && w.vessel.id === 77,
+      'хозяин вышел из игры — пассажир всё ещё на его палубе, и ему сказали, что его ждут');
+    net.state = wasState;
+    net.roster = [];
+    // Не дождались: сервер посадил пассажира в кресло своего корабля
+    // (Hub::strand) — игра забирает место у него.
+    SERVER_STATE.me = { systemId: 0, aboard: 1, seated: true, walk: null, out: null };
+    SERVER_STATE.aboard = null;
+    net.events.push({ t: 'home', ship: 77, by: 5, home: 1 });
+    frames(2);
+    await new Promise((r) => setTimeout(r, 30));
+    frames(5);
+    ok(!w.on && game.sys.id === 0 && !game.ship.away && game.ship.landedAt
+      && game.ship.landedAt.id === HOME_LAND.id && !game.peers.some((p) => p.id === 77),
+      'не дождались — пассажир в кресле своего корабля на ' + HOME_LAND.name + ' (система '
+        + game.sys.id + '), чужого корабля в мире нет');
+    ok(said('ВЫ НА СВОЁМ КОРАБЛЕ'), 'и ему сказали, почему');
   } else {
     ok(saved && saved.ship && saved.ship.landed && saved.ship.landed.id === HOME_LAND.id
       && saved.ship.hatches.includes('nL'),

@@ -381,6 +381,8 @@ export const EN = {
   'НА БОРТУ: КОРАБЛЬ ': 'ABOARD: SHIP OF ',
   'ПИЛОТА': 'A PILOT',
   'КОРАБЛЬ, НА КОТОРОМ ВЫ ЕХАЛИ, УНИЧТОЖЕН': 'THE SHIP YOU WERE RIDING WAS DESTROYED',
+  'ХОЗЯИН КОРАБЛЯ ВЫШЕЛ ИЗ ИГРЫ · ЖДЁМ ЕГО': "THE SHIP'S OWNER LEFT THE GAME · WAITING",
+  'ХОЗЯИН КОРАБЛЯ ВЫШЕЛ ИЗ ИГРЫ · ВЫ НА СВОЁМ КОРАБЛЕ': "THE SHIP'S OWNER LEFT THE GAME · BACK ON YOUR OWN SHIP",
   'ВАРП · КОРАБЛЬ УХОДИТ В ПРЫЖОК': 'WARP · THE SHIP IS JUMPING',
   '«ЛЮК»': '«HATCH»',
   ' — ЗАКРЫТЬ ЛЮК · ЗА БОРТОМ НЕ НА ЧТО ВСТАТЬ': ' — CLOSE HATCH · NOTHING TO STAND ON OUTSIDE',

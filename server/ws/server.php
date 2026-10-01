@@ -101,6 +101,8 @@ try {
 }
 
 $hub = new Hub($log);
+// Кто был в игре у прошлого процесса — ждём, как ушедших (Hub::boot).
+$hub->boot(microtime(true));
 $loop = React\EventLoop\Loop::get();
 
 // Тик рассылки. Он же чистит тех, кто молчит и не представился.

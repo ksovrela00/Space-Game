@@ -3557,6 +3557,35 @@ console.log('\n== мок GL: путь отрисовки ==');
     scene.render(game);
     const empty = scene.cabin.interDraws;
     ok(with10 - empty === 10, `10 т в трюме — 10 ящиков в кадре (${with10} вызовов против ${empty} в пустом)`);
+    // Дверь в кают-компанию из машинного, закрытая. Рама стоит на стене
+    // кают-компании (комнаты a), а та за закрытой дверью не рисуется: раму с
+    // этой стороны рисуют отдельно — иначе вокруг створки светилась щель в
+    // толщину перегородки. Открыта дверь — рама приходит с кают-компанией.
+    {
+      const gl = scene.cabin.gl;
+      const fr = scene.cabin.inter && scene.cabin.inter.frames.engine;
+      let bound = null, framed = 0;
+      const bind0 = gl.bindVertexArray, draw0 = gl.drawArrays;
+      gl.bindVertexArray = (v) => { bound = v; return bind0.call(gl, v); };
+      gl.drawArrays = (...a) => { if (fr && bound === fr.part.vao) framed++; return draw0.apply(gl, a); };
+      const d = game.interior.doors.find((x) => x.id === 'engine');
+      w.pos = [0, -4.94, -27.7];
+      w.room = game.interior.roomById.engine;
+      game.walkEye = Wk.walkerEye(w, game.interior);
+      look(false);
+      d.open = 0;
+      scene.render(game);
+      const shut = framed;
+      framed = 0;
+      d.open = 1;
+      scene.render(game);
+      const opened = framed;
+      d.open = 0;
+      gl.bindVertexArray = bind0;
+      gl.drawArrays = draw0;
+      ok(!!fr && shut === 1 && opened === 0,
+        `дверь из машинного закрыта — её рама нарисована (${shut} раз), открыта — рама приходит с кают-компанией (${opened})`);
+    }
     ok(state.nan === nan0, 'в помещениях ни одного NaN');
 
     // Шлюз снаружи (js/game/airlock.js): люк открыт, трап выдвинут — вид

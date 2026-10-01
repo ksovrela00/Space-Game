@@ -625,7 +625,7 @@ $hub3->close($f2, $t);
 //
 // Соединение — игрок. Корабль он ведёт, только если тот его и здесь;
 // сам он может быть где угодно — и это видно соседям отдельным списком.
-// Корабль без хозяина в игре не пропадает: он спит в базе и виден.
+// В мире только те, кто в игре: корабль ушедшего не виден никому.
 
 echo PHP_EOL . '== сокет: пилот и корабль ==' . PHP_EOL;
 
@@ -643,6 +643,7 @@ Db::update('ship', ['system_id' => 0, 'docked_body' => null, 'landed_body' => $L
 Db::update('ship', ['system_id' => 0, 'docked_body' => null, 'landed_body' => $L, 'landed_pose' => $pose(0.09),
     'gear_out' => 1, 'hatches' => null], '`id`=?', [$shipB]);
 Db::update('player', ['system_id' => 0], '`id` IN (?, ?)', [$a['player_id'], $b['player_id']]);
+Db::run('UPDATE `player` SET `online`=0');
 
 $cb4 = new FakeConn('p1');
 $hub4->open($cb4, $t);
@@ -650,12 +651,10 @@ $hub4->message($cb4, json_encode(['t' => 'hello', 'token' => $b['token']]), $t);
 $t += 1;
 $hub4->tick($t);
 $ships = $cb4->last('peers')['list'] ?? [];
-$sleepA = array_values(array_filter($ships, static fn($s) => $s['id'] === $shipA))[0] ?? null;
-ok($sleepA !== null && ($sleepA['dorm'] ?? 0) === 1 && $sleepA['b'] === $L && $sleepA['h'] === ['sR']
-    && $sleepA['g'] === 1 && abs(hypot($sleepA['lx'], $sleepA['ly']) - ($R + 0.006)) < 1e-6,
-    'корабль ушедшей Альфы виден спящим: на своей стоянке, в осях тела, с открытым люком');
+ok(!in_array($shipA, array_column($ships, 'id'), true),
+    'корабля Альфы, которой нет в игре, не видно: он стоит в базе, но в мире только те, кто в игре');
 ok(!in_array($shipB, array_column($ships, 'id'), true),
-    'свой корабль, которым пилот командует, ему самому спящим не показывается: его ведёт игра');
+    'свой корабль, которым пилот командует, ему самому из базы не показывается: его ведёт игра');
 
 // Бета ведёт свой корабль и сама выходит на грунт, к трапу Альфы.
 $me = ['st' => 'out', 'b' => $L, 'lx' => 0.01, 'ly' => $R, 'lz' => 0.004, 'lfx' => 1, 'lfy' => 0, 'lfz' => 0,
@@ -664,6 +663,13 @@ $posB = ['t' => 'pos', 'sys' => 0, 'sid' => $shipB, 'x' => 5, 'y' => 0, 'z' => 0
     'b' => $L, 'lx' => 0.09, 'ly' => $R + 0.006, 'lz' => 0, 'g' => 1, 'h' => ['nL', '../etc'], 'me' => $me];
 $t += 1;
 $hub4->message($cb4, json_encode($posB), $t);
+
+// Люк корабля Альфы, пока её нет, не открыть и у самого трапа: стучаться
+// не к кому.
+$t += 1;
+$hub4->message($cb4, json_encode(['t' => 'hatch', 'ship' => $shipA, 'id' => 'nL', 'open' => true]), $t);
+ok(Players::hatchesOf(Players::shipRow($shipA)) === ['sR'],
+    'люк корабля той, кого нет в игре, не открывается и у трапа');
 
 // Альфа возвращается: видит Бету — и её корабль, и её саму.
 $ca4 = new FakeConn('p2');
@@ -686,15 +692,16 @@ $hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 0, 'sid' => $shipB, 'x'
     'me' => ['st' => 'walk', 's' => $shipA, 'x' => 0, 'y' => -9, 'z' => 3]]), $t);
 $hub4->tick($t);
 $still = array_values(array_filter($cb4->last('peers')['list'] ?? [], static fn($s) => $s['id'] === $shipA))[0] ?? null;
-ok($still !== null && ($still['dorm'] ?? 0) === 1,
-    'снимок за чужой корабль не делает игрока его водителем: корабль Альфы по-прежнему спящий у Беты в списке');
+ok($still !== null && ($still['dorm'] ?? 0) === 1 && $still['by'] === $a['player_id'] && $still['b'] === $L
+    && $still['h'] === ['sR'] && $still['g'] === 1 && abs(hypot($still['lx'], $still['ly']) - ($R + 0.006)) < 1e-6,
+    'снимок за чужой корабль не делает Альфу водителем: она в игре, а её корабль виден без водителя, по базе — на стоянке, в осях тела, с открытым люком');
 
-// Люк спящего корабля просят стоя у трапа — и он открывается в базе.
+// Люк корабля без водителя просят стоя у трапа — и он открывается в базе.
 $t += 1;
 $hub4->message($cb4, json_encode(['t' => 'hatch', 'ship' => $shipA, 'id' => 'nL', 'open' => true]), $t);
 $hatches = Players::hatchesOf(Players::shipRow($shipA));
 ok(in_array('nL', $hatches, true) && in_array('sR', $hatches, true),
-    'стоя у трапа спящего корабля, люк попросили — открылся: ' . json_encode($hatches));
+    'стоя у трапа корабля без водителя (хозяйка в игре), люк попросили — открылся: в базе: ' . json_encode($hatches));
 // Издалека — нет.
 $far = $posB;
 $far['me']['lx'] = 40;
@@ -752,6 +759,110 @@ ok($there !== null && $there['sys'] === 3 && $there['pilot'] === $a['player_id']
 $t += 1;
 $hub4->message($ca4, json_encode(['t' => 'impact', 'fatal' => true]), $t);
 ok(($cb4->last('boom')['id'] ?? 0) === $shipA, 'корабль погиб — пассажир узнаёт об этом сразу (boom)');
+
+// --- ушла хозяйка ------------------------------------------------------------
+//
+// Ушёл хозяин — его корабль пропал у всех сразу. Пассажиров хаб ждёт
+// GRACE (обновил страницу, моргнула сеть) и, не дождавшись, возвращает в
+// кресла их собственных кораблей.
+
+echo PHP_EOL . '== сокет: ушла хозяйка ==' . PHP_EOL;
+
+// Бета стоит на палубе Альфы — и по базе тоже (её сохранение).
+Db::update('player', ['aboard_ship' => $shipA, 'seated' => 0], '`id`=?', [$b['player_id']]);
+
+$t += 1;
+$hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 0, 'sid' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0, 'mode' => 'docked',
+    'me' => ['st' => 'seat', 's' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0]]), $t);
+$hub4->message($cb4, json_encode(['t' => 'pos', 'sys' => 0,
+    'me' => ['st' => 'walk', 's' => $shipA, 'x' => 1, 'y' => -9, 'z' => 4]]), $t);
+$hub4->message($cc4, json_encode(['t' => 'pos', 'sys' => 0,
+    'me' => ['st' => 'out', 'b' => $L, 'lx' => 1, 'ly' => $R, 'lz' => 0]]), $t);
+$t += 1;
+$hub4->tick($t);
+$sawA = in_array($shipA, array_column($cc4->last('peers')['list'] ?? [], 'id'), true);
+$t += 1;
+$hub4->close($ca4, $t);
+$t += Hub::TICK;
+$hub4->tick($t);
+$snapC = $cc4->last('peers');
+ok($sawA && !in_array($shipA, array_column($snapC['list'] ?? [], 'id'), true)
+    && !in_array($a['player_id'], array_column($snapC['people'] ?? [], 'id'), true) && !$cb4->has('home'),
+    'Альфа закрыла игру — ни её корабля, ни её самой больше не видно; пассажира пока не трогают');
+
+// Вернулась через десять секунд — обновила страницу.
+$t += 10;
+$ca5 = new FakeConn('p4');
+$hub4->open($ca5, $t);
+$hub4->message($ca5, json_encode(['t' => 'hello', 'token' => $a['token']]), $t);
+$t += Hub::GRACE;
+$hub4->tick($t);
+ok(!$cb4->has('home') && (int) Players::byId($b['player_id'])['aboard_ship'] === $shipA,
+    'вернулась через 10 с (обновила страницу) — пассажир по-прежнему на её борту');
+
+// Вторая вкладка выбивает первую — это тоже не уход.
+$ca6 = new FakeConn('p5');
+$hub4->open($ca6, $t);
+$hub4->message($ca6, json_encode(['t' => 'hello', 'token' => $a['token']]), $t);
+$hub4->close($ca5, $t);                         // так Ratchet закрывает выбитое
+$t += Hub::GRACE + 1;
+$hub4->tick($t);
+ok($ca5->closed && !$cb4->has('home'), 'вторая вкладка выбила первую — это не уход: пассажира не трогают');
+
+// Ушла насовсем. Через GRACE пассажиры — у себя: и тот, кто в игре (ему
+// об этом говорят), и тот, кого нет, но кто по базе на её борту.
+Db::update('player', ['aboard_ship' => $shipA, 'seated' => 0, 'out_body' => null], '`id`=?', [$c['player_id']]);
+$hub4->close($cc4, $t);
+$hub4->close($ca6, $t);
+$t += Hub::GRACE - 1;
+$hub4->tick($t);
+$early = $cb4->has('home');
+$t += 2;
+$hub4->tick($t);
+$home = $cb4->last('home');
+$pb = Players::byId($b['player_id']);
+$pc = Players::byId($c['player_id']);
+$shipC = (int) Players::ship($c['player_id'])['id'];
+ok(!$early && $home !== null && $home['ship'] === $shipA && $home['home'] === $shipB
+    && (int) $pb['aboard_ship'] === $shipB && (int) $pb['seated'] === 1
+    && (int) $pc['aboard_ship'] === $shipC && (int) $pc['seated'] === 1,
+    'не вернулась за ' . Hub::GRACE . ' с — пассажиры в креслах своих кораблей (тому, кто в игре, — home)');
+ok((int) Players::byId($a['player_id'])['online'] === 0 && (int) $pb['online'] === 1,
+    'по базе Альфа больше не в игре, Бета — в игре');
+
+// Перезапуск сервера: кто был в игре у прошлого процесса, того ждут
+// столько же — и, не дождавшись, возвращают пассажиров.
+$t += 100;
+Db::update('player', ['online' => 1], '`id`=?', [$a['player_id']]);
+Db::update('player', ['aboard_ship' => $shipA, 'seated' => 0], '`id`=?', [$b['player_id']]);
+$hub5 = new Hub();
+$hub5->boot($t);
+$cb5 = new FakeConn('p6');
+$hub5->open($cb5, $t);
+$hub5->message($cb5, json_encode(['t' => 'hello', 'token' => $b['token']]), $t);
+$hub5->message($cb5, json_encode(['t' => 'pos', 'sys' => 0,
+    'me' => ['st' => 'walk', 's' => $shipA, 'x' => 0, 'y' => -9, 'z' => 3]]), $t);
+$t += 5;
+$hub5->tick($t);
+$soon = $cb5->has('home');
+$t += Hub::GRACE;
+$hub5->tick($t);
+ok(!$soon && ($cb5->last('home')['ship'] ?? 0) === $shipA
+    && (int) Players::byId($b['player_id'])['aboard_ship'] === $shipB,
+    'сервер перезапущен: хозяйку ждали GRACE, не дождались — пассажир у себя');
+
+// Хаб не знает хозяйку вовсе (база говорит «в игре», а соединения нет):
+// вошедшему на её борт — тот же срок.
+$t += 100;
+Db::update('player', ['aboard_ship' => $shipA, 'seated' => 0], '`id`=?', [$b['player_id']]);
+$hub6 = new Hub();
+$cb6 = new FakeConn('p7');
+$hub6->open($cb6, $t);
+$hub6->message($cb6, json_encode(['t' => 'hello', 'token' => $b['token']]), $t);
+$t += Hub::GRACE + 1;
+$hub6->tick($t);
+ok(($cb6->last('home')['ship'] ?? 0) === $shipA,
+    'вошёл на борт той, кого нет в хабе, — через GRACE он у себя, даже не прислав снимка');
 
 echo PHP_EOL . ($fails === 0
     ? "ХАБ: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ($checks)"

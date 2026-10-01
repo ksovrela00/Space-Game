@@ -1283,6 +1283,12 @@ $r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false]],
 ok(($r['meDenied'] ?? '') === 'too_far' && $r['me']['out'] !== null,
     'на чужой борт за 40 км не попасть: сервер оставил пилота на грунте');
 Api::call('player.save', ['me' => ['out' => $outAt(0.07)]], $ta);
+// Соседа нет в игре — его корабля нет в мире, и зайти некуда.
+$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
+ok(($r['meDenied'] ?? '') === 'owner_away' && $r['me']['out'] !== null,
+    'к соседу, которого нет в игре, и у трапа на борт не попасть');
+// Сосед в игре — так его отмечает хаб (Hub::hello).
+Db::update('player', ['online' => 1], '`id`=?', [$rb['player_id']]);
 $r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
 $st = Api::call('player.state', [], $ta);
 ok(!isset($r['meDenied']) && $st['me']['aboard'] === $shipB && $st['me']['seated'] === false
@@ -1328,6 +1334,17 @@ $rowB = Players::shipRow($shipB);
 ok($rowB['docked_body'] !== null && (int) $pb['aboard_ship'] === $shipB && (int) $pb['seated'] === 1
     && (int) $pa['aboard_ship'] === $shipB && (int) $pa['seated'] === 0,
     'после гибели корабль в порту, хозяин в кресле, пассажир на борту');
+
+// Хозяин вышел из игры. Опоздавшее сохранение пассажира «я на его
+// палубе» уже не пишется, а вход в игру возвращает его к себе.
+Db::update('player', ['online' => 0], '`id`=?', [$rb['player_id']]);
+$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false,
+    'walk' => ['pos' => [0, 0, 6], 'yaw' => 0, 'pitch' => 0]]], $ta);
+ok(($r['meDenied'] ?? '') === 'owner_away', 'хозяина нет в игре — на его палубе пассажира больше не пишут');
+$st = Api::call('player.state', [], $ta);
+ok($st['me']['aboard'] === $shipA1 && $st['me']['seated'] === true && $st['me']['systemId'] === 0
+    && $st['aboard'] === null,
+    'хозяин ушёл — пассажир входит в игру в кресле своего корабля, в его системе');
 
 // Второй свой корабль: командование — только из его кресла.
 $typeId = (int) Db::one('SELECT `type_id` FROM `ship` WHERE `id`=?', [$shipA1]);

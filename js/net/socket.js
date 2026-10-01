@@ -39,7 +39,7 @@ export const net = {
   // 'off' — не подключались; 'connecting'; 'live'; 'down' — оборвалось.
   state: 'off',
   // Корабли своей системы: [{id — номер корабля, by — кто ведёт, name,
-  // x..z или b, lx..lz (оси тела), осанка, шасси, люки, dorm — спит}].
+  // x..z или b, lx..lz (оси тела), осанка, шасси, люки, dorm — без водителя}].
   peers: [],
   // Люди: [{id — игрок, name, st, s | b, x..z | lx..lz, yaw, pitch, v, air}].
   people: [],
@@ -198,7 +198,8 @@ function open() {
       });
       if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
-               || msg.t === 'boom' || msg.t === 'impact' || msg.t === 'hatchreq') {
+               || msg.t === 'boom' || msg.t === 'impact' || msg.t === 'hatchreq'
+               || msg.t === 'home') {
       // Очередь не копим бесконечно: если игра почему-то перестала её
       // разбирать, сотня событий в памяти полезнее тысячи, а тысяча
       // ничем не лучше сотни.

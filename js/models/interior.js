@@ -512,7 +512,7 @@ function wallBox(buf, f, u0, u1, v0, v1, d0, d1, rgb, mat, em = 0) {
  * тоннель сквозь перегородку (у двери пака его даёт сама деталь
  * doorWallA): щёки, потолок и порог с кромкой «осторожно».
  */
-function codeDoor(buf, f, d, u0, u1, y0, y1) {
+function codeDoor(buf, f, d, u0, u1, y0, y1, frame = null) {
   const dh = INT.doorHalf, top = d.y + INT.doorTop;
   panel(buf, f, u0, d.c - dh, y0, y1);
   panel(buf, f, d.c + dh, u1, y0, y1);
@@ -529,11 +529,28 @@ function codeDoor(buf, f, d, u0, u1, y0, y1) {
   if (d.side !== 'A') return;
   const g = -INT.gap;
   const P = (u, v, w) => wallPoint(f, u, v, w);
-  buf.poly([P(d.c - dh, d.y, 0), P(d.c - dh, d.y, g), P(d.c - dh, top, g), P(d.c - dh, top, 0)], C.steel, CMAT.paint);
-  buf.poly([P(d.c + dh, d.y, 0), P(d.c + dh, top, 0), P(d.c + dh, top, g), P(d.c + dh, d.y, g)], C.steel, CMAT.paint);
-  buf.poly([P(d.c - dh, top, 0), P(d.c - dh, top, g), P(d.c + dh, top, g), P(d.c + dh, top, 0)], C.steel, CMAT.paint);
-  buf.poly([P(d.c - dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, g),
-    P(d.c - dh, d.y + 0.004, g)], C.hazard, CMAT.hazard);
+  // Тоннель в толщине перегородки — и в комнату, и в раму двери (frame).
+  for (const b of frame ? [buf, frame] : [buf]) {
+    b.poly([P(d.c - dh, d.y, 0), P(d.c - dh, d.y, g), P(d.c - dh, top, g), P(d.c - dh, top, 0)], C.steel, CMAT.paint);
+    b.poly([P(d.c + dh, d.y, 0), P(d.c + dh, top, 0), P(d.c + dh, top, g), P(d.c + dh, d.y, g)], C.steel, CMAT.paint);
+    b.poly([P(d.c - dh, top, 0), P(d.c - dh, top, g), P(d.c + dh, top, g), P(d.c + dh, top, 0)], C.steel, CMAT.paint);
+    b.poly([P(d.c - dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, 0), P(d.c + dh, d.y + 0.004, g),
+      P(d.c - dh, d.y + 0.004, g)], C.hazard, CMAT.hazard);
+  }
+}
+
+/**
+ * Рама двери — отдельной сеткой (interior.doorFrames).
+ *
+ * Рама с тоннелем стоит на стене комнаты a, а со стороны b в стене только
+ * проём. Комната за закрытой дверью не рисуется (visibleNow), и из b рама
+ * пропадала вместе с комнатой a: вокруг створки светилась щель в толщину
+ * перегородки, сверху торчал её короб. Открылась дверь — комната a снова
+ * видна, а с ней и рама. Теперь рама есть и сама по себе: её рисуют, когда
+ * видна комната b, а комната a — нет (js/gl/cabin.js).
+ */
+function frameOf(ctx, id) {
+  return ctx.frames[id] || (ctx.frames[id] = new MeshBuf());
 }
 
 /** Колонна пака стоймя: середина в (x, z), низ y0, высота h. */
@@ -560,10 +577,11 @@ function buildWall(ctx, buf, room, f) {
   for (const c of cuts) {
     if (c.u0 > u + 1e-6) fillWall(buf, f, u, c.u0, y0, y1, seed + u);
     if (c.door && c.door.code) {
-      codeDoor(buf, f, c.door, c.u0, c.u1, y0, y1);
+      codeDoor(buf, f, c.door, c.u0, c.u1, y0, y1, c.door.side === 'A' ? frameOf(ctx, c.door.id) : null);
     } else if (c.door) {
       const d = c.door;
       wallPiece(buf, f, d.side === 'A' ? 'doorWallA' : 'doorWallB', d.c, y0, INT.wallW, INT.wallH);
+      if (d.side === 'A') wallPiece(frameOf(ctx, d.id), f, 'doorWallA', d.c, y0, INT.wallW, INT.wallH);
       if (y1 - y0 > INT.wallH + 0.02) panel(buf, f, c.u0, c.u1, y0 + INT.wallH, y1);
     } else {
       const h = c.hole;
@@ -1052,7 +1070,7 @@ function bulkheadSolids(solids) {
 export function buildInterior(hull) {
   const hullM = hullMeters(hull);
   const faces = layoutFaces();
-  const ctx = { meshes: {}, lamps: [], solids: [], columns: new Set() };
+  const ctx = { meshes: {}, frames: {}, lamps: [], solids: [], columns: new Set() };
   for (const r of ROOMS) ctx.meshes[r.id] = new MeshBuf();
 
   // Рубка: переборка с дверью по сечению фонаря.
@@ -1167,6 +1185,7 @@ export function buildInterior(hull) {
   const out = {
     INT, rooms: ROOMS, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
     carve, sunBox, stairs: STAIRS, slots: crateSlots(), crate: CRATE, hullM, doorMesh, crateMesh,
+    doorFrames: ctx.frames,
     // Люки (данные; их ход и трапы ведёт js/game/airlock.js — он же
     // кладёт сюда своё состояние, air).
     hatches: HATCHES, air: null, airways: AIRWAYS,

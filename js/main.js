@@ -64,6 +64,7 @@ import {
 import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
+  standAt, deckWorld,
   crateSolids, stepDoors, WALK,
 } from './game/walker.js';
 import { drawWalkHud } from './ui/walkhud.js';
@@ -692,6 +693,8 @@ function loadInterior() {
   return interiorJob;
 }
 game.loadInterior = loadInterior;
+// Мир за бортом в осях G — замерам (tools/, отладка): во что упёрся пешеход.
+game.outsideFrame = (G = game.walk.out, pos = game.walk.pos) => (G && game.interior ? outsideFrame(G, pos) : null);
 
 /** Груз в трюме: ящик на тонну (рисует кабина, твёрдыми их видит ход). */
 function syncCargo(force = false) {
@@ -999,12 +1002,20 @@ function hatchBlock(pOut) {
   return null;
 }
 
-const _gp = v3(), _gd = v3(), _gw = v3();
+const _gp = v3(), _gd = v3();
 
 /**
  * Грунт под точкой (x, z) осей корабля — его высота в тех же осях, м, или
  * null: тела рядом нет, или до грунта больше трёхсот метров (трапу до
  * него не достать, а считать рельеф незачем).
+ *
+ * «Под» — по оси корабля, а не по отвесу: где линия вниз по кораблю через
+ * эту точку встречает грунт. На склоне корабль стоит с креном до 20°, и
+ * отвес из точки над пятой трапа за пять метров до земли уходит вбок на
+ * полтора. Здесь мерили по отвесу — и трап «стоял» пятой на земле, а на
+ * деле висел над склоном на два десятка сантиметров: первая ступень с
+ * грунта выходила выше шага. Шагов несколько: высота над грунтом по
+ * отвесу, делённая на косинус крена, — и снова, пока не сойдётся.
  */
 function groundUnder(V, x, z) {
   const body = vesselBody(V);
@@ -1020,13 +1031,21 @@ function groundUnder(V, x, z) {
     const dirV = localDir(body, V.pos, _gd);
     if (Math.hypot(V.pos.x - body.pos.x, V.pos.y - body.pos.y, V.pos.z - body.pos.z) - groundOf(body, dirV) > 0.3) return null;
   }
-  const b = V.basis, y = -8;
-  _gp.x = V.pos.x + (b.right.x * x + b.up.x * y + b.fwd.x * z) / 1000;
-  _gp.y = V.pos.y + (b.right.y * x + b.up.y * y + b.fwd.y * z) / 1000;
-  _gp.z = V.pos.z + (b.right.z * x + b.up.z * y + b.fwd.z * z) / 1000;
-  const dir = localDir(body, _gp, _gd);
-  worldPoint(body, dir, groundOf(body, dir), _gw);
-  return ((_gw.x - V.pos.x) * b.up.x + (_gw.y - V.pos.y) * b.up.y + (_gw.z - V.pos.z) * b.up.z) * 1000;
+  const b = V.basis;
+  let y = -8;
+  for (let i = 0; i < 5; i++) {
+    _gp.x = V.pos.x + (b.right.x * x + b.up.x * y + b.fwd.x * z) / 1000;
+    _gp.y = V.pos.y + (b.right.y * x + b.up.y * y + b.fwd.y * z) / 1000;
+    _gp.z = V.pos.z + (b.right.z * x + b.up.z * y + b.fwd.z * z) / 1000;
+    const rx = _gp.x - body.pos.x, ry = _gp.y - body.pos.y, rz = _gp.z - body.pos.z;
+    const R = Math.hypot(rx, ry, rz);
+    const alt = (R - groundOf(body, localDir(body, _gp, _gd))) * 1000;
+    const c = (b.up.x * rx + b.up.y * ry + b.up.z * rz) / R;
+    const dy = alt / Math.max(0.5, c);
+    y -= dy;
+    if (Math.abs(dy) < 0.002) break;
+  }
+  return y;
 }
 const groundShip = (x, z) => groundUnder(ownVessel, x, z);
 
@@ -1189,23 +1208,27 @@ function gearBoxes(V, out) {
   });
 }
 
-const groundOut = (x, z) => groundY(game.walk.out, x, z, groundOf);
-const waterOut = (x, z) => waterUnder(game.walk.out, x, z);
+// Оси грунта, для которых собран мир за бортом: обычно пилота, а на пороге —
+// те, в которые он только собирается шагнуть (crossThreshold).
+let _outG = null;
+const groundOut = (x, z) => groundY(_outG, x, z, groundOf);
+const waterOut = (x, z) => waterUnder(_outG, x, z);
 
 /**
  * Мир за бортом на этот кадр: твёрдое КАЖДОГО корабля рядом в осях
  * грунта (порог, трап, стойки, днище), грунт, вода, тяжесть. Кораблей два
  * рядом — и упираешься в стойки обоих.
  */
-function outsideFrame() {
-  const w = game.walk, G = w.out, I = game.interior;
+function outsideFrame(G = game.walk.out, pos = game.walk.pos) {
+  const I = game.interior;
+  _outG = G;
   if (!_tunnelSolids || _tunnelSolids.of !== I) {
     const ids = new Set(I.hatches.map((h) => h.id));
     _tunnelSolids = I.solids.filter((s) => (s.sill && ids.has(s.sill)) || s.hatchWall);
     _tunnelSolids.of = I;
   }
   if (!_under) _under = hullUnderside(shipMesh);
-  groundToWorld(G, w.pos, _feetW);
+  groundToWorld(G, pos, _feetW);
   let n = 0;
   for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
     const air = V.own ? I.air : V.air;
@@ -1217,8 +1240,16 @@ function outsideFrame() {
     gearBoxes(V, _shipBoxes);
     // Днище — коробками вокруг пилота: на лёгком теле прыгают выше, чем
     // висит корпус.
-    undersideBoxes(_under, groundPointToShip(T, w.pos, _wsp2), 2.5, _shipBoxes);
-    for (const s of _shipBoxes) { _outSolids[n] = boxToGround(T, s, _outSolids[n] || {}); n++; }
+    undersideBoxes(_under, groundPointToShip(T, pos, _wsp2), 2.5, _shipBoxes);
+    // Коробка корабля в осях грунта — повёрнутая (ob), а не охватывающая:
+    // на склоне охватывающая раздувается и запирает проём (js/game/walker.js).
+    for (const s of _shipBoxes) {
+      const o = _outSolids[n] || (_outSolids[n] = { lo: null, hi: null, ob: { R: null, t: null, lo: null, hi: null } });
+      boxToGround(T, s, o);
+      o.ob.R = T.R; o.ob.t = T.t; o.ob.lo = s.lo; o.ob.hi = s.hi;
+      o.src = s;
+      n++;
+    }
   }
   _outSolids.length = n;
   return outsideWorld(_outSolids, groundOut, waterOut, gravityAt(G.body, _feetW) * 1000);
@@ -1249,9 +1280,21 @@ function reframe(w, rot) {
   w.vel = rot(w.vel, [0, 0, 0]);
 }
 
+// Начало новых осей грунта — ноги пилота на пороге.
+const _q0 = [0, 0, 0];
+// Дальше этого за обшивкой порог пропускают как есть, м: проём кончился.
+const SILL_OUT = 0.45;
+
 /**
  * Порог люка: шаг за обшивку — в оси грунта, шаг с трапа в тоннель — в
  * оси корабля. Переносится всё: ноги, скорость, взгляд.
+ *
+ * На склоне оси корабля и грунта расходятся до 20°, и в новых осях ноги
+ * не там, где были: наклонённый порог у ступни выше на десяток
+ * сантиметров, а притолока бортового люка — над самой головой. Поэтому
+ * шагают туда, где можно встать (standAt): ноги — на опору, тело — во
+ * весь рост или пригнувшись. Нельзя — шаг остаётся в прежних осях до
+ * следующего кадра.
  *
  * С трапа входят в ЛЮБОЙ корабль рядом — в тот, в чей тоннель шагнули.
  */
@@ -1266,9 +1309,12 @@ function crossThreshold() {
     if (!hx || !hx.exitOk || !body) return;
     vesselPoint(V, w.pos, _feetW);
     const G = makeGroundFrame(body, _feetW, V.basis.fwd);
+    const at = standAt(outsideFrame(G, _q0), _q0, w.height);
+    if (!at && hx.h.side * w.pos[0] < hx.h.skin + SILL_OUT) return;
     shipToGround(G, V, _outT);
     reframe(w, shipDirToGround);
-    w.pos = worldToGround(G, _feetW);
+    w.pos = at ? at.pos : worldToGround(G, _feetW);
+    if (at) w.height = at.height;
     w.out = G;
     w.room = null;
     w.vessel = null;
@@ -1285,8 +1331,11 @@ function crossThreshold() {
     shipToGround(w.out, V, _outT);
     const p = groundPointToShip(_outT, w.pos, [0, 0, 0]);
     if (!tunnelAt(air, I, p)) continue;
+    const at = standAt(deckWorld(w, I, air), p, w.height);
+    if (!at) continue;
     reframe(w, groundDirToShip);
-    w.pos = p;
+    w.pos = at.pos;
+    w.height = at.height;
     boardVessel(V);
     w.room = I.roomAt(p);
     game.walkRoomT = 2.6;
@@ -1896,7 +1945,8 @@ function restoreMe() {
 /**
  * Чужой корабль, на борту которого пилот вышел из игры: пока сокет не
  * прислал его снимка, ставим по тому, что знает сервер (state.aboard), —
- * спящим, на его стоянке.
+ * без водителя, на его стоянке. Хозяина нет в игре — сервер такого
+ * пассажира уже вернул к себе (Players::state), и сюда он не попадает.
  */
 function pinVessel(id) {
   const a = game.pendingAboard;
@@ -2171,11 +2221,12 @@ function tellImpact(m, fatal = false) {
 }
 
 /**
- * Корабль, на борту которого мы ехали, погиб: сервер увёл его в порт с
- * пассажирами. Где мы теперь, — спрашиваем у него.
+ * Корабль, на борту которого мы ехали, погиб (сервер увёл его в порт с
+ * пассажирами) или ушёл из мира вместе с хозяином (сервер вернул нас в
+ * кресло своего, Hub::strand). Где мы теперь, — спрашиваем у него.
  */
-async function rideLost() {
-  say(game.state, L('КОРАБЛЬ, НА КОТОРОМ ВЫ ЕХАЛИ, УНИЧТОЖЕН'), '#ff7a66', 5);
+async function rideLost(text = L('КОРАБЛЬ, НА КОТОРОМ ВЫ ЕХАЛИ, УНИЧТОЖЕН'), color = '#ff7a66') {
+  say(game.state, text, color, 5);
   const st = await serverRefresh();
   if (!st) return;
   applyState(serverToSave(st));
@@ -2249,6 +2300,16 @@ function applyNetEvent(ev) {
       return;
     }
     say(game.state, L('ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ'), '#ffcc66', 3);
+    return;
+  }
+  if (ev.t === 'home') {
+    // Хозяин корабля, на палубе которого мы стояли, ушёл из игры и не
+    // вернулся за Hub::GRACE: корабля больше нет в мире, и сервер уже
+    // посадил нас в кресло своего. Палубу под ногами держал aboardPin —
+    // отпускаем, иначе чужой корабль постоял бы ещё PEER_TTL.
+    aboardPin = null;
+    dropPeer(peerStore, ev.ship);
+    rideLost(L('ХОЗЯИН КОРАБЛЯ ВЫШЕЛ ИЗ ИГРЫ · ВЫ НА СВОЁМ КОРАБЛЕ'), '#ffcc66');
     return;
   }
   if (ev.t === 'fuel') {
@@ -3459,8 +3520,8 @@ function frame(now) {
     net.left.length = 0;
     if (net.rev !== peerRev) {
       peerRev = net.rev;
-      // Свой корабль, которым командуем, приходит и спящим (пока игра его
-      // не повела), — он не чужой, и рисовать его дважды нельзя.
+      // Свой корабль, которым командуем, приходит и без водителя (пока
+      // игра его не повела), — он не чужой, и рисовать его дважды нельзя.
       ingestPeers(peerStore, ship.id === null ? net.peers : net.peers.filter((p) => p.id !== ship.id), tNow);
       ingestPeople(peopleStore, net.people, tNow);
       if (ride !== null) {
@@ -3476,12 +3537,20 @@ function frame(now) {
     for (const V of game.peers) {
       vesselAir(V);
       // Шасси чужого корабля выходит с той же скоростью, что у своего;
-      // спящий стоит на стойках сразу.
+      // корабль без водителя стоит на стойках сразу.
       if (V.dorm || V._seen === undefined) V.gear.t = V.gear.out ? 1 : 0;
       else updateGear(V, dt);
       V._seen = true;
     }
     followVessel();
+    // Хозяин корабля, на палубе которого стоим, вышел из игры: у всех
+    // корабль пропал, а у нас стоит, где был (aboardPin), пока сервер
+    // ждёт хозяина (Hub::GRACE). Сказать один раз — иначе полминуты
+    // неподвижного корабля без единого слова выглядят как зависание.
+    const host = ride !== null && w.vessel ? w.vessel.by : null;
+    const hostGone = host !== null && net.state === 'live' && !net.roster.some((r) => r.id === host);
+    if (hostGone && !game.hostGone) say(game.state, L('ХОЗЯИН КОРАБЛЯ ВЫШЕЛ ИЗ ИГРЫ · ЖДЁМ ЕГО'), '#ffcc66', 6);
+    game.hostGone = hostGone;
     // Корабль, на котором едем, мог исчезнуть из мира (его тела здесь
     // нет, а за ним ещё не перешли) — палуба остаётся та же запись.
     if (ride !== null && w.vessel && !game.peers.includes(w.vessel)) {

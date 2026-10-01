@@ -14,8 +14,15 @@
  * КОРАБЛИ И ЛЮДИ — РАЗНЫЕ СПИСКИ. Соединение — это игрок. Он ВЕДЁТ свой
  * корабль (тот, которым командует, если корабль в той же системе), и он
  * же САМ где-то есть: в кресле, на палубе — своего или чужого корабля, —
- * на грунте. Корабль без хозяина в игре никуда не девается: он стоит,
- * где оставили, и его видно — хаб берёт его из базы («спящий», dorm).
+ * на грунте. Корабль, хозяин которого в игре, но ведёт не его (пересел,
+ * улетел пассажиром), стоит, где оставили, и его видно — хаб берёт его
+ * из базы («без водителя», dorm).
+ *
+ * В МИРЕ ТОЛЬКО ТЕ, КТО В ИГРЕ. Ушёл игрок — пропал и он сам, и все его
+ * корабли: стоящий на грунте корабль того, кого нет, — это мебель
+ * чужой игры, и зайти в него всё равно не к кому. Пассажиров ушедшего
+ * хаб ждёт GRACE, а не дождавшись, возвращает в кресла их собственных
+ * кораблей (strand, Players::sendHome).
  *
  * Что летает по сокету:
  *
@@ -39,8 +46,9 @@
  *   сервер -> клиент
  *     {"t":"welcome","you":{...},"peers":[...],"people":[...],"wt":123.4}
  *     {"t":"peers","list":[...],"people":[...],"wt":123.4}  раз в тик, своя система
- *       list — корабли: id корабля, by — кто ведёт (или хозяин спящего),
- *         место, осанка, корпус и щит, шасси, люки; dorm — спит в базе;
+ *       list — корабли: id корабля, by — кто ведёт (или хозяин),
+ *         место, осанка, корпус и щит, шасси, люки; dorm — без водителя:
+ *         хозяин в игре, но ведёт не его, и стоит он по базе;
  *       people — люди: id игрока, где и как стоит
  *
  * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
@@ -53,6 +61,8 @@
  *     {"t":"hitok","id":12,"hull":61,"dead":false}         попали МЫ
  *     {"t":"boom","id":12}                   корабль 12 уничтожен
  *     {"t":"hatchreq","ship":12,"id":"nL","open":true,"by":7}  просят люк НАШЕГО корабля
+ *     {"t":"home","ship":12,"by":7,"home":30}  хозяин корабля 12 ушёл из игры:
+ *                                            вы в кресле своего (30)
  *     {"t":"fuel","fuel":8.4,"cap":12,"n":17}  бак по счёту сервера после снимка n
  *     {"t":"error","code":"auth","message":"..."}
  *
@@ -86,6 +96,19 @@ final class Hub
      */
     public const IMPACT_RATE = 4;
 
+    /**
+     * Сколько ждём ушедшего хозяина, прежде чем вернуть его пассажиров
+     * на их корабли, с.
+     *
+     * Уход — не всегда уход: обновил страницу, моргнул Wi-Fi, перезапустили
+     * сервер. Игра переподключается сама, ступенями 1, 2, 5, 10, 20 с
+     * (js/net/socket.js, BACKOFF): первые четыре — 18 с. Полминуты
+     * покрывают их и загрузку страницы, и хозяин, нажавший F5, своих
+     * пассажиров не высаживает. Корабль у остальных при этом пропадает
+     * сразу: ждут его только те, кто стоит на его палубе.
+     */
+    public const GRACE = 30.0;
+
     /** Сколько просьб о люке в секунду слушаем: люк ходит полторы секунды. */
     public const HATCH_RATE = 4;
 
@@ -93,12 +116,12 @@ final class Hub
     public const STAT_EVERY = 10;
 
     /**
-     * Как часто перечитываем спящие корабли системы из базы, с.
+     * Как часто перечитываем из базы корабли системы без водителя, с.
      *
-     * Спящий корабль не движется: меняются у него только люки (их хаб
+     * Такой корабль не движется: меняются у него только люки (их хаб
      * сам пишет и сам сбрасывает этот срок) и то, что пишет сохранение
-     * ушедшего хозяина. Две секунды — столько не жалко подождать, чтобы
-     * увидеть корабль, хозяин которого только что вышел из игры.
+     * хозяина. Две секунды — столько не жалко подождать, чтобы увидеть
+     * корабль, хозяин которого только что из него пересел.
      */
     public const DORM_EVERY = 2.0;
 
@@ -132,8 +155,11 @@ final class Hub
     /** @var array<int, array> id соединения => состояние */
     private array $peers = [];
 
-    /** @var array<int, array{at:float, list:array}> система => спящие корабли */
+    /** @var array<int, array{at:float, list:array}> система => корабли без водителя */
     private array $dorm = [];
+
+    /** @var array<int, float> игрок => когда ушёл: ждём его GRACE */
+    private array $gone = [];
 
     /** @var callable|null куда писать события (для журнала) */
     private $log;
@@ -146,6 +172,36 @@ final class Hub
     public function count(): int
     {
         return count($this->peers);
+    }
+
+    /**
+     * Запуск хаба. Кто по базе «в игре», был им у прошлого процесса — и
+     * сейчас, скорее всего, переподключается. Ждём его, как ушедшего,
+     * GRACE: перезапуск сервера не должен высаживать пассажиров, чей
+     * хозяин вернётся через десять секунд. Не вернётся — strand.
+     */
+    public function boot(float $now): void
+    {
+        foreach (Db::all('SELECT `id` FROM `player` WHERE `online`=1') as $r) {
+            $this->gone[(int) $r['id']] = $now;
+        }
+    }
+
+    /** Есть ли у игрока соединение. */
+    private function connected(int $playerId): bool
+    {
+        return $this->peerOf($playerId) !== null;
+    }
+
+    /** Ключ соединения игрока — или null. */
+    private function peerOf(int $playerId)
+    {
+        foreach ($this->peers as $k => $p) {
+            if ($p['player'] === $playerId) {
+                return $k;
+            }
+        }
+        return null;
     }
 
     /** Кто сейчас в сети: для журнала и для ping по HTTP. */
@@ -249,12 +305,16 @@ final class Hub
         if ($peer && $peer['player'] !== null) {
             // Остальным в той же системе говорим об уходе сразу, а не
             // ждём тика: корабль, исчезающий с задержкой, читается как
-            // подвисание. Корабль его при этом не пропадает: он остаётся
-            // стоять, где стоял, — спящим, из базы.
+            // подвисание. Пропадает он вместе с хозяином; прочие его
+            // корабли (без водителя) уходят из списка со следующим тиком.
             $this->broadcast($peer['sys'], ['t' => 'leave', 'id' => $peer['player'],
                 'ship' => $peer['hosting'] ? $peer['ship'] : null], $peer['player']);
             if ($peer['sys'] !== null) {
                 $this->forgetDorm($peer['sys']);
+            }
+            // Вторая вкладка выбивает первую (hello) — это не уход.
+            if (!$this->connected($peer['player'])) {
+                $this->gone[$peer['player']] = $now;
             }
             // Ушедший пропадает из состава у всех, а не только у соседей
             // по системе: список пилотов общий на всю галактику.
@@ -465,6 +525,10 @@ final class Hub
         $peer['name'] = $row ? ($row['name'] ?: $row['login']) : ('#' . $playerId);
         $peer['sys'] = $row && $row['system_id'] !== null ? (int) $row['system_id'] : null;
         $this->loadStats($peer, $now);
+        // В игре — и вернулся вовремя, если уходил: его пассажиры остаются.
+        Db::update('player', ['online' => 1], '`id`=?', [$playerId]);
+        unset($this->gone[$playerId]);
+        $this->awaitOwner($playerId, $now);
 
         $this->send($conn, [
             't' => 'welcome',
@@ -708,9 +772,11 @@ final class Hub
             return;
         }
 
-        // Спит — люк переставляем в базе.
+        // Без водителя — люк переставляем в базе. Если хозяин в игре:
+        // корабля ушедшего нет в мире, и стучаться не во что.
         $row = Players::shipRow($shipId);
-        if ($row === null || $row['system_id'] === null || (int) $row['system_id'] !== $peer['sys']) {
+        if ($row === null || $row['system_id'] === null || (int) $row['system_id'] !== $peer['sys']
+            || !$this->connected((int) $row['owner_id'])) {
             return;
         }
         if (!self::beside($me, $shipId, Players::shipPoint($row))) {
@@ -754,6 +820,7 @@ final class Hub
         // Время мира спрашиваем РАЗ на тик, а не на каждого: это обращение
         // к базе, а снимок у всех всё равно один и тот же.
         $wt = Clock::worldTime();
+        $this->strandGone($now);
         foreach ($this->peers as $key => $peer) {
             if ($peer['player'] === null) {
                 // Молчит и не представился — закрываем: это либо сканер
@@ -978,6 +1045,96 @@ final class Hub
     }
 
     /**
+     * Вошедший стоит на борту чужого корабля, а хозяина нет: ждём и его
+     * GRACE (вдруг оба переподключаются после перезапуска сервера), не
+     * дождёмся — strand вернёт пассажира к себе.
+     */
+    private function awaitOwner(int $playerId, float $now): void
+    {
+        $owner = Db::one('SELECT s.`owner_id` FROM `player` p JOIN `ship` s ON s.`id` = p.`aboard_ship`
+                          WHERE p.`id`=?', [$playerId]);
+        if ($owner === null) {
+            return;
+        }
+        $owner = (int) $owner;
+        if ($owner !== $playerId && !$this->connected($owner) && !isset($this->gone[$owner])) {
+            $this->gone[$owner] = $now;
+        }
+    }
+
+    /** Ушедшие, которых не дождались: из игры — и их пассажиров по домам. */
+    private function strandGone(float $now): void
+    {
+        foreach ($this->gone as $owner => $since) {
+            if ($now - $since < self::GRACE) {
+                continue;
+            }
+            unset($this->gone[$owner]);
+            if ($this->connected($owner)) {
+                continue;
+            }
+            Db::update('player', ['online' => 0], '`id`=?', [$owner]);
+            $this->strand($owner);
+        }
+    }
+
+    /**
+     * Хозяин ушёл из игры, и его корабли пропали из мира, — тем, кто на
+     * их борту, оставаться негде: стоять на палубе, которой ни для кого
+     * нет, значит висеть в пустоте у всех на глазах. Каждый — в кресло
+     * своего корабля (Players::sendHome).
+     *
+     * Где сейчас тот, кто в игре, решает ЕГО снимок, а не база: сохранение
+     * идёт раз в восемь секунд, и сошедший по трапу по базе ещё на борту.
+     * Где тот, кого нет (или кто ещё не прислал снимка), — по базе.
+     */
+    private function strand(int $owner): void
+    {
+        $ships = array_map('intval', array_column(
+            Db::all('SELECT `id` FROM `ship` WHERE `owner_id`=?', [$owner]), 'id'));
+        if (!$ships) {
+            return;
+        }
+        $mine = array_flip($ships);
+        $live = [];
+        foreach ($this->peers as $k => $p) {
+            if ($p['player'] === null || $p['player'] === $owner || $p['me'] === null) {
+                continue;
+            }
+            $live[$p['player']] = true;
+            if ($p['aboard'] !== null && isset($mine[$p['aboard']])) {
+                $this->takeHome($k, $p['aboard'], $owner);
+            }
+        }
+        foreach (Db::all('SELECT `id`, `aboard_ship` FROM `player`
+                          WHERE `aboard_ship` IN (' . implode(',', $ships) . ') AND `id`<>?', [$owner]) as $r) {
+            $pid = (int) $r['id'];
+            if (isset($live[$pid])) {
+                continue;
+            }
+            $k = $this->peerOf($pid);
+            if ($k !== null) {
+                $this->takeHome($k, (int) $r['aboard_ship'], $owner);
+            } else {
+                Players::sendHome($pid);
+            }
+        }
+    }
+
+    /** Пассажира в игре — на свой корабль, и сказать ему об этом. */
+    private function takeHome($key, int $shipId, int $owner): void
+    {
+        $p = $this->peers[$key];
+        $home = Players::sendHome((int) $p['player']);
+        // До его следующего снимка он не стоит нигде: на чужой палубе его
+        // больше не показываем.
+        $this->peers[$key]['me'] = null;
+        $this->peers[$key]['aboard'] = null;
+        $this->send($p['conn'], ['t' => 'home', 'ship' => $shipId, 'by' => $owner, 'home' => $home]);
+        $this->say($p['name'] . ' — на свой корабль: хозяин ушёл');
+    }
+
+    /**
      * Корабли, которые видит этот пилот.
      *
      * Ведомые — свои системы и не в прыжке. И один всегда, где бы он ни
@@ -985,14 +1142,20 @@ final class Hub
      * не видит никто, кроме тех, кто внутри, а им без него нечем даже
      * нарисовать стены вокруг себя.
      *
-     * Спящие — из базы, кроме тех, что сейчас кто-то ведёт.
+     * Без водителя — из базы, кроме тех, что сейчас кто-то ведёт, и
+     * только тех, чей хозяин в игре.
      */
     private function shipsOf(array $me, float $now): array
     {
         $out = [];
         $hosted = [];
+        $online = [];
         foreach ($this->peers as $p) {
-            if ($p['player'] === null || !$p['hosting'] || $p['ship'] === null) {
+            if ($p['player'] === null) {
+                continue;
+            }
+            $online[$p['player']] = true;
+            if (!$p['hosting'] || $p['ship'] === null) {
                 continue;
             }
             $hosted[$p['ship']] = true;
@@ -1030,9 +1193,10 @@ final class Hub
         }
         if ($me['sys'] !== null) {
             foreach ($this->dormOf($me['sys'], $now) as $d) {
-                // Свой корабль, которым пилот командует, ему спящим не нужен:
-                // его игра ведёт сама (или вот-вот поведёт).
-                if (!isset($hosted[$d['id']]) && $d['id'] !== $me['ship']) {
+                // Свой корабль, которым пилот командует, ему из базы не нужен:
+                // его игра ведёт сама (или вот-вот поведёт). Корабль того,
+                // кого нет в игре, не нужен никому.
+                if (isset($online[$d['by']]) && !isset($hosted[$d['id']]) && $d['id'] !== $me['ship']) {
                     $out[] = $d;
                 }
             }
@@ -1061,7 +1225,8 @@ final class Hub
     }
 
     /**
-     * Спящие корабли системы: из базы, раз в DORM_EVERY.
+     * Корабли системы без водителя: из базы, раз в DORM_EVERY. Все —
+     * кто из хозяев в игре, решает shipsOf на каждый снимок.
      *
      * В порту спящих не показываем: корабль в доке стоит внутри станции,
      * рисовать его снаружи некуда.
@@ -1132,7 +1297,7 @@ final class Hub
         ];
     }
 
-    /** Спящие этой системы — перечитать при следующем снимке. */
+    /** Корабли без водителя этой системы — перечитать при следующем снимке. */
     private function forgetDorm(int $sys): void
     {
         unset($this->dorm[$sys]);

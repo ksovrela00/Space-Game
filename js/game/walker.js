@@ -47,6 +47,14 @@ export const WALK = {
   g: 9.81,             // м/с² — палуба
   jump: 0.45,          // м — прыжок с места
   step: 0.42,          // м — порог, на который нога поднимается сама
+  // Пригнуться. Бортовой люк — 1.86 м при росте 1.8: в корабле, стоящем
+  // ровно, проходят не нагибаясь. А на склоне корабль стоит с креном до
+  // 20°, человек же за бортом стоит по отвесу, и проём для него наклонён:
+  // над порогом остаётся 1.86·cos 20° без полуширины тела на наклоне —
+  // около 1.6 м. Люди в такой двери пригибаются; пилот — тоже, сам, когда
+  // упёрся головой, а ногам дорога есть.
+  duck: 1.4,           // м — рост пригнувшись: ниже не пролезть
+  unduck: 1.2,         // м/с — как быстро выпрямляется, когда над головой есть место
   snap: 0.45,          // м — по ступеням вниз без отрыва от пола
   sub: 1 / 120,        // с — шаг интегрирования
   look: 0.0022,        // рад на точку мыши
@@ -79,6 +87,7 @@ export function makeWalker() {
     yaw: 0,              // рад — 0 смотрит в нос, + — вправо
     pitch: 0,            // рад — + вверх
     ground: true,
+    height: WALK.height, // м — рост сейчас: пригнувшись под притолокой — меньше
     lag: 0,              // м — на сколько глаз отстаёт от шага на ступень
     bobPhase: 0,
     floor: 'deck',       // на чём стоит: deck — твёрдое корабля, ground — грунт (звук шагов)
@@ -147,18 +156,146 @@ function doorSolids(interior) {
   return out;
 }
 
-function makeWorld(w, interior) {
+function makeWorld(w, interior, air = w.air || interior.air, buf = w._air || (w._air = [])) {
   if (!w.grid || w.gridOf !== interior) {
     w.grid = solidGrid(interior.solids);
     w.gridOf = interior;
   }
   // Люки и трапы (js/game/airlock.js): закрытая панель — стена, трап —
   // ступени и поручни. Люки — того корабля, где стоит пилот.
-  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(w.air || interior.air, w._air || (w._air = []))) };
+  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(air, buf)) };
 }
 
-const overlap = (s, lo, hi) => s.lo[0] < hi[0] && s.hi[0] > lo[0] && s.lo[1] < hi[1]
-  && s.hi[1] > lo[1] && s.lo[2] < hi[2] && s.hi[2] > lo[2];
+const _deckAir = [];
+
+/** Мир палубы корабля с люками air — проверить, где на ней встать, ещё не ступив. */
+export function deckWorld(w, interior, air) {
+  return makeWorld(w, interior, air, _deckAir);
+}
+
+// --- повёрнутые коробки ------------------------------------------------------
+//
+// За бортом твёрдое корабля лежит в осях ГРУНТА, а построено оно в осях
+// КОРАБЛЯ: трап, порог и притолока люка, стойки, днище. Корабль на склоне
+// стоит с креном до 20°, и коробка, охватившая повёрнутую, — уже не она.
+// Притолока бортового люка длиной 0.6 м при крене в 6° опускается на 6 см
+// (а над головой там всего 6 см: проём 1.86 м при росте 1.8), стенки проёма
+// высотой 2.6 м при тангаже 15° въезжают в проход на 0.7 м. Пилот застревал
+// на пороге, выходя, и упирался в пустоту, входя: на ровном месте этого не
+// видно, а на склоне в полтора градуса бортовой люк не выпускал вовсе.
+//
+// Поэтому у такого твёрдого есть ob — сама коробка (lo, hi в своих осях) и
+// то, как она лежит в осях шага: p' = R·p + t (R — строки 3×3, поворот).
+// Охватывающие lo, hi остаются: по ним дальнее отсеивается, а то, что
+// рядом с телом, считается точно.
+
+const _obC = new Float64Array(24);
+
+/**
+ * Какие высоты занимает повёрнутая коробка над прямоугольником плана
+ * [x0, x1] × [z0, z1]: out = [низ, верх] — или null, если его она не
+ * накрывает.
+ *
+ * Коробка и бесконечный по высоте столб над прямоугольником — оба
+ * выпуклые, значит, и их пересечение, а его высоты — отрезок от нижней
+ * вершины до верхней. Вершина — это три плоскости сразу: три грани коробки
+ * (её угол внутри столба), две грани и стенка столба (ребро коробки сквозь
+ * стенку) или грань и две стенки (ребро столба сквозь грань). Других
+ * сочетаний нет — стенки столба попарно параллельны, — и перебираются все
+ * три вида.
+ */
+export function obSpan(ob, x0, x1, z0, z1, out = [0, 0]) {
+  const R = ob.R, t = ob.t, lo = ob.lo, hi = ob.hi, C = _obC;
+  let ymin = Infinity, ymax = -Infinity;
+  for (let i = 0; i < 8; i++) {
+    const a = i & 1 ? hi[0] : lo[0], b = i & 2 ? hi[1] : lo[1], c = i & 4 ? hi[2] : lo[2];
+    const x = R[0] * a + R[1] * b + R[2] * c + t[0];
+    const y = R[3] * a + R[4] * b + R[5] * c + t[1];
+    const z = R[6] * a + R[7] * b + R[8] * c + t[2];
+    C[i * 3] = x; C[i * 3 + 1] = y; C[i * 3 + 2] = z;
+    if (x >= x0 && x <= x1 && z >= z0 && z <= z1) {
+      if (y < ymin) ymin = y;
+      if (y > ymax) ymax = y;
+    }
+  }
+  // Рёбра коробки — пары углов, различающихся одним битом.
+  for (let i = 0; i < 8; i++) {
+    for (let bit = 1; bit < 8; bit <<= 1) {
+      if (i & bit) continue;
+      const j = i | bit;
+      const ax = C[i * 3], ay = C[i * 3 + 1], az = C[i * 3 + 2];
+      const dx = C[j * 3] - ax, dy = C[j * 3 + 1] - ay, dz = C[j * 3 + 2] - az;
+      for (let k = 0; k < 2; k++) {
+        if (dx !== 0) {
+          const u = ((k ? x1 : x0) - ax) / dx;
+          if (u >= 0 && u <= 1) {
+            const z = az + dz * u;
+            if (z >= z0 && z <= z1) {
+              const y = ay + dy * u;
+              if (y < ymin) ymin = y;
+              if (y > ymax) ymax = y;
+            }
+          }
+        }
+        if (dz !== 0) {
+          const u = ((k ? z1 : z0) - az) / dz;
+          if (u >= 0 && u <= 1) {
+            const x = ax + dx * u;
+            if (x >= x0 && x <= x1) {
+              const y = ay + dy * u;
+              if (y < ymin) ymin = y;
+              if (y > ymax) ymax = y;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Рёбра столба — вертикали по углам плана, сквозь коробку. В её осях
+  // вертикаль (X, s, Z) — точка p0 и ход d = Rᵀ·(0, 1, 0), а высота точки на
+  // ней — сам параметр s.
+  const ex = R[3], ey = R[4], ez = R[5];
+  for (let k = 0; k < 4; k++) {
+    const qx = (k & 1 ? x1 : x0) - t[0], qy = -t[1], qz = (k & 2 ? z1 : z0) - t[2];
+    const p = [R[0] * qx + R[3] * qy + R[6] * qz, R[1] * qx + R[4] * qy + R[7] * qz,
+      R[2] * qx + R[5] * qy + R[8] * qz];
+    const d = [ex, ey, ez];
+    let s0 = -Infinity, s1 = Infinity;
+    for (let a = 0; a < 3 && s0 <= s1; a++) {
+      if (Math.abs(d[a]) < 1e-12) {
+        if (p[a] < lo[a] || p[a] > hi[a]) s0 = Infinity;
+        continue;
+      }
+      let u0 = (lo[a] - p[a]) / d[a], u1 = (hi[a] - p[a]) / d[a];
+      if (u0 > u1) { const q = u0; u0 = u1; u1 = q; }
+      if (u0 > s0) s0 = u0;
+      if (u1 < s1) s1 = u1;
+    }
+    if (s0 <= s1) {
+      if (s0 < ymin) ymin = s0;
+      if (s1 > ymax) ymax = s1;
+    }
+  }
+  if (!(ymin <= ymax)) return null;
+  out[0] = ymin; out[1] = ymax;
+  return out;
+}
+
+const _span = [0, 0];
+
+/** Высоты твёрдого над планом [lo, hi]: у повёрнутого — точно, у ровного — его собственные. */
+function spanOf(s, lo, hi) {
+  if (!s.ob) { _span[0] = s.lo[1]; _span[1] = s.hi[1]; return _span; }
+  return obSpan(s.ob, lo[0], hi[0], lo[2], hi[2], _span);
+}
+
+function overlap(s, lo, hi) {
+  if (!(s.lo[0] < hi[0] && s.hi[0] > lo[0] && s.lo[1] < hi[1]
+    && s.hi[1] > lo[1] && s.lo[2] < hi[2] && s.hi[2] > lo[2])) return false;
+  if (!s.ob) return true;
+  const sp = spanOf(s, lo, hi);
+  return sp !== null && sp[0] < hi[1] && sp[1] > lo[1];
+}
 
 /** Всё твёрдое, что пересекает коробку [lo, hi]. */
 function query(W, lo, hi, out = []) {
@@ -183,15 +320,15 @@ function query(W, lo, hi, out = []) {
 
 const _lo = [0, 0, 0], _hi = [0, 0, 0], _hits = [];
 
-/** Тело в точке p: коробка от ног вверх. Нижний миллиметр не считается — это пол. */
-function body(p, lo = _lo, hi = _hi) {
+/** Тело ростом h в точке p: коробка от ног вверх. Нижний миллиметр не считается — это пол. */
+function body(p, h = WALK.height, lo = _lo, hi = _hi) {
   lo[0] = p[0] - WALK.half; lo[1] = p[1] + 0.001; lo[2] = p[2] - WALK.half;
-  hi[0] = p[0] + WALK.half; hi[1] = p[1] + WALK.height; hi[2] = p[2] + WALK.half;
+  hi[0] = p[0] + WALK.half; hi[1] = p[1] + h; hi[2] = p[2] + WALK.half;
 }
 
-/** Упирается ли тело в точке p во что-нибудь. */
-export function blocked(W, p) {
-  body(p);
+/** Упирается ли тело ростом h в точке p во что-нибудь. */
+export function blocked(W, p, h = WALK.height) {
+  body(p, h);
   if (query(W, _lo, _hi, _hits).length > 0) return true;
   // Грунт — твёрдое под ногами: ниже его тело не опускается.
   if (W.ground) {
@@ -206,12 +343,53 @@ function support(W, p, depth, up = 0.001) {
   _lo[0] = p[0] - WALK.half; _lo[1] = p[1] - depth; _lo[2] = p[2] - WALK.half;
   _hi[0] = p[0] + WALK.half; _hi[1] = p[1] + up; _hi[2] = p[2] + WALK.half;
   let top = -Infinity;
-  for (const s of query(W, _lo, _hi, _hits)) if (s.hi[1] <= p[1] + up + 1e-6) top = Math.max(top, s.hi[1]);
+  for (const s of query(W, _lo, _hi, _hits)) {
+    const y = spanOf(s, _lo, _hi)[1];
+    if (y <= p[1] + up + 1e-6) top = Math.max(top, y);
+  }
   if (W.ground) {
     const gy = W.ground(p[0], p[2]);
     if (gy <= p[1] + up + 1e-6 && gy >= p[1] - depth) top = Math.max(top, gy);
   }
   return top;
+}
+
+/**
+ * Сколько места над ногами в точке p, м: низ самого низкого твёрдого, в
+ * которое упирается тело ростом h. Стена от пола или грунт выше ступни —
+ * ноль: под ними не пролезть.
+ */
+function headroom(W, p, h) {
+  if (W.ground && W.ground(p[0], p[2]) > p[1] + 0.002) return 0;
+  body(p, h);
+  let low = Infinity;
+  for (const s of query(W, _lo, _hi, _hits)) low = Math.min(low, spanOf(s, _lo, _hi)[0]);
+  return low - p[1];
+}
+
+/** Какой рост помещается в точке p: весь (до h), пригнувшись — или 0, если никак. */
+function fitHeight(W, p, h) {
+  if (!blocked(W, p, h)) return h;
+  const room = headroom(W, p, h) - 0.002;
+  return room >= WALK.duck && room < h && !blocked(W, p, room) ? room : 0;
+}
+
+/**
+ * Где встать в точке p этого мира: ноги — на самое высокое твёрдое под ними
+ * (не выше ступени и не ниже, чем сходят без прыжка) или на грунт, а тело
+ * помещается — во весь рост h или пригнувшись. Иначе null.
+ *
+ * Нужно на пороге люка: в новых осях ноги должны стоять, а не сидеть
+ * внутри наклонённого порога, — иначе тело с первого же кадра упирается
+ * во всё сразу и не может сделать ни шагу.
+ * @returns {{ pos: number[], height: number } | null}
+ */
+export function standAt(W, p, h = WALK.height) {
+  const s = support(W, [p[0], p[1] + WALK.step, p[2]], WALK.step + WALK.snap);
+  if (!(s > -Infinity)) return null;
+  const q = [p[0], s, p[2]];
+  const f = fitHeight(W, q, h);
+  return f > 0 ? { pos: q, height: f } : null;
 }
 
 // --- кресло -------------------------------------------------------------------
@@ -230,6 +408,7 @@ export function standUp(w, interior, look = { yaw: 0, pitch: 0 }) {
   w.pitch = Math.max(-0.6, Math.min(0.6, -(look.pitch || 0)));
   w.from = { yaw: w.yaw, pitch: w.pitch };
   w.ground = true;
+  w.height = WALK.height;
   w.lag = 0;
   w.out = null;
   w.room = interior.rooms.find((r) => r.id === 'bridge');
@@ -271,7 +450,9 @@ const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 /** Глаз пилота в осях корабля, м (и сидя, и в переходе, и на ногах). */
 export function walkerEye(w, interior, out = [0, 0, 0]) {
   const seat = interior.seat.eye;
-  const standEye = (p) => [p[0], p[1] + WALK.eye - w.lag + Math.sin(w.bobPhase) * WALK.bob * bobK(w), p[2]];
+  // Пригнулся — глаз ниже ровно настолько же.
+  const duck = WALK.height - (w.height || WALK.height);
+  const standEye = (p) => [p[0], p[1] + WALK.eye - duck - w.lag + Math.sin(w.bobPhase) * WALK.bob * bobK(w), p[2]];
   if (w.phase === 'rise' || w.phase === 'sit') {
     const k = w.phase === 'rise' ? smooth(w.t / WALK.rise) : 1 - smooth(w.t / WALK.sit);
     const s = standEye(w.phase === 'rise' ? w.pos : w.from.pos);
@@ -394,6 +575,14 @@ function stepBody(w, W, ctl, dt, jump) {
   v[1] -= (W.g || WALK.g) * dt;
 
   const wasGround = w.ground;
+  // Рост: пригнулся под притолокой — выпрямляется, как только над головой
+  // есть место, и не рывком.
+  let H = w.height || WALK.height;
+  if (H < WALK.height) {
+    const want = Math.min(WALK.height, H + WALK.unduck * dt);
+    if (!blocked(W, p, want)) H = want;
+    else H = Math.max(H, Math.min(want, headroom(W, p, want) - 0.002));
+  }
   // Грунт за бортом — ПОВЕРХНОСТЬ, по которой идут, а не стенка, в
   // которую упираются. Раньше он был стенкой с допуском в 2 мм: на
   // подъёме шаг уводил ноги под грунт на полтора миллиметра, падение за
@@ -426,7 +615,9 @@ function stepBody(w, W, ctl, dt, jump) {
         q[1] = gy;
       }
     }
-    if (!blocked(W, q)) { p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; continue; }
+    // Упёрся только головой — пригнуться (fitHeight), как в низкую дверь.
+    let f = fitHeight(W, q, H);
+    if (f > 0) { H = f; p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; continue; }
     // Порог: тело поднимается ровно на высоту того, во что упёрлось, а не
     // на весь допуск сразу, — иначе под низким потолком (трап уходит в
     // проём) голова цепляла бы кромку там, где ноге хватает и ступени.
@@ -434,7 +625,9 @@ function stepBody(w, W, ctl, dt, jump) {
       const s = support(W, [q[0], q[1] + WALK.step, q[2]], WALK.step + 0.01);
       if (s > q[1] + 1e-4 && s <= q[1] + WALK.step) {
         const up = [q[0], s, q[2]];
-        if (!blocked(W, up)) {
+        f = fitHeight(W, up, H);
+        if (f > 0) {
+          H = f;
           w.lag += up[1] - p[1];
           p[0] = up[0]; p[1] = up[1]; p[2] = up[2];
           continue;
@@ -449,7 +642,7 @@ function stepBody(w, W, ctl, dt, jump) {
   const y1 = p[1] + v[1] * dt;
   const q = [p[0], y1, p[2]];
   const gy = G ? G(p[0], p[2]) : -Infinity;
-  if (y1 >= gy && !blocked(W, q)) {
+  if (y1 >= gy && !blocked(W, q, H)) {
     p[1] = y1;
     w.ground = false;
   } else if (v[1] < 0) {
@@ -461,12 +654,13 @@ function stepBody(w, W, ctl, dt, jump) {
     w.jumped = false;
   } else {
     // Головой в потолок: остановиться под ним.
-    body(q);
+    body(q, H);
     let low = Infinity;
-    for (const s of query(W, _lo, _hi, _hits)) low = Math.min(low, s.lo[1]);
-    if (isFinite(low)) p[1] = Math.min(p[1], low - WALK.height - 0.002);
+    for (const s of query(W, _lo, _hi, _hits)) low = Math.min(low, spanOf(s, _lo, _hi)[0]);
+    if (isFinite(low)) p[1] = Math.min(p[1], low - H - 0.002);
     v[1] = 0;
   }
+  w.height = H;
 
   // Вниз по ступеням — не отрываясь: шаг с ними совпадает, и без этого
   // пилот на каждой ступени на миг повисал бы в воздухе.

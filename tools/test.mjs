@@ -8483,6 +8483,123 @@ console.log('\n== наземный город ==');
     const want = Wk.jumpSpeed() ** 2 / (2 * g);
     ok(Math.abs(peak - want) / want < 0.03 && wj.ground,
       `на ${icy ? icy.name : 'лёгком теле'} (${g.toFixed(2)} м/с²) прыгают на ${peak.toFixed(2)} м, а не на ${Wk.WALK.jump} — толчок тот же`);
+    // obSpan — какие высоты занимает повёрнутая коробка над прямоугольником
+    // плана — против точного ответа: всех вершин пересечения коробки со
+    // столбом над прямоугольником (тройки из десяти плоскостей).
+    {
+      let seed = 7;
+      const rnd = (a, b) => { seed = (seed * 16807) % 2147483647; return a + (b - a) * (seed / 2147483647); };
+      const det3 = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+      let worst = 0, wrong = 0, met = 0;
+      for (let it = 0; it < 3000; it++) {
+        const f = [rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)]; let l = Math.hypot(...f); f.forEach((v, i) => { f[i] = v / l; });
+        let u = [rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)]; const k = u[0] * f[0] + u[1] * f[1] + u[2] * f[2];
+        u = u.map((v, i) => v - k * f[i]); l = Math.hypot(...u); u = u.map((v) => v / l);
+        const r = [u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]];
+        const R = [r[0], u[0], f[0], r[1], u[1], f[1], r[2], u[2], f[2]];
+        const t = [rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)];
+        const lo = [rnd(-1, 0), rnd(-1, 0), rnd(-1, 0)];
+        const hi = [lo[0] + rnd(0.02, 1.5), lo[1] + rnd(0.02, 1.5), lo[2] + rnd(0.02, 1.5)];
+        const x0 = rnd(-1.5, 1), x1 = x0 + rnd(0.1, 0.8), z0 = rnd(-1.5, 1), z1 = z0 + rnd(0.1, 0.8);
+        const P = [];
+        for (let a = 0; a < 3; a++) {
+          const ax = [R[a], R[3 + a], R[6 + a]], o = ax[0] * t[0] + ax[1] * t[1] + ax[2] * t[2];
+          P.push([ax, hi[a] + o], [ax.map((v) => -v), -(lo[a] + o)]);
+        }
+        P.push([[1, 0, 0], x1], [[-1, 0, 0], -x0], [[0, 0, 1], z1], [[0, 0, -1], -z0]);
+        let ymin = Infinity, ymax = -Infinity;
+        for (let i = 0; i < 10; i++) for (let j = i + 1; j < 10; j++) for (let m = j + 1; m < 10; m++) {
+          const M = [P[i][0], P[j][0], P[m][0]], b = [P[i][1], P[j][1], P[m][1]], D = det3(M);
+          if (Math.abs(D) < 1e-12) continue;
+          const x = [0, 1, 2].map((c) => det3(M.map((row, ri) => row.map((v, ci) => (ci === c ? b[ri] : v)))) / D);
+          if (P.every(([n, c]) => n[0] * x[0] + n[1] * x[1] + n[2] * x[2] <= c + 1e-9)) {
+            ymin = Math.min(ymin, x[1]); ymax = Math.max(ymax, x[1]);
+          }
+        }
+        const got = Wk.obSpan({ R, t, lo, hi }, x0, x1, z0, z1);
+        if (ymin === Infinity) { if (got) wrong++; continue; }
+        met++;
+        if (!got) { wrong++; continue; }
+        worst = Math.max(worst, Math.abs(got[0] - ymin), Math.abs(got[1] - ymax));
+      }
+      ok(wrong === 0 && worst < 1e-9 && met > 500,
+        `повёрнутая коробка над следом ног — точно: ${met} пересечений из 3000, расхождение ${worst.toExponential(1)} м, ошибок «есть/нет» ${wrong}`);
+    }
+    // Проём на склоне. Корабль стоит с креном или тангажом до 20°, а
+    // человек за бортом — по отвесу: проём бортового люка (1.86 м при росте
+    // 1.8) для него наклонён. Твёрдое корабля ложится в оси грунта
+    // повёрнутыми коробками (ob, js/game/walker.js): охватывающие на крене
+    // раздуваются и запирают проём — тело на пороге сидело в них с первого
+    // кадра. Здесь — то же твёрдое, что собирает игра (порог, щёки, притолока,
+    // трап), повёрнутое на 15° четырьмя способами.
+    {
+      const av = A.makeAir(In, SHIP.gearClear);
+      const hx = av.hatches.find((x) => x.id === 'sR');
+      Object.assign(hx, { open: 1, stair: 1, want: true, exitOk: true, swing: 0, footGap: 0 });
+      // Трап доворачивается к грунту (до ±15°): на крене он и в осях грунта
+      // остаётся около своих 40°, а не 25 и не 55.
+      const solidsAt = (swing) => {
+        hx.swing = swing;
+        return In.solids.filter((s) => s.sill === 'sR' || s.hatchWall === 'sR')
+          .concat(A.airSolids(av, []).filter((s) => s.hatch === 'sR' || s.stair === 'sR'));
+      };
+      let solids = solidsAt(0);
+      const hg = A.hinge(hx);
+      const turn = (axis, deg) => {
+        const c = Math.cos(deg * Math.PI / 180), s = Math.sin(deg * Math.PI / 180);
+        const R = axis === 'крен' ? [c, -s, 0, s, c, 0, 0, 0, 1] : [1, 0, 0, 0, c, -s, 0, s, c];
+        const t = [0, 1, 2].map((i) => -(R[i * 3] * hg[0] + R[i * 3 + 1] * hg[1] + R[i * 3 + 2] * hg[2]));
+        return { R: new Float64Array(R), t };
+      };
+      const worldOf = (T, exact) => Wk.outsideWorld(solids.map((s) => {
+        const o = O.boxToGround(T, s);
+        if (exact) o.ob = { R: T.R, t: T.t, lo: s.lo, hi: s.hi };
+        return o;
+      }), () => -6, null, 9.81);
+      const toShip = (T, g) => O.groundPointToShip(T, g);
+      const toGround = (T, p) => O.shipPointToGround(T, p);
+      // Идёт по оси трапа — как игрок, который его видит: на точку.
+      const aim = (wk, p) => { wk.yaw = Math.atan2(p[0] - wk.pos[0], p[2] - wk.pos[2]); };
+      const rows = [];
+      let oldStuck = 0, allGood = true;
+      for (const [axis, deg] of [['крен', 15], ['крен', -15], ['тангаж', 15], ['тангаж', -15]]) {
+        const T = turn(axis, deg);
+        solids = solidsAt(axis === 'крен' ? -deg * Math.PI / 180 : 0);
+        const Wold = worldOf(T, false), Wnew = worldOf(T, true);
+        if (Wk.blocked(Wold, [0, 0, 0])) oldStuck++;
+        const at = Wk.standAt(Wnew, [0, 0, 0]);
+        // С трапа (пятая ступень, метр с лишним за бортом) — в тоннель.
+        const d = hx.design;
+        const p0 = toGround(T, A.stairPoint(hx, 1, [4.5 * d.t, -5 * d.r, 0]));
+        const st = Wk.standAt(Wnew, p0);
+        const wk = Wk.makeWalker();
+        Wk.standUp(wk, In); wk.phase = 'walk'; wk.out = { test: true };
+        let inside = false, minH = Wk.WALK.height, outside = false;
+        if (st) {
+          wk.pos = st.pos; wk.height = st.height;
+          for (let i = 0; i < 60 * 6 && !inside; i++) {
+            aim(wk, toGround(T, [hx.h.side * (hx.h.skin - 0.5), hx.h.y[0], hx.zc]));
+            Wk.updateWalker(wk, In, { fwd: 1 }, 1 / 60, Wnew);
+            minH = Math.min(minH, wk.height);
+            inside = hx.h.side * toShip(T, wk.pos)[0] < hx.h.skin - 0.1;
+          }
+          // И обратно наружу — на ту же ступень.
+          for (let i = 0; i < 60 * 6 && !outside; i++) {
+            aim(wk, toGround(T, A.stairPoint(hx, 1, [6 * d.t, -6 * d.r, 0])));
+            Wk.updateWalker(wk, In, { fwd: 1 }, 1 / 60, Wnew);
+            minH = Math.min(minH, wk.height);
+            outside = hx.h.side * toShip(T, wk.pos)[0] > hx.h.skin + 1.0;
+          }
+        }
+        const good = !!at && !!st && inside && outside && minH >= Wk.WALK.duck;
+        allGood = allGood && good;
+        rows.push(`${axis} ${deg}°: ${good ? 'да' : 'НЕТ (' + (!at ? 'на пороге не встать' : !st ? 'на ступени не встать' : !inside ? 'в тоннель не дошли' : !outside ? 'наружу не вышли' : 'присел ниже предела') + ')'}` + (minH < Wk.WALK.height - 0.01 ? ' пригнувшись до ' + minH.toFixed(2) + ' м' : ''));
+      }
+      ok(allGood && oldStuck >= 3,
+        `бортовой люк на склоне: встать на пороге, с трапа в тоннель и обратно — ${rows.join(', ')}; ` +
+        `охватывающими коробками тело на пороге упиралось в ${oldStuck} случаях из 4`);
+    }
   }
 }
 

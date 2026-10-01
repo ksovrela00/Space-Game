@@ -59,8 +59,13 @@ final class Schema
      *     `player.ship_id` — корабль, которым пилот командует сейчас:
      *     кораблей у него может быть несколько. Старые строки
      *     переносятся сами (carry), а лишние столбцы сносятся.
+     * 11 — `player.online`: в игре ли пилот сейчас. Ведёт его хаб
+     *     (вошёл по сокету — 1, ушёл и не вернулся за Hub::GRACE — 0).
+     *     Корабль ушедшего из мира пропадает вместе с ним, и стоять на
+     *     его борту нельзя: по этому столбцу сервер не пускает туда и
+     *     возвращает таких пассажиров на их корабли (Players::sendHome).
      */
-    public const VERSION = 10;
+    public const VERSION = 11;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -287,6 +292,10 @@ final class Schema
                 `name` VARCHAR(64) NOT NULL,
                 `created_at` DATETIME NOT NULL,
                 `last_seen_at` DATETIME NULL,
+                -- В игре ли сейчас: ведёт хаб (server/src/Hub.php). Не
+                -- «заходил недавно», как last_seen_at, а «его видят»: на
+                -- борт корабля, чей хозяин не в игре, не пускают.
+                `online` TINYINT(1) NOT NULL DEFAULT 0,
                 -- Деньги — ЦЕЛЫЕ кроны. Никаких плавающих: доля кроны в
                 -- игре не существует, а плавающая арифметика в деньгах
                 -- рано или поздно даёт 999.9999999.
@@ -538,6 +547,8 @@ final class Schema
                 'walk_pose' => 'TEXT NULL',
                 'out_body' => 'INT NULL',
                 'out_pose' => 'TEXT NULL',
+                // Версия 11: в игре ли.
+                'online' => 'TINYINT(1) NOT NULL DEFAULT 0',
             ],
         ];
     }

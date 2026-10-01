@@ -922,6 +922,147 @@ await step('шлюз: сели на мир с атмосферой, E — люк
   }
 });
 
+// Шлюз на склоне. Корабль садится на три стойки и стоит на склоне с креном
+// и тангажом до 20°, а человек за бортом стоит по отвесу: проём для него
+// наклонён. Раньше твёрдое корабля ложилось в оси грунта охватывающими
+// коробками, а они на крене раздуваются: бортовой люк не выпускал уже на
+// полутора градусах, носовой — с семи, обратно с трапа упирались в пустоту
+// у самого входа, а пята трапа висела над склоном выше шага. Из 96 проходов
+// (пять склонов до 18°, шесть курсов, четыре люка) туда и обратно удавалось
+// 29. Здесь — самый крутой из них, двумя курсами: крен и тангаж.
+await step('шлюз на склоне: крен и тангаж до 18°, все четыре трапа — на грунт и обратно в шлюз', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const A = await import('../js/game/airlock.js');
+  const S = await import('../js/game/surface.js');
+  const { WALK } = await import('../js/game/walker.js');
+  const { vesselPoint } = await import('../js/game/vessels.js');
+  const { worldToGround } = await import('../js/game/outside.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const w = game.walk;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    const I = game.interior, air = I.air;
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    // Суша с уклоном 16–19° (посадка допускает до 20°).
+    let q = null;
+    for (let i = 0; i < 20000 && !q; i++) {
+      const u = -0.8 + 1.6 * (i / 19999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const d = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      const sl = S.slopeAt(b, d);
+      if (!S.waterAt(b, d) && sl > 0.28 && sl < 0.34 && S.groundRadius(b, d) - b.radius > 0.05) q = d;
+    }
+    if (!q) throw new Error('на океаническом мире не нашлось склона в 16–19°');
+    const dot = (u, v) => u.x * v.x + u.y * v.y + u.z * v.z;
+    const land = (heading) => {
+      game.state.mode = 'flight';
+      sh.landedAt = null; sh.landedPose = null;
+      S.worldPoint(b, q, S.groundRadius(b, q) + 0.02, sh.pos);
+      const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+      const ul = Math.hypot(up.x, up.y, up.z); up.x /= ul; up.y /= ul; up.z /= ul;
+      const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      const f0 = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+      const fl = Math.hypot(f0.x, f0.y, f0.z); f0.x /= fl; f0.y /= fl; f0.z /= fl;
+      const r = { x: f0.y * up.z - f0.z * up.y, y: f0.z * up.x - f0.x * up.z, z: f0.x * up.y - f0.y * up.x };
+      const c = Math.cos(heading), s = Math.sin(heading);
+      lookAlong(sh.basis, { x: f0.x * c + r.x * s, y: f0.y * c + r.y * s, z: f0.z * c + r.z * s }, up);
+      sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+      frames(2);
+      if (!game.landHere() || game.state.mode !== 'landed') throw new Error('на склон не сели: ' + game.state.mode);
+      frames(2);
+      const P = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+      const pl = Math.hypot(P.x, P.y, P.z);
+      return { roll: Math.asin(dot(sh.basis.right, P) / pl) * 180 / Math.PI, pitch: Math.asin(dot(sh.basis.fwd, P) / pl) * 180 / Math.PI };
+    };
+    // В шлюз, лицом к люку.
+    const putIn = (hx) => {
+      const h = hx.h, r = I.roomById[h.lock], wall = h.side > 0 ? r.hi[0] : r.lo[0];
+      w.out = null; w.air = null; w.vessel = game.ownVessel;
+      w.pos = [wall - h.side * 0.9, r.lo[1] + 0.01, hx.zc]; w.vel = [0, 0, 0];
+      w.room = r; w.yaw = h.side * Math.PI / 2; w.pitch = 0;
+      frames(3);
+    };
+    // Обратно — по оси трапа, как идёт игрок, который его видит: на склоне
+    // трап в осях грунта идёт вкось, низ сдвинут вбок на полметра.
+    const steerUp = (hx) => {
+      const V = game.ownVessel;
+      const toG = (p) => worldToGround(w.out, vesselPoint(V, p));
+      const H = toG(A.stairPoint(hx, 1, [0, 0, 0]));
+      const F = toG(A.stairPoint(hx, 1, [hx.design.foot[0], hx.design.foot[1], 0]));
+      const ax = H[0] - F[0], az = H[2] - F[2], L = Math.hypot(ax, az);
+      const along = ((w.pos[0] - F[0]) * ax + (w.pos[2] - F[2]) * az) / L;
+      const side = Math.abs((w.pos[0] - F[0]) * az - (w.pos[2] - F[2]) * ax) / L;
+      // Далеко сбоку — сначала выйти на ось перед пятой, потом вверх.
+      const k = side > 0.3 && along < 0.5 ? -1.5 : Math.max(0, Math.min(L, along)) + 1;
+      w.yaw = Math.atan2(F[0] + ax / L * k - w.pos[0], F[2] + az / L * k - w.pos[2]);
+    };
+    const tilts = [], bad = [];
+    if (!w.on) { key('KeyY'); frames(60); }
+    for (const heading of [0, Math.PI / 2]) {
+      const t = land(heading);
+      tilts.push(`крен ${t.roll.toFixed(0)}°, тангаж ${t.pitch.toFixed(0)}°`);
+      if (Math.hypot(t.roll, t.pitch) < 12) throw new Error('корабль на склоне стоит почти ровно: ' + tilts.join('; '));
+      if (!w.on) { key('KeyY'); frames(60); }
+      for (const hx of air.hatches) {
+        for (const x of air.hatches) x.want = false;
+        hx.want = true;
+        putIn(hx);
+        frames(Math.ceil((2 / A.AIR.rate + A.AIR.hatchTime + A.AIR.stairTime) * 60) + 40);
+        if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) { bad.push(hx.id + ': люк не открылся'); continue; }
+        putIn(hx);
+        holdDown('KeyW');
+        for (let i = 0; i < 60 * 8 && !(w.out && w.ground && Math.hypot(w.pos[0], w.pos[2]) > 6.5); i++) frames(1);
+        release('KeyW'); frames(5);
+        if (!w.out || !(Math.hypot(w.pos[0], w.pos[2]) > 6)) {
+          bad.push(`${hx.id} (${tilts[tilts.length - 1]}): наружу не сошли — ` + (w.out ? 'встали за бортом в ' : 'остались на палубе в ')
+            + w.pos.map((v) => v.toFixed(2)).join(', '));
+          continue;
+        }
+        holdDown('KeyW');
+        for (let i = 0; i < 60 * 12 && w.out; i++) { steerUp(hx); frames(1); }
+        frames(60);
+        release('KeyW'); frames(5);
+        if (w.out || !w.room || w.room.id !== hx.h.lock) {
+          bad.push(`${hx.id} (${tilts[tilts.length - 1]}): с трапа в шлюз не вернулись — ` + (w.out ? 'за бортом в ' : 'на палубе в ')
+            + w.pos.map((v) => v.toFixed(2)).join(', '));
+        } else if ((w.height || WALK.height) < WALK.height) {
+          bad.push(`${hx.id}: в шлюзе так и не выпрямились, рост ${w.height.toFixed(2)} м`);
+        }
+      }
+      for (const x of air.hatches) x.want = false;
+      putIn(air.hatches[0]);
+      frames(60 * 6);
+    }
+    if (bad.length) throw new Error(bad.length + ' из 8: ' + bad.join('; '));
+  } finally {
+    if (game.walk.on) {
+      game.walk.out = null;
+      game.walk.pos = game.interior.seat.stand.slice(); game.walk.room = game.interior.roomById.bridge;
+      frames(2); key('KeyE'); frames(50);
+    }
+    if (game.interior && game.interior.air) {
+      for (const x of game.interior.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const L of Object.values(game.interior.air.locks)) { L.p = 1; L.state = 'sealed'; L.vent = false; }
+      for (const r of Object.values(game.interior.air.rooms)) { r.p = 1; r.leak = false; }
+    }
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(2);
+  }
+});
+
 // Пилот — не корабль. Рядом садится сосед (корабль без хозяина в игре,
 // спящий — как его шлёт хаб), люк у него открыт: пилот сходит со своего
 // трапа, поднимается по чужому, ходит по чужой палубе, в чужое кресло не

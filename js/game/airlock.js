@@ -457,6 +457,27 @@ function footAt(hx, swing, out) {
 const _f = [0, 0, 0];
 
 /**
+ * Грунт под пятой трапа, м (оси корабля): самая низкая из точек под пятой и
+ * там, откуда на трап ступают, — в шаге наружу, посередине и у поручней.
+ *
+ * Не одна точка под серединой пяты: на склоне поперёк трапа и под горку от
+ * него грунт у края ниже, и трап, поставленный серединой на землю, на склоне
+ * в 18° вышел с первой ступенью в 0.55 м над грунтом — выше шага (WALK.step,
+ * 0.42), и на него было не подняться. Пята, упёртая в самую низкую точку,
+ * высоким краем чуть уходит в грунт, — как настоящий трап на мягкой земле.
+ */
+const FOOT_OUT = 0.35, FOOT_SIDE = AIR.half - 0.25;
+function footGround(hx, ground, f) {
+  let g = Infinity;
+  for (let i = 0; i < 6; i++) {
+    const y = ground(f[0] + hx.h.side * (i < 3 ? 0 : FOOT_OUT), f[2] + FOOT_SIDE * ((i % 3) - 1));
+    if (y === null || y === undefined) return null;
+    if (y < g) g = y;
+  }
+  return g;
+}
+
+/**
  * Доворот трапа к грунту и высота пяты над ним. Считается, пока трап
  * опускается и стоит: корабль на стоянке неподвижен, а над грунтом может
  * и сесть, и подняться.
@@ -469,8 +490,8 @@ function settleStair(hx, env, dt) {
     // Две итерации: от доворота зависит, над какой точкой пята.
     for (let i = 0; i < 2; i++) {
       footAt(hx, target, _f);
-      const gy = ground(_f[0], _f[2]);
-      if (gy === null || gy === undefined) { target = 0; break; }
+      const gy = footGround(hx, ground, _f);
+      if (gy === null) { target = 0; break; }
       const drop = hx.h.y[0] - gy;
       const s = Math.max(-1, Math.min(1, drop / hx.design.len));
       target = Math.max(-AIR.swing, Math.min(AIR.swing, hx.design.alpha - Math.asin(s)));
@@ -480,8 +501,8 @@ function settleStair(hx, env, dt) {
   const k = Math.min(1, dt * 3);
   hx.swing += (target - hx.swing) * (hx.stair < 1 ? 1 : k);
   footAt(hx, hx.swing, _f);
-  const gy = ground ? ground(_f[0], _f[2]) : null;
-  hx.footGap = gy === null || gy === undefined ? Infinity : _f[1] - gy;
+  const gy = ground ? footGround(hx, ground, _f) : null;
+  hx.footGap = gy === null ? Infinity : _f[1] - gy;
   hx.exitOk = hx.stair >= 1 && isFinite(hx.footGap);
 }
 
@@ -505,15 +526,28 @@ export function airSolids(air, out = []) {
       out.push({ lo: [xlo, y0 - 0.3, h.z[0]], hi: [xhi, y1, h.z[1]], hatch: hx.id });
       continue;
     }
-    // Сходят только на трап: по бокам от него проём перекрыт.
-    out.push({ lo: [xlo, y0 - 0.3, h.z[0]], hi: [xhi, y1, hx.zc - AIR.half], hatch: hx.id });
-    out.push({ lo: [xlo, y0 - 0.3, hx.zc + AIR.half], hi: [xhi, y1, h.z[1]], hatch: hx.id });
+    // Сходят только на трап: по бокам от него проём перекрыт заслоном. Он
+    // невидим и стоит лишь там, где поручней ещё нет, — от тоннеля до
+    // обшивки (поручни ступеней начинаются от самой петли), — и только чуть
+    // выше шага: перешагнуть его нельзя, а большего от него не нужно. Раньше
+    // он был во весь проём и на 35 см за обшивку, и на склоне (тангаж до
+    // 20°) стенка в четыре метра наклонялась к проходу на полметра: пилот
+    // упирался в пустоту у верха трапа и в носовом люке, где над головой
+    // три метра.
+    const gx0 = sd * (h.skin - 0.12), gx1 = sd * (h.skin + 0.05);
+    const glo = Math.min(gx0, gx1), ghi = Math.max(gx0, gx1), gy = y0 + GUARD;
+    out.push({ lo: [glo, y0 - 0.3, h.z[0]], hi: [ghi, gy, hx.zc - AIR.half], hatch: hx.id });
+    out.push({ lo: [glo, y0 - 0.3, hx.zc + AIR.half], hi: [ghi, gy, h.z[1]], hatch: hx.id });
     const key = hx.swing.toFixed(4) + ':' + (hx.footGap > AIR.drop ? 1 : 0);
     if (hx.solidsKey !== key || !hx.solids) { hx.solids = stairSolids(hx); hx.solidsKey = key; }
     for (const s of hx.solids) out.push(s);
   }
   return out;
 }
+
+// Высота невидимого заслона по бокам от трапа на пороге, м: выше шага
+// (WALK.step, 0.42), чтобы на него не наступить.
+const GUARD = 0.6;
 
 function stairSolids(hx) {
   const d = hx.design, out = [];

@@ -20,7 +20,11 @@
  *     у трапа или из соседнего корабля. Телепорта на чужой борт через
  *     полпланеты сервер не примет;
  *   * в кресло пилота садятся только в СВОЁМ корабле: чужой корабль
- *     везёт, но не слушается.
+ *     везёт, но не слушается;
+ *   * на чужом борту стоят, только пока его хозяин В ИГРЕ (`player.online`,
+ *     его ведёт хаб). Ушёл хозяин — из мира ушли и его корабли, и
+ *     пассажирам стоять не на чем: они возвращаются в кресла своих
+ *     кораблей (sendHome).
  *
  * Что сервер проверяет, а что нет — важно понимать честно. Проверяются
  * ССЫЛКИ и ПРЕДЕЛЫ: система существует, порт существует и находится в той
@@ -436,6 +440,38 @@ final class Players
         return self::near($me, $at);
     }
 
+    /** Хозяина корабля нет в игре — и это не сам пилот. */
+    private static function ownerAway(array $ship, int $playerId): bool
+    {
+        $owner = (int) $ship['owner_id'];
+        return $owner !== $playerId
+            && !(int) Db::one('SELECT `online` FROM `player` WHERE `id`=?', [$owner]);
+    }
+
+    /**
+     * Вернуть пилота в кресло его корабля — того, которым он командует.
+     *
+     * Так кончается поездка пассажиром, когда хозяин ушёл из игры: его
+     * корабль ушёл из мира вместе с ним (Hub::strand), и стоять больше не
+     * на чем. Высадить на грунт у трапа было бы честнее с виду, но
+     * корабль мог висеть в пустоте или стоять в доке, а свой у пассажира
+     * бывает в другой системе — он остался бы там, где сам не дойдёт.
+     * Свой корабль ждёт его, где оставлен: туда и в ту систему.
+     *
+     * @return int корабль, в кресле которого он теперь
+     */
+    public static function sendHome(int $playerId): int
+    {
+        $ship = self::ship($playerId);
+        $set = ['aboard_ship' => (int) $ship['id'], 'seated' => 1, 'walk_pose' => null,
+            'out_body' => null, 'out_pose' => null];
+        if ($ship['system_id'] !== null) {
+            $set['system_id'] = (int) $ship['system_id'];
+        }
+        Db::update('player', $set, '`id`=?', [$playerId]);
+        return (int) $ship['id'];
+    }
+
     /** Пилот без корабля, которым командует, его не видит в своём состоянии. */
     private static function vessel(array $row): array
     {
@@ -504,6 +540,17 @@ final class Players
         self::ensureStock($shipId);
         // Строка пилота могла поправиться выше (ship чинит ship_id).
         $p = self::byId($playerId);
+        // На борту чужого корабля, а хозяина нет в игре: такого корабля
+        // ни для кого больше нет, и стоять на нём нельзя. Обычно таких
+        // пассажиров возвращает хаб (Hub::strand) — здесь на случай, когда
+        // хаба не было вовсе или он упал, не успев.
+        if ($p['aboard_ship'] !== null) {
+            $row = self::shipRow((int) $p['aboard_ship']);
+            if ($row !== null && self::ownerAway($row, $playerId)) {
+                self::sendHome($playerId);
+                $p = self::byId($playerId);
+            }
+        }
 
         $equipment = Db::all(
             'SELECT e.`code`, e.`name`, e.`slot`, e.`spec`, se.`level`, se.`health`
@@ -913,6 +960,12 @@ final class Players
             }
             if ($aboard !== $wasAboard && !self::canBoard($p, $target)) {
                 return [[], 'too_far'];
+            }
+            // На чужом борту — только пока его хозяин в игре. Проверка не
+            // только при посадке: опоздавшее сохранение пассажира, которого
+            // хаб уже вернул к себе, не должно усадить его обратно.
+            if (self::ownerAway($target, (int) $p['id'])) {
+                return [[], 'owner_away'];
             }
             $set['aboard_ship'] = $aboard;
             $set['out_body'] = null;
