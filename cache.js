@@ -45,14 +45,14 @@
       'airlock', 'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
       'entry', 'flow', 'fuel',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
-      'outside', 'player', 'quantum', 'shadow', 'ship', 'specs', 'state', 'surface',
+      'outside', 'player', 'quantum', 'ship', 'specs', 'state', 'surface',
       'walker', 'warp', 'weapons', 'world'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
       'forestworker', 'gputime', 'ground',
       'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
-      'quadtree', 'rocks', 'scene', 'shaders', 'terrain', 'tilegeo', 'tilepool',
+      'quadtree', 'rocks', 'scene', 'shaders', 'shipshadow', 'terrain', 'tilegeo', 'tilepool',
       'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [

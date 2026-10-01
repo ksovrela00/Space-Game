@@ -36,7 +36,6 @@ import {
 } from '../js/game/landing.js';
 import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '../js/game/gravity.js';
 import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
-import { shipShadow, convexHull } from '../js/game/shadow.js';
 import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
 import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
@@ -1858,152 +1857,136 @@ console.log('\n== гравитация и захват ==');
 }
 
 // --- 5f. Тень корабля --------------------------------------------------------
+//
+// Тень — картой глубины от солнца (js/gl/shipshadow.js). Здесь её счёт
+// повторён на процессоре: корпус растеризуется в карту той же стороны,
+// что у сцены, а точки грунта и обшивки спрашивают её так же, как
+// шейдер (сдвиг по нормали, запас по глубине). Ответ сверяется с
+// эталоном — лучом от точки к солнцу, пересечённым со всеми гранями
+// корпуса. Совпало — значит, тень лежит там, где её отбрасывает корпус,
+// и только там: на грунте, а не над ним.
 console.log('\n== тень ==');
 {
-  const w = makeSystem(0x1a7e);
-  const moon = w.bodies.find((b) => b.kind === 'moon');
-  const mesh = buildCobra();
-  const out = {};
-
-  // Ищем неровное место: на ровной площадке натянутая тень и плоская
-  // неразличимы, и проверка ничего не значила бы.
-  let dir = null, spread = 0;
-  for (let i = 0; i < 400 && spread < 0.006; i++) {
-    const u = -1 + 2 * ((i + 0.5) / 400);
-    const a = i * 2.399963;
-    const r = Math.sqrt(Math.max(0, 1 - u * u));
-    const d = normalize(v3(r * Math.cos(a), u, r * Math.sin(a)));
-    const g0 = groundRadius(moon, d);
-    let lo = g0, hi = g0;
-    for (let k = 0; k < 8; k++) {
-      const t = (k / 8) * Math.PI * 2;
-      const off = normalize(v3(
-        d.x + Math.cos(t) * 0.00004, d.y + Math.sin(t) * 0.00004, d.z + Math.cos(t) * 0.00003));
-      const g = groundRadius(moon, off);
-      lo = Math.min(lo, g); hi = Math.max(hi, g);
-    }
-    if (hi - lo > spread) { spread = hi - lo; dir = d; }
+  const S = await import('../js/gl/shipshadow.js');
+  const { buildCobra: build, GEAR_CLEAR: gc } = await import('../js/models/ships.js');
+  const hull = build();
+  const N = S.SHIP_SHADOW.size;
+  const h = S.hullRadius(hull) + S.SHIP_SHADOW.pad;
+  const center = v3(0, 0, 0);
+  // Треугольники корпуса (оси корабля = мировые, корабль в начале).
+  const T = [];
+  for (const f of hull.faces) {
+    for (let k = 2; k < f.v.length; k++) T.push([hull.verts[f.v[0]], hull.verts[f.v[k - 1]], hull.verts[f.v[k]]]);
   }
-
-  const sh = makeShip();
-  placeShip(sh, worldPoint(moon, dir, groundRadius(moon, dir) + 0.04, v3()), makeBasis());
-  const up = dirToWorldBody(moon, dir, v3());
-  // Ось для носа берём заведомо не вдоль вертикали, иначе горизонтальная
-  // составляющая вырождается в ноль и базис корабля выходит нулевым.
-  const axis = Math.abs(up.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
-  lookAlong(sh.basis, normalize(horizontal(axis, up, v3())), up);
-  const zone = landingContext(w, sh);
-  const sun = v3(moon.pos.x + up.x * 1e6, moon.pos.y + up.y * 1e6, moon.pos.z + up.z * 1e6);
-  const n = shipShadow(zone, sh, mesh, sun, out);
-
-  // Каждая вершина тени обязана лежать на грунте, а не на плоскости:
-  // иначе на кратере тень наполовину под землёй, наполовину висит.
-  let worstAlt = 0, loR = Infinity, hiR = -Infinity;
-  const p = v3();
-  for (let i = 0; i < n; i++) {
-    p.x = sh.pos.x + out.verts[i * 3];
-    p.y = sh.pos.y + out.verts[i * 3 + 1];
-    p.z = sh.pos.z + out.verts[i * 3 + 2];
-    worstAlt = Math.max(worstAlt, Math.abs(altitudeOf(moon, p).alt));
-    const rr = Math.hypot(p.x - moon.pos.x, p.y - moon.pos.y, p.z - moon.pos.z);
-    loR = Math.min(loR, rr); hiR = Math.max(hiR, rr);
-  }
-  ok(n > 40 && worstAlt < 0.004 && hiR - loR > 0.003,
-    `тень натянута на рельеф: ${n} вершин, все в ${(worstAlt * 1000).toFixed(1)} м от грунта, ` +
-    `а сам грунт под ней гуляет на ${((hiR - loR) * 1000).toFixed(1)} м`);
-
-  // ТО, ЧТО БЫЛО СЛОМАНО: тень строилась как ВЫПУКЛАЯ ОБОЛОЧКА проекции,
-  // и от корабля оставался ромб — у этого корпуса настоящий силуэт
-  // занимает чуть больше половины площади своей оболочки. Считаем
-  // площадь тени и сравниваем с оболочкой тех же точек.
-  {
-    const P = [];
-    for (let i = 0; i < n; i++) {
-      P.push([out.verts[i * 3], out.verts[i * 3 + 1], out.verts[i * 3 + 2]]);
+  // Эталон: луч от точки к солнцу задевает корпус (Мёллер — Трумбор).
+  const blocked = (p, d) => {
+    for (const [a, b, c] of T) {
+      const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
+      const e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
+      const px = d.y * e2z - d.z * e2y, py = d.z * e2x - d.x * e2z, pz = d.x * e2y - d.y * e2x;
+      const det = e1x * px + e1y * py + e1z * pz;
+      if (Math.abs(det) < 1e-18) continue;
+      const tx = p.x - a.x, ty = p.y - a.y, tz = p.z - a.z;
+      const u = (tx * px + ty * py + tz * pz) / det;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const vv = (d.x * qx + d.y * qy + d.z * qz) / det;
+      if (vv < 0 || u + vv > 1) continue;
+      if ((e2x * qx + e2y * qy + e2z * qz) / det > 1e-6) return true;
     }
-    // Плоскость тени: две оси из разброса точек.
-    const c = [0, 0, 0];
-    for (const q of P) { c[0] += q[0]; c[1] += q[1]; c[2] += q[2]; }
-    for (let k = 0; k < 3; k++) c[k] /= P.length;
-    const nrm = [up.x, up.y, up.z];
-    let e1 = [1, 0, 0];
-    const d0 = e1[0] * nrm[0] + e1[1] * nrm[1] + e1[2] * nrm[2];
-    if (Math.abs(d0) > 0.9) e1 = [0, 1, 0];
-    const dd = e1[0] * nrm[0] + e1[1] * nrm[1] + e1[2] * nrm[2];
-    e1 = [e1[0] - nrm[0] * dd, e1[1] - nrm[1] * dd, e1[2] - nrm[2] * dd];
-    const l1 = Math.hypot(e1[0], e1[1], e1[2]);
-    e1 = e1.map((x) => x / l1);
-    const e2 = [
-      nrm[1] * e1[2] - nrm[2] * e1[1],
-      nrm[2] * e1[0] - nrm[0] * e1[2],
-      nrm[0] * e1[1] - nrm[1] * e1[0]];
-    const flat2 = new Float32Array(P.length * 2);
-    P.forEach((q, i) => {
-      const x = q[0] - c[0], y = q[1] - c[1], z = q[2] - c[2];
-      flat2[i * 2] = x * e1[0] + y * e1[1] + z * e1[2];
-      flat2[i * 2 + 1] = x * e2[0] + y * e2[1] + z * e2[2];
-    });
-    // Площадь самой тени — ОБЪЕДИНЕНИЕ треугольников: проекции граней
-    // местами накладываются (корпус не выпуклый), и складывать их
-    // площади нельзя. Растеризуем в сетку, как это делает экран.
-    let ru0 = Infinity, ru1 = -Infinity, rv0 = Infinity, rv1 = -Infinity;
-    for (let i = 0; i < P.length; i++) {
-      ru0 = Math.min(ru0, flat2[i * 2]); ru1 = Math.max(ru1, flat2[i * 2]);
-      rv0 = Math.min(rv0, flat2[i * 2 + 1]); rv1 = Math.max(rv1, flat2[i * 2 + 1]);
-    }
-    const RES = 128;
-    const cell = Math.max((ru1 - ru0), (rv1 - rv0)) / (RES - 1);
-    const grid = new Uint8Array(RES * RES);
-    for (let i = 0; i + 2 < P.length; i += 3) {
-      const ax = (flat2[i * 2] - ru0) / cell, ay = (flat2[i * 2 + 1] - rv0) / cell;
-      const bx = (flat2[(i + 1) * 2] - ru0) / cell, by = (flat2[(i + 1) * 2 + 1] - rv0) / cell;
-      const cx2 = (flat2[(i + 2) * 2] - ru0) / cell, cy2 = (flat2[(i + 2) * 2 + 1] - rv0) / cell;
-      const den = (bx - ax) * (cy2 - ay) - (by - ay) * (cx2 - ax);
-      if (Math.abs(den) < 1e-9) continue;
-      const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx2)));
-      const x1 = Math.min(RES - 1, Math.ceil(Math.max(ax, bx, cx2)));
-      const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy2)));
-      const y1 = Math.min(RES - 1, Math.ceil(Math.max(ay, by, cy2)));
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          const w0 = ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) / den;
-          const w1 = ((x - ax) * (cy2 - ay) - (y - ay) * (cx2 - ax)) / den;
-          if (w0 >= 0 && w1 >= 0 && w0 + w1 <= 1) grid[y * RES + x] = 1;
+    return false;
+  };
+  const sunAt = (elev, az) => normalize(v3(Math.cos(elev) * Math.cos(az), Math.sin(elev), Math.cos(elev) * Math.sin(az)));
+  for (const [elev, az, name] of [[1.2, 0.7, 'высоко'], [0.45, 2.3, 'вечером']]) {
+    const sun = sunAt(elev, az);
+    const F = S.shadowFrame(center, sun, h);
+    // Карта: глубина ближайшей к солнцу грани в каждой точке.
+    const depth = new Float32Array(N * N).fill(1);
+    const sc = (p) => S.shadowCoord(F, p, [0, 0, 0]);
+    for (const tri of T) {
+      const [A, B, C] = tri.map(sc);
+      const x0 = Math.max(0, Math.floor(Math.min(A[0], B[0], C[0]) * N));
+      const x1 = Math.min(N - 1, Math.ceil(Math.max(A[0], B[0], C[0]) * N));
+      const y0 = Math.max(0, Math.floor(Math.min(A[1], B[1], C[1]) * N));
+      const y1 = Math.min(N - 1, Math.ceil(Math.max(A[1], B[1], C[1]) * N));
+      const den = (B[1] - C[1]) * (A[0] - C[0]) + (C[0] - B[0]) * (A[1] - C[1]);
+      if (Math.abs(den) < 1e-18) continue;
+      for (let j = y0; j <= y1; j++) {
+        const y = (j + 0.5) / N;
+        for (let i = x0; i <= x1; i++) {
+          const x = (i + 0.5) / N;
+          const w0 = ((B[1] - C[1]) * (x - C[0]) + (C[0] - B[0]) * (y - C[1])) / den;
+          const w1 = ((C[1] - A[1]) * (x - C[0]) + (A[0] - C[0]) * (y - C[1])) / den;
+          const w2 = 1 - w0 - w1;
+          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+          const z = w0 * A[2] + w1 * B[2] + w2 * C[2];
+          if (z < depth[j * N + i]) depth[j * N + i] = z;
         }
       }
     }
-    let area = 0;
-    for (const g of grid) area += g;
-    area *= cell * cell;
-    const hull = convexHull(flat2, P.length);
-    let hullArea = 0;
-    for (let i = 0; i < hull.length; i++) {
-      const a = hull[i], b2 = hull[(i + 1) % hull.length];
-      hullArea += flat2[a * 2] * flat2[b2 * 2 + 1] - flat2[b2 * 2] * flat2[a * 2 + 1];
+    // Выборка — как в шейдере (без сглаживания: одна точка карты).
+    const texKm = 2 * h / N;
+    const lit = (p, n) => {
+      const q = v3(p.x + n.x * texKm * S.SHIP_SHADOW.offset, p.y + n.y * texKm * S.SHIP_SHADOW.offset,
+        p.z + n.z * texKm * S.SHIP_SHADOW.offset);
+      const s = sc(q);
+      if (s[0] <= 0 || s[1] <= 0 || s[0] >= 1 || s[1] >= 1 || s[2] <= 0) return true;
+      const r = Math.min(s[2], 1) - S.SHIP_SHADOW.bias / N;
+      return r <= depth[Math.floor(s[1] * N) * N + Math.floor(s[0] * N)];
+    };
+    // Грунт под кораблём на шасси: ровная площадка, сетка точек на сто
+    // метров вокруг — в том числе там, куда тень вытянута низким солнцем.
+    const up = v3(0, 1, 0);
+    const shift = v3(-sun.x / sun.y * gc, 0, -sun.z / sun.y * gc);
+    let agree = 0, total = 0, shadowed = 0, leak = 0, phantom = 0;
+    for (let a = -40; a <= 40; a++) {
+      for (let b = -40; b <= 40; b++) {
+        const p = v3(shift.x + a * 0.0013, -gc, shift.z + b * 0.0013);
+        const truth = blocked(p, sun), got = !lit(p, up);
+        total++;
+        if (truth === got) agree++;
+        else if (truth) leak++; else phantom++;
+        if (truth) shadowed++;
+      }
     }
-    hullArea = Math.abs(hullArea) / 2;
-    const fill = area / hullArea;
-    ok(fill > 0.35 && fill < 0.8,
-      `тень повторяет силуэт, а не оболочку: занимает ${(fill * 100).toFixed(0)}% ` +
-      'её площади (ромб дал бы под сотню, двойное покрытие — больше)');
+    // Обшивка, повёрнутая к солнцу: сама себя она затенять не должна
+    // (рябь), а там, где её закрывает другая часть корпуса, — должна.
+    let acne = 0, faces = 0;
+    for (const f of hull.faces) {
+      if (!f.n || f.n.x * sun.x + f.n.y * sun.y + f.n.z * sun.z < 0.3) continue;
+      const c = v3(0, 0, 0);
+      for (const i of f.v) { c.x += hull.verts[i].x; c.y += hull.verts[i].y; c.z += hull.verts[i].z; }
+      c.x /= f.v.length; c.y /= f.v.length; c.z /= f.v.length;
+      const p = v3(c.x + f.n.x * 1e-6, c.y + f.n.y * 1e-6, c.z + f.n.z * 1e-6);
+      faces++;
+      if (!lit(c, f.n) && !blocked(p, sun)) acne++;
+    }
+    ok(shadowed > 150 && agree / total > 0.985 && acne / faces < 0.03,
+      `тень на грунте (солнце ${name}, ${(elev * 180 / Math.PI).toFixed(0)}°): карта ${N}² совпала с лучами к солнцу ` +
+      `в ${(agree / total * 100).toFixed(1)}% точек (${shadowed} в тени; расхождения по краю — ${leak} светлых, ` +
+      `${phantom} лишних); обшивка к солнцу сама себя не затеняет — рябь на ${acne} гранях из ${faces}`);
+  }
 
-    // Накрывающая сетка обязана перекрывать силуэт целиком: по ней идёт
-    // умножение, и не накрытый ею край остался бы светлой каймой.
-    let cu0 = Infinity, cu1 = -Infinity, cv0 = Infinity, cv1 = -Infinity;
-    for (let i = 0; i < out.coverCount; i++) {
-      const x = out.cover[i * 3] - c[0], y = out.cover[i * 3 + 1] - c[1], z = out.cover[i * 3 + 2] - c[2];
-      const uu = x * e1[0] + y * e1[1] + z * e1[2];
-      const vv = x * e2[0] + y * e2[1] + z * e2[2];
-      cu0 = Math.min(cu0, uu); cu1 = Math.max(cu1, uu);
-      cv0 = Math.min(cv0, vv); cv1 = Math.max(cv1, vv);
+  // Матрица шейдера — из осей КАМЕРЫ в карту — даёт то же, что прямой
+  // счёт из мира: иначе тень уехала бы при повороте головы.
+  {
+    const F = S.shadowFrame(v3(1200.5, -300.25, 77.125), sunAt(0.6, 1.1), 0.05);
+    const cam = { pos: v3(1200.51, -300.24, 77.13), basis: makeBasis() };
+    lookAlong(cam.basis, normalize(v3(0.3, -0.5, 0.8)), normalize(v3(0.1, 1, 0.2)));
+    const M = S.shadowMatrix(F, cam);
+    let worst = 0;
+    for (let i = 0; i < 50; i++) {
+      const P = v3(F.c.x + Math.sin(i) * 0.03, F.c.y + Math.cos(i * 1.7) * 0.02, F.c.z + Math.sin(i * 2.3) * 0.03);
+      const d = v3(P.x - cam.pos.x, P.y - cam.pos.y, P.z - cam.pos.z);
+      const b = cam.basis;
+      const pc = [dot(d, b.right), dot(d, b.up), dot(d, b.fwd)];
+      const want = S.shadowCoord(F, P);
+      for (let r = 0; r < 3; r++) {
+        const got = M[r] * pc[0] + M[4 + r] * pc[1] + M[8 + r] * pc[2] + M[12 + r];
+        worst = Math.max(worst, Math.abs(got - want[r]));
+      }
     }
-    let outside = 0;
-    for (let i = 0; i < P.length; i++) {
-      const uu = flat2[i * 2], vv = flat2[i * 2 + 1];
-      if (uu < cu0 || uu > cu1 || vv < cv0 || vv > cv1) outside++;
-    }
-    ok(out.coverCount > 0 && outside === 0,
-      `накрывающая сетка (${out.coverCount} вершин) перекрывает силуэт целиком`);
+    ok(worst < 1e-6, `матрица тени из осей камеры совпадает с прямым счётом (ошибка ${worst.toExponential(1)} доли карты)`);
   }
 }
 
@@ -2904,6 +2887,21 @@ console.log('\n== звук ==');
     ok(a.events.length <= 32, `неразобранная очередь ограничена: ${a.events.length}`);
   }
 
+  // Шаг: поверхность и воздух доходят до синтеза как есть; бегом громче
+  // шага, приземление громче бега и ниже (heavy).
+  {
+    const a = makeAudio(31);
+    const got = [];
+    const fake = { ok: true, engine() {}, drive() {}, thrust() {}, ambient() {}, step: (...x) => got.push(x) };
+    audioCue(a, 'step', { surface: 'grass', air: 0.4 });
+    audioCue(a, 'step', { surface: 'metal', run: true });
+    audioCue(a, 'step', { surface: 'ground', land: 5 });
+    playAudio(a, fake);
+    ok(got.length === 3 && got[0][0] === 'grass' && got[0][2] === 0.4 && got[1][2] === 1
+      && got[0][1] < got[1][1] && got[1][1] < got[2][1] && got[2][3] === 1 && got[0][3] === 0,
+      `шаги в синтез: ${got.map((x) => `${x[0]} ${x[1].toFixed(2)}`).join(', ')} — бег громче шага, приземление громче бега`);
+  }
+
   // Выключенный звук не копит событий: глушится источник, а не выход.
   {
     const a = makeAudio(12), g = mkGame();
@@ -2928,6 +2926,7 @@ console.log('\n== синтез звука ==');
     const check = (x, where) => {
       if (typeof x === 'number' && !Number.isFinite(x)) calls.bad.push(`${name}.${where}: ${x}`);
       if (name === 'rate' && typeof x === 'number') calls.rates.push(x);
+      if (name === 'freq' && typeof x === 'number') (calls.freqs || (calls.freqs = [])).push(x);
       calls.param++;
       return p;
     };
@@ -3053,7 +3052,41 @@ console.log('\n== синтез звука ==');
     // Разные записи подряд: один и тот же скрип дважды сразу слышен.
     const seq = [pickDur(2), pickDur(2), pickDur(2)];
     ok(new Set(seq).size > 1, `подряд идут разные записи (${seq.join(', ')})`);
+
+    // Шаги: у каждой поверхности свои слои; в пустоте верха срезаны
+    // (звук идёт только через скафандр), но шаг не пропадает.
+    {
+      const five = (d) => [1, 2, 3, 4, 5].map((i) => fakeBuf(d + i * 0.01));
+      s.buf.stepHard = five(0.1); s.buf.stepPlate = five(0.55); s.buf.stepGrass = five(0.7);
+      s.buf.stepSnow = five(0.37); s.buf.stepGravel = fakeBuf(0.704);
+      calls.bad.length = 0;
+      const layers = {}, tops = {};
+      for (const surface of ['metal', 'ground', 'grass', 'snow']) {
+        for (const air of [1, 0]) {
+          s.live = 0;
+          const n0 = calls.node.bufsrc || 0;
+          calls.freqs = [];
+          s.step(surface, 0.5, air, 0);
+          if (air === 1) layers[surface] = (calls.node.bufsrc || 0) - n0;
+          tops[surface + air] = Math.max(...calls.freqs);
+        }
+      }
+      const picks = new Set();
+      for (let i = 0; i < 12; i++) { picks.add(s._any('stepHard')); }
+      let repeat = 0, last = null;
+      for (let i = 0; i < 40; i++) { const b = s._any('stepGrass'); if (b === last) repeat++; last = b; }
+      ok(layers.metal === 2 && layers.ground === 2 && layers.grass === 2 && layers.snow === 1 && calls.bad.length === 0
+        && ['metal', 'ground', 'grass', 'snow'].every((x) => tops[x + '0'] <= 400 && tops[x + '1'] > 1000)
+        && picks.size > 2 && repeat === 0,
+        `шаги на записях: палуба — ${layers.metal} слоя (подошва и плита), грунт — ${layers.ground} (подошва и хруст ` +
+        `гравия), трава — ${layers.grass}, снег — ${layers.snow}; в пустоте фильтр срезает всё выше ` +
+        `${Math.round(tops.metal0)} Гц (при воздухе — до ${Math.round(tops.metal1)}); один дубль дважды подряд — ни разу`);
+    }
     s.sampled = false;
+    calls.bad.length = 0;
+    s.live = 0;
+    for (const surface of ['metal', 'ground', 'grass', 'snow']) s.step(surface, 0.5, 0.6, 0.3);
+    ok(calls.bad.length === 0 && s.live > 0, `шаги синтезом (без файлов) собираются без ошибок: голосов ${s.live}`);
   }
 
   // Громкость и немота идут через мастер-узел, а не через источники.
@@ -3708,6 +3741,20 @@ console.log('\n== камни на грунте ==');
   // парит, либо тонет — и оба случая видно сразу.
   {
     const geo = buildRockGeometry(moon, rocks.slice(0, 40));
+    // Поле в поле: от середины (как рисует сцена) — те же камни, только
+    // числа малы, и float32 их не огрубляет (js/gl/rocks.js).
+    {
+      const c = rocks[0].dir;
+      const loc = buildRockGeometry(moon, rocks.slice(0, 40), null, null, c);
+      let worst = 0, big = 0;
+      for (let i = 0; i < geo.faces * 9; i++) {   // заполнено столько: тени без солнца нет
+        worst = Math.max(worst, Math.abs(loc.positions[i] + loc.origin[i % 3] - geo.positions[i]));
+        big = Math.max(big, Math.abs(loc.positions[i]));
+      }
+      ok(worst <= 1.2e-7 && big < 1e-3 && geo.origin.every((v) => v === 0),
+        `камни от середины поля — те же камни (расхождение ${(worst * moon.radius * 1e6).toFixed(0)} мм — ` +
+        `шаг float32 прежних чисел), а вершины в ${(big * moon.radius * 1000).toFixed(0)} м от начала, не в радиусе тела`);
+    }
     let worstUnder = 0, best = 0;
     for (let i = 0; i < geo.faces * 3; i++) {
       const x = geo.positions[i * 3], y = geo.positions[i * 3 + 1], z = geo.positions[i * 3 + 2];
@@ -8171,13 +8218,15 @@ console.log('\n== наземный город ==');
       p.yaw = s * Math.PI / 2;
       let bump = false, t = 0;
       const far = Math.abs(A.stairPoint(hx, 1, [hx.design.foot[0] + 1.5, 0, 0])[0]);
+      const floors = [];
       while (t < 12 && Math.abs(p.pos[0]) < far) {
         const vy = p.vel[1];
         Wk.updateWalker(p, In, { fwd: 1 }, 1 / 60, Wo);
         if (vy > 0.5 && p.vel[1] === 0) bump = true;
+        if (p.ground && floors[floors.length - 1] !== p.floor) floors.push(p.floor);
         t += 1 / 60;
       }
-      const down = Math.abs(p.pos[1] + gear) < 0.01;
+      const down = Math.abs(p.pos[1] + gear) < 0.01 && floors.join(' ') === 'deck ground';
       p.yaw += Math.PI;
       let t2 = 0;
       while (t2 < 12 && Math.abs(p.pos[0]) > hx.h.skin - 0.2) { Wk.updateWalker(p, In, { fwd: 1 }, 1 / 60, Wo); t2 += 1 / 60; }
@@ -8317,6 +8366,82 @@ console.log('\n== наземный город ==');
       const atEdge = !O.waterUnder(Gc, wc.pos[0], wc.pos[2]);
       ok(atEdge && Math.hypot(wc.pos[0], wc.pos[2]) < 3,
         `у моря пилот останавливается на берегу: в воду не заходит (${Math.hypot(wc.pos[0], wc.pos[2]).toFixed(1)} м от начала)`);
+    }
+    // По рельефу — без остановок. Грунт был стенкой с допуском в 2 мм:
+    // на подъёме ноги уходили под него на полтора миллиметра, опора их
+    // не видела, следующий шаг в склон упирался и обнулял скорость — на
+    // ровном подъёме в 15° пилот шёл полметра в секунду вместо двух и
+    // «вяз». Теперь нога идёт по рельефу. Проверка: восемь направлений
+    // на настоящем грунте, шагом и бегом, — скорость полная, ноги на
+    // грунте, а не под ним и не над ним.
+    {
+      const gr = (x, z) => O.groundY(G, x, z, groundRadius);
+      const Wg = Wk.outsideWorld([], gr, (x, z) => O.waterUnder(G, x, z), body.g0);
+      let worst = Infinity, worstAt = '', stalls = 0, under = 0, air = 0, frames = 0, climb = 0;
+      for (const run of [false, true]) {
+        for (let k = 0; k < 8; k++) {
+          const wg = Wk.makeWalker();
+          Wk.standUp(wg, In); wg.phase = 'walk'; wg.out = G;
+          wg.pos = [0, gr(0, 0), 0]; wg.yaw = k * Math.PI / 4;
+          const want = run ? Wk.WALK.run : Wk.WALK.speed;
+          let dist = 0;
+          for (let i = 0; i < 60 * 12; i++) {
+            const p0 = wg.pos.slice();
+            Wk.updateWalker(wg, In, { fwd: 1, run }, 1 / 60, Wg);
+            if (i < 30) continue;          // разгон
+            const d = Math.hypot(wg.pos[0] - p0[0], wg.pos[2] - p0[2]);
+            dist += d; frames++;
+            climb = Math.max(climb, Math.abs(wg.pos[1] - p0[1]) / Math.max(d, 1e-9));
+            if (d < want / 60 * 0.5) stalls++;
+            const gap = wg.pos[1] - gr(wg.pos[0], wg.pos[2]);
+            if (gap < -1e-6) under++;
+            if (!wg.ground) air++;
+          }
+          const v = dist / (12 - 0.5);
+          if (v / want < worst) { worst = v / want; worstAt = `${run ? 'бег' : 'шаг'} ${k * 45}°`; }
+        }
+      }
+      ok(worst > 0.99 && stalls === 0 && under === 0 && air === 0,
+        `по рельефу ${body.name} в восьми направлениях шагом и бегом: худшая скорость — ${(worst * 100).toFixed(1)}% ` +
+        `(${worstAt}), остановок ${stalls}, ноги под грунтом ${under} раз, в воздухе ${air} кадров из ${frames}; ` +
+        `самый крутой участок пути — ${(Math.atan(climb) * 180 / Math.PI).toFixed(0)}°`);
+    }
+    // Шаги (звук): нога встаёт раз в полпериода качания головы — шагом
+    // через 0.75 м, бегом через 1.4 (бегут шире, а не чаще). Пол —
+    // грунт, а на палубе — палуба; прыжок кончается слышным приземлением.
+    {
+      const count = (W, out, run, secs) => {
+        const p = Wk.makeWalker();
+        Wk.standUp(p, In); p.phase = 'walk'; p.out = out;
+        p.pos = out ? [0, W.ground(0, 0), 0] : [0, I.INT.deck.low, 3.0];
+        p.yaw = out ? 0.7 : 0;
+        if (!out) p.room = In.roomById.hold;
+        for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, { fwd: 1, run }, 1 / 60, W);   // разгон
+        let n = 0;
+        const floors = new Set();
+        for (let i = 0; i < Math.round(secs * 60); i++) {
+          const ev = Wk.updateWalker(p, In, { fwd: out || i % 120 < 60 ? 1 : -1, run }, 1 / 60, W);
+          if (ev.step) n++;
+          floors.add(p.floor);
+        }
+        return { rate: n / secs, floors: [...floors].join('/') };
+      };
+      const Wg = Wk.outsideWorld([], (x, z) => O.groundY(G, x, z, groundRadius), null, body.g0);
+      const walkOut = count(Wg, G, false, 6), runOut = count(Wg, G, true, 6);
+      const deck = count(null, null, false, 2);
+      // Прыжок на палубе: приходят на ноги со скоростью отрыва.
+      const pj = Wk.makeWalker();
+      Wk.standUp(pj, In); pj.phase = 'walk'; pj.pos = [0, I.INT.deck.low, 6.0]; pj.room = In.roomById.hold;
+      Wk.updateWalker(pj, In, {}, 1 / 60);
+      Wk.updateWalker(pj, In, { jump: true }, 1 / 60);
+      let land = 0;
+      for (let i = 0; i < 90 && !land; i++) { const ev = Wk.updateWalker(pj, In, {}, 1 / 60); if (ev.step && ev.step.land) land = ev.step.land; }
+      const wantWalk = Wk.WALK.speed / Wk.WALK.stride, wantRun = Wk.WALK.run / Wk.WALK.strideRun;
+      ok(Math.abs(walkOut.rate - wantWalk) < 0.25 && Math.abs(runOut.rate - wantRun) < 0.25 && walkOut.floors === 'ground'
+        && deck.floors === 'deck' && Math.abs(land - Wk.jumpSpeed()) < 0.2,
+        `шаги: по грунту ${walkOut.rate.toFixed(2)} в секунду шагом и ${runOut.rate.toFixed(2)} бегом ` +
+        `(${wantWalk.toFixed(2)} и ${wantRun.toFixed(2)} по длине шага), пол — ${walkOut.floors}; в трюме — ${deck.floors}; ` +
+        `прыжок кончается приземлением на ${land.toFixed(2)} м/с`);
     }
     // Днище — твёрдое над пилотом под кораблём, но не у порога люка.
     const t0u = performance.now();

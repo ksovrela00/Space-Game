@@ -8,6 +8,7 @@ import { HULL_GLSL } from './hull.js';
 import { MAT } from '../models/hulldetail.js';
 import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
+import { SHIP_SHADOW_GLSL } from './shipshadow.js';
 
 // Глубина пишется логарифмически (см. mat4.js): иначе на диапазоне от
 // метров до миллионов километров начинается z-fighting.
@@ -128,6 +129,11 @@ in float aMat;
 uniform mat4 uProj;
 uniform mat4 uModelView;
 uniform mat3 uNormalMat;
+// Начало отсчёта вершин в осях модели. У плиток грунта и камней вершины
+// лежат от середины плитки (поля), а не от центра тела: так их положение
+// точно во float32 (js/gl/tilegeo.js). Мелкому рельефу нужна позиция от
+// центра тела — её и собирает vLocal. У остальных сеток — нуль.
+uniform vec3 uLocalShift;
 // Струя движков: гнёт растения (js/gl/wash.js). Включена только на
 // поле растительности, у остальных uWashOn = 0.
 ${WASH_GLSL}
@@ -152,7 +158,7 @@ void main() {
   vViewPos = vp.xyz;
   vNormal = uNormalMat * nrm;
   vColor = aColor;
-  vLocal = pos;
+  vLocal = pos + uLocalShift;
   vUv = aUv;
   vGrain = aGrain;
   vMat = aMat;
@@ -299,6 +305,9 @@ uniform float uLogFC;
 // Тени построек от фар: коробки города и его оси (js/gl/citymesh.js).
 // uShadeN = 0 — города рядом нет, и весь блок пропускается одним сравнением.
 ${SHADE_GLSL}
+// Тень своего корабля от солнца — картой глубины (js/gl/shipshadow.js).
+// uShipShadowOn = 0 — карты нет, и выборок нет.
+${SHIP_SHADOW_GLSL}
 // Запечённая поверхность: нормаль в локальных осях (RGB) и тон (A).
 // uSurfMode = 0 — текстуры нет (корабли, станции, светило).
 uniform sampler2D uSurfTex;
@@ -423,6 +432,10 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   if (dot(n, normalize(vViewPos)) > 0.0) n = -n;
 
   float lam = max(dot(n, uSunDir), 0.0);
+  // Свой корабль заслоняет солнце: гаснет прямой свет, рассеянный
+  // остаётся. Нормаль здесь уже развёрнута к камере, и раз lam > 0 —
+  // к солнцу тоже: по ней точку и отодвигают от поверхности.
+  if (uShipShadowOn > 0.5 && lam > 0.0) lam *= shipShadowAt(vViewPos, n);
   float lit = uAmbient + (1.0 - uAmbient) * lam;
   if (inner) lit = max(lit, 0.36);
 
@@ -579,39 +592,6 @@ void main() {
   outColor = vec4(n * 0.5 + 0.5, tint * 0.5 + 0.5);
 }`;
 
-// --- Тень корабля -----------------------------------------------------------
-// Один тёмный многоугольник на грунте (js/game/shadow.js). Рисуется
-// умножением: под тенью от поверхности остаётся только та часть света,
-// которая и так шла не от солнца. Поэтому шейдер и не считает ничего
-// сам — освещение уже посчитано в поверхности.
-
-export const SHADOW_VS = `#version 300 es
-in vec3 aPos;
-
-uniform mat4 uProj;
-uniform mat4 uModelView;
-
-out float vFragDepth;
-
-void main() {
-  vec4 vp = uModelView * vec4(aPos, 1.0);
-  gl_Position = uProj * vp;
-  vFragDepth = 1.0 + gl_Position.w;
-}`;
-
-export const SHADOW_FS = `#version 300 es
-precision highp float;
-
-in float vFragDepth;
-uniform float uLogFC;
-uniform float uDark;     // во сколько раз гасим свет под тенью
-
-out vec4 outColor;
-
-void main() {
-${LOG_DEPTH_FRAG}
-  outColor = vec4(vec3(uDark), 1.0);
-}`;
 
 // --- Звёздный фон -----------------------------------------------------------
 

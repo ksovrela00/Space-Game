@@ -16,7 +16,7 @@ import { GpuTimer } from './gputime.js';
 import { buildProgram } from './program.js';
 import {
   MESH_VS, MESH_FS, MESH_FS_DETAIL, STARS_VS, STARS_FS, GLOW_VS, GLOW_FS,
-  ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS, SHADOW_VS, SHADOW_FS,
+  ATMO_VS, ATMO_FS, RING_VS, RING_FS, BAKE_VS, BAKE_FS,
   PLUME_VS, PLUME_FS, WARP_VS, WARP_FS, TUNNEL_VS, TUNNEL_FS, MOTE_VS, MOTE_FS,
   BOLT_VS, BOLT_FS, SHIELD_VS, SHIELD_FS,
   WARPTUN_VS, WARPTUN_FS,
@@ -35,7 +35,9 @@ import { Baker, createBlankTexture, createSkyTexture, CUBE_FACES } from './bake.
 import { TileSet } from './tiles.js';
 import { loadGround, grainOrigin, grainPerUnit, GROUND, GRAIN_MAX_SPAN } from './ground.js';
 import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtree.js';
-import { shipShadow } from '../game/shadow.js';
+import {
+  SHIP_SHADOW, shadowFrame, shadowMatrix, hullRadius, depthVs, DEPTH_FS, makeShadowTarget,
+} from './shipshadow.js';
 import { cityLocal } from '../game/city.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
@@ -49,7 +51,7 @@ import { washUniforms } from './wash.js';
 
 import {
   buildFlatMesh, buildIndexedMesh, buildPointsMesh, buildQuad, buildRingMesh,
-  buildDynamicMesh, buildWarpMesh, buildMoteMesh, buildShockMesh, buildBoltBuffer,
+  buildWarpMesh, buildMoteMesh, buildShockMesh, buildBoltBuffer,
 } from './mesh.js';
 import { makeRng } from '../core/rng.js';
 import { icosphere } from './icosphere.js';
@@ -98,10 +100,6 @@ const NEAR_FOOT = 5e-5;            // км
 const FAR_BRIDGE = 0.25;           // км
 const FAR = 2e9;             // с запасом на всю систему
 const AMBIENT = 0.14;
-// Во сколько раз тень гасит поверхность. Не в ноль: на безатмосферном
-// теле в тень всё равно светит рассеянный свет от соседнего склона —
-// и тот же ambient, которым освещена ночная сторона.
-const SHADOW_DARK = 0.30;
 // Поток частиц в прыжке: сколько их и как далеко впереди рождаются.
 // Глубина рождения важнее числа: при uZ0 = 5 частица появляется в
 // 1–15° от точки схода, то есть у самого центра, и разгоняется к краю
@@ -126,13 +124,6 @@ const SHIELD_SCALE = new Float32Array(SHIELD_AXES);
 // в кадре десятки черт. Считать их нечем и незачем: буфер статический,
 // на кадр приходится один вызов отрисовки.
 const MOTE_COUNT = Q.motes;
-// Единичный базис: тень уже посчитана в мировых осях, поворачивать её
-// нечем и незачем.
-const IDENTITY_BASIS = {
-  right: { x: 1, y: 0, z: 0 },
-  up: { x: 0, y: 1, z: 0 },
-  fwd: { x: 0, y: 0, z: 1 },
-};
 // Оптическая толщина воздуха ВЕРТИКАЛЬНО ВВЕРХ от поверхности, при
 // давлении в одну атмосферу: сколько света воздух СЪЕДАЕТ. Настоящий
 // воздух в этом смысле почти прозрачен — ночью сквозь него видны
@@ -248,7 +239,6 @@ export class GlScene {
     this.pAtmo = buildProgram(gl, 'atmo', ATMO_VS, ATMO_FS);
     this.pRing = buildProgram(gl, 'ring', RING_VS, RING_FS);
     this.pPlume = buildProgram(gl, 'plume', PLUME_VS, PLUME_FS);
-    this.pShadow = buildProgram(gl, 'shadow', SHADOW_VS, SHADOW_FS);
     this.pWarp = buildProgram(gl, 'warp', WARP_VS, WARP_FS);
     this.pTunnel = buildProgram(gl, 'tunnel', TUNNEL_VS, TUNNEL_FS);
     this.pWarpTun = buildProgram(gl, 'warptun', WARPTUN_VS, WARPTUN_FS);
@@ -339,13 +329,33 @@ export class GlScene {
       aUv: this.pBolt.attrib('aUv'),
       aColor: this.pBolt.attrib('aColor'),
     });
-    // Тень переписывается каждый кадр. Силуэт — это настоящие грани
-    // корпуса, отвёрнутые от солнца, поэтому вершин у него тысячи, а не
-    // десятки: буфер берём с запасом на весь корпус.
-    this.shadowMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 6144);
-    // Накрывающая сетка, по которой умножается тень (см. drawShadow).
-    this.coverMesh = buildDynamicMesh(gl, this.pShadow.attrib('aPos'), 512);
-    this.shadowBuf = {};
+    // Тень своего корабля — картой глубины от солнца (js/gl/shipshadow.js).
+    // Проход глубины рисует те же буферы корпуса, что и общая программа,
+    // поэтому место атрибута у него то же. Карта и её буфер создаются
+    // сразу и живут всю игру; не собрались — тени нет, игра остаётся.
+    this.shipShadow = null;
+    this.shipShadowOn = 0;
+    this.shipShadowPasses = 0;
+    try {
+      this.pShipDepth = buildProgram(gl, 'ship-shadow', depthVs(this.meshLocs.aPos), DEPTH_FS);
+      this.shipShadow = makeShadowTarget(gl, SHIP_SHADOW.size);
+    } catch (e) {
+      console.error('Тень корабля не собралась, рисуем без неё:\n' + e.message);
+    }
+    this.shipShadowMat = new Float32Array(16);
+    this.shipShadowFrame = null;
+    // Сэмплер карты у программ сеток — один раз и навсегда на своём
+    // блоке, и карта на нём лежит всегда: выборка со сравнением из
+    // чужой текстуры — неопределённое поведение.
+    for (const p of [this.pMesh, this.pForest]) {
+      if (!p) continue;
+      p.use();
+      gl.uniform1i(p.loc('uShipShadow'), SHIP_SHADOW.unit);
+      gl.uniform1f(p.loc('uShipShadowOn'), 0);
+    }
+    gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
+    gl.bindTexture(gl.TEXTURE_2D, this.shipShadow ? this.shipShadow.tex : null);
+    gl.activeTexture(gl.TEXTURE0);
     this.stars = this.buildStars();
     // Поток частиц прыжка. Строится один раз на запуск и от звёзд не
     // зависит вовсе: звёзды бесконечно далеко и лететь мимо не могут.
@@ -733,10 +743,15 @@ export class GlScene {
 
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
     const gl = this.gl;
-    modelView(this.camera.basis, this.camera.pos, basis, pos, scale, this.mv, this.nrm);
+    // В проходе глубины тени «камера» — солнце (updateShipShadow): те же
+    // части корабля рисуются теми же вызовами, только в оси карты.
+    const eye = this.depthEye || this.camera;
+    modelView(eye.basis, eye.pos, basis, pos, scale, this.mv, this.nrm);
     gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
-    gl.uniformMatrix3fv(prog.loc('uNormalMat'), false, this.nrm);
-    gl.uniform3fv(prog.loc('uSunDir'), this.setSunDir(pos, sunPos));
+    if (!this.depthEye) {
+      gl.uniformMatrix3fv(prog.loc('uNormalMat'), false, this.nrm);
+      gl.uniform3fv(prog.loc('uSunDir'), this.setSunDir(pos, sunPos));
+    }
     mesh.draw();
     this.draws++;
     this.tris += mesh.faces || mesh.tris;
@@ -774,6 +789,8 @@ export class GlScene {
     if (this.pending) pumpBuilds(gl, this.meshLocs, BUILD_MS);
     this.updatePatches(game);
     this.updateSky(world);
+    // Карта тени корабля — тоже до настройки кадра: свой буфер и вьюпорт.
+    this.updateShipShadow(game, sunPos);
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 1);
@@ -994,6 +1011,7 @@ export class GlScene {
     this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projBridge);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
+    this.useShipShadow(prog, false);   // изнутри — у кабины свои тени
     // Фары светят вперёд, на мир, а не на свою обшивку.
     this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), logFC);
@@ -1198,6 +1216,7 @@ export class GlScene {
     this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), WARP_AMBIENT);
+    this.useShipShadow(prog, false);   // в тоннеле солнца нет
     this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
     this.setDetail(prog, null, 0);
@@ -1506,6 +1525,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
     this.setLamps(prog, game);
     this.setAir(prog, body);
+    this.useShipShadow(prog, true);
     if (!this._forestProf) {
       this._forestProf = new Float32Array(32);
       TREE_PROFILES.forEach((pr, i) => { if (i < 8) this._forestProf.set(pr, i * 4); });
@@ -1566,6 +1586,20 @@ export class GlScene {
   }
 
   /**
+   * Точка в осях тела (доли радиуса) -> мир, в double. Начало сетки,
+   * отсчитанной не от центра тела (плитки грунта, поле камней).
+   * Базис тела — уже в basisTmp.
+   */
+  localOrigin(body, o) {
+    const b = this.basisTmp, R = body.radius;
+    const p = this._lo || (this._lo = { x: 0, y: 0, z: 0 });
+    p.x = body.pos.x + R * (b.right.x * o[0] + b.up.x * o[1] + b.fwd.x * o[2]);
+    p.y = body.pos.y + R * (b.right.y * o[0] + b.up.y * o[1] + b.fwd.y * o[2]);
+    p.z = body.pos.z + R * (b.right.z * o[0] + b.up.z * o[1] + b.fwd.z * o[2]);
+    return p;
+  }
+
+  /**
    * Плитки ближайшего тела с поверхностью. Пока корневые шесть не
    * готовы, тело рисуется обычной сферой — так подгрузка не оставляет
    * дырок в кадре.
@@ -1588,14 +1622,18 @@ export class GlScene {
     this.tileBody = this.tiles.rootsReady ? body : null;
   }
 
-  // Плитки рисуются одной матрицей тела: меняется только текстура и —
-  // при смене уровня — окно мелкой детали, которую шейдер добавляет
-  // ниже текселя этой текстуры.
+  // Плитки рисуются в осях тела, но каждая от СВОЕЙ середины (origin,
+  // js/gl/tilegeo.js): начало плитки переводится в мир здесь, в double,
+  // и во float32 уходит только его смещение от камеры. От центра тела
+  // грунт у ног дрожал на десятки сантиметров при каждом движении мыши.
+  // Меняются ещё текстура и — при смене уровня — окно мелкой детали,
+  // которую шейдер добавляет ниже текселя этой текстуры.
   drawTiles(prog, sunPos) {
     const gl = this.gl;
     const body = this.tileBody;
     const terrain = terrainOf(body);
     bodyBasis(body, this.basisTmp);
+    const shift = prog.loc('uLocalShift');
     gl.uniform1f(prog.loc('uSurfMode'), 1);
     gl.uniform1i(prog.loc('uSurfTex'), 0);
     gl.activeTexture(gl.TEXTURE0);
@@ -1614,8 +1652,10 @@ export class GlScene {
         lastLevel = t.level;
       }
       gl.bindTexture(gl.TEXTURE_2D, e.tex.tex);
-      this.drawObject(prog, e.mesh, body.pos, this.basisTmp, body.radius, sunPos);
+      gl.uniform3f(shift, e.origin[0], e.origin[1], e.origin[2]);
+      this.drawObject(prog, e.mesh, this.localOrigin(body, e.origin), this.basisTmp, body.radius, sunPos);
     }
+    gl.uniform3f(shift, 0, 0, 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
     gl.uniform1f(prog.loc('uGrainOn'), 0);
     this.setDetail(prog, null, 0);
@@ -1753,6 +1793,9 @@ export class GlScene {
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
     gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    // Тень своего корабля — на весь проход: на грунт, камни, растения,
+    // постройки, стойки, трап и сам корпус.
+    this.useShipShadow(prog, true);
     // Фары — на весь проход разом: и грунт, и камни, и станции, и чужие
     // корабли рисуются этой же программой.
     this.lamps = this.setLamps(prog, game);
@@ -1846,12 +1889,16 @@ export class GlScene {
     gl.depthMask(true);
 
     // Камни на грунте. Рисуются после поверхности и без деталировки на
-    // пиксель: это обычные модели, просто мелкие и в осях тела.
+    // пиксель: это обычные модели, просто мелкие и в осях тела — от
+    // середины поля, как плитки от своей (точность, см. drawTiles).
     if (this.rockBody && this.rocks.mesh) {
       this.rockDraws++;
       bodyBasis(this.rockBody, this.basisTmp);
-      this.drawObject(prog, this.rocks.mesh, this.rockBody.pos, this.basisTmp,
+      const o = this.rocks.origin;
+      gl.uniform3f(prog.loc('uLocalShift'), o[0], o[1], o[2]);
+      this.drawObject(prog, this.rocks.mesh, this.localOrigin(this.rockBody, o), this.basisTmp,
         this.rockBody.radius, sunPos);
+      gl.uniform3f(prog.loc('uLocalShift'), 0, 0, 0);
     }
 
     // Растительность. В отличие от камней рисуется как ПРЕДМЕТ — со
@@ -2145,61 +2192,73 @@ export class GlScene {
   }
 
   /**
-   * Тень корабля на грунте: настоящий силуэт, нарисованный УМНОЖЕНИЕМ.
-   *
-   * Смешивание ZERO/SRC_COLOR оставляет от освещённой поверхности ту
-   * долю, которая пришла не от солнца, — то есть ровно то, что и
-   * означает тень. Складывать сюда чёрный с альфой нельзя: под тенью
-   * тогда и рельеф, и цвет грунта одинаково уходят в серое.
-   *
-   * Но умножать САМ силуэт нельзя: корпус не выпуклый, проекции его
-   * граней местами накладываются, а два умножения дают чёрное пятно.
-   * Поэтому в два прохода: силуэт пишется в трафарет (без цвета), а
-   * умножается по трафарету накрывающая сетка — она без перекрытий, и
-   * каждый пиксель гасится ровно один раз.
+   * Карта тени своего корабля (js/gl/shipshadow.js): корпус, стойки,
+   * створки и трапы — глубиной со стороны солнца. Только у тела (не выше
+   * SHIP_SHADOW.maxAlt над грунтом), днём и в полёте или на стоянке: в
+   * порту и в пустоте тени ложиться не на что.
    */
-  drawShadow(game, sunPos) {
-    const gl = this.gl;
-    const buf = this.shadowBuf;
-    const n = shipShadow(game.zone, game.ship, game.shipMesh, sunPos, buf);
-    if (n < 3 || !buf.coverCount) return;
-    const nSil = Math.min(n, this.shadowMesh.maxVerts);
-    this.shadowMesh.update(buf.verts, nSil);
-    this.coverMesh.update(buf.cover, Math.min(buf.coverCount, this.coverMesh.maxVerts));
+  updateShipShadow(game, sunPos) {
+    this.shipShadowOn = 0;
+    const S = this.shipShadow, ship = game.ship, zone = game.zone;
+    if (!S || !ship || !game.shipMesh || !zone || !zone.body) return;
+    const mode = game.state.mode;
+    if (mode !== 'flight' && mode !== 'landed') return;
+    if (!(zone.alt <= SHIP_SHADOW.maxAlt)) return;
+    const sx = sunPos.x - ship.pos.x, sy = sunPos.y - ship.pos.y, sz = sunPos.z - ship.pos.z;
+    const b = zone.body;
+    const ux = ship.pos.x - b.pos.x, uy = ship.pos.y - b.pos.y, uz = ship.pos.z - b.pos.z;
+    if (sx * ux + sy * uy + sz * uz <= 0) return;          // солнце за горизонтом
+    if (this._shadowMesh !== game.shipMesh) {
+      this._shadowMesh = game.shipMesh;
+      this._shadowR = hullRadius(game.shipMesh) + SHIP_SHADOW.pad;
+    }
+    const sun = this._sunTo || (this._sunTo = { x: 0, y: 0, z: 0 });
+    sun.x = sx; sun.y = sy; sun.z = sz;
+    const F = this.shipShadowFrame = shadowFrame(ship.pos, sun, this._shadowR, this.shipShadowFrame || undefined);
+    // «Камера» прохода глубины — солнце: оси карты и центр в корабле.
+    const eye = this._depthEye || (this._depthEye = { pos: { x: 0, y: 0, z: 0 }, basis: makeBasis() });
+    eye.pos.x = F.c.x; eye.pos.y = F.c.y; eye.pos.z = F.c.z;
+    const eb = eye.basis;
+    eb.right.x = F.r[0]; eb.right.y = F.r[1]; eb.right.z = F.r[2];
+    eb.up.x = F.u[0]; eb.up.y = F.u[1]; eb.up.z = F.u[2];
+    eb.fwd.x = F.f[0]; eb.fwd.y = F.f[1]; eb.fwd.z = F.f[2];
 
-    const prog = this.pShadow;
-    prog.use();
-    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
-    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
-    gl.uniform1f(prog.loc('uDark'), SHADOW_DARK);
-    // Вершины лежат в мировых осях относительно корабля, поэтому базис
-    // объекта — единичный, а сдвиг до камеры считается в двойной
-    // точности, как у всех остальных мешей.
-    modelView(this.camera.basis, this.camera.pos, IDENTITY_BASIS, game.ship.pos, 1,
-      this.mv, this.nrm);
-    gl.uniformMatrix4fv(prog.loc('uModelView'), false, this.mv);
-
-    // 1. силуэт -> трафарет, цвет не трогаем.
-    gl.enable(gl.STENCIL_TEST);
-    gl.stencilMask(0xff);
-    gl.clearStencil(0);
-    gl.clear(gl.STENCIL_BUFFER_BIT);
-    gl.stencilFunc(gl.ALWAYS, 1, 0xff);
-    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-    gl.colorMask(false, false, false, false);
-    this.shadowMesh.draw();
-
-    // 2. по трафарету — накрывающая сетка, уже с умножением.
-    gl.colorMask(true, true, true, true);
-    gl.stencilFunc(gl.EQUAL, 1, 0xff);
-    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    gl.stencilMask(0);
-    gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
-    this.coverMesh.draw();
-
-    gl.stencilMask(0xff);
+    const gl = this.gl, pd = this.pShipDepth;
+    pd.use();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, S.fbo);
+    gl.viewport(0, 0, S.size, S.size);
+    gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
-    this.draws += 2;
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    gl.clearDepth(1);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.uniform1f(pd.loc('uInvH'), 1 / F.h);
+    this.depthEye = eye;
+    this.drawObject(pd, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+    this.drawGear(pd, game, sunPos);
+    this.drawHatches(pd, game, sunPos);
+    this.depthEye = null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.shipShadowOn = 1;
+    this.shipShadowPasses++;
+  }
+
+  /** Тень корабля — в программу сеток на этот проход (on = false — без неё). */
+  useShipShadow(prog, on) {
+    const gl = this.gl;
+    const yes = on && this.shipShadowOn ? 1 : 0;
+    gl.uniform1f(prog.loc('uShipShadowOn'), yes);
+    if (!yes) return;
+    shadowMatrix(this.shipShadowFrame, this.camera, this.shipShadowMat);
+    gl.uniformMatrix4fv(prog.loc('uShipShadowMat'), false, this.shipShadowMat);
+    gl.uniform2f(prog.loc('uShipShadowK'), 1 / this.shipShadow.size, 2 * this.shipShadowFrame.h / this.shipShadow.size);
+    // Карта лежит на своём блоке всегда, но проход кабины и запекание
+    // работают с текстурами сами — привязываем заново, это дёшево.
+    gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
+    gl.bindTexture(gl.TEXTURE_2D, this.shipShadow.tex);
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   drawTransparent(game, world, sunPos) {
@@ -2214,12 +2273,6 @@ export class GlScene {
     // проходом), а не наоборот.
     this.drawBolts(game);
     this.drawShields(game);
-
-    // Тень — первой: всё остальное прозрачное (выхлоп, ореолы) светится
-    // и должно ложиться поверх неё.
-    if (game.state.mode === 'flight' || game.state.mode === 'landed') {
-      this.drawShadow(game, sunPos);
-    }
 
     // Кольца: полупрозрачный слой, поэтому обычное смешивание
     // (цвет уже умножен на альфу в шейдере).

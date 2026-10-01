@@ -58,6 +58,12 @@ export const WALK = {
   doorPass: 0.75,      // доля хода, с которой в проём уже проходят
   bob: 0.022,          // м — размах головы на шаге (центр масс ходит на 4–5 см)
   stride: 0.75,        // м — длина шага
+  // Бегом шаг длиннее, а не чаще: человек на 4.6 м/с делает около трёх
+  // шагов в секунду, а не шесть — с шагом в 0.75 м звук шёл бы дробью.
+  strideRun: 1.4,      // м — длина шага бегом
+  // Приземление слышно отдельным шагом, если пришли на ноги быстрее
+  // этого: спрыгнуть со ступени — не удар, а соскочить с трапа — удар.
+  landStep: 1.5,       // м/с
 };
 
 /** Скорость отрыва для прыжка WALK.jump. */
@@ -75,6 +81,8 @@ export function makeWalker() {
     ground: true,
     lag: 0,              // м — на сколько глаз отстаёт от шага на ступень
     bobPhase: 0,
+    floor: 'deck',       // на чём стоит: deck — твёрдое корабля, ground — грунт (звук шагов)
+    landed: 0,           // м/с — с какой скоростью пришёл на ноги в этом кадре
     room: null,          // комната под ногами (js/models/interior.js)
     out: null,           // за бортом: оси грунта (js/game/outside.js), иначе null
     from: null,          // откуда встали: взгляд головы в кресле
@@ -292,7 +300,8 @@ export function walkerLook(w, out = { fwd: [0, 0, 1], right: [1, 0, 0], up: [0, 
  * Шаг пилота.
  *
  * @param ctl { fwd, side: −1..1, run, jump (нажат в этом кадре), lookX, lookY (рад) }
- * @returns события кадра: { opened: [id двери], seated: true, room: сменилась }
+ * @returns события кадра: { opened: [id двери], seated: true, room: сменилась,
+ *   step: { run, land } — нога встала (звук шагов; land — скорость приземления, м/с) }
  */
 export function updateWalker(w, interior, ctl, dt, outside = null) {
   const ev = { opened: [], seated: false, room: false };
@@ -331,7 +340,22 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
   w.lag *= Math.exp(-dt * 14);
   if (Math.abs(w.lag) < 1e-4) w.lag = 0;
   const v = Math.hypot(w.vel[0], w.vel[2]);
-  if (w.ground && v > 0.2) w.bobPhase += (v * dt / WALK.stride) * Math.PI;
+  // Шаг — половина периода качания головы: нога встаёт, голова в низшей
+  // точке. Отсюда и звук шагов (ev.step): он идёт ровно в такт с тем,
+  // что видно, а не своим таймером.
+  const runK = Math.max(0, Math.min(1, (v - WALK.speed) / (WALK.run - WALK.speed)));
+  const stride = WALK.stride + (WALK.strideRun - WALK.stride) * runK;
+  const was = Math.floor(w.bobPhase / Math.PI);
+  if (w.ground && v > 0.2) w.bobPhase += (v * dt / stride) * Math.PI;
+  if (Math.floor(w.bobPhase / Math.PI) !== was) ev.step = { run: runK > 0.5, land: 0 };
+  // На чём стоит: грунт (за бортом, ноги на нём) или твёрдое корабля —
+  // палуба, трап, порог люка.
+  if (w.ground) {
+    const gy = W.ground ? W.ground(w.pos[0], w.pos[2]) : -Infinity;
+    w.floor = Math.abs(w.pos[1] - gy) < 0.003 ? 'ground' : 'deck';
+  }
+  if (w.landed > WALK.landStep) ev.step = { run: false, land: w.landed };
+  w.landed = 0;
 
   if (w.out) {
     if (w.room) { w.room = null; ev.room = true; }
@@ -363,6 +387,23 @@ function stepBody(w, W, ctl, dt, jump) {
   v[1] -= (W.g || WALK.g) * dt;
 
   const wasGround = w.ground;
+  // Грунт за бортом — ПОВЕРХНОСТЬ, по которой идут, а не стенка, в
+  // которую упираются. Раньше он был стенкой с допуском в 2 мм: на
+  // подъёме шаг уводил ноги под грунт на полтора миллиметра, падение за
+  // подшаг добавляло ещё полмиллиметра, опора их уже не видела (она
+  // ищет пол не выше ступни), пилот на подшаг «повисал» — и следующий шаг
+  // в склон упирался, а упор обнулял скорость. На ровном подъёме в 15°
+  // это случалось каждые два кадра: скорость не набиралась выше
+  // полуметра в секунду, и казалось, что пилот в чём-то вязнет.
+  // Теперь нога идёт по рельефу: где грунт выше ступни (не выше
+  // ступени), ступня встаёт на него; выше ступени — это уступ, стена.
+  const G = W.ground || null;
+  if (G) {
+    // Сменилась подробность нарисованного грунта (подгрузились плитки) —
+    // ноги могли оказаться чуть ниже него: встать на него.
+    const gy = G(p[0], p[2]);
+    if (gy > p[1] && gy - p[1] <= WALK.step) p[1] = gy;
+  }
   // По плану — по осям, с подъёмом на порог.
   for (const ax of [0, 2]) {
     const d = v[ax] * dt;
@@ -371,7 +412,14 @@ function stepBody(w, W, ctl, dt, jump) {
     q[ax] += d;
     // Вода — берег: в неё не заходят (но из неё, если уж попал, — выходят).
     if (W.water && W.water(q[0], q[2]) && !W.water(p[0], p[2])) { v[ax] = 0; continue; }
-    if (!blocked(W, q)) { p[ax] = q[ax]; continue; }
+    if (G) {
+      const gy = G(q[0], q[2]);
+      if (gy > q[1]) {
+        if (gy - q[1] > WALK.step) { v[ax] = 0; continue; }   // уступ выше ступени
+        q[1] = gy;
+      }
+    }
+    if (!blocked(W, q)) { p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; continue; }
     // Порог: тело поднимается ровно на высоту того, во что упёрлось, а не
     // на весь допуск сразу, — иначе под низким потолком (трап уходит в
     // проём) голова цепляла бы кромку там, где ноге хватает и ступени.
@@ -389,13 +437,16 @@ function stepBody(w, W, ctl, dt, jump) {
     v[ax] = 0;
   }
 
-  // По высоте.
+  // По высоте. Грунт — пол без допуска: ниже него ноги не уходят, и
+  // стоящий на нём стоит, а не повисает на подшаг.
   const y1 = p[1] + v[1] * dt;
   const q = [p[0], y1, p[2]];
-  if (!blocked(W, q)) {
+  const gy = G ? G(p[0], p[2]) : -Infinity;
+  if (y1 >= gy && !blocked(W, q)) {
     p[1] = y1;
     w.ground = false;
   } else if (v[1] < 0) {
+    if (!wasGround) w.landed = Math.max(w.landed || 0, -v[1]);
     const s = support(W, [p[0], p[1], p[2]], p[1] - y1 + 0.01);
     if (s > -Infinity) p[1] = s;
     v[1] = 0;

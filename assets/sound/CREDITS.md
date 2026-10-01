@@ -1,8 +1,8 @@
 # Звуки
 
 Все файлы в этой папке — **CC0 1.0 (Public Domain)**. Атрибуция для CC0 не
-обязательна, но автор здесь указан: паки собраны rubberduck и выложены на
-OpenGameArt.
+обязательна, но авторы здесь указаны: звуки корабля — паки rubberduck с
+OpenGameArt, шаги — Kenney и TinyWorlds.
 
 | источник | лицензия | автор |
 |---|---|---|
@@ -11,6 +11,8 @@ OpenGameArt.
 | [100 CC0 metal and wood SFX](https://opengameart.org/content/100-cc0-metal-and-wood-sfx) | CC0 | rubberduck |
 | [100 CC0 SFX](https://opengameart.org/content/100-cc0-sfx) | CC0 | rubberduck |
 | [100 CC0 SFX #2](https://opengameart.org/content/100-cc0-sfx-2) | CC0 | rubberduck |
+| [Impact Sounds](https://kenney.nl/assets/impact-sounds) | CC0 | Kenney |
+| [Different steps on wood, stone, leaves, gravel and mud](https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud) | CC0 | TinyWorlds (записи pdsounds.org) |
 
 ## Что откуда взято
 
@@ -37,10 +39,15 @@ OpenGameArt.
 | `servo.ogg` | metal/`metal_open_01.ogg` | привод шасси |
 | `latch.ogg` | metal/`lock_open_01.ogg` | защёлка шасси |
 | `spool.ogg` | sci-fi/`teleport_01.ogg` | ступень круизного ускорителя |
+| `step_hard_01..05.ogg` | impact/`footstep_concrete_000..004.ogg` | шаг: подошва (под каждым шагом, кроме снега) |
+| `step_plate_01..05.ogg` | impact/`impactPlate_light_000..004.ogg` | шаг по палубе: звон стальной плиты |
+| `step_grass_01..05.ogg` | impact/`footstep_grass_000..004.ogg` | шаг по траве |
+| `step_snow_01..05.ogg` | impact/`footstep_snow_000..004.ogg` | шаг по снегу (ледяные миры) |
+| `step_gravel.ogg` | steps/`gravel.ogg` | шаг по грунту: хруст (четыре куска одной записи) |
 
 Набор пересобирается из исходных паков: `npm run sounds` (см.
-[tools/sounds.mjs](../../tools/sounds.mjs)) — он скачивает три архива с
-OpenGameArt и раскладывает файлы по этой же таблице.
+[tools/sounds.mjs](../../tools/sounds.mjs)) — он скачивает исходные архивы (OpenGameArt и
+Kenney) и раскладывает файлы по этой же таблице.
 
 ## Как они выбирались
 

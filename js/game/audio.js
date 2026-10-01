@@ -148,6 +148,21 @@ export function audioCue(a, kind, opts = {}) {
       // Шлюз стравливает или набирает воздух (js/game/airlock.js).
       push(a, { kind: 'hiss', gain: clamp(opts.gain || 0.35, 0, 1), dur: opts.dur || 2 });
       break;
+    case 'step': {
+      // Шаг пилота (js/game/walker.js). Поверхность — где стоит нога
+      // (js/main.js, stepSurface): палуба, грунт, трава, снег. Бегом
+      // ступают тяжелее; приземление с прыжка — тем тяжелее, чем быстрее
+      // пришли на ноги (5 м/с — соскочить с трапа на грунт).
+      const land = clamp((opts.land || 0) / 5, 0, 1);
+      push(a, {
+        kind: 'step',
+        surface: opts.surface || 'metal',
+        gain: clamp(0.34 + (opts.run ? 0.12 : 0) + 0.4 * land, 0, 1),
+        air: opts.air === undefined ? 1 : opts.air,
+        heavy: land,
+      });
+      break;
+    }
     default: break;
   }
 }
@@ -322,6 +337,7 @@ export function playAudio(a, sound) {
       case 'clamp': sound.clamp(e.gain); break;
       case 'servo': sound.servo(e.dur, e.up); break;
       case 'hiss': if (sound.hiss) sound.hiss(e.gain, e.dur); break;
+      case 'step': if (sound.step) sound.step(e.surface, e.gain, e.air, e.heavy); break;
       case 'spool': sound.spool(e.up, e.level); break;
       default: break;
     }

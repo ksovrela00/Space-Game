@@ -826,6 +826,14 @@ await step('шлюз: сели на мир с атмосферой, E — люк
     if (!seen.some((s) => s.indexOf('ОТКРЫТЬ ЛЮК') >= 0)) throw new Error('у люка нет подсказки «открыть люк»');
     const hx = air.hatches.find((x) => x.id === 'nR');
     const door = I.doors.find((x) => x.id === 'lockN');
+    // Шаги: какие поверхности прозвучали по дороге (звук считается без
+    // звуковой карты — события очереди js/game/audio.js).
+    const steps = [];
+    const push0 = game.audio.events.push;
+    game.audio.events.push = function (...e) {
+      for (const x of e) if (x.kind === 'step') steps.push(x.surface + (x.heavy > 0 ? '!' : ''));
+      return push0.apply(this, e);
+    };
     key('KeyE');
     const cycle = Math.abs(1 - air.pOut) / AIR.rate + AIR.hatchTime + AIR.stairTime;
     frames(Math.ceil(cycle * 60) + 30);
@@ -867,6 +875,11 @@ await step('шлюз: сели на мир с атмосферой, E — люк
     for (let i = 0; i < 90; i++) { frames(1); peak = Math.max(peak, w.pos[1]); }
     const g = 9.81 * 0.45 / Math.max(0.01, peak - y0);
     if (!(peak - y0 > 0.5)) throw new Error('прыжок за бортом — как на палубе: ' + (peak - y0).toFixed(2) + ' м');
+    game.audio.events.push = push0;
+    const heard = new Set(steps);
+    if (!heard.has('metal') || !(heard.has('ground') || heard.has('grass')) || !steps.some((s) => s.endsWith('!'))) {
+      throw new Error('шаги не те: ' + [...heard].join(', '));
+    }
     // Обратно: развернуться и вверх по трапу — в тоннель.
     w.yaw += Math.PI;
     holdDown('KeyW');

@@ -313,6 +313,8 @@ export class TileSet {
     const mesh = buildIndexedMesh(this.gl, this.locs, geo);
     mesh.faces = geo.faces;
     entry.mesh = mesh;
+    // Начало отсчёта вершин (js/gl/tilegeo.js): плитка рисуется от него.
+    entry.origin = geo.origin;
     entry.tex = createBakeTexture(this.gl, TILE_TEX);
     this.bake(body, entry, entry.tex);
     this.built++;

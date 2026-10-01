@@ -29,6 +29,12 @@ const PACKS = [
     page: 'https://opengameart.org/content/100-cc0-sfx' },
   { id: 'sfx100b', url: 'https://opengameart.org/sites/default/files/sfx_100_v2.zip',
     page: 'https://opengameart.org/content/100-cc0-sfx-2' },
+  // Шаги (js/core/sound.js, step): подошва, трава, снег — Kenney; хруст
+  // гравия — TinyWorlds (записи pdsounds.org, порезаны для Minetest).
+  { id: 'impact', url: 'https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip',
+    page: 'https://kenney.nl/assets/impact-sounds' },
+  { id: 'steps', url: 'https://opengameart.org/sites/default/files/%5Bkdd%5DDifferentSteps_0.zip',
+    page: 'https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud' },
 ];
 
 // Роль в игре -> откуда взято. Тот же список, что в CREDITS.md.
@@ -58,6 +64,24 @@ const MAP = [
   ['servo.ogg', 'metal', 'metal_open_01.ogg'],
   ['latch.ogg', 'metal', 'lock_open_01.ogg'],
   ['spool.ogg', 'scifi', 'teleport_01.ogg'],
+  // Шаги. Выбраны замером (декодер Chrome, огибающая по 5 мс, спектр
+  // от удара), а не по названиям:
+  //  - подошва — «бетон»: удар в 0.1 с, гаснет за 10–15 мс, центр
+  //    спектра 260–340 Гц. Это ботинок, а не пол: пол добавляют слои;
+  //  - палуба — лёгкий удар по стальной плите: центр 480–920 Гц, звон
+  //    (доля высоких 0.08–0.11) и тело ниже 300 Гц. «Металл» того же
+  //    пака звенит на 2.5–3 кГц — это жесть, а не палуба;
+  //  - трава — шорох в 0.6–0.8 с, центр 480–800 Гц;
+  //  - снег — хруст в 0.37 с, центр 200–520 Гц;
+  //  - гравий — четыре хруста подряд в одной записи (0.03, 0.17, 0.27 и
+  //    0.38 с), центр 1.6 кГц; режется на куски при игре.
+  ...[0, 1, 2, 3, 4].flatMap((i) => [
+    [`step_hard_0${i + 1}.ogg`, 'impact', `footstep_concrete_00${i}.ogg`],
+    [`step_plate_0${i + 1}.ogg`, 'impact', `impactPlate_light_00${i}.ogg`],
+    [`step_grass_0${i + 1}.ogg`, 'impact', `footstep_grass_00${i}.ogg`],
+    [`step_snow_0${i + 1}.ogg`, 'impact', `footstep_snow_00${i}.ogg`],
+  ]),
+  ['step_gravel.ogg', 'steps', 'gravel.ogg'],
 ];
 
 const force = process.argv.includes('--force');

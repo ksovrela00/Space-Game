@@ -23,7 +23,7 @@
 //   thrust   подъёмные движки (R/F)
 //
 // и разовые поверх: clunk (удар), creak (скрежет), servo (привод
-// шасси), spool (ступень ускорителя).
+// шасси), spool (ступень ускорителя), step (шаги пилота).
 //
 // Весь модуль обязан молча выживать без WebAudio: в node его нет вовсе,
 // а в браузере контекст нельзя создать до жеста пользователя. Поэтому
@@ -48,7 +48,21 @@ const BANK = {
   servo: 'servo.ogg',
   latch: 'latch.ogg',
   spool: 'spool.ogg',
+  // Шаги пилота (step): подошва, палуба, трава, снег — по пять дублей,
+  // гравий — одна запись с четырьмя хрустами (GRAVEL).
+  stepHard: [1, 2, 3, 4, 5].map((i) => `step_hard_0${i}.ogg`),
+  stepPlate: [1, 2, 3, 4, 5].map((i) => `step_plate_0${i}.ogg`),
+  stepGrass: [1, 2, 3, 4, 5].map((i) => `step_grass_0${i}.ogg`),
+  stepSnow: [1, 2, 3, 4, 5].map((i) => `step_snow_0${i}.ogg`),
+  stepGravel: 'step_gravel.ogg',
 };
+
+// Хрусты в записи гравия: начало, длина и пик каждого, с. Найдены по
+// огибающей (5 мс, порог — треть пика): запись — один шаг по щебню, где
+// камешки хрустят четыре раза подряд. Играется ОДИН хруст: целиком
+// запись тянется 0.7 с и на ходу налезала бы на следующий шаг. Пик —
+// чтобы выровнять громкость: записано тихо (0.09–0.14 полной шкалы).
+const GRAVEL = [[0.025, 0.155, 0.113], [0.17, 0.105, 0.141], [0.265, 0.12, 0.089], [0.375, 0.33, 0.119]];
 
 // Неравнократные отношения частот для СИНТЕЗИРОВАННОГО скрежета: так
 // звенит пластина, а не струна. У струны обертоны кратны основному
@@ -672,6 +686,126 @@ export class Sound {
     src.connect(hp); hp.connect(ng); ng.connect(this.master);
     src.start(at, Math.random() * (NOISE_SEC - 0.2));
     this._release(src, at + 0.14);
+  }
+
+  /**
+   * Шаг пилота. Поверхность — слоями настоящих записей (выбраны замером,
+   * см. tools/sounds.mjs):
+   *
+   *   metal  — подошва и, тише, звон стальной плиты палубы, обрезанный
+   *            за пятую долю секунды: палуба гудит, но не колокол;
+   *   ground — подошва под фильтром (земля глушит верха) и один хруст
+   *            гравия;
+   *   grass  — шорох травы и едва слышный удар ноги под ним;
+   *   snow   — хруст снега (ледяные миры).
+   *
+   * @param air   бар у ног. В пустоте звук по воздуху не идёт вовсе —
+   *              шаг слышно только через скафандр и ботинок: глухо (без
+   *              верхов) и тише. Пропасть ему нельзя: ноги же чувствуют.
+   * @param heavy 0..1 — приземление: ниже и громче
+   */
+  step(surface = 'metal', gain = 0.4, air = 1, heavy = 0) {
+    if (!this.ok) return;
+    const k = Math.max(0, Math.min(1, air));
+    const top = 380 + 11000 * k * k;
+    const g = gain * (0.45 + 0.55 * k);
+    const rate = (0.94 + Math.random() * 0.12) * (1 - 0.12 * heavy);
+    if (this.sampled && this.buf.stepHard) {
+      const hard = this._any('stepHard');
+      if (surface === 'grass' && this.buf.stepGrass) {
+        this._layer(this._any('stepGrass'), g * 1.1, rate, top, 0, 0, 0.42);
+        this._layer(hard, g * 0.22, rate * 0.9, Math.min(top, 1400));
+        return;
+      }
+      if (surface === 'snow' && this.buf.stepSnow) {
+        this._layer(this._any('stepSnow'), g, rate, top, 0, 0, 0.3);
+        return;
+      }
+      if (surface === 'ground') {
+        this._layer(hard, g * 0.75, rate, Math.min(top, 2200));
+        const gr = this.buf.stepGravel;
+        if (gr) {
+          const [off, dur, peak] = GRAVEL[Math.floor(Math.random() * GRAVEL.length)];
+          this._layer(gr, g * 0.5 * (0.85 / peak), rate, top, off, dur, dur);
+        }
+        return;
+      }
+      this._layer(hard, g * 0.7, rate, Math.min(top, 7000));
+      if (this.buf.stepPlate) this._layer(this._any('stepPlate'), g * 0.32, rate * (0.92 + Math.random() * 0.16), Math.min(top, 6000), 0, 0, 0.22);
+      return;
+    }
+    // Синтез: щелчок шума под фильтром поверхности; у палубы — ещё и
+    // короткий звон плиты (неравнократные моды, как у скрежета).
+    const t0 = this._slot();
+    if (t0 === null) return;
+    const ctx = this.ctx;
+    const shape = {
+      metal: ['lowpass', 1800, 0.07], ground: ['lowpass', 900, 0.08],
+      grass: ['highpass', 1600, 0.22], snow: ['bandpass', 2400, 0.14],
+    }[surface] || ['lowpass', 1200, 0.08];
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    const f = ctx.createBiquadFilter();
+    f.type = shape[0];
+    f.frequency.value = Math.min(top, shape[1]);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(Math.max(0.0001, g * 0.6), t0);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + shape[2]);
+    src.connect(f); f.connect(env); env.connect(this.master);
+    src.start(t0, Math.random() * (NOISE_SEC - 0.3));
+    this._release(src, t0 + shape[2] + 0.02);
+    if (surface !== 'metal' || k < 0.2) return;
+    const t1 = this._slot();
+    if (t1 === null) return;
+    const o = ctx.createOscillator();
+    o.frequency.value = 420 * MODES[1] * (0.95 + Math.random() * 0.1);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(Math.max(0.0001, g * 0.08), t1);
+    og.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.15);
+    o.connect(og); og.connect(this.master);
+    o.start(t1);
+    this._release(o, t1 + 0.17);
+  }
+
+  /**
+   * Слой шага: кусок записи (offset, dur — 0: до конца) с фильтром
+   * сверху (top) и, если задан, спадом к fade секундам — длинный хвост
+   * на ходу налезал бы на следующий шаг.
+   */
+  _layer(b, gain, rate, top, offset = 0, dur = 0, fade = 0) {
+    const t0 = this._slot();
+    if (t0 === null || !b) return false;
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = b;
+    src.playbackRate.value = rate;
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = Math.max(200, top);
+    f.Q.value = 0.7;
+    const g = ctx.createGain();
+    const len = (dur > 0 ? dur : b.duration - offset) / rate;
+    const end = fade > 0 ? Math.min(len, fade) : len;
+    g.gain.setValueAtTime(Math.max(0.0001, gain), t0);
+    if (fade > 0) {
+      g.gain.setValueAtTime(Math.max(0.0001, gain), t0 + end * 0.45);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + end);
+    }
+    src.connect(f); f.connect(g); g.connect(this.master);
+    if (dur > 0) src.start(t0, offset, dur); else src.start(t0, offset);
+    this._release(src, t0 + end + 0.02);
+    return true;
+  }
+
+  /** Случайный дубль, но не тот же, что в прошлый раз: шаги подряд одинаковыми не бывают. */
+  _any(role) {
+    const list = this.buf[role];
+    if (!list || !list.length) return null;
+    const last = (this._last || (this._last = {}))[role];
+    let i = Math.floor(Math.random() * list.length);
+    if (list.length > 1 && i === last) i = (i + 1) % list.length;
+    this._last[role] = i;
+    return list[i];
   }
 
   /** Захваты станции: тяжёлый лязг, ни на что другое не похожий. */

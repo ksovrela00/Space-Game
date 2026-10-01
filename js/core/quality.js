@@ -80,6 +80,9 @@ export function qualityFor(dev) {
       // солнца, точек на метр у экранов и ширина их атласа, темп
       // перерисовки экранов (множитель к своему у каждого).
       cabinShadow: 2048,
+      // Тень своего корабля на грунте (js/gl/shipshadow.js): сторона карты
+      // глубины от солнца — 4–5 см на точку при корпусе в 94 м.
+      shipShadow: 2048,
       cabinDensity: 2000,
       cabinAtlas: 2048,
       cabinRate: 1,
@@ -121,6 +124,7 @@ export function qualityFor(dev) {
     // в шесть дюймов разницы не покажет, а загрузка текстур и лишний
     // проход глубины ему дороги.
     cabinShadow: 1024,
+    shipShadow: 1024,
     cabinDensity: 1200,
     cabinAtlas: 1024,
     cabinRate: 0.5,

@@ -1788,7 +1788,10 @@ console.log('\n== плитки поверхности ==');
   }
 
   // Соседние плитки одного уровня дают на общем ребре одни и те же
-  // вершины: иначе между ними была бы щель в геометрии.
+  // вершины: иначе между ними была бы щель в геометрии. Вершины у каждой
+  // плитки отсчитаны от её середины (js/gl/tilegeo.js), поэтому
+  // сравниваются полные координаты: бит в бит они уже не сойдутся, но
+  // расхождение — шаг float32 у размера плитки, миллионные её доли.
   {
     const a = tileBuilder(moon, { face: 2, level: 4, tx: 5, ty: 6 });
     const b = tileBuilder(moon, { face: 2, level: 4, tx: 6, ty: 6 });
@@ -1799,12 +1802,14 @@ console.log('\n== плитки поверхности ==');
     for (let j = 0; j < n; j++) {
       const ia = (j * n + TILE_GRID) * 3;     // правый край левой плитки
       const ib = (j * n) * 3;                 // левый край правой
-      worst = Math.max(worst,
-        Math.abs(ga.positions[ia] - gb.positions[ib]),
-        Math.abs(ga.positions[ia + 1] - gb.positions[ib + 1]),
-        Math.abs(ga.positions[ia + 2] - gb.positions[ib + 2]));
+      for (let c = 0; c < 3; c++) {
+        worst = Math.max(worst, Math.abs((ga.positions[ia + c] + ga.origin[c]) - (gb.positions[ib + c] + gb.origin[c])));
+      }
     }
-    ok(worst === 0, `на общем ребре соседние плитки совпадают вершина в вершину`);
+    const side = Math.PI / 2 / (1 << 4);
+    ok(worst < side * 1e-6,
+      `на общем ребре соседние плитки сходятся: расхождение ${(worst * moon.radius * 1e6).toFixed(2)} мм ` +
+      `на плитке в ${(side * moon.radius).toFixed(0)} км (${(worst / side).toExponential(1)} её размера)`);
   }
 
   // Геометрия плитки: радиусы в пределах рельефа, uv в [0,1], индексы
@@ -1816,16 +1821,15 @@ console.log('\n== плитки поверхности ==');
     const g = bld.result;
     const n = TILE_GRID + 1, grid = n * n;
     let bad = 0, minR = Infinity, maxR = 0, minSkirt = Infinity;
+    const at = (i) => Math.hypot(g.positions[i * 3] + g.origin[0], g.positions[i * 3 + 1] + g.origin[1],
+      g.positions[i * 3 + 2] + g.origin[2]);
     for (let i = 0; i < grid; i++) {
-      const r = Math.hypot(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]);
+      const r = at(i);
       minR = Math.min(minR, r); maxR = Math.max(maxR, r);
       if (!(g.uv[i * 2] >= 0 && g.uv[i * 2] <= 1)) bad++;
       if (!(g.uv[i * 2 + 1] >= 0 && g.uv[i * 2 + 1] <= 1)) bad++;
     }
-    for (let i = grid; i < g.positions.length / 3; i++) {
-      const r = Math.hypot(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]);
-      minSkirt = Math.min(minSkirt, r);
-    }
+    for (let i = grid; i < g.positions.length / 3; i++) minSkirt = Math.min(minSkirt, at(i));
     let maxIdx = 0, nan = 0;
     for (let i = 0; i < g.indices.length; i++) maxIdx = Math.max(maxIdx, g.indices[i]);
     for (const arr of [g.positions, g.normals, g.colors, g.uv]) {
@@ -1835,6 +1839,77 @@ console.log('\n== плитки поверхности ==');
        minR > 1 - t.ampDown && maxR < 1 + t.ampUp && minSkirt < minR,
       `плитка: ${g.faces} граней, радиус ${minR.toFixed(4)}..${maxR.toFixed(4)}, ` +
       `юбка ниже сетки, индексы влезают в 16 бит`);
+  }
+
+  // ТОЧНОСТЬ У НОГ. Шейдер переводит вершину в оси камеры во float32:
+  // vp = M · p + t. Повторяем ровно это (Math.fround после каждой
+  // операции, матрица — из mat4.js modelView, как в сцене) для глаза
+  // пилота на 1.66 м над грунтом и головы, которую поворачивают мышью, и
+  // сравниваем с тем же счётом в double. От центра тела (как было) обе
+  // части суммы — тысячи километров, и грунт у ног уезжал на десятки
+  // сантиметров от любого поворота; от середины плитки — микроны.
+  {
+    const wb = makeSystem(0x1a7e);
+    const big = wb.bodies.filter((b) => b.kind !== 'gas' && b.kind !== 'star')
+      .reduce((a, b) => (b.radius > a.radius ? b : a));
+    const R = big.radius;
+    const lv = TILE_MAX_LEVEL, tx = 30000, ty = 41000;
+    const bld = tileBuilder(big, { face: 1, level: lv, tx, ty });
+    while (!bld.step(1e9));
+    const g = bld.result, o = g.origin;
+    const f32 = Math.fround;
+    const n = TILE_GRID + 1;
+    const mid = (TILE_GRID / 2) * n + TILE_GRID / 2;
+    // Глаз — над вершиной у середины плитки, в км (оси тела = мировые).
+    const foot = [0, 1, 2].map((c) => (g.positions[mid * 3 + c] + o[c]) * R);
+    const fl = Math.hypot(...foot);
+    const up = foot.map((v) => v / fl);
+    const eyeAt = foot.map((v, c) => v + up[c] * 0.00166);
+    const helper = Math.abs(up[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const nrm = (a) => { const l = Math.hypot(...a); return a.map((v) => v / l); };
+    const e1 = nrm(cross(helper, up)), e2 = cross(up, e1);
+    const axes = makeBasis();
+    const shader = (mv, p) => [0, 1, 2].map((r) => {
+      let s = f32(f32(mv[r] * p[0]) + f32(mv[4 + r] * p[1]));
+      s = f32(s + f32(mv[8 + r] * p[2]));
+      return f32(s + mv[12 + r]);
+    });
+    const mv = new Float32Array(16);
+    let oldM = 0, newM = 0, pts = 0;
+    for (let k = 0; k < 120; k++) {
+      // Голову поворачивают: курс и наклон вниз под ноги.
+      const yaw = 0.2 + k * 0.0031, pitch = 0.5 + (k % 9) * 0.004;
+      const hz = e1.map((v, c) => Math.cos(yaw) * v + Math.sin(yaw) * e2[c]);
+      const fwd = nrm(hz.map((v, c) => Math.cos(pitch) * v - Math.sin(pitch) * up[c]));
+      const camUp = nrm(hz.map((v, c) => Math.sin(pitch) * v + Math.cos(pitch) * up[c]));
+      const right = cross(camUp, fwd);
+      const cam = { right: { x: right[0], y: right[1], z: right[2] }, up: { x: camUp[0], y: camUp[1], z: camUp[2] },
+        fwd: { x: fwd[0], y: fwd[1], z: fwd[2] } };
+      const camPos = { x: eyeAt[0], y: eyeAt[1], z: eyeAt[2] };
+      for (let j = TILE_GRID / 2 - 6; j <= TILE_GRID / 2 + 6; j += 3) {
+        for (let i = TILE_GRID / 2 - 6; i <= TILE_GRID / 2 + 6; i += 3) {
+          const vi = j * n + i;
+          const local = [0, 1, 2].map((c) => g.positions[vi * 3 + c]);
+          const w = local.map((v, c) => (v + o[c]) * R);
+          const d = w.map((v, c) => v - eyeAt[c]);
+          const want = [cam.right, cam.up, cam.fwd].map((a) => d[0] * a.x + d[1] * a.y + d[2] * a.z);
+          // Было: вершина от центра тела, матрица от центра тела.
+          modelView(cam, camPos, axes, { x: 0, y: 0, z: 0 }, R, mv, null);
+          const gotOld = shader(mv, local.map((v, c) => f32(v + o[c])));
+          // Стало: вершина от середины плитки, матрица от неё же.
+          modelView(cam, camPos, axes, { x: o[0] * R, y: o[1] * R, z: o[2] * R }, R, mv, null);
+          const gotNew = shader(mv, local);
+          oldM = Math.max(oldM, Math.hypot(...gotOld.map((v, c) => v - want[c])) * 1000);
+          newM = Math.max(newM, Math.hypot(...gotNew.map((v, c) => v - want[c])) * 1000);
+          pts++;
+        }
+      }
+    }
+    ok(newM < 1e-3 && oldM > 0.05,
+      `грунт у ног на ${big.name} (${R} км), глаз на 1.66 м, голову поворачивают: от середины плитки ` +
+      `вершина стоит с точностью ${(newM * 1000).toFixed(3)} мм, от центра тела (как было) ` +
+      `гуляла бы на ${(oldM * 100).toFixed(0)} см (${pts} замеров)`);
   }
 
   // Стык уровней: соседние плитки должны доводить деталь до одной и той
@@ -3756,6 +3831,27 @@ console.log('\n== мок GL: путь отрисовки ==');
     }
     ok(holes === 0, `в списке отрисовки нет незаготовленных плиток (${holes})`);
 
+    // Плитка рисуется от СВОЕЙ середины, а не от центра тела: перенос в
+    // матрице ближайшей плитки — сотни метров, а не радиус тела
+    // (js/gl/tilegeo.js), и шейдер получает её начало для мелкого рельефа.
+    {
+      const seen = [];
+      const draw0 = scene.drawObject;
+      scene.drawObject = function (prog, mesh, pos, basis, scale, sun) {
+        seen.push({ mesh, d: Math.hypot(pos.x - scene.camera.pos.x, pos.y - scene.camera.pos.y, pos.z - scene.camera.pos.z), scale });
+        return draw0.call(this, prog, mesh, pos, basis, scale, sun);
+      };
+      scene.render(game);
+      scene.drawObject = draw0;
+      const meshes = new Set(scene.tiles.draw.map((t) => scene.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`).mesh));
+      const tiles = seen.filter((s) => meshes.has(s.mesh));
+      const nearest = Math.min(...tiles.map((s) => s.d));
+      const shift = state.vecName.uLocalShift;
+      ok(tiles.length === scene.tiles.draw.length && nearest < 1 && shift && shift.every((v) => v === 0),
+        `плитки рисуются от своей середины: до ближайшей ${(nearest * 1000).toFixed(0)} м от камеры ` +
+        `(от центра тела было бы ${moon.radius.toFixed(0)} км), сдвиг для рельефа после плиток сброшен`);
+    }
+
     // Зависание: ничего не строится. Это то, чего принципиально не могли
     // заплатки — они центрированы на камере и пересобирались от любого
     // дрожания высоты.
@@ -3959,7 +4055,8 @@ console.log('\n== мок GL: путь отрисовки ==');
       for (let i = 0; i < direct.positions.length; i++) {
         if (direct.positions[i] !== same[i]) diff++;
       }
-      ok(diff === 0 && viaWorker.geo.faces === direct.faces,
+      ok(diff === 0 && viaWorker.geo.faces === direct.faces
+        && viaWorker.geo.origin.every((v, i) => v === direct.origin[i]),
         `поток и кадр дают одну и ту же геометрию: ${direct.positions.length / 3} вершин, ` +
         `${direct.faces} граней, расхождений ${diff}`);
 
@@ -3967,36 +4064,41 @@ console.log('\n== мок GL: путь отрисовки ==');
       delete globalThis.Worker;
     }
 
-    // Тень корабля: силуэт считается на CPU (js/game/shadow.js), а
-    // сцена обязана его залить в буфер и нарисовать. Проверяем всю
-    // цепочку: обстановка у поверхности -> силуэт -> вершины в буфере.
+    // Тень корабля — картой глубины (js/gl/shipshadow.js): у грунта днём
+    // проход глубины рисует корпус и стойки в свою карту, а программа
+    // сеток получает её на своём блоке текстур. Ночью и высоко карты нет.
+    // Тени как предмета (тёмного листа над грунтом) нет вовсе: трафарет
+    // кадр больше не трогает.
     {
       const { landingContext } = await import('../js/game/landing.js');
+      const { SHIP_SHADOW } = await import('../js/gl/shipshadow.js');
       put(0.12);
       game.zone = landingContext(world, ship);
-      // Солнце над головой: тень ложится прямо под корабль.
       const up = normalize(v3(
         ship.pos.x - moon.pos.x, ship.pos.y - moon.pos.y, ship.pos.z - moon.pos.z));
       const overhead = v3(
         moon.pos.x + up.x * 1e6, moon.pos.y + up.y * 1e6, moon.pos.z + up.z * 1e6);
-      const saveStar = world.star.pos;
-      world.star.pos = overhead;
-      scene.render(game);
-      const lit = scene.shadowMesh.count;
-      world.star.pos = saveStar;
-
-      // Солнце за горизонтом и большая высота — тени нет вовсе.
-      const { shipShadow, SHADOW_MAX_ALT } = await import('../js/game/shadow.js');
       const below = v3(
         moon.pos.x - up.x * 1e6, moon.pos.y - up.y * 1e6, moon.pos.z - up.z * 1e6);
-      const night = shipShadow(game.zone, ship, game.shipMesh, below, {});
-      put(SHADOW_MAX_ALT * 2);
-      const highZone = landingContext(world, ship);
-      const high = shipShadow(highZone, ship, game.shipMesh, overhead, {});
+      const saveStar = world.star.pos;
+      const frame = (star) => {
+        world.star.pos = star;
+        delete state.uni.uShipShadowOn;
+        const p0 = scene.shipShadowPasses, st0 = state.stencils;
+        scene.render(game);
+        return { passes: scene.shipShadowPasses - p0, on: state.uni.uShipShadowOn, stencils: state.stencils - st0 };
+      };
+      const day = frame(overhead);
+      const night = frame(below);
+      put(SHIP_SHADOW.maxAlt * 2);
+      game.zone = landingContext(world, ship);
+      const high = frame(overhead);
+      world.star.pos = saveStar;
       game.zone = null;
-      ok(lit >= 3 && night === 0 && high === 0,
-        `тень корабля: ${lit} вершин силуэта при солнце над головой, ` +
-        `ночью ${night}, с ${SHADOW_MAX_ALT * 2} км — ${high}`);
+      ok(day.passes === 1 && day.on === 1 && state.ints.uShipShadow === SHIP_SHADOW.unit && scene.shipShadow
+        && night.passes === 0 && !night.on && high.passes === 0 && !high.on,
+        `тень корабля: днём у грунта — проход глубины в карту ${SHIP_SHADOW.size}², сетки читают её с блока ` +
+        `${state.ints.uShipShadow}; ночью и с ${SHIP_SHADOW.maxAlt * 2} км — без карты`);
     }
 
     // Сходимость подгрузки с холодного кэша: сколько кадров проходит,

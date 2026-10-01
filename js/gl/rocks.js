@@ -162,15 +162,25 @@ const vertsPerRock = SHAPES[0].faces.length * 3 + 8 * 3;
 
 /**
  * Порционный сборщик поля: геометрия в локальных осях тела и в ЕДИНИЧНОМ
- * радиусе — ровно как у плиток поверхности, поэтому рисуется той же
- * матрицей.
+ * радиусе — ровно как у плиток поверхности, — и, как у них, от середины
+ * поля (origin), а не от центра тела: иначе float32 в шейдере даёт
+ * камню полметра ошибки, и у ног пилота он дрожит (js/gl/tilegeo.js).
+ *
+ * @param center направление на середину поля (оси тела); без него —
+ *        от центра тела, как раньше (так считают проверки)
  *
  * Порциями, потому что на каждый камень приходится выборка рельефа:
  * поле целиком — это десяток миллисекунд, а кадр длится шестнадцать.
  */
-export function rockBuilder(body, rocks, sun = null, detail = null) {
+export function rockBuilder(body, rocks, sun = null, detail = null, center = null) {
   const terrain = terrainOf(body);
   const R = body.radius;
+  let origin = [0, 0, 0];
+  if (center) {
+    const h0 = 1 + terrain.displace(center.x, center.y, center.z, detail);
+    origin = [center.x * h0, center.y * h0, center.z * h0];
+  }
+  const [ox, oy, oz] = origin;
   const n = rocks.length;
   const total = n * vertsPerRock;
   const positions = new Float32Array(total * 3);
@@ -207,9 +217,9 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
     const dark = [rgb[0] * ROCKS.shadowDark, rgb[1] * ROCKS.shadowDark,
       rgb[2] * ROCKS.shadowDark];
     const put = (u, v) => {
-      positions[o * 3] = d.x * lift + tx * u + bx * v;
-      positions[o * 3 + 1] = d.y * lift + ty * u + by * v;
-      positions[o * 3 + 2] = d.z * lift + tz * u + bz * v;
+      positions[o * 3] = d.x * lift + tx * u + bx * v - ox;
+      positions[o * 3 + 1] = d.y * lift + ty * u + by * v - oy;
+      positions[o * 3 + 2] = d.z * lift + tz * u + bz * v - oz;
       normals[o * 3] = d.x; normals[o * 3 + 1] = d.y; normals[o * 3 + 2] = d.z;
       colors[o * 4] = dark[0]; colors[o * 4 + 1] = dark[1]; colors[o * 4 + 2] = dark[2];
       // Не светится: альфа у сетки — доля свечения, а не непрозрачность
@@ -291,9 +301,9 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
       const jit = 0.86 + ((nx * 13.7 + nz * 7.3) % 1 + 1) % 1 * 0.28;
       const cr = rgb[0] * k * jit, cg = rgb[1] * k * jit, cb = rgb[2] * (k + 0.03) * jit;
       for (const p of [a, b, c]) {
-        positions[o * 3] = p[0];
-        positions[o * 3 + 1] = p[1];
-        positions[o * 3 + 2] = p[2];
+        positions[o * 3] = p[0] - ox;
+        positions[o * 3 + 1] = p[1] - oy;
+        positions[o * 3 + 2] = p[2] - oz;
         normals[o * 3] = nx; normals[o * 3 + 1] = ny; normals[o * 3 + 2] = nz;
         colors[o * 4] = cr; colors[o * 4 + 1] = cg; colors[o * 4 + 2] = cb;
         // Альфа — доля СВЕЧЕНИЯ (MESH_FS), а не непрозрачность. Стояла
@@ -314,7 +324,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
       const end = Math.min(n, at + count);
       for (; at < end; at++) one(rocks[at]);
       if (at < n) return false;
-      result = { positions, normals, colors, indices, faces: o / 3, count: n };
+      result = { positions, normals, colors, indices, faces: o / 3, count: n, origin };
       return true;
     },
     get result() { return result; },
@@ -322,8 +332,8 @@ export function rockBuilder(body, rocks, sun = null, detail = null) {
 }
 
 /** Поле целиком, одним заходом. Этим пользуются проверки. */
-export function buildRockGeometry(body, rocks, sun = null, detail = null) {
-  const b = rockBuilder(body, rocks, sun, detail);
+export function buildRockGeometry(body, rocks, sun = null, detail = null, center = null) {
+  const b = rockBuilder(body, rocks, sun, detail, center);
   while (!b.step(1e9)) { /* один заход */ }
   return b.result;
 }
@@ -337,6 +347,7 @@ export class RockField {
     this.gl = gl;
     this.locs = locs;
     this.mesh = null;          // то, что рисуется сейчас
+    this.origin = [0, 0, 0];   // от чего отсчитаны его вершины (доли радиуса)
     this.body = null;
     this.center = null;        // направление, вокруг которого собрано поле
     this.radius = 0;
@@ -382,7 +393,7 @@ export class RockField {
           radius,
           cell,
           builder: rockBuilder(body, scatterRocks(body, dir, radius), sun,
-            cell > 0 ? terrainOf(body).detailForCell(cell) : null),
+            cell > 0 ? terrainOf(body).detailForCell(cell) : null, dir),
         };
       }
     }
@@ -392,6 +403,7 @@ export class RockField {
       this.release();
       this.mesh = geo.faces > 0 ? buildIndexedMesh(this.gl, this.locs, geo) : null;
       if (this.mesh) this.mesh.faces = geo.faces;
+      this.origin = geo.origin;
       this.body = this.job.body;
       this.center = this.job.center;
       this.radius = this.job.radius;

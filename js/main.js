@@ -100,6 +100,8 @@ import { shipAnchor, anchorOk, anchorPose } from './game/anchor.js';
 import { makeDebug, tickDebug, drawDebug } from './ui/debug.js';
 import { drawPilots } from './ui/pilots.js';
 import { gpuKind } from './gl/context.js';
+import { terrainOf } from './gl/terrain.js';
+import { growth } from './gl/flora.js';
 import { L, initLang, setLang, getLang } from './core/lang.js';
 
 const STEP = 1 / 60;
@@ -743,6 +745,9 @@ function walkFrame(dt) {
   };
   const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
+  if (ev.step) {
+    audioCue(game.audio, 'step', { run: ev.step.run, land: ev.step.land, surface: stepSurface(), air: feetAir() });
+  }
   crossThreshold();
   if (ev.room) game.walkRoomT = 2.6;
   game.walkRoomT = Math.max(0, game.walkRoomT - dt);
@@ -1043,6 +1048,39 @@ function pressHint() {
   return [(r.p < AIR.cabin ? L('НАДДУВ · ') : L('СТРАВЛИВАНИЕ · ')) + bar, AIR_AMBER];
 }
 
+// Трава под ногой — там, где грунт покрашен зеленью и растут стебли:
+// густота растительности (js/gl/flora.js, growth) — то же число, по
+// которому их и сажают. Ниже трети — проплешины, грунт.
+const STEP_GRASS = 0.3;
+const _stepDir = v3();
+
+/**
+ * На чём шаг (звук): палуба корабля (и трап, и порог люка — всё его
+ * твёрдое), снег ледяного мира, трава или голый грунт.
+ */
+function stepSurface() {
+  const w = game.walk;
+  if (!w.out || w.floor !== 'ground') return 'metal';
+  const body = w.out.body;
+  if (body.kind === 'ice') return 'snow';
+  groundToWorld(w.out, w.pos, _feetW);
+  localDir(body, _feetW, _stepDir);
+  return growth(body, terrainOf(body), _stepDir.x, _stepDir.y, _stepDir.z) > STEP_GRASS ? 'grass' : 'ground';
+}
+
+/** Воздух у ног, бар: в помещении — его давление (js/game/airlock.js), за бортом — тела. */
+function feetAir() {
+  const w = game.walk, I = game.interior;
+  if (!w.out) {
+    const r = I && I.air && w.room ? roomAir(I.air, w.room.id) : null;
+    return r ? r.p : 1;
+  }
+  const G = w.out;
+  groundToWorld(G, w.pos, _feetW);
+  return airDensity(G.body, Math.max(0, Math.hypot(_feetW.x - G.body.pos.x, _feetW.y - G.body.pos.y,
+    _feetW.z - G.body.pos.z) - G.body.radius));
+}
+
 /** За бортом: где, тяжесть, воздух и до корабля. */
 function outHint() {
   const w = game.walk;
@@ -1050,8 +1088,7 @@ function outHint() {
   const G = w.out;
   groundToWorld(G, w.pos, _feetW);
   const g = gravityAt(G.body, _feetW) * 1000;
-  const p = airDensity(G.body, Math.max(0, Math.hypot(_feetW.x - G.body.pos.x, _feetW.y - G.body.pos.y,
-    _feetW.z - G.body.pos.z) - G.body.radius));
+  const p = feetAir();
   const d = Math.hypot(_feetW.x - ship.pos.x, _feetW.y - ship.pos.y, _feetW.z - ship.pos.z) * 1000;
   return {
     name: L('ЗА БОРТОМ') + ' · ' + G.body.name,

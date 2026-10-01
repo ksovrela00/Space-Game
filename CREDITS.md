@@ -16,7 +16,7 @@
 | зерно грунта (гравий, трещины) | [Rocks Ground 05](https://polyhaven.com/a/rocks_ground_05) | CC0 | Rob Tuytel (Poly Haven) |
 | пятна цвета на грунте (валуны, проплешины) | [Rocky Terrain 02](https://polyhaven.com/a/rocky_terrain_02) | CC0 | Amal Kumar (Poly Haven) |
 | краска кабины (царапины, потёртости, блеск) | [Blue Metal Plate](https://polyhaven.com/a/blue_metal_plate) | CC0 | Rob Tuytel (Poly Haven) |
-| звуки | [см. assets/sound/CREDITS.md](assets/sound/CREDITS.md) | CC0 | rubberduck |
+| звуки | [см. assets/sound/CREDITS.md](assets/sound/CREDITS.md) | CC0 | rubberduck, Kenney, TinyWorlds |
 
 ## Корпус
 
