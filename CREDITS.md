@@ -10,6 +10,7 @@
 | детали станций (тарелки, генераторы, баки, фермы, турели) | [Space Kit](https://kenney.nl/assets/space-kit) | CC0 | Kenney |
 | помещения корабля: стены, пол, потолок, двери, колонны, ящики, пульты, капсулы, реакторы | [LowPoly Modular Sci-Fi Environments](https://opengameart.org/content/lowpoly-modular-sci-fi-environments) | CC0 | Quaternius |
 | мебель корабля: койки, камбуз, стол, стулья, санузел | [Furniture Kit](https://kenney.nl/assets/furniture-kit) | CC0 | Kenney |
+| пилот в скафандре: модель, скелет, стойка, шаг, бег | [Space Suit](https://poly.pizza/m/3hC2i0CTuO) из пака [Ultimate Modular Men](https://quaternius.com/packs/ultimatemodularmen.html) | CC0 | Quaternius |
 | здания наземного города (кварталы, башни) | [City Kit (Commercial)](https://kenney.nl/assets/city-kit-commercial) | CC0 | Kenney |
 | космопорт города (ангары, баки, монорельс, техника) | [Space Kit](https://kenney.nl/assets/space-kit) | CC0 | Kenney |
 | растительность (деревья, кусты, трава, цветы) | [Nature Kit](https://kenney.nl/assets/nature-kit) | CC0 | Kenney |

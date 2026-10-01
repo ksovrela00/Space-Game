@@ -176,6 +176,13 @@ async function act(fn) {
 }
 
 export const refuel = (tons = null) => act(() => api.refuel(tons));
+
+/** Пересесть в другой свой корабль: ответ — полное состояние с ним. */
+export async function command(shipId) {
+  if (!isOnline()) throw Object.assign(new Error(L('нет связи с сервером')), { code: 'offline' });
+  session.player = await api.command(shipId);
+  return session.player;
+}
 export const buyGoods = (code, tons) => act(() => api.buy(code, tons));
 export const sellGoods = (code, tons) => act(() => api.sell(code, tons));
 export const buyModule = (code) => act(() => api.outfitBuy(code));

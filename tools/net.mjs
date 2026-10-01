@@ -24,7 +24,7 @@ const CASE = arg ? arg.slice(7) : null;
 if (!CASE) {
   console.log('\n== сеть: запуск игры с сервером ==');
   let bad = 0;
-  for (const name of ['server', 'offline', 'notoken', 'wreck']) {
+  for (const name of ['server', 'offline', 'notoken', 'wreck', 'onfoot', 'outside', 'rider']) {
     const r = spawnSync(process.execPath, [process.argv[1], '--case=' + name], {
       stdio: 'inherit',
     });
@@ -159,6 +159,49 @@ const SERVER_STATE = {
   ledger: [{ at: '2026-09-23 06:00:00', label: 'НАЧАЛЬНЫЙ КАПИТАЛ', amount: 12345,
     balance_after: 12345, ref: 'start' }],
 };
+
+// --- пилот не в кресле -----------------------------------------------------------
+//
+// Центр игры — пилот, а не корабль: при входе он обязан оказаться там,
+// где был, — на палубе, на грунте, пассажиром в чужом корабле, — а не
+// за штурвалом. Корабль при этом стоит там, где его оставили.
+const { systemById } = await import('../js/game/galaxy.js');
+const { makeSystem } = await import('../js/game/world.js');
+const { isLandable } = await import('../js/game/surface.js');
+const landOn = (sysId) => makeSystem(systemById(sysId)).bodies.find((b) => isLandable(b) && b.kind !== 'moon');
+const poseOn = (R, dx = 0) => {
+  const l = Math.hypot(dx, R);
+  return { dir: { x: dx / l, y: R / l, z: 0 }, radius: R + 0.006,
+    right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, fwd: { x: 0, y: 0, z: 1 } };
+};
+const HOME_LAND = landOn(0);
+const DECK = [0.6, 0, -6.5];
+if (CASE === 'onfoot' || CASE === 'outside' || CASE === 'rider') {
+  Object.assign(SERVER_STATE.position, {
+    systemId: 0, pos: { x: 0, y: 0, z: 0 }, landedBody: HOME_LAND.id,
+    landedPose: poseOn(HOME_LAND.radius), landedSecured: true, view: 'cockpit', hatches: ['nL'],
+  });
+  SERVER_STATE.ship.gearOut = true;
+}
+if (CASE === 'onfoot') {
+  SERVER_STATE.me = { systemId: 0, aboard: 1, seated: false, out: null,
+    walk: { pos: DECK, yaw: 0.7, pitch: -0.1 } };
+}
+if (CASE === 'outside') {
+  SERVER_STATE.me = { systemId: 0, aboard: null, seated: false, walk: null,
+    out: { body: HOME_LAND.id, o: { x: 0.03, y: HOME_LAND.radius + 0.0004, z: 0.02 },
+      f: { x: 1, y: 0, z: 0 }, pitch: 0.2 } };
+}
+const RIDE_SYS = 2;
+const RIDE_LAND = CASE === 'rider' ? landOn(RIDE_SYS) : null;
+if (CASE === 'rider') {
+  SERVER_STATE.me = { systemId: RIDE_SYS, aboard: 77, seated: false, out: null,
+    walk: { pos: DECK, yaw: -1.2, pitch: 0 } };
+  SERVER_STATE.aboard = { id: 77, ownerId: 5, ownerName: 'ХОЗЯИН', name: '', type: { code: 'challenger' },
+    systemId: RIDE_SYS, pos: { x: 0, y: 0, z: 0 }, basis: null, dockedBody: null,
+    landedBody: RIDE_LAND.id, landedPose: poseOn(RIDE_LAND.radius, 0.2), landedSecured: true,
+    anchorBody: null, anchorPose: null, gearOut: true, hatches: ['nR'] };
+}
 
 // --- характеристики: с сервера или из слепка -----------------------------------
 //
@@ -318,6 +361,63 @@ if (CASE === 'wreck') {
     'щит тоже: ' + (game ? game.ship.shield : '—'));
 }
 
+if (CASE === 'onfoot' || CASE === 'outside' || CASE === 'rider') {
+  // Помещения собираются лениво и только там, где есть кабина: в этом
+  // стенде её дают руками (как в tools/smoke.mjs), и пилот встаёт туда,
+  // где был, ровно в тот момент, когда они готовы.
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  ok(!game.walk.on, 'пока помещений нет, ставить пилота некуда: ждём');
+  game.cockpit = buildCockpit();
+  await game.loadInterior();
+  frames(5);
+  const w = game.walk;
+  ok(game.state.mode === (CASE === 'rider' ? 'flight' : 'landed'), 'режим: ' + game.state.mode);
+  if (CASE === 'onfoot') {
+    ok(w.on && w.phase === 'walk' && !w.out && w.vessel === game.ownVessel
+      && Math.hypot(w.pos[0] - DECK[0], w.pos[2] - DECK[2]) < 0.05 && Math.abs(w.yaw - 0.7) < 1e-6,
+      'при входе пилот на палубе, где ходил, — не в кресле: ' + w.pos.map((v) => v.toFixed(2)).join(', '));
+    ok(game.ship.landedAt && game.ship.landedAt.id === HOME_LAND.id && game.interior.air.hatches.find((h) => h.id === 'nL').open === 1,
+      'корабль на своей стоянке на ' + HOME_LAND.name + ', люк, оставленный открытым, открыт');
+  }
+  if (CASE === 'outside') {
+    const { groundToWorld } = await import('../js/game/outside.js');
+    const { bodyWorld } = await import('../js/game/vessels.js');
+    const P = groundToWorld(w.out, w.pos);
+    const want = bodyWorld(w.out.body, SERVER_STATE.me.out.o);
+    const d = Math.hypot(P.x - want.x, P.y - want.y, P.z - want.z) * 1000;
+    ok(w.on && w.out && w.out.body.id === HOME_LAND.id && d < 1.5,
+      'при входе пилот на грунте ' + HOME_LAND.name + ' там же, где стоял: ' + d.toFixed(2) + ' м от записи');
+  }
+  if (CASE === 'rider') {
+    const V = w.vessel;
+    ok(game.sys.id === RIDE_SYS && game.ship.away === true,
+      'пилот в системе ' + game.sys.id + ' пассажиром, свой корабль остался в системе 0');
+    ok(w.on && V && !V.own && V.id === 77 && V.name === 'ХОЗЯИН' && V.air
+      && Math.hypot(w.pos[0] - DECK[0], w.pos[2] - DECK[2]) < 0.05,
+      'стоит на палубе чужого корабля #' + (V && V.id) + ' (' + (V && V.name) + ')');
+    const B = game.world.bodies.find((b) => b.id === RIDE_LAND.id);
+    const R = Math.hypot(V.pos.x - B.pos.x, V.pos.y - B.pos.y, V.pos.z - B.pos.z);
+    ok(Math.abs(R - RIDE_LAND.radius - 0.006) < 1e-6 && V.air.hatches.find((h) => h.id === 'nR').want,
+      'чужой корабль на своей стоянке у ' + RIDE_LAND.name + ', его люк открыт');
+  }
+  // Сохранение: место пилота и место корабля — отдельно. Берётся
+  // последнее, что игра положила в очередь к серверу (js/net/session.js):
+  // до отправки его держит пауза SAVE_EVERY.
+  for (const fn of nodes.bootBtn.listeners.click || []) fn();
+  nowMs += 20000;
+  frames(60 * 9);
+  saved = session.dirty || saved;
+  ok(saved && saved.me && saved.me.seated !== true, 'на сервер ушло место пилота: ' + JSON.stringify(saved && saved.me).slice(0, 90));
+  if (CASE === 'rider') {
+    ok(saved && saved.ship === null && saved.me.aboard === 77 && saved.system === RIDE_SYS,
+      'свой корабль из другой системы сервер не переписывает: ship = null, пилот на борту #77');
+  } else {
+    ok(saved && saved.ship && saved.ship.landed && saved.ship.landed.id === HOME_LAND.id
+      && saved.ship.hatches.includes('nL'),
+      'корабль остался на стоянке с открытым люком: ' + JSON.stringify(saved && saved.ship && saved.ship.hatches));
+  }
+}
+
 if (CASE === 'notoken') {
   ok(location.replaced === 'login.html', 'без входа игра уходит на страницу входа');
   ok(!game || !rafCb, 'кадры при этом не запускаются');
@@ -379,8 +479,8 @@ if (CASE === 'server') {
   // Кэш браузера приведён к серверному состоянию: следующий запуск без
   // сети должен поднять игру там же, где сервер её оставил.
   const cached = JSON.parse(store['solar_trader_save_v2']);
-  ok(Math.abs(cached.pos.x - SERVER_STATE.position.pos.x) < 1e-6,
-    'местный кэш переписан серверным состоянием');
+  ok(Math.abs(cached.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6 && cached.me.seated === true,
+    'местный кэш переписан серверным состоянием: корабль и пилот в его кресле');
 
   // Сохранение уходит на сервер — не чаще раза в SAVE_EVERY секунд.
   for (const fn of nodes.bootBtn.listeners.click || []) fn();

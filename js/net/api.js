@@ -158,6 +158,13 @@ export const refuel = (tons = null) => call('station.refuel', tons === null ? {}
 /** Аварийный буксир в порт: корабль с пустым баком в пустоте. */
 export const rescue = () => call('ship.rescue');
 
+/**
+ * Принять командование другим своим кораблём — сесть в его кресло.
+ * Кораблей у пилота может быть несколько; ответ — полное состояние уже
+ * с новым кораблём (server/src/Players.php, command).
+ */
+export const command = (id) => call('ship.command', { id });
+
 /** Верфь порта: что стоит на корабле и что здесь можно поставить. */
 export const outfit = () => call('outfit.list');
 export const outfitBuy = (code) => call('outfit.buy', { code });

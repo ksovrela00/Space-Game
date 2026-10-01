@@ -46,19 +46,19 @@
       'entry', 'flow', 'fuel',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
       'outside', 'player', 'quantum', 'ship', 'specs', 'state', 'surface',
-      'walker', 'warp', 'weapons', 'world'
+      'vessels', 'walker', 'warp', 'weapons', 'world'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
       'forestworker', 'gputime', 'ground',
       'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
-      'quadtree', 'rocks', 'scene', 'shaders', 'shipshadow', 'terrain', 'tilegeo', 'tilepool',
+      'quadtree', 'rocks', 'scene', 'shaders', 'shipshadow', 'spacesuit', 'terrain', 'tilegeo', 'tilepool',
       'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [
       'airstair', 'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
       'interior', 'interior.parts',
-      'nature.parts', 'ships', 'station.parts', 'stations'
+      'nature.parts', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'

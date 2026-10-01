@@ -17,7 +17,7 @@
 //   * в шлюзе — давление и что он делает (задраен, стравливает, открыт);
 //   * за бортом — где пилот, какая тут тяжесть и воздух, далеко ли корабль.
 
-import { CY, AMBER, GREEN, RED, INK } from './theme.js';
+import { CY, AMBER, GREEN, RED, INK, PEER } from './theme.js';
 import { Q } from '../core/quality.js';
 import { L } from '../core/lang.js';
 import { fmtSpeed } from './hud.js';
@@ -56,6 +56,42 @@ export function shipStatus(game) {
  * @param game  состояние игры; game.walk — пилот (js/game/walker.js)
  * @param hint  подсказки: { seat, mouse, intro } — что показать внизу
  */
+// Над головой — имя: без него в скафандрах все одинаковые. Только рядом
+// и только тем, кто там же, где ты (на грунте — тем, кто на грунте; на
+// палубе — тем, кто на этой палубе): имя сквозь три переборки — подсказка
+// о том, чего не видно, а не подпись к тому, что видно.
+const NAME_NEAR = 0.04;           // км
+const _head = { x: 0, y: 0, z: 0 }, _hp = { x: 0, y: 0 };
+function drawNames(ctx, cam, game) {
+  const list = game.people;
+  if (!list || !list.length || !cam.toCamera) return;
+  const w = game.walk;
+  const here = w && w.on && !w.out && w.vessel ? w.vessel.id : null;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = fnt(12, 'bold');
+  ctx.lineWidth = 3;
+  for (const p of list) {
+    if (!p.here || !p.place) continue;
+    const same = p.st === 'out' ? !!(w && w.out) : p.ship === here;
+    if (!same) continue;
+    const u = p.place.basis.up, f = p.place.pos;
+    _head.x = f.x + u.x * 0.0021; _head.y = f.y + u.y * 0.0021; _head.z = f.z + u.z * 0.0021;
+    const d = Math.hypot(_head.x - cam.pos.x, _head.y - cam.pos.y, _head.z - cam.pos.z);
+    if (d > NAME_NEAR) continue;
+    const c = cam.toCamera(_head);
+    if (c.z <= cam.near) continue;
+    const s = cam.project(c, _hp);
+    const name = (p.name || L('ПИЛОТ')) + (d > 0.008 ? '  ' + Math.round(d * 1000) + L(' м') : '');
+    ctx.globalAlpha = Math.min(1, (NAME_NEAR - d) / 0.01);
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeText(name, s.x, s.y);
+    ctx.fillStyle = PEER;
+    ctx.fillText(name, s.x, s.y);
+  }
+  ctx.restore();
+}
+
 export function drawWalkHud(r, game, hint = {}) {
   const ctx = r.ctx;
   const w = r.camera.w, h = r.camera.h;
@@ -94,6 +130,8 @@ export function drawWalkHud(r, game, hint = {}) {
     ctx.globalAlpha = 1;
   }
 
+  drawNames(ctx, r.camera, game);
+
   // Что с кораблём — правый верхний угол.
   const [line, color] = shipStatus(game);
   ctx.textAlign = 'right';
@@ -109,6 +147,7 @@ export function drawWalkHud(r, game, hint = {}) {
   const warn = [];
   if (hint.lock) warn.push(hint.lock);
   if (hint.press) warn.push(hint.press);
+  if (hint.aboard) warn.push([hint.aboard, '#9fd9ff']);
   if (out) warn.push([out.info, CY]);
   if (out && out.ship) warn.push([out.ship, CY]);
   if (game.ship.hull < 35) warn.push([L('КОРПУС ') + Math.round(game.ship.hull) + '%', RED]);

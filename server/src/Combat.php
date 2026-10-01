@@ -110,12 +110,15 @@ final class Combat
     {
         $dmg = $fatal ? INF : self::impactDamage($norm, $slide, $gear, $poseOk);
 
-        return Db::tx(function () use ($playerId, $dmg) {
+        // Бьётся корабль, которым пилот командует: удар о грунт докладывает
+        // тот, кто его ведёт (Hub, impact).
+        $shipId = (int) Players::ship($playerId)['id'];
+        return Db::tx(function () use ($shipId, $dmg) {
             $row = Db::row(
                 'SELECT s.`id`, s.`hull`, t.`hull_max`
                  FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
-                 WHERE s.`owner_id`=? FOR UPDATE',
-                [$playerId]
+                 WHERE s.`id`=? FOR UPDATE',
+                [$shipId]
             );
             if ($row === null) {
                 throw new ApiError('no_ship', 'у пилота нет корабля');
@@ -148,14 +151,14 @@ final class Combat
         return $spec;
     }
 
-    /** Стоит ли это оружие на корабле пилота. */
+    /** Стоит ли это оружие на корабле, которым пилот командует. */
     public static function armed(int $playerId, string $code): bool
     {
         $n = Db::one(
             'SELECT COUNT(*) FROM `ship_equipment` se
              JOIN `equipment_type` e ON e.`id` = se.`equipment_id`
-             JOIN `ship` s ON s.`id` = se.`ship_id`
-             WHERE s.`owner_id`=? AND e.`code`=?',
+             JOIN `player` p ON p.`ship_id` = se.`ship_id`
+             WHERE p.`id`=? AND e.`code`=?',
             [$playerId, $code]
         );
         return (int) $n > 0;
@@ -167,18 +170,21 @@ final class Combat
      * Порядок именно такой и в этом весь смысл щита: он принимает удар на
      * себя и отрастает сам, а корпус чинят за деньги в порту.
      *
+     * Попадают в КОРАБЛЬ, а не в пилота: пилот может стоять на грунте в
+     * километре от своего корабля, а на борту может ехать чужой.
+     *
      * @return array{hull,max,shield,smax,absorbed,dead}
      */
-    public static function damage(int $victimId, float $dmg): array
+    public static function damage(int $shipId, float $dmg): array
     {
-        return Db::tx(function () use ($victimId, $dmg) {
+        return Db::tx(function () use ($shipId, $dmg) {
             // Читаем ПОД ЗАМКОМ: два попадания в один миг — обычное дело,
             // и без него второе посчиталось бы от старых чисел.
             $row = Db::row(
                 'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
                  FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
-                 WHERE s.`owner_id`=? FOR UPDATE',
-                [$victimId]
+                 WHERE s.`id`=? FOR UPDATE',
+                [$shipId]
             );
             if ($row === null) {
                 throw new ApiError('no_ship', 'у пилота нет корабля');
@@ -209,56 +215,93 @@ final class Combat
     }
 
     /**
-     * Возвращение в строй: корабль целый, пилот в порту.
+     * Возвращение в строй: корабль целый, в порту.
      *
      * Своего «экрана гибели» у сервера нет и быть не может — он не знает,
      * смотрит ли кто-то в этот момент в экран. Поэтому гибель сразу
      * превращается в состояние, из которого можно играть дальше: в тот
-     * порт, откуда пилот последний раз уходил. Цену за это (страховку,
+     * порт, откуда хозяин последний раз уходил. Цену за это (страховку,
      * потерю груза) добавлять рано — сначала должен появиться сам бой.
+     *
+     * @param int $victimId пилот, чей корабль (тот, которым он командует)
      */
     public static function respawn(int $victimId): void
     {
-        Db::tx(function () use ($victimId) {
-            $p = Db::row('SELECT `id`,`ship_id`,`system_id`,`last_station`,`crashes`
-                          FROM `player` WHERE `id`=? FOR UPDATE', [$victimId]);
+        $shipId = (int) Players::ship($victimId)['id'];
+        self::respawnShip($shipId);
+    }
+
+    /**
+     * Корабль — в порт, целым; хозяин — в его кресло, пассажиры — на борт.
+     *
+     * Хозяина страховка возвращает ВМЕСТЕ с кораблём, где бы он ни был:
+     * стоял он на грунте у корабля, который расстреляли, — и остался бы на
+     * чужой планете без корабля, в тупике, из которого не выбраться.
+     * Пассажиры остаются на борту: их везли — их и довезли.
+     */
+    public static function respawnShip(int $shipId): void
+    {
+        Db::tx(function () use ($shipId) {
+            $ship = Db::row('SELECT * FROM `ship` WHERE `id`=? FOR UPDATE', [$shipId]);
+            if ($ship === null) {
+                return;
+            }
+            $ownerId = (int) $ship['owner_id'];
+            $p = Db::row('SELECT `id`,`last_station`,`crashes` FROM `player` WHERE `id`=? FOR UPDATE',
+                [$ownerId]);
             if ($p === null) {
                 return;
             }
-            $where = $p['last_station'] !== null
-                ? ['system_id' => (int) $p['system_id'], 'local_id' => (int) $p['last_station']]
-                : Players::startPoint();
+            $sys = $ship['system_id'] === null ? null : (int) $ship['system_id'];
+            $where = null;
+            if ($sys !== null && $p['last_station'] !== null && Db::one(
+                "SELECT `id` FROM `body` WHERE `system_id`=? AND `local_id`=? AND `kind`='station'",
+                [$sys, (int) $p['last_station']]
+            ) !== null) {
+                $where = ['system_id' => $sys, 'local_id' => (int) $p['last_station']];
+            }
+            if ($where === null) {
+                $where = Players::startPoint();
+            }
 
-            Db::update('player', [
+            $hullMax = (float) Db::one('SELECT `hull_max` FROM `ship_type` WHERE `id`=?',
+                [(int) $ship['type_id']]);
+            // Щит после гибели тоже целый, и время последнего попадания
+            // сбрасывается: новый корабль, новая жизнь. Люки задраены.
+            Db::update('ship', [
+                'hull' => $hullMax,
+                'shield' => 0,
+                'hit_at' => null,
                 'system_id' => $where['system_id'],
                 'docked_body' => $where['local_id'],
-                'last_station' => $where['local_id'],
                 'landed_body' => null,
                 'landed_pose' => null,
                 'landed_secured' => 0,
+                'anchor_body' => null,
+                'anchor_pose' => null,
                 'pos_x' => 0, 'pos_y' => 0, 'pos_z' => 0,
                 'basis' => null,
-                'crashes' => (int) $p['crashes'] + 1,
-            ], '`id`=?', [$victimId]);
+                'hatches' => null,
+            ], '`id`=?', [$shipId]);
+            // Страховка возвращает корабль с резервом в баке — с тем, на
+            // чём можно выйти из дока. Больше не доливает: иначе разбиться
+            // было бы дешевле, чем заправиться.
+            Fuel::topUpReserve($shipId);
 
-            $hullMax = Db::one(
-                'SELECT t.`hull_max` FROM `ship` s JOIN `ship_type` t ON t.`id`=s.`type_id`
-                 WHERE s.`id`=?',
-                [(int) $p['ship_id']]
-            );
-            if ($hullMax !== null) {
-                // Щит после гибели тоже целый, и время последнего
-                // попадания сбрасывается: новый корабль, новая жизнь.
-                Db::update('ship', [
-                    'hull' => (float) $hullMax,
-                    'shield' => 0,
-                    'hit_at' => null,
-                ], '`id`=?', [(int) $p['ship_id']]);
-                // Страховка возвращает корабль с резервом в баке — с тем,
-                // на чём можно выйти из дока. Больше не доливает: иначе
-                // разбиться было бы дешевле, чем заправиться.
-                Fuel::topUpReserve((int) $p['ship_id']);
-            }
+            Db::update('player', [
+                'system_id' => $where['system_id'],
+                'last_station' => $where['local_id'],
+                'aboard_ship' => $shipId,
+                'ship_id' => $shipId,
+                'seated' => 1,
+                'walk_pose' => null,
+                'out_body' => null,
+                'out_pose' => null,
+                'crashes' => (int) $p['crashes'] + 1,
+            ], '`id`=?', [$ownerId]);
+            // Пассажиры — с кораблём, на ногах.
+            Db::run('UPDATE `player` SET `system_id`=?, `seated`=0, `walk_pose`=NULL
+                     WHERE `aboard_ship`=? AND `id`<>?', [$where['system_id'], $shipId, $ownerId]);
         });
     }
 }

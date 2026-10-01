@@ -11,37 +11,56 @@
  * умеющими send() и close(), — а Ratchet подставляет свои
  * (server/ws/server.php).
  *
+ * КОРАБЛИ И ЛЮДИ — РАЗНЫЕ СПИСКИ. Соединение — это игрок. Он ВЕДЁТ свой
+ * корабль (тот, которым командует, если корабль в той же системе), и он
+ * же САМ где-то есть: в кресле, на палубе — своего или чужого корабля, —
+ * на грунте. Корабль без хозяина в игре никуда не девается: он стоит,
+ * где оставили, и его видно — хаб берёт его из базы («спящий», dorm).
+ *
  * Что летает по сокету:
  *
  *   клиент -> сервер
  *     {"t":"hello","token":"..."}            вход по тому же токену, что и API
- *     {"t":"pos","sys":0,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight",
+ *     {"t":"pos","sys":0,                    система, где САМ пилот
+ *      -- корабль, который он ведёт (нет полей x,y,z — не ведёт никакого):
+ *      "sid":12,"x":..,"y":..,"z":..,"v":0.4,"mode":"flight",
  *      "fx":..,"fy":..,"fz":..,"ux":..,"uy":..,"uz":..,   куда смотрит и где верх
- *      "wm":..,"wl":..,"wr":..,"n":17}   работа сопел с начала связи, км/с, и номер снимка
+ *      "b":3,"lx":..,"ly":..,"lz":..,"lfx":..,"luy":..,   то же в осях тела (у тела)
+ *      "g":1,"h":["nL"],"k":0.3,             шасси, открытые люки, работа подъёмных
+ *      "wm":..,"wl":..,"wr":..,"n":17,       работа сопел с начала связи и номер снимка
+ *      -- сам пилот:
+ *      "me":{"st":"walk","s":12,"x":..,"y":..,"z":..,"yaw":..,"pitch":..,"v":1.9,"air":0}}
+ *           или {"st":"out","b":3,"lx":..,"ly":..,"lz":..,"lfx":..,"lfy":..,"lfz":..,...}
  *     {"t":"ping"}
  *     {"t":"shot","w":"laser_g","x":..,"y":..,"z":..,"dx":..,"dy":..,"dz":..}
- *     {"t":"hit","id":7,"w":"laser_g"}      попадание по пилоту 7
+ *     {"t":"hit","id":12,"w":"laser_g"}     попадание по кораблю 12
+ *     {"t":"hatch","ship":12,"id":"nL","open":true}   люк чужого корабля
  *
  *   сервер -> клиент
- *     {"t":"welcome","you":{...},"peers":[...],"wt":123.4}
- *     {"t":"peers","list":[...],"wt":123.4}  раз в тик, только своя система
- *       в списке у каждого: место, осанка, корпус и щит (hull/hmax/sh/smax)
+ *     {"t":"welcome","you":{...},"peers":[...],"people":[...],"wt":123.4}
+ *     {"t":"peers","list":[...],"people":[...],"wt":123.4}  раз в тик, своя система
+ *       list — корабли: id корабля, by — кто ведёт (или хозяин спящего),
+ *         место, осанка, корпус и щит, шасси, люки; dorm — спит в базе;
+ *       people — люди: id игрока, где и как стоит
  *
  * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
  * Оно идёт в каждом снимке, а не только при входе: вкладка в фоне
  * перестаёт получать кадры, её часы отстают, и без поправки пилот,
  * вернувшийся к игре, увидит станцию не там, где остальные.
- *     {"t":"leave","id":7}
+ *     {"t":"leave","id":7,"ship":12}         игрок 7 ушёл (и увёл корабль 12)
  *     {"t":"shot","by":7,...}                чужой выстрел — только картинка
  *     {"t":"hurt","by":7,"dmg":3,"hull":61,"dead":false}   попали В НАС
- *     {"t":"hitok","id":7,"hull":61,"dead":false}          попали МЫ
- *     {"t":"boom","id":7}                    чей-то корабль уничтожен
+ *     {"t":"hitok","id":12,"hull":61,"dead":false}         попали МЫ
+ *     {"t":"boom","id":12}                   корабль 12 уничтожен
+ *     {"t":"hatchreq","ship":12,"id":"nL","open":true,"by":7}  просят люк НАШЕГО корабля
  *     {"t":"fuel","fuel":8.4,"cap":12,"n":17}  бак по счёту сервера после снимка n
  *     {"t":"error","code":"auth","message":"..."}
  *
  * Положение НЕ ПРОВЕРЯЕТСЯ: сервер не считает физику и знает лишь то, что
  * прислал клиент. Это честная граница сегодняшнего дня — присутствие тут
- * настоящее, а движение пока на доверии.
+ * настоящее, а движение пока на доверии. Проверяется то, что проверяемо:
+ * корабль ведёт только его хозяин, люк чужого корабля просят только
+ * стоя рядом с ним.
  */
 
 final class Hub
@@ -67,11 +86,27 @@ final class Hub
      */
     public const IMPACT_RATE = 4;
 
+    /** Сколько просьб о люке в секунду слушаем: люк ходит полторы секунды. */
+    public const HATCH_RATE = 4;
+
     /** Как часто перечитываем корпус и щит пилота из базы, с. */
     public const STAT_EVERY = 10;
 
+    /**
+     * Как часто перечитываем спящие корабли системы из базы, с.
+     *
+     * Спящий корабль не движется: меняются у него только люки (их хаб
+     * сам пишет и сам сбрасывает этот срок) и то, что пишет сохранение
+     * ушедшего хозяина. Две секунды — столько не жалко подождать, чтобы
+     * увидеть корабль, хозяин которого только что вышел из игры.
+     */
+    public const DORM_EVERY = 2.0;
+
     /** Больше — молчащий клиент считается мёртвым, с. */
     public const IDLE_TIMEOUT = 90;
+
+    /** Палуба корабля, м: дальше этого от центра точки на борту нет. */
+    public const DECK_M = 60.0;
 
     /**
      * Запас предела расхода: во сколько раз больше того, что двигатель
@@ -96,6 +131,9 @@ final class Hub
 
     /** @var array<int, array> id соединения => состояние */
     private array $peers = [];
+
+    /** @var array<int, array{at:float, list:array}> система => спящие корабли */
+    private array $dorm = [];
 
     /** @var callable|null куда писать события (для журнала) */
     private $log;
@@ -148,19 +186,31 @@ final class Hub
             'player' => null,          // пока не вошёл — ничего не видит и не шлёт
             'name' => '',
             'sys' => null,
+            // Ведёт ли он сейчас корабль (в последнем снимке были его поля).
+            'hosting' => false,
             'x' => 0.0, 'y' => 0.0, 'z' => 0.0, 'v' => 0.0,
             // Осанка корабля. По умолчанию — «смотрит по оси Z, верх по
             // Y»: пока пилот не прислал свою, показать его надо хоть
             // как-то, а не боком.
             'fx' => 0.0, 'fy' => 0.0, 'fz' => 1.0,
             'ux' => 0.0, 'uy' => 1.0, 'uz' => 0.0,
+            // То же В ОСЯХ ТЕЛА, у которого корабль: соседи рисуют его с
+            // опозданием в четверть секунды, а грунт под ним за это время
+            // уезжает на десятки метров. В осях тела опоздание касается
+            // только его собственного хода (js/game/peers.js).
+            'local' => null,
+            'g' => 0, 'h' => [], 'k' => 0.0,
             'mode' => 'flight',
+            // Сам пилот: где и как стоит, и на чьём борту.
+            'me' => null,
+            'aboard' => null,
             'since' => $now,
             'seen' => $now,
             'posAt' => 0.0,
             'shotAt' => 0.0,
             'hitAt' => 0.0,
             'impactAt' => 0.0,
+            'hatchAt' => 0.0,
             // Что стоит на корабле — спрашиваем у базы один раз на
             // соединение: оружие в полёте не меняется, а запрос на
             // каждое попадание превратил бы бой в поток запросов.
@@ -199,8 +249,13 @@ final class Hub
         if ($peer && $peer['player'] !== null) {
             // Остальным в той же системе говорим об уходе сразу, а не
             // ждём тика: корабль, исчезающий с задержкой, читается как
-            // подвисание.
-            $this->broadcast($peer['sys'], ['t' => 'leave', 'id' => $peer['player']], $peer['player']);
+            // подвисание. Корабль его при этом не пропадает: он остаётся
+            // стоять, где стоял, — спящим, из базы.
+            $this->broadcast($peer['sys'], ['t' => 'leave', 'id' => $peer['player'],
+                'ship' => $peer['hosting'] ? $peer['ship'] : null], $peer['player']);
+            if ($peer['sys'] !== null) {
+                $this->forgetDorm($peer['sys']);
+            }
             // Ушедший пропадает из состава у всех, а не только у соседей
             // по системе: список пилотов общий на всю галактику.
             $this->sendRoster();
@@ -229,53 +284,7 @@ final class Hub
                 return;
 
             case 'pos':
-                // До входа не слушаем ничего: иначе любой желающий сможет
-                // светиться в чужой системе, не имея учётной записи.
-                if ($peer['player'] === null) {
-                    $this->send($conn, ['t' => 'error', 'code' => 'auth', 'message' => 'сначала hello']);
-                    return;
-                }
-                // Слишком частые обновления просто отбрасываем: тик всё
-                // равно рассылает последнее известное.
-                if ($now - $peer['posAt'] < 1.0 / self::POS_RATE) {
-                    return;
-                }
-                $peer['posAt'] = $now;
-                $wasSys = $peer['sys'];
-                $wasHere = !self::between($peer);
-                $was = ['x' => $peer['x'], 'y' => $peer['y'], 'z' => $peer['z'], 'mode' => $peer['mode']];
-                $peer['sys'] = isset($msg['sys']) ? (int) $msg['sys'] : $peer['sys'];
-                $peer['x'] = self::num($msg['x'] ?? 0);
-                $peer['y'] = self::num($msg['y'] ?? 0);
-                $peer['z'] = self::num($msg['z'] ?? 0);
-                $peer['v'] = self::num($msg['v'] ?? 0);
-                // Ориентацию только ПЕРЕСЫЛАЕМ: своей физики у сервера
-                // нет, проверять её нечем, а нормирует вектор тот, кто
-                // рисует (js/game/peers.js).
-                foreach (['fx', 'fy', 'fz', 'ux', 'uy', 'uz'] as $k) {
-                    if (isset($msg[$k])) {
-                        $peer[$k] = self::num($msg[$k]);
-                    }
-                }
-                $mode = (string) ($msg['mode'] ?? 'flight');
-                $peer['mode'] = in_array($mode, ['flight', 'docked', 'landed', 'warp'], true)
-                    ? $mode : 'flight';
-                $peer['moved'] = true;
-                $this->meter($peer, $msg, $now, $wasSys, $was);
-
-                // Пропал из системы — говорим об этом СРАЗУ, а не ждём,
-                // пока сосед сам забудет по истечении срока. Пропасть
-                // можно двумя способами: уйти в другую систему и уйти в
-                // прыжок, и второе так же окончательно, как первое.
-                if ($wasSys !== null && $peer['player'] !== null
-                    && ($wasSys !== $peer['sys'] || ($wasHere && self::between($peer)))) {
-                    $this->broadcast($wasSys, ['t' => 'leave', 'id' => $peer['player']], $peer['player']);
-                }
-                // Смена системы видна в списке пилотов у ВСЕХ: ради этого
-                // список и нужен — видеть, кто куда ушёл.
-                if ($wasSys !== $peer['sys']) {
-                    $this->sendRoster();
-                }
+                $this->pos($conn, $peer, $msg, $now);
                 return;
 
             case 'shot':
@@ -288,14 +297,16 @@ final class Hub
                 if ($now - $peer['shotAt'] < 1.0 / self::SHOT_RATE) {
                     return;
                 }
-                // Из прыжка не стреляют — соседям нечего показывать.
-                if (self::between($peer)) {
+                // Из прыжка не стреляют — соседям нечего показывать. И не
+                // стреляют, не ведя корабля: пушки у корабля, а не у пешехода.
+                if (self::between($peer) || !$peer['hosting']) {
                     return;
                 }
                 $peer['shotAt'] = $now;
                 $this->broadcast($peer['sys'], [
                     't' => 'shot',
                     'by' => $peer['player'],
+                    'ship' => $peer['ship'],
                     'w' => (string) ($msg['w'] ?? ''),
                     'x' => self::num($msg['x'] ?? 0),
                     'y' => self::num($msg['y'] ?? 0),
@@ -314,12 +325,110 @@ final class Hub
                 $this->impact($conn, $peer, $msg, $now);
                 return;
 
+            case 'hatch':
+                $this->hatch($conn, $peer, $msg, $now);
+                return;
+
             case 'ping':
                 $this->send($conn, ['t' => 'pong', 'time' => round($now, 3)]);
                 return;
 
             default:
                 $this->send($conn, ['t' => 'error', 'code' => 'unknown', 'message' => 'неизвестный вызов']);
+        }
+    }
+
+    /**
+     * Снимок от игрока: его корабль (если он его ведёт) и он сам.
+     */
+    private function pos($conn, array &$peer, array $msg, float $now): void
+    {
+        // До входа не слушаем ничего: иначе любой желающий сможет
+        // светиться в чужой системе, не имея учётной записи.
+        if ($peer['player'] === null) {
+            $this->send($conn, ['t' => 'error', 'code' => 'auth', 'message' => 'сначала hello']);
+            return;
+        }
+        // Слишком частые обновления просто отбрасываем: тик всё равно
+        // рассылает последнее известное.
+        if ($now - $peer['posAt'] < 1.0 / self::POS_RATE) {
+            return;
+        }
+        $peer['posAt'] = $now;
+        $wasSys = $peer['sys'];
+        $wasHere = $peer['hosting'] && !self::between($peer);
+        $was = ['x' => $peer['x'], 'y' => $peer['y'], 'z' => $peer['z'], 'mode' => $peer['mode']];
+        $peer['sys'] = isset($msg['sys']) ? (int) $msg['sys'] : $peer['sys'];
+
+        // Какой корабль игра ведёт. Не тот, которым пилот командует по
+        // базе, — не ведёт никакого: чужой корабль хаб не двигает. Игра
+        // пересела (Players::command) — перечитываем, каким командует.
+        $sid = isset($msg['sid']) && is_numeric($msg['sid']) ? (int) $msg['sid'] : $peer['ship'];
+        if ($sid !== $peer['ship'] && $now - $peer['statAt'] > 1.0) {
+            $this->loadStats($peer, $now, true);
+        }
+        $hosting = array_key_exists('x', $msg) && $peer['ship'] !== null && $sid === $peer['ship'];
+
+        if ($hosting) {
+            $peer['x'] = self::num($msg['x']);
+            $peer['y'] = self::num($msg['y'] ?? 0);
+            $peer['z'] = self::num($msg['z'] ?? 0);
+            $peer['v'] = self::num($msg['v'] ?? 0);
+            // Ориентацию только ПЕРЕСЫЛАЕМ: своей физики у сервера нет,
+            // проверять её нечем, а нормирует вектор тот, кто рисует
+            // (js/game/peers.js).
+            foreach (['fx', 'fy', 'fz', 'ux', 'uy', 'uz'] as $k) {
+                if (isset($msg[$k])) {
+                    $peer[$k] = self::num($msg[$k]);
+                }
+            }
+            $peer['local'] = isset($msg['b'], $msg['lx'], $msg['ly'], $msg['lz']) && is_numeric($msg['b'])
+                ? ['b' => (int) $msg['b'],
+                    'lx' => self::num($msg['lx']), 'ly' => self::num($msg['ly']), 'lz' => self::num($msg['lz']),
+                    'lfx' => self::num($msg['lfx'] ?? 0), 'lfy' => self::num($msg['lfy'] ?? 0),
+                    'lfz' => self::num($msg['lfz'] ?? 1),
+                    'lux' => self::num($msg['lux'] ?? 0), 'luy' => self::num($msg['luy'] ?? 1),
+                    'luz' => self::num($msg['luz'] ?? 0)]
+                : null;
+            $peer['g'] = self::clamp(self::num($msg['g'] ?? 0), 0, 1);
+            $peer['h'] = self::hatchNames($msg['h'] ?? []);
+            $peer['k'] = self::clamp(self::num($msg['k'] ?? 0), 0, 1);
+            $mode = (string) ($msg['mode'] ?? 'flight');
+            $peer['mode'] = in_array($mode, ['flight', 'docked', 'landed', 'warp'], true)
+                ? $mode : 'flight';
+        }
+        $wasHosting = $peer['hosting'];
+        $peer['hosting'] = $hosting;
+        $peer['moved'] = true;
+        if ($hosting) {
+            $this->meter($peer, $msg, $now, $wasSys, $was);
+        }
+
+        // Сам пилот.
+        $peer['me'] = self::person($msg['me'] ?? null);
+        $peer['aboard'] = $peer['me'] !== null && $peer['me']['st'] !== 'out' ? $peer['me']['s'] : null;
+
+        // Пропал из системы — говорим об этом СРАЗУ, а не ждём, пока
+        // сосед сам забудет по истечении срока. Пропасть можно тремя
+        // способами: уйти в другую систему, уйти в прыжок и перестать
+        // вести корабль (пересел, улетел пассажиром) — корабль тогда
+        // заснёт, и его покажет база.
+        if ($wasSys !== null) {
+            if ($wasSys !== $peer['sys']) {
+                $this->broadcast($wasSys, ['t' => 'leave', 'id' => $peer['player'],
+                    'ship' => $wasHosting ? $peer['ship'] : null], $peer['player']);
+            } elseif ($wasHere && ($peer['hosting'] ? self::between($peer) : true)) {
+                $this->broadcast($wasSys, ['t' => 'leave', 'id' => null, 'ship' => $peer['ship']],
+                    $peer['player']);
+            }
+            if ($wasHosting !== $peer['hosting'] || $wasSys !== $peer['sys']) {
+                $this->forgetDorm($wasSys);
+            }
+        }
+        // Смена системы видна в списке пилотов у ВСЕХ: ради этого список
+        // и нужен — видеть, кто куда ушёл.
+        if ($wasSys !== $peer['sys']) {
+            $this->sendRoster();
         }
     }
 
@@ -359,10 +468,12 @@ final class Hub
 
         $this->send($conn, [
             't' => 'welcome',
-            'you' => ['id' => $playerId, 'name' => $peer['name'], 'sys' => $peer['sys']],
+            'you' => ['id' => $playerId, 'name' => $peer['name'], 'sys' => $peer['sys'],
+                'ship' => $peer['ship']],
             'tick' => self::TICK,
             'wt' => Clock::worldTime(),
-            'peers' => $this->peersOf($peer['sys'], $playerId, $now),
+            'peers' => $this->shipsOf($peer, $now),
+            'people' => $this->peopleOf($peer),
             // Состав сети целиком — вошедшему он нужен сразу, а не после
             // первого чужого входа.
             'roster' => $this->online(),
@@ -379,6 +490,9 @@ final class Hub
      * пределах дальности с запасом, и попадания идут не чаще, чем оружие
      * умеет стрелять. Непроверяемо: летел ли болт на самом деле — физики
      * снарядов на сервере нет, как нет и физики полёта (см. Combat).
+     *
+     * Цель — КОРАБЛЬ, и только тот, что ведут: в спящий не стреляют — его
+     * нет ни в чьих прицелах, он стоит на грунте без хозяина.
      */
     private function hit($conn, array &$peer, array $msg, float $now): void
     {
@@ -389,20 +503,20 @@ final class Hub
         if ($now - $peer['hitAt'] < 1.0 / Combat::HIT_RATE) {
             return;                                  // темп выше оружейного
         }
-        $victimId = (int) ($msg['id'] ?? 0);
+        $shipId = (int) ($msg['id'] ?? 0);
         $code = (string) ($msg['w'] ?? '');
-        if ($victimId <= 0 || $victimId === $peer['player'] || $code === '') {
+        if ($shipId <= 0 || $shipId === $peer['ship'] || $code === '') {
             return;
         }
 
         // В прыжке не стреляют. Стрелок между системами — это тот же
         // корабль, которого в системе нет: его самого не видно и не
         // достать, и попаданий от него быть не может.
-        if (self::between($peer)) {
+        if (self::between($peer) || !$peer['hosting']) {
             return;
         }
 
-        // Жертва должна быть В СЕТИ И В ЭТОЙ ЖЕ СИСТЕМЕ: по кораблю,
+        // Цель должна быть В СЕТИ И В ЭТОЙ ЖЕ СИСТЕМЕ: по кораблю,
         // которого здесь нет, попасть нельзя ничем.
         //
         // «Здесь нет» — это и ушедший в прыжок. Проверка повторяет ту,
@@ -411,8 +525,8 @@ final class Hub
         // выстрел по исчезнувшему приходит на сервер как обычный.
         $victim = null;
         foreach ($this->peers as $p) {
-            if ($p['player'] === $victimId && $p['sys'] === $peer['sys']
-                && !self::between($p)) {
+            if ($p['player'] !== null && $p['hosting'] && $p['ship'] === $shipId
+                && $p['sys'] === $peer['sys'] && !self::between($p)) {
                 $victim = $p;
                 break;
             }
@@ -442,12 +556,12 @@ final class Hub
         }
 
         $peer['hitAt'] = $now;
-        $res = Combat::damage($victimId, (float) $gun['damage']);
+        $res = Combat::damage($shipId, (float) $gun['damage']);
 
         // Кэш жертвы обновляем сразу: её корпус и щит рисуются у метки в
         // чужих приборах, и ждать перечитывания из базы там нечего.
         foreach ($this->peers as $k => $p) {
-            if ($p['player'] === $victimId) {
+            if ($p['ship'] === $shipId) {
                 $this->peers[$k]['hull'] = $res['hull'];
                 $this->peers[$k]['hullMax'] = $res['max'];
                 $this->peers[$k]['shield'] = $res['shield'];
@@ -463,23 +577,41 @@ final class Hub
             'absorbed' => $res['absorbed'], 'dead' => $res['dead'],
         ]);
         $this->send($conn, [
-            't' => 'hitok', 'id' => $victimId,
+            't' => 'hitok', 'id' => $shipId,
             'hull' => $res['hull'], 'max' => $res['max'],
             'shield' => $res['shield'], 'smax' => $res['smax'],
             'absorbed' => $res['absorbed'], 'dead' => $res['dead'],
         ]);
 
         if ($res['dead']) {
-            // Гибель сразу превращается в состояние, из которого можно
-            // играть дальше: корабль целый, пилот в своём порту.
-            Combat::respawn($victimId);
-            foreach ($this->peers as $k => $p) {
-                if ($p['player'] === $victimId) {
-                    $this->loadStats($this->peers[$k], $now, true);
-                }
+            $this->wreck($shipId, $victim['sys'], $now);
+            $this->say('уничтожен корабль ' . $victim['name'] . ' (огнём ' . $peer['name'] . ')');
+        }
+    }
+
+    /**
+     * Корабль уничтожен: страховка возвращает его в порт (Combat::
+     * respawnShip), а всем рядом — весть о гибели. Её получают и те, кто
+     * был на борту: их игра заберёт новое место у сервера.
+     */
+    private function wreck(int $shipId, ?int $sys, float $now): void
+    {
+        Combat::respawnShip($shipId);
+        foreach ($this->peers as $k => $p) {
+            if ($p['ship'] === $shipId) {
+                $this->loadStats($this->peers[$k], $now, true);
             }
-            $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $victimId], $victimId);
-            $this->say('уничтожен ' . $victim['name'] . ' (огнём ' . $peer['name'] . ')');
+        }
+        foreach ($this->peers as $p) {
+            if ($p['player'] === null) {
+                continue;
+            }
+            if (($sys !== null && $p['sys'] === $sys) || $p['aboard'] === $shipId) {
+                $this->send($p['conn'], ['t' => 'boom', 'id' => $shipId]);
+            }
+        }
+        if ($sys !== null) {
+            $this->forgetDorm($sys);
         }
     }
 
@@ -517,28 +649,96 @@ final class Hub
 
         // Корпус в кэше — тот, что видят соседи у метки: ждать
         // перечитывания из базы там нечего.
-        foreach ($this->peers as $k => $p) {
-            if ($p['player'] === $peer['player']) {
-                $this->peers[$k]['hull'] = $res['hull'];
-                $this->peers[$k]['hullMax'] = $res['max'];
-            }
-        }
+        $peer['hull'] = $res['hull'];
+        $peer['hullMax'] = $res['max'];
 
         $this->send($conn, [
             't' => 'impact', 'hull' => $res['hull'], 'max' => $res['max'],
             'dmg' => $res['damage'], 'dead' => $res['dead'],
         ]);
 
-        if ($res['dead']) {
-            Combat::respawn((int) $peer['player']);
-            foreach ($this->peers as $k => $p) {
-                if ($p['player'] === $peer['player']) {
-                    $this->loadStats($this->peers[$k], $now, true);
-                }
-            }
-            $this->broadcast($peer['sys'], ['t' => 'boom', 'id' => $peer['player']], $peer['player']);
+        if ($res['dead'] && $peer['ship'] !== null) {
+            $this->wreck((int) $peer['ship'], $peer['sys'], $now);
             $this->say('разбился ' . $peer['name']);
         }
+    }
+
+    /**
+     * Люк ЧУЖОГО корабля.
+     *
+     * Свой корабль игра водит сама, и люки у него открывает сама. Чужой —
+     * нет: его ведёт другая игра (тогда просьба уходит ей, и она решает,
+     * можно ли, — у неё напор воздуха и прыжок), или никто (корабль спит,
+     * и люк переставляет хаб прямо в базе).
+     *
+     * Просить можно только стоя рядом: на его борту или на грунте у
+     * трапа, в пределах Players::BOARD_KM. Открывать чужие люки из другого
+     * конца системы — это уже не «постучался», а взлом.
+     */
+    private function hatch($conn, array &$peer, array $msg, float $now): void
+    {
+        if ($peer['player'] === null || $now - $peer['hatchAt'] < 1.0 / self::HATCH_RATE) {
+            return;
+        }
+        $shipId = (int) ($msg['ship'] ?? 0);
+        $hid = (string) ($msg['id'] ?? '');
+        if ($shipId <= 0 || !preg_match('/^[A-Za-z0-9_]{1,12}$/', $hid)) {
+            return;
+        }
+        $open = !empty($msg['open']);
+        $peer['hatchAt'] = $now;
+        $me = $peer['me'];
+
+        // Ведёт ли этот корабль кто-то в игре.
+        foreach ($this->peers as $p) {
+            if ($p['player'] === null || !$p['hosting'] || $p['ship'] !== $shipId) {
+                continue;
+            }
+            if ($p['player'] === $peer['player']) {
+                return;                          // свой — игра открывает сама
+            }
+            $at = $p['local'] !== null
+                ? ['body' => $p['local']['b'], 'p' => [$p['local']['lx'], $p['local']['ly'], $p['local']['lz']]]
+                : null;
+            if ($p['sys'] !== $peer['sys'] || !self::beside($me, $shipId, $at)) {
+                return;
+            }
+            $this->send($p['conn'], ['t' => 'hatchreq', 'ship' => $shipId, 'id' => $hid,
+                'open' => $open, 'by' => $peer['player'], 'name' => $peer['name']]);
+            return;
+        }
+
+        // Спит — люк переставляем в базе.
+        $row = Players::shipRow($shipId);
+        if ($row === null || $row['system_id'] === null || (int) $row['system_id'] !== $peer['sys']) {
+            return;
+        }
+        if (!self::beside($me, $shipId, Players::shipPoint($row))) {
+            return;
+        }
+        $list = array_values(array_diff(Players::hatchesOf($row), [$hid]));
+        if ($open) {
+            $list[] = $hid;
+        }
+        Db::update('ship', ['hatches' => Players::hatchList($list)], '`id`=?', [$shipId]);
+        $this->forgetDorm((int) $row['system_id']);
+    }
+
+    /** Рядом ли пилот с кораблём: на его борту или на грунте у него. */
+    private static function beside(?array $me, int $shipId, ?array $at): bool
+    {
+        if ($me === null) {
+            return false;
+        }
+        if ($me['st'] !== 'out') {
+            return $me['s'] === $shipId;
+        }
+        if ($at === null || $me['b'] !== $at['body']) {
+            return false;
+        }
+        $d = sqrt(($me['lx'] - $at['p'][0]) ** 2 + ($me['ly'] - $at['p'][1]) ** 2
+            + ($me['lz'] - $at['p'][2]) ** 2);
+        return $d <= Players::BOARD_KM;
     }
 
     /**
@@ -571,9 +771,10 @@ final class Hub
             // например. Перечитываем редко, но перечитываем.
             if ($now - $peer['statAt'] > self::STAT_EVERY) {
                 $this->loadStats($this->peers[$key], $now);
+                $peer = $this->peers[$key];
             }
-            $list = $this->peersOf($peer['sys'], $peer['player'], $now);
-            $this->send($peer['conn'], ['t' => 'peers', 'list' => $list, 'wt' => $wt]);
+            $this->send($peer['conn'], ['t' => 'peers', 'list' => $this->shipsOf($peer, $now),
+                'people' => $this->peopleOf($peer), 'wt' => $wt]);
             $sent++;
         }
         return $sent;
@@ -583,7 +784,8 @@ final class Hub
      * Перечитать корпус и щит пилота из базы.
      *
      * Нужно не только при входе: корпус чинят в порту, и без обновления
-     * сосед ещё десять минут висел бы битым в чужих приборах.
+     * сосед ещё десять минут висел бы битым в чужих приборах. И не только
+     * корпус: пилот мог пересесть в другой свой корабль (Players::command).
      */
     private function loadStats(array &$peer, float $now, bool $moved = false): void
     {
@@ -595,21 +797,32 @@ final class Hub
         }
         $row = Db::row(
             'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
-             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
-             WHERE s.`owner_id`=? LIMIT 1',
+             FROM `player` p JOIN `ship` s ON s.`id` = p.`ship_id`
+             JOIN `ship_type` t ON t.`id` = s.`type_id`
+             WHERE p.`id`=? AND s.`owner_id`=p.`id`',
             [$peer['player']]
         );
         if ($row === null) {
             return;
         }
+        $id = (int) $row['id'];
+        if ($peer['ship'] !== null && $peer['ship'] !== $id) {
+            // Пересел: накопленный расход — прежнему кораблю, и счётчики
+            // сопел начинаются заново.
+            $this->flushFuel($peer, $now, false);
+            $peer['pend'] = 0.0;
+            $peer['work'] = null;
+            $peer['qOk'] = false;
+            $peer['guns'] = [];
+        }
         // Хаб — отдельный процесс, и память модулей (Loadout) у него своя:
         // верфь меняет их запросом в другом процессе, и без этого хаб до
         // перезапуска считал бы щит и расход по снятому модулю.
-        $peer['ship'] = (int) $row['id'];
-        Loadout::forget($peer['ship']);
+        $peer['ship'] = $id;
+        Loadout::forget($id);
         // Щит соседа — с его модуля: у двоих на одинаковых корпусах щиты
         // могут быть разные, и в приборах это должно быть видно.
-        $row += Loadout::shield((int) $row['id']);
+        $row += Loadout::shield($id);
         $peer['hull'] = (float) $row['hull'];
         $peer['hullMax'] = (float) $row['hull_max'];
         $peer['shieldMax'] = (float) $row['shield_max'];
@@ -622,7 +835,7 @@ final class Hub
         $peer['shieldAt'] = $now;
         // Бак — тоже отсюда: его меняют мимо хаба заправка, верфь и варп
         // (Players::save), и игра обязана узнать об этом, не перезаходя.
-        $peer['fm'] = Fuel::model($peer['ship']);
+        $peer['fm'] = Fuel::model($id);
         $peer['fuel'] = $peer['fm']['fuel'];
         $this->sendFuel($peer);
     }
@@ -742,7 +955,7 @@ final class Hub
     }
 
     /**
-     * Пилот МЕЖДУ СИСТЕМАМИ: ушёл в варп-прыжок.
+     * Корабль МЕЖДУ СИСТЕМАМИ: ушёл в варп-прыжок.
      *
      * Такого в системе физически нет. Существенно это потому, что игра
      * ставит корабль к звезде НОВОЙ системы за несколько секунд до
@@ -764,26 +977,38 @@ final class Hub
         return ($p['mode'] ?? 'flight') === 'warp';
     }
 
-    /** Кто виден пилоту: только его система и только вошедшие. */
-    private function peersOf(?int $sys, int $exceptPlayer, float $now): array
+    /**
+     * Корабли, которые видит этот пилот.
+     *
+     * Ведомые — свои системы и не в прыжке. И один всегда, где бы он ни
+     * был, — тот, на борту которого пилот едет пассажиром: в прыжке его
+     * не видит никто, кроме тех, кто внутри, а им без него нечем даже
+     * нарисовать стены вокруг себя.
+     *
+     * Спящие — из базы, кроме тех, что сейчас кто-то ведёт.
+     */
+    private function shipsOf(array $me, float $now): array
     {
         $out = [];
+        $hosted = [];
         foreach ($this->peers as $p) {
-            if ($p['player'] === null || $p['player'] === $exceptPlayer) {
+            if ($p['player'] === null || !$p['hosting'] || $p['ship'] === null) {
                 continue;
             }
+            $hosted[$p['ship']] = true;
+            if ($p['player'] === $me['player']) {
+                continue;
+            }
+            $ride = $me['aboard'] !== null && $me['aboard'] === $p['ship'];
             // Система обязана совпасть. Пилот в другой системе не просто
-            // далеко — его там физически нет.
-            if ($sys === null || $p['sys'] !== $sys) {
+            // далеко — его там физически нет. Как и ушедший в прыжок: он
+            // уже не здесь, хотя координаты прислал здешние.
+            if (!$ride && ($me['sys'] === null || $p['sys'] !== $me['sys'] || self::between($p))) {
                 continue;
             }
-            // Как и ушедший в прыжок: он уже не здесь, хотя координаты
-            // прислал здешние.
-            if (self::between($p)) {
-                continue;
-            }
-            $out[] = [
-                'id' => $p['player'],
+            $row = [
+                'id' => $p['ship'],
+                'by' => $p['player'],
                 'name' => $p['name'],
                 'x' => $p['x'], 'y' => $p['y'], 'z' => $p['z'],
                 'v' => $p['v'],
@@ -792,7 +1017,183 @@ final class Hub
                 'hull' => round($p['hull'], 1), 'hmax' => $p['hullMax'],
                 'sh' => round(self::shieldOf($p, $now), 1), 'smax' => $p['shieldMax'],
                 'mode' => $p['mode'],
+                'sys' => $p['sys'],
+                'g' => $p['g'], 'h' => $p['h'], 'k' => $p['k'],
+                // Кто в кресле: хозяин, если сидит в нём.
+                'pilot' => $p['me'] !== null && $p['me']['st'] === 'seat' && $p['me']['s'] === $p['ship']
+                    ? $p['player'] : null,
             ];
+            if ($p['local'] !== null) {
+                $row += $p['local'];
+            }
+            $out[] = $row;
+        }
+        if ($me['sys'] !== null) {
+            foreach ($this->dormOf($me['sys'], $now) as $d) {
+                // Свой корабль, которым пилот командует, ему спящим не нужен:
+                // его игра ведёт сама (или вот-вот поведёт).
+                if (!isset($hosted[$d['id']]) && $d['id'] !== $me['ship']) {
+                    $out[] = $d;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Люди, которых видит этот пилот: в его системе — и все, кто едет на
+     * одном с ним борту, где бы тот ни был.
+     */
+    private function peopleOf(array $me): array
+    {
+        $out = [];
+        foreach ($this->peers as $p) {
+            if ($p['player'] === null || $p['player'] === $me['player'] || $p['me'] === null) {
+                continue;
+            }
+            $ride = $me['aboard'] !== null && $p['aboard'] === $me['aboard'];
+            if (!$ride && ($me['sys'] === null || $p['sys'] !== $me['sys'])) {
+                continue;
+            }
+            $out[] = ['id' => $p['player'], 'name' => $p['name']] + $p['me'];
+        }
+        return $out;
+    }
+
+    /**
+     * Спящие корабли системы: из базы, раз в DORM_EVERY.
+     *
+     * В порту спящих не показываем: корабль в доке стоит внутри станции,
+     * рисовать его снаружи некуда.
+     */
+    private function dormOf(int $sys, float $now): array
+    {
+        $c = $this->dorm[$sys] ?? null;
+        if ($c !== null && $now - $c['at'] < self::DORM_EVERY) {
+            return $c['list'];
+        }
+        $list = [];
+        foreach (Db::all(
+            'SELECT s.*, t.`hull_max`, p.`name` AS `owner_name`, p.`login` AS `owner_login`
+             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
+             JOIN `player` p ON p.`id` = s.`owner_id`
+             WHERE s.`system_id`=? AND s.`docked_body` IS NULL',
+            [$sys]
+        ) as $r) {
+            $row = [
+                'id' => (int) $r['id'],
+                'by' => (int) $r['owner_id'],
+                'name' => (string) ($r['owner_name'] ?: $r['owner_login']),
+                'dorm' => 1,
+                'mode' => $r['landed_body'] !== null ? 'landed' : 'flight',
+                'sys' => $sys,
+                'v' => 0.0,
+                'hull' => round((float) $r['hull'], 1), 'hmax' => (float) $r['hull_max'],
+                'sh' => 0.0, 'smax' => 0.0,
+                'g' => (int) $r['gear_out'] || $r['landed_body'] !== null ? 1 : 0,
+                'h' => Players::hatchesOf($r),
+                'k' => 0.0,
+                'pilot' => null,
+            ];
+            $pose = $r['landed_body'] !== null ? json_decode((string) $r['landed_pose'], true) : null;
+            $anchor = $r['anchor_body'] !== null ? json_decode((string) $r['anchor_pose'], true) : null;
+            if (is_array($pose) && is_array($pose['dir'] ?? null) && is_numeric($pose['radius'] ?? null)
+                && is_array($pose['fwd'] ?? null) && is_array($pose['up'] ?? null)) {
+                $rad = (float) $pose['radius'];
+                $row += ['b' => (int) $r['landed_body'],
+                    'lx' => self::num($pose['dir']['x'] ?? 0) * $rad,
+                    'ly' => self::num($pose['dir']['y'] ?? 0) * $rad,
+                    'lz' => self::num($pose['dir']['z'] ?? 0) * $rad]
+                    + self::axes($pose['fwd'], $pose['up']);
+            } elseif (is_array($anchor) && is_array($anchor['pos'] ?? null)) {
+                $row += ['b' => (int) $r['anchor_body'],
+                    'lx' => self::num($anchor['pos']['x'] ?? 0), 'ly' => self::num($anchor['pos']['y'] ?? 0),
+                    'lz' => self::num($anchor['pos']['z'] ?? 0)]
+                    + self::axes($anchor['fwd'] ?? null, $anchor['up'] ?? null);
+            } else {
+                $basis = json_decode((string) $r['basis'], true);
+                $row += ['x' => (float) $r['pos_x'], 'y' => (float) $r['pos_y'], 'z' => (float) $r['pos_z'],
+                    'fx' => self::num($basis['fwd']['x'] ?? 0), 'fy' => self::num($basis['fwd']['y'] ?? 0),
+                    'fz' => self::num($basis['fwd']['z'] ?? 1),
+                    'ux' => self::num($basis['up']['x'] ?? 0), 'uy' => self::num($basis['up']['y'] ?? 1),
+                    'uz' => self::num($basis['up']['z'] ?? 0)];
+            }
+            $list[] = $row;
+        }
+        $this->dorm[$sys] = ['at' => $now, 'list' => $list];
+        return $list;
+    }
+
+    private static function axes($f, $u): array
+    {
+        return [
+            'lfx' => self::num($f['x'] ?? 0), 'lfy' => self::num($f['y'] ?? 0), 'lfz' => self::num($f['z'] ?? 1),
+            'lux' => self::num($u['x'] ?? 0), 'luy' => self::num($u['y'] ?? 1), 'luz' => self::num($u['z'] ?? 0),
+        ];
+    }
+
+    /** Спящие этой системы — перечитать при следующем снимке. */
+    private function forgetDorm(int $sys): void
+    {
+        unset($this->dorm[$sys]);
+    }
+
+    /**
+     * Где пилот сам — из снимка, поштучно и в пределах.
+     *
+     * Всё это пересылается соседям как есть, а приходит с чужой машины:
+     * строку на месте числа или палубу в километр длиной пропускать
+     * дальше нельзя.
+     */
+    private static function person($v): ?array
+    {
+        if (!is_array($v)) {
+            return null;
+        }
+        $st = (string) ($v['st'] ?? '');
+        if (!in_array($st, ['seat', 'walk', 'out'], true)) {
+            return null;
+        }
+        $out = [
+            'st' => $st,
+            'yaw' => self::clamp(self::num($v['yaw'] ?? 0), -10, 10),
+            'pitch' => self::clamp(self::num($v['pitch'] ?? 0), -1.6, 1.6),
+            'v' => self::clamp(self::num($v['v'] ?? 0), 0, 20),
+            'air' => !empty($v['air']) ? 1 : 0,
+        ];
+        if ($st === 'out') {
+            if (!isset($v['b']) || !is_numeric($v['b'])) {
+                return null;
+            }
+            $out += ['s' => null, 'b' => (int) $v['b'],
+                'lx' => self::num($v['lx'] ?? 0), 'ly' => self::num($v['ly'] ?? 0), 'lz' => self::num($v['lz'] ?? 0),
+                'lfx' => self::num($v['lfx'] ?? 0), 'lfy' => self::num($v['lfy'] ?? 0),
+                'lfz' => self::num($v['lfz'] ?? 1)];
+            return $out;
+        }
+        if (!isset($v['s']) || !is_numeric($v['s'])) {
+            return null;
+        }
+        $deck = static fn($x) => self::clamp(self::num($x), -self::DECK_M, self::DECK_M);
+        $out += ['s' => (int) $v['s'], 'x' => $deck($v['x'] ?? 0), 'y' => $deck($v['y'] ?? 0),
+            'z' => $deck($v['z'] ?? 0)];
+        return $out;
+    }
+
+    /** Открытые люки из снимка: имена, не больше восьми. */
+    private static function hatchNames($v): array
+    {
+        $out = [];
+        if (!is_array($v)) {
+            return $out;
+        }
+        foreach ($v as $h) {
+            if (is_string($h) && preg_match('/^[A-Za-z0-9_]{1,12}$/', $h)) {
+                $out[] = $h;
+            }
+            if (count($out) >= 8) {
+                break;
+            }
         }
         return $out;
     }
@@ -825,6 +1226,11 @@ final class Hub
     private static function num($v): float
     {
         return is_numeric($v) && is_finite((float) $v) ? (float) $v : 0.0;
+    }
+
+    private static function clamp(float $v, float $lo, float $hi): float
+    {
+        return max($lo, min($hi, $v));
     }
 
     private function say(string $line): void

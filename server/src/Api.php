@@ -30,6 +30,9 @@ final class Api
             'station.repair' => [[self::class, 'stationRepair'], true],
             'station.refuel' => [[self::class, 'stationRefuel'], true],
             'ship.rescue' => [[self::class, 'shipRescue'], true],
+            // Принять командование своим кораблём: сесть в его кресло.
+            // Кораблей у пилота может быть несколько (Players::command).
+            'ship.command' => [[self::class, 'shipCommand'], true],
             'outfit.list' => [[self::class, 'outfitList'], true],
             'outfit.buy' => [[self::class, 'outfitBuy'], true],
             'outfit.sell' => [[self::class, 'outfitSell'], true],
@@ -100,9 +103,9 @@ final class Api
      */
     private static function whereDocked(int $playerId, array $in): array
     {
-        $p = Players::byId($playerId);
-        $sys = self::int($in, 'system', $p['system_id'] === null ? null : (int) $p['system_id']);
-        $loc = self::int($in, 'station', $p['docked_body'] === null ? null : (int) $p['docked_body']);
+        $port = Players::port($playerId);
+        $sys = self::int($in, 'system', $port === null ? null : $port['system_id']);
+        $loc = self::int($in, 'station', $port === null ? null : $port['local_id']);
         if ($sys === null || $loc === null) {
             throw ApiError::denied('not_docked', 'корабль не в порту');
         }
@@ -202,6 +205,16 @@ final class Api
     public static function shipRescue(array $in, ?int $playerId): array
     {
         return Fuel::rescue($playerId);
+    }
+
+    /** Пересесть в кресло другого своего корабля (Players::command). */
+    public static function shipCommand(array $in, ?int $playerId): array
+    {
+        $id = self::int($in, 'id');
+        if ($id === null) {
+            throw ApiError::bad('нужен номер корабля');
+        }
+        return Players::command($playerId, $id);
     }
 
     public static function outfitList(array $in, ?int $playerId): array

@@ -36,9 +36,9 @@ function demoPilot(callable $say): string
 
     $reg = Auth::register($login, 'demo', 'ДЕМО-ПИЛОТ');
     $pid = $reg['player_id'];
-    $p = Players::byId($pid);
-    $sys = (int) $p['system_id'];
-    $port = (int) $p['docked_body'];
+    $ship = Players::ship($pid);
+    $sys = (int) $ship['system_id'];
+    $port = (int) $ship['docked_body'];
 
     // Вылет и возвращение: так в ленте появляется сбор за стыковку.
     Players::save($pid, ['docked' => null, 'pos' => ['x' => 620000, 'y' => 0, 'z' => 0]]);

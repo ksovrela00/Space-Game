@@ -26,6 +26,12 @@
  *   ИЗМЕНЯЕМОЕ (player, ship, ship_equipment, cargo, market, mission,
  *   ledger, session) — всё, что двигается по ходу игры. Ровно это в
  *   онлайне обязано жить на сервере, а не в localStorage браузера.
+ *
+ *   ГДЕ ПИЛОТ И ГДЕ КОРАБЛЬ — ДВА РАЗНЫХ ВОПРОСА (версия 10). Пилот —
+ *   человек: он сидит в кресле, ходит по палубе, стоит на грунте, едет
+ *   пассажиром в чужом корабле. Корабль — вещь: он стоит там, где его
+ *   оставили, хоть его хозяин ушёл пешком, хоть вышел из игры. Поэтому
+ *   место корабля лежит в `ship`, а место человека — в `player`.
  */
 
 final class Schema
@@ -45,8 +51,16 @@ final class Schema
      *     сервер считает расход), уровень техники модуля
      *     `equipment_type.tech` (где его продают) и `ship.bare` —
      *     гнёзда, которые пилот опустошил сам.
+     * 10 — центр игры — пилот, а не корабль. Место КОРАБЛЯ (система,
+     *     порт, стоянка, якорь, точка, люки) переехало из `player` в
+     *     `ship`; у `player` осталось место ЧЕЛОВЕКА: на борту какого
+     *     корабля (`aboard_ship`), в кресле ли (`seated`), где на палубе
+     *     (`walk_pose`) или где на грунте (`out_body`, `out_pose`).
+     *     `player.ship_id` — корабль, которым пилот командует сейчас:
+     *     кораблей у него может быть несколько. Старые строки
+     *     переносятся сами (carry), а лишние столбцы сносятся.
      */
-    public const VERSION = 9;
+    public const VERSION = 10;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -277,23 +291,27 @@ final class Schema
                 -- игре не существует, а плавающая арифметика в деньгах
                 -- рано или поздно даёт 999.9999999.
                 `balance` BIGINT NOT NULL DEFAULT 0,
+                -- Корабль, которым пилот КОМАНДУЕТ: его игра ведёт сама,
+                -- его место пишет сохранение. Не «единственный корабль»:
+                -- их у пилота может быть несколько, и пересаживаются из
+                -- кресла в кресло (Players::command).
                 `ship_id` INT NULL,
+                -- Система, где сейчас сам пилот. Обычно та же, что у его
+                -- корабля, — но пассажир чужого корабля улетает с ним, а
+                -- свой корабль остаётся там, где стоял.
                 `system_id` INT NULL,
-                `pos_x` DOUBLE NOT NULL DEFAULT 0,
-                `pos_y` DOUBLE NOT NULL DEFAULT 0,
-                `pos_z` DOUBLE NOT NULL DEFAULT 0,
-                `basis` TEXT NULL,
-                `docked_body` INT NULL,
-                `landed_body` INT NULL,
-                `landed_pose` TEXT NULL,
-                `landed_secured` TINYINT(1) NOT NULL DEFAULT 0,
-                -- Место в полёте — в осях тела захвата, рядом с которым
-                -- корабль вышел из игры. Почему не мировые: время мира общее
-                -- и идёт без игрока, а грунт на экваторе идёт сотни метров
-                -- в секунду: за час мировая точка оказывается в сотнях
-                -- километров от того места, где игрок вышел (js/game/anchor.js).
-                `anchor_body` INT NULL,
-                `anchor_pose` TEXT NULL,
+                -- ГДЕ ЧЕЛОВЕК. На борту корабля (`aboard_ship`): в кресле
+                -- пилота (`seated`) или на ногах — тогда `walk_pose`,
+                -- точка ног в осях корабля, метры, и взгляд. Или за бортом
+                -- (`aboard_ship` пуст): на грунте тела `out_body`, и
+                -- `out_pose` — точка ног В ОСЯХ ТЕЛА, километры, и куда
+                -- смотрит. Оси тела — по той же причине, что и стоянка
+                -- корабля: мир крутится и без игрока (js/game/anchor.js).
+                `aboard_ship` INT NULL,
+                `seated` TINYINT(1) NOT NULL DEFAULT 1,
+                `walk_pose` TEXT NULL,
+                `out_body` INT NULL,
+                `out_pose` TEXT NULL,
                 -- План полёта: выбранная цель, отмеченная система варпа,
                 -- последний порт и вид камеры. Это не «настройки», а
                 -- состояние игры: выбрал цель, отложил, вернулся — цель
@@ -310,6 +328,7 @@ final class Schema
                 `landings` INT NOT NULL DEFAULT 0,
                 `crashes` INT NOT NULL DEFAULT 0,
                 UNIQUE KEY `login` (`login`),
+                KEY `aboard` (`aboard_ship`),
                 CONSTRAINT `player_system` FOREIGN KEY (`system_id`)
                     REFERENCES `star_system` (`id`) ON DELETE SET NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
@@ -327,6 +346,28 @@ final class Schema
                 `hit_at` DATETIME NULL,
                 `fuel_t` DECIMAL(10,3) NOT NULL,
                 `gear_out` TINYINT(1) NOT NULL DEFAULT 0,
+                -- ГДЕ КОРАБЛЬ. Он стоит там, где его оставили, кто бы и
+                -- куда бы ни ушёл: в порту (`docked_body`), на грунте
+                -- (`landed_body` и поза в осях тела), в полёте у тела
+                -- (`anchor_body` и поза в его осях — js/game/anchor.js)
+                -- или в пустоте (мировая точка и базис). Пишет это только
+                -- тот, кто кораблём командует (Players::save).
+                `system_id` INT NULL,
+                `pos_x` DOUBLE NOT NULL DEFAULT 0,
+                `pos_y` DOUBLE NOT NULL DEFAULT 0,
+                `pos_z` DOUBLE NOT NULL DEFAULT 0,
+                `basis` TEXT NULL,
+                `docked_body` INT NULL,
+                `landed_body` INT NULL,
+                `landed_pose` TEXT NULL,
+                `landed_secured` TINYINT(1) NOT NULL DEFAULT 0,
+                `anchor_body` INT NULL,
+                `anchor_pose` TEXT NULL,
+                -- Открытые люки: JSON-список имён (js/models/interior.js,
+                -- HATCHES). Корабль без хозяина в игре остаётся с теми
+                -- люками, с какими его оставили, — и в открытый можно
+                -- зайти (Hub, hatch).
+                `hatches` TEXT NULL,
                 -- Гнёзда, которые пилот опустошил САМ, продав модуль на
                 -- верфи: JSON-список. Дозаливка заводского набора
                 -- (Players::ensureStock) их не трогает — иначе проданный
@@ -335,6 +376,7 @@ final class Schema
                 `bare` TEXT NULL,
                 `created_at` DATETIME NOT NULL,
                 KEY `owner` (`owner_id`),
+                KEY `in_system` (`system_id`),
                 CONSTRAINT `ship_type` FOREIGN KEY (`type_id`)
                     REFERENCES `ship_type` (`id`),
                 CONSTRAINT `ship_owner` FOREIGN KEY (`owner_id`)
@@ -475,13 +517,63 @@ final class Schema
                 'hit_at' => 'DATETIME NULL',
                 // Версия 9: гнёзда, опустошённые на верфи.
                 'bare' => 'TEXT NULL',
-            ],
-            // Версия 8: место в полёте в осях тела.
-            'player' => [
+                // Версия 10: место корабля — у корабля.
+                'system_id' => 'INT NULL',
+                'pos_x' => 'DOUBLE NOT NULL DEFAULT 0',
+                'pos_y' => 'DOUBLE NOT NULL DEFAULT 0',
+                'pos_z' => 'DOUBLE NOT NULL DEFAULT 0',
+                'basis' => 'TEXT NULL',
+                'docked_body' => 'INT NULL',
+                'landed_body' => 'INT NULL',
+                'landed_pose' => 'TEXT NULL',
+                'landed_secured' => 'TINYINT(1) NOT NULL DEFAULT 0',
                 'anchor_body' => 'INT NULL',
                 'anchor_pose' => 'TEXT NULL',
+                'hatches' => 'TEXT NULL',
+            ],
+            // Версия 10: место человека.
+            'player' => [
+                'aboard_ship' => 'INT NULL',
+                'seated' => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'walk_pose' => 'TEXT NULL',
+                'out_body' => 'INT NULL',
+                'out_pose' => 'TEXT NULL',
             ],
         ];
+    }
+
+    /** Столбцы места, переехавшие из `player` в `ship` (версия 10). */
+    public const MOVED = ['system_id', 'pos_x', 'pos_y', 'pos_z', 'basis', 'docked_body',
+        'landed_body', 'landed_pose', 'landed_secured', 'anchor_body', 'anchor_pose'];
+
+    /**
+     * Перенести место корабля из строки пилота в строку корабля.
+     *
+     * Догон столбцов создаёт их ПУСТЫМИ, а снос старых унёс бы место
+     * вместе со столбцом: живой пилот, стоявший на грунте Lave IV,
+     * очутился бы в пустоте. Поэтому между досозданием и сносом —
+     * перенос, и он идёт, только пока старые столбцы у `player` ещё
+     * есть. Пилот при этом оказывается в кресле своего корабля: так он
+     * и выходил из игры до версии 10 — другого места у него не было.
+     */
+    private static function carry(): array
+    {
+        $cols = [];
+        foreach (Db::all('SHOW COLUMNS FROM `player`') as $c) {
+            $cols[strtolower($c['Field'])] = true;
+        }
+        if (!isset($cols['docked_body'])) {
+            return [];
+        }
+        $set = [];
+        foreach (self::MOVED as $c) {
+            $set[] = 's.`' . $c . '` = p.`' . $c . '`';
+        }
+        $n = Db::run('UPDATE `ship` s JOIN `player` p ON p.`ship_id` = s.`id` SET '
+            . implode(', ', $set))->rowCount();
+        Db::run('UPDATE `player` SET `aboard_ship` = `ship_id`, `seated` = 1
+                 WHERE `ship_id` IS NOT NULL AND `aboard_ship` IS NULL AND `out_body` IS NULL');
+        return ['carry:' . $n];
     }
 
     /**
@@ -502,6 +594,10 @@ final class Schema
                 // принадлежат. Столбец остался бы вторым ответом на вопрос,
                 // какой у корабля щит, — и отвечал бы за все корабли сразу.
                 'shield_max', 'shield_regen', 'shield_delay', 'hold_t'],
+            // Версия 10: место корабля переехало к кораблю (carry). Систему
+            // пилот оставляет себе — она теперь про человека.
+            'player' => ['pos_x', 'pos_y', 'pos_z', 'basis', 'docked_body',
+                'landed_body', 'landed_pose', 'landed_secured', 'anchor_body', 'anchor_pose'],
         ];
     }
 
@@ -534,6 +630,11 @@ final class Schema
                 Db::run('ALTER TABLE `' . $table . '` ADD COLUMN `' . $col . '` ' . $ddl);
                 $made[] = $table . '.' . $col;
             }
+        }
+        // Перенос — между досозданием и сносом: новые столбцы уже есть,
+        // старые ещё не снесены.
+        if (isset($have['player'], $have['ship'])) {
+            $made = array_merge($made, self::carry());
         }
         foreach (self::dropped() as $table => $cols) {
             if (!isset($have[strtolower($table)])) {

@@ -36,12 +36,9 @@ final class Outfit
     /** Порт, в котором стоит пилот. Верфь работает только в доке. */
     private static function port(int $playerId): array
     {
-        $p = Players::byId($playerId);
-        if ($p['docked_body'] === null || $p['system_id'] === null) {
-            throw ApiError::denied('not_docked', 'модули ставят в порту');
-        }
-        $info = Stations::info((int) $p['system_id'], (int) $p['docked_body']);
-        $info['bodyId'] = (int) Galaxy::body((int) $p['system_id'], (int) $p['docked_body'])['id'];
+        $port = Players::portOrDeny($playerId, 'модули ставят в порту');
+        $info = Stations::info($port['system_id'], $port['local_id']);
+        $info['bodyId'] = (int) Galaxy::body($port['system_id'], $port['local_id'])['id'];
         return $info;
     }
 

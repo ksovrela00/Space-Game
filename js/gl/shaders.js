@@ -293,6 +293,10 @@ in vec2 vGrain;
 uniform vec3 uSunDir;    // направление НА солнце в координатах камеры
 uniform mat3 uNormalMat;
 uniform float uAmbient;
+// Нормаль грани — по производным положения, а не из вершин: у сваренной
+// сетки (пилот в скафандре, js/gl/spacesuit.js) своих нормалей нет. У
+// остальных сеток — ноль, и всё как было.
+uniform float uFlatN;
 // Фары корабля: две лампы, всё в координатах КАМЕРЫ. uLampN = 0 —
 // выключены, и весь блок пропускается одним сравнением.
 uniform int uLampN;
@@ -343,7 +347,7 @@ ${LOG_DEPTH_FRAG}
   // рубки, к самому коридору, и вырез средней палубы задевал его.
   if (uCarveN > 0 && vMat > 0.5 && floor(vMat + 0.5) != ${MAT.glass}.0
     && hullCarved(vLocal * 1000.0)) discard;
-  vec3 n = normalize(vNormal);
+  vec3 n = uFlatN > 0.5 ? normalize(cross(dFdx(vViewPos), dFdy(vViewPos))) : normalize(vNormal);
   vec3 albedo = vColor.rgb;
   // Собственный свет узора — окна мостика, жар сопел. Постоянный: его
   // не освещают, он светит сам.

@@ -85,6 +85,13 @@ export function makeWalker() {
     landed: 0,           // м/с — с какой скоростью пришёл на ноги в этом кадре
     room: null,          // комната под ногами (js/models/interior.js)
     out: null,           // за бортом: оси грунта (js/game/outside.js), иначе null
+    // Шлюзы того корабля, на борту которого пилот (js/game/airlock.js,
+    // makeAir): помещения у кораблей одного типа одни, а люки у каждого
+    // свои. null — свой корабль (interior.air).
+    air: null,
+    // Другие люди на этой же палубе — точки ног в осях корабля: двери
+    // открываются и перед ними (js/game/people.js).
+    others: [],
     from: null,          // откуда встали: взгляд головы в кресле
     grid: null,          // твёрдое, разложенное по клеткам
     crates: [],          // ящики груза в трюме (твёрдые, меняются с грузом)
@@ -146,8 +153,8 @@ function makeWorld(w, interior) {
     w.gridOf = interior;
   }
   // Люки и трапы (js/game/airlock.js): закрытая панель — стена, трап —
-  // ступени и поручни.
-  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(interior.air, w._air || (w._air = []))) };
+  // ступени и поручни. Люки — того корабля, где стоит пилот.
+  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(w.air || interior.air, w._air || (w._air = []))) };
 }
 
 const overlap = (s, lo, hi) => s.lo[0] < hi[0] && s.hi[0] > lo[0] && s.lo[1] < hi[1]
@@ -478,20 +485,35 @@ function stepBody(w, W, ctl, dt, jump) {
 
 /**
  * Двери открываются сами, когда к ним подходят, и закрываются, когда
- * отходят: как на любом корабле, где руки бывают заняты.
+ * отходят: как на любом корабле, где руки бывают заняты. Подходит не
+ * только сам пилот — и любой, кто ходит по той же палубе (w.others).
  */
+const nearDoor = (d, p) => {
+  const t = d.ax === 0 ? 2 : 0;
+  return Math.hypot(p[d.ax] - d.pos[d.ax], p[t] - d.pos[t]) < WALK.doorNear && Math.abs(p[1] - d.pos[1]) < 1.2;
+};
+
 function updateDoors(w, interior, dt, ev) {
+  const others = w.others || [];
   for (const d of interior.doors) {
-    const t = d.ax === 0 ? 2 : 0;
-    const near = w.on && w.phase !== 'seated' && !w.out
-      && Math.hypot(w.pos[d.ax] - d.pos[d.ax], w.pos[t] - d.pos[t]) < WALK.doorNear
-      && Math.abs(w.pos[1] - d.pos[1]) < 1.2;
+    let near = w.on && w.phase !== 'seated' && !w.out && nearDoor(d, w.pos);
+    for (let i = 0; !near && i < others.length; i++) near = nearDoor(d, others[i]);
     const want = near ? 1 : 0;
     if (want && !d.want) ev.opened.push(d.id);
     d.want = want;
     const k = dt / WALK.doorTime;
     d.open = want ? Math.min(1, d.open + k) : Math.max(0, d.open - k);
   }
+}
+
+/**
+ * Двери, когда сам пилот сидит: по палубе могут ходить другие (пассажиры),
+ * и двери перед ними открываются так же.
+ */
+export function stepDoors(w, interior, dt) {
+  const ev = { opened: [] };
+  updateDoors(w, interior, dt, ev);
+  return ev.opened;
 }
 
 /** Ничего не держит двери открытыми: все закрыты (пилот в кресле). */

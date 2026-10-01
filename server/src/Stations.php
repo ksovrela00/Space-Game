@@ -62,7 +62,15 @@ final class Stations
     {
         return Db::tx(function () use ($playerId, $systemId, $localId) {
             $p = Players::byId($playerId);
-            $sys = $systemId ?? ($p['system_id'] === null ? null : (int) $p['system_id']);
+            // Встаёт в порт КОРАБЛЬ, которым пилот командует, и пилот на
+            // его борту: стыкует тот, кто сидит в кресле.
+            $ship = Players::ship($playerId);
+            $shipId = (int) $ship['id'];
+            if ((int) $p['aboard_ship'] !== $shipId) {
+                throw ApiError::denied('not_aboard', 'в порт ставит корабль тот, кто на его борту');
+            }
+            $shipSys = $ship['system_id'] === null ? null : (int) $ship['system_id'];
+            $sys = $systemId ?? $shipSys;
             if ($sys === null || $localId === null) {
                 throw ApiError::bad('нужен порт: система и номер тела');
             }
@@ -71,7 +79,7 @@ final class Stations
             // Уже стоим здесь — сбор второй раз не берём. Иначе повторный
             // вызов (а он будет: клиент переспрашивает при потере связи)
             // обчистит игрока.
-            if ((int) $p['system_id'] === $sys && (int) $p['docked_body'] === $localId) {
+            if ($shipSys === $sys && (int) $ship['docked_body'] === $localId) {
                 return ['station' => $info, 'fee' => 0, 'charged' => false,
                     'balance' => (int) $p['balance']];
             }
@@ -82,15 +90,22 @@ final class Stations
             // даже если сохранение об этом ещё не рассказало. Платят за
             // прыжок и здесь: иначе довольно было бы не сохраняться до
             // стыковки, и варп ничего бы не стоил.
-            Fuel::arrive($playerId, $p['system_id'] === null ? null : (int) $p['system_id'], $sys);
-            Db::update('player', [
+            Fuel::arriveShip($shipId, $shipSys, $sys);
+            Db::update('ship', [
                 'system_id' => $sys,
                 'docked_body' => $localId,
                 'landed_body' => null,
                 'landed_pose' => null,
+                'landed_secured' => 0,
+                'anchor_body' => null,
+                'anchor_pose' => null,
+                'hatches' => null,
+            ], '`id`=?', [$shipId]);
+            Db::update('player', [
                 'docks' => (int) $p['docks'] + 1,
                 'last_seen_at' => Db::now(),
             ], '`id`=?', [$playerId]);
+            Db::run('UPDATE `player` SET `system_id`=? WHERE `aboard_ship`=?', [$sys, $shipId]);
 
             $money = $fee > 0
                 ? Ledger::add($playerId, 'СТЫКОВОЧНЫЙ СБОР · ' . mb_strtoupper($info['name']),
@@ -112,12 +127,9 @@ final class Stations
     public static function repair(int $playerId): array
     {
         return Db::tx(function () use ($playerId) {
-            $p = Players::byId($playerId);
-            $ship = Players::ship($playerId);
-            if ($p['docked_body'] === null || $p['system_id'] === null) {
-                throw ApiError::denied('not_docked', 'чинят в порту');
-            }
-            $info = self::info((int) $p['system_id'], (int) $p['docked_body']);
+            $port = Players::portOrDeny($playerId, 'чинят в порту');
+            $ship = $port['ship'];
+            $info = self::info($port['system_id'], $port['local_id']);
             if (!$info['services']['repair']) {
                 throw ApiError::denied('no_service', 'здесь нечем чинить: уровень техники '
                     . $info['tech']);

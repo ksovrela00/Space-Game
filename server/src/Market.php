@@ -71,13 +71,10 @@ final class Market
 
         return Db::tx(function () use ($playerId, $code, $tons, $buying) {
             $p = Players::byId($playerId);
-            $ship = Players::ship($playerId);
+            $port = Players::portOrDeny($playerId, 'торговать можно только в порту');
+            $ship = $port['ship'];
             $shipId = (int) $ship['id'];
-
-            if ($p['docked_body'] === null || $p['system_id'] === null) {
-                throw ApiError::denied('not_docked', 'торговать можно только в порту');
-            }
-            $station = Galaxy::body((int) $p['system_id'], (int) $p['docked_body']);
+            $station = Galaxy::body($port['system_id'], $port['local_id']);
             if ($station['kind'] !== 'station') {
                 throw ApiError::denied('not_docked', 'торговать можно только в порту');
             }

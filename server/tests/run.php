@@ -412,8 +412,9 @@ ok(abs($stockNow - ($good['stock'] - 4)) < 1e-9,
 // Чтобы проверять ТРЮМ, а не склад, склад надо сделать заведомо большим:
 // иначе покупка упирается в «на складе только столько», и проверка молча
 // проверяет не то, что написано в её названии (на этом она и попалась).
-$stationId = (int) Db::one("SELECT b.`id` FROM `body` b JOIN `player` p ON p.`docked_body`=b.`local_id`
-                           AND p.`system_id`=b.`system_id` WHERE p.`id`=?", [$pid]);
+$stationId = (int) Db::one("SELECT b.`id` FROM `body` b JOIN `ship` s ON s.`docked_body`=b.`local_id`
+                           AND s.`system_id`=b.`system_id` JOIN `player` p ON p.`ship_id`=s.`id`
+                           WHERE p.`id`=?", [$pid]);
 $goodId = (int) Db::one('SELECT `id` FROM `commodity` WHERE `code`=?', [$good['code']]);
 Db::update('market', ['stock' => 999], '`station_id`=? AND `commodity_id`=?', [$stationId, $goodId]);
 denies('no_room', fn() => Api::call('market.buy', ['code' => $good['code'], 'tons' => 500], $token),
@@ -900,8 +901,9 @@ Db::update('ship', ['bare' => null, 'fuel_t' => 12, 'hull' => 100], '`id`=?', [$
 Players::ensureStock($shipId);
 Loadout::forget();
 Ledger::add($pid, 'ПРОВЕРКА: СРЕДСТВА НА ВЕРФЬ', 300000, 'test');
-Db::update('player', ['system_id' => 0, 'docked_body' => $home['dockedBody'],
-    'last_station' => $home['dockedBody']], '`id`=?', [$pid]);
+Db::update('ship', ['system_id' => 0, 'docked_body' => $home['dockedBody']], '`id`=?', [$shipId]);
+Db::update('player', ['system_id' => 0, 'last_station' => $home['dockedBody'],
+    'aboard_ship' => $shipId, 'seated' => 1], '`id`=?', [$pid]);
 
 $massT = (float) Db::one("SELECT `mass_t` FROM `ship_type` WHERE `code`='challenger'");
 $catMass = 0.0;
@@ -1032,7 +1034,7 @@ Db::update('ship', ['fuel_t' => 0.3], '`id`=?', [$shipId]);
 Db::update('player', ['last_station' => $home['dockedBody']], '`id`=?', [$pid]);
 $before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
 $tow = Api::call('ship.rescue', [], $token);
-$p = Players::byId($pid);
+$p = Players::ship($pid);
 ok((int) $p['docked_body'] === (int) $home['dockedBody'] && abs($tow['fuel'] - 1.2) < 1e-9
     && $tow['fee'] === Content::RESCUE_FEE && $tow['balance'] === $before - Content::RESCUE_FEE,
     'буксир дотянул до последнего порта за ' . $tow['fee'] . ' кр и долил бак до резерва');
@@ -1072,9 +1074,10 @@ $yard4 = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
 $noYard = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
                    FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
                    WHERE st.`has_outfit`=0 LIMIT 1");
-$dockAt = static function (array $st) use ($pid): void {
-    Db::update('player', ['system_id' => (int) $st['system_id'], 'docked_body' => (int) $st['local_id']],
-        '`id`=?', [$pid]);
+$dockAt = static function (array $st) use ($pid, $shipId): void {
+    Db::update('ship', ['system_id' => (int) $st['system_id'], 'docked_body' => (int) $st['local_id']],
+        '`id`=?', [$shipId]);
+    Db::update('player', ['system_id' => (int) $st['system_id']], '`id`=?', [$pid]);
 };
 $dockAt($yard);
 
@@ -1199,11 +1202,176 @@ denies('not_docked', fn() => Api::call('outfit.list', [], $token), 'в полё�
 // Вернуть заводской двигатель: следующие наборы считают по нему.
 $dockAt($yard);
 Api::call('outfit.buy', ['code' => 'engine'], $token);
-Db::update('player', ['system_id' => 0, 'docked_body' => $home['dockedBody']], '`id`=?', [$pid]);
+Db::update('ship', ['system_id' => 0, 'docked_body' => $home['dockedBody']], '`id`=?', [$shipId]);
+Db::update('player', ['system_id' => 0], '`id`=?', [$pid]);
 
 $sum = (int) Db::one('SELECT COALESCE(SUM(`amount`),0) FROM `ledger` WHERE `player_id`=?', [$pid]);
 $balance = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
 ok($sum === $balance, 'после заправок, буксира и верфи баланс сходится с лентой');
+
+// --- пилот и корабль -----------------------------------------------------------
+//
+// Центр игры — пилот, а не корабль (схема 10). Корабль стоит, где его
+// оставили; пилот ходит, где хочет, — но на чужой борт попадает только
+// рядом с ним, а в кресло садится только своего.
+
+section('пилот и корабль');
+
+$ra = Auth::register('pilot_a', 'secret', 'ПИЛОТ А');
+$rb = Auth::register('pilot_b', 'secret', 'ПИЛОТ Б');
+$ta = $ra['token'];
+$tb = $rb['token'];
+$sa = Api::call('player.state', [], $ta);
+$shipA1 = $sa['ship']['id'];
+$shipB = Api::call('player.state', [], $tb)['ship']['id'];
+ok($sa['me']['aboard'] === $shipA1 && $sa['me']['seated'] === true && $sa['me']['out'] === null
+    && $sa['position']['dockedBody'] !== null,
+    'новый пилот — в кресле своего корабля, корабль — в порту');
+
+// Стоянка на Lave II: корабль в осях тела, как его кладёт игра (settle).
+$land = Db::row("SELECT `local_id`, `radius_km` FROM `body` WHERE `system_id`=0 AND `name`='Lave II'");
+$L = (int) $land['local_id'];
+$R = (float) $land['radius_km'];
+$poseAt = static function (float $dx) use ($R): array {
+    $l = sqrt($dx * $dx + $R * $R);
+    return ['dir' => ['x' => $dx / $l, 'y' => $R / $l, 'z' => 0], 'radius' => $R + 0.006,
+        'right' => ['x' => 1, 'y' => 0, 'z' => 0], 'up' => ['x' => 0, 'y' => 1, 'z' => 0],
+        'fwd' => ['x' => 0, 'y' => 0, 'z' => 1]];
+};
+$outAt = static fn(float $dx, float $dz = 0) => ['body' => $L, 'o' => ['x' => $dx, 'y' => $R, 'z' => $dz],
+    'f' => ['x' => 0, 'y' => 0, 'z' => 1], 'pitch' => 0.1];
+
+Api::call('player.save', [
+    'ship' => ['id' => $shipA1, 'system' => 0, 'docked' => null, 'gear' => true, 'hatches' => ['nL', 'bad name!'],
+        'landed' => ['id' => $L, 'pose' => $poseAt(0), 'secured' => true]],
+    'me' => ['aboard' => $shipA1, 'seated' => true]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok($st['position']['landedBody'] === $L && $st['position']['dockedBody'] === null
+    && $st['position']['hatches'] === ['nL'],
+    'место корабля пишет тот, кто им командует: стоянка и открытый люк (мусорное имя люка отброшено)');
+
+// На ногах по палубе: точка ног в осях корабля и взгляд.
+Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false,
+    'walk' => ['pos' => [1.5, -2.3, 10], 'yaw' => 0.5, 'pitch' => -0.2]]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok($st['me']['seated'] === false && abs($st['me']['walk']['pos'][2] - 10) < 1e-9
+    && abs($st['me']['walk']['yaw'] - 0.5) < 1e-9,
+    'пилот на ногах в своём корабле: при входе в игру он там же, а не в кресле');
+
+// Сошёл на грунт у корабля.
+$r = Api::call('player.save', ['me' => ['out' => $outAt(0.03, 0.02)]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok(!isset($r['meDenied']) && $st['me']['aboard'] === null && $st['me']['out']['body'] === $L
+    && abs($st['me']['out']['o']['x'] - 0.03) < 1e-9 && $st['position']['landedBody'] === $L,
+    'пилот за бортом — в осях тела; корабль стоит, где стоял');
+
+// Сойти с корабля в километрах от него нельзя: это уже не трап.
+Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false]], $ta);
+$r = Api::call('player.save', ['me' => ['out' => $outAt(30)]], $ta);
+ok(($r['meDenied'] ?? '') === 'too_far' && $r['me']['aboard'] === $shipA1,
+    'сойти с борта в 30 км от корабля нельзя: пилот остался на борту');
+Api::call('player.save', ['me' => ['out' => $outAt(0.03)]], $ta);
+
+// Второй пилот садится рядом — в восьмидесяти метрах.
+Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 0, 'docked' => null, 'gear' => true,
+    'landed' => ['id' => $L, 'pose' => $poseAt(0.08), 'secured' => true]],
+    'me' => ['aboard' => $shipB, 'seated' => true]], $tb);
+
+// По грунту ходят куда угодно — но на чужой борт попадают только рядом.
+Api::call('player.save', ['me' => ['out' => $outAt(40)]], $ta);
+$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false]], $ta);
+ok(($r['meDenied'] ?? '') === 'too_far' && $r['me']['out'] !== null,
+    'на чужой борт за 40 км не попасть: сервер оставил пилота на грунте');
+Api::call('player.save', ['me' => ['out' => $outAt(0.07)]], $ta);
+$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok(!isset($r['meDenied']) && $st['me']['aboard'] === $shipB && $st['me']['seated'] === false
+    && $st['aboard']['id'] === $shipB && $st['aboard']['ownerName'] === 'ПИЛОТ Б'
+    && $st['aboard']['landedBody'] === $L,
+    'поднялся на борт соседа; в чужое кресло не садятся — пассажир на ногах');
+
+// Пассажир не двигает чужой корабль.
+$r = Api::call('player.save', ['ship' => ['id' => $shipB, 'landed' => null, 'pos' => ['x' => 1, 'y' => 2, 'z' => 3]]], $ta);
+$rowB = Players::shipRow($shipB);
+ok(!empty($r['shipIgnored']) && (int) $rowB['landed_body'] === $L,
+    'сохранение за чужой корабль не пишется: он стоит, где стоял');
+
+// Хозяин улетает в другую систему — пассажир с ним, свой корабль на месте.
+$fuelB0 = (float) $rowB['fuel_t'];
+Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 3, 'landed' => null, 'docked' => null,
+    'pos' => ['x' => 5e6, 'y' => 0, 'z' => 0]], 'me' => ['aboard' => $shipB, 'seated' => true]], $tb);
+$st = Api::call('player.state', [], $ta);
+$fuelB1 = (float) Players::shipRow($shipB)['fuel_t'];
+$fuelA1 = (float) Players::shipRow($shipA1)['fuel_t'];
+ok($st['me']['systemId'] === 3 && $st['me']['aboard'] === $shipB
+    && $st['position']['systemId'] === 0 && $st['position']['landedBody'] === $L,
+    'пассажир улетел с хозяином в систему 3, его корабль остался на Lave II');
+ok($fuelB1 < $fuelB0 && abs($fuelA1 - (float) $sa['ship']['fuelT']) < 1e-9,
+    'за варп платит бак того корабля, что прыгнул: −' . round($fuelB0 - $fuelB1, 2) . ' т, у пассажира бак цел');
+
+// Пассажир в порту — но не в своём: его трюм остался в его корабле.
+$homeSt = Db::row("SELECT `local_id` FROM `body` WHERE `system_id`=0 AND `kind`='station' ORDER BY `local_id` LIMIT 1");
+Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 0, 'pos' => ['x' => 0, 'y' => 0, 'z' => 0]]], $tb);
+Api::call('station.dock', ['system' => 0, 'station' => (int) $homeSt['local_id']], $tb);
+denies('not_docked', fn() => Api::call('market.prices', [], $ta),
+    'пассажир чужого корабля в порту не торгует');
+ok(Api::call('market.prices', [], $tb)['prices'] !== [], 'а хозяин, стоящий в нём, торгует');
+
+// Корабль погиб — страховка возвращает его в порт; хозяин в кресле,
+// пассажир на борту.
+Api::call('player.save', ['ship' => ['id' => $shipB, 'docked' => null], 'me' => ['aboard' => $shipB, 'seated' => false,
+    'walk' => ['pos' => [0, 0, 5], 'yaw' => 0, 'pitch' => 0]]], $tb);
+Combat::respawnShip($shipB);
+$pa = Players::byId($ra['player_id']);
+$pb = Players::byId($rb['player_id']);
+$rowB = Players::shipRow($shipB);
+ok($rowB['docked_body'] !== null && (int) $pb['aboard_ship'] === $shipB && (int) $pb['seated'] === 1
+    && (int) $pa['aboard_ship'] === $shipB && (int) $pa['seated'] === 0,
+    'после гибели корабль в порту, хозяин в кресле, пассажир на борту');
+
+// Второй свой корабль: командование — только из его кресла.
+$typeId = (int) Db::one('SELECT `type_id` FROM `ship` WHERE `id`=?', [$shipA1]);
+$shipA2 = Db::insert('ship', ['type_id' => $typeId, 'owner_id' => $ra['player_id'], 'name' => 'ВТОРОЙ',
+    'hull' => 100, 'fuel_t' => 12, 'system_id' => 0, 'landed_body' => $L,
+    'landed_pose' => json_encode($poseAt(-0.1)), 'created_at' => Db::now()]);
+Players::ensureStock($shipA2);
+denies('not_owner', fn() => Api::call('ship.command', ['id' => $shipB], $ta), 'командовать чужим кораблём нельзя');
+denies('not_aboard', fn() => Api::call('ship.command', ['id' => $shipA2], $ta),
+    'своим — только с его борта');
+Db::update('player', ['aboard_ship' => null, 'seated' => 0, 'out_body' => $L,
+    'out_pose' => json_encode($outAt(-0.09))], '`id`=?', [$ra['player_id']]);
+Api::call('player.save', ['me' => ['aboard' => $shipA2, 'seated' => true]], $ta);
+$st = Api::call('ship.command', ['id' => $shipA2], $ta);
+$fleet = array_column($st['fleet'], 'active', 'id');
+ok($st['ship']['id'] === $shipA2 && $st['me']['seated'] === true && count($st['fleet']) === 2
+    && $fleet[$shipA2] === true && $fleet[$shipA1] === false && $st['position']['landedBody'] === $L,
+    'пересел во второй свой корабль: им и командует, первый стоит на месте');
+Api::call('player.save', ['ship' => ['id' => $shipA1, 'landed' => null]], $ta);
+ok((int) Players::shipRow($shipA1)['landed_body'] === $L,
+    'сохранение за прежний корабль после пересадки не пишется');
+
+// Перенос со схемы 9: место корабля лежало в строке пилота. Живой пилот,
+// стоявший на грунте, обязан остаться на грунте, а не очутиться в порту.
+$old = ['pos_x' => 'DOUBLE NOT NULL DEFAULT 0', 'pos_y' => 'DOUBLE NOT NULL DEFAULT 0',
+    'pos_z' => 'DOUBLE NOT NULL DEFAULT 0', 'basis' => 'TEXT NULL', 'docked_body' => 'INT NULL',
+    'landed_body' => 'INT NULL', 'landed_pose' => 'TEXT NULL',
+    'landed_secured' => 'TINYINT(1) NOT NULL DEFAULT 0', 'anchor_body' => 'INT NULL',
+    'anchor_pose' => 'TEXT NULL'];
+foreach ($old as $c => $ddl) {
+    Db::run('ALTER TABLE `player` ADD COLUMN `' . $c . '` ' . $ddl);
+}
+$rc = Auth::register('pilot_c', 'secret', 'ПИЛОТ В');
+$shipC = (int) Players::ship($rc['player_id'])['id'];
+Db::update('ship', ['docked_body' => null], '`id`=?', [$shipC]);
+Db::update('player', ['landed_body' => $L, 'landed_pose' => json_encode($poseAt(1.5)), 'landed_secured' => 1,
+    'aboard_ship' => null, 'docked_body' => null], '`id`=?', [$rc['player_id']]);
+$made = Schema::migrate();
+$rowC = Players::shipRow($shipC);
+$cols = array_column(Db::all('SHOW COLUMNS FROM `player`'), 'Field');
+ok((int) $rowC['landed_body'] === $L && (int) $rowC['landed_secured'] === 1
+    && (int) Players::byId($rc['player_id'])['aboard_ship'] === $shipC
+    && !in_array('landed_body', $cols, true) && in_array('-player.landed_body', $made, true),
+    'перенос со схемы 9: стоянка переехала к кораблю, пилот в его кресле, старые столбцы снесены');
 
 // --- итог --------------------------------------------------------------------
 

@@ -922,6 +922,164 @@ await step('шлюз: сели на мир с атмосферой, E — люк
   }
 });
 
+// Пилот — не корабль. Рядом садится сосед (корабль без хозяина в игре,
+// спящий — как его шлёт хаб), люк у него открыт: пилот сходит со своего
+// трапа, поднимается по чужому, ходит по чужой палубе, в чужое кресло не
+// садится, — а когда сосед уходит в другую систему, игра идёт за ним, и
+// свой корабль остаётся стоять, где стоял.
+await step('к соседу на борт: по его трапу, чужое кресло, вместе в другую систему и обратно', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const A = await import('../js/game/airlock.js');
+  const Vs = await import('../js/game/vessels.js');
+  const O = await import('../js/game/outside.js');
+  const S = await import('../js/game/surface.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel },
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const sys0 = game.sys.id;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+    // Ровная суша океанического мира — как в шаге про шлюз.
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    let d = null;
+    for (let i = 0; i < 3000 && !d; i++) {
+      const u = -0.5 + (i / 2999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const q = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      if (!S.waterAt(b, q) && S.slopeAt(b, q) < 0.03 && S.groundRadius(b, q) - b.radius > 0.05) d = q;
+    }
+    if (!d) throw new Error('на океаническом мире не нашлось ровной суши');
+    S.worldPoint(b, d, S.groundRadius(b, d) + 0.02, sh.pos);
+    const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const f = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+    const fl = Math.hypot(f.x, f.y, f.z);
+    lookAlong(sh.basis, { x: f.x / fl, y: f.y / fl, z: f.z / fl }, up);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    frames(2);
+    if (!game.landHere() || game.state.mode !== 'landed') throw new Error('не сели: ' + game.state.mode);
+    frames(2);
+    const P = sh.landedPose;
+
+    // Сосед — в семидесяти метрах справа, носом туда же; его левый
+    // носовой люк смотрит на нас и открыт, трап выдвинут.
+    const R = P.radius;
+    const lx = P.dir.x * R + P.right.x * 0.07, ly = P.dir.y * R + P.right.y * 0.07, lz = P.dir.z * R + P.right.z * 0.07;
+    const l = Math.hypot(lx, ly, lz), dn = { x: lx / l, y: ly / l, z: lz / l };
+    const r2 = S.groundRadius(b, dn) + (R - S.groundRadius(b, P.dir));
+    const entry = (extra = {}) => Object.assign({ id: 900, by: 77, name: 'СОСЕД', dorm: 1, sys: sys0, mode: 'landed',
+      g: 1, h: ['nL'], b: b.id, lx: dn.x * r2, ly: dn.y * r2, lz: dn.z * r2,
+      lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }, extra);
+    let pin = entry();
+    // Хаб шлёт спящий корабль каждым тиком: так его и держим.
+    const tickNet = () => { net.peers = pin ? [pin] : []; net.people = []; net.rev++; };
+    tickNet(); frames(3);
+    let V = game.peers.find((p) => p.id === 900);
+    if (!V || !V.air || V.own) throw new Error('спящий сосед не принят: ' + game.peers.length);
+    let hx = A.hatchById(V.air, 'nL');
+    if (!(hx.open === 1 && hx.stair === 1)) throw new Error('люк соседа не открыт: ' + hx.open + '/' + hx.stair);
+    const own = game.interior.air;
+    if (A.hatchById(own, 'nL').want) throw new Error('люк соседа открыл и наш');
+
+    // Встать и выйти за борт — сразу к пяте чужого трапа. Пока вставали,
+    // снимков не было дольше PEER_TTL: запись соседа заведена заново.
+    key('KeyY');
+    for (let i = 0; i < 60; i++) { if (i % 12 === 0) tickNet(); frames(1); }
+    const w = game.walk;
+    if (!w.on) throw new Error('не встали');
+    tickNet(); frames(1);
+    V = game.peers.find((p) => p.id === 900);
+    hx = A.hatchById(V.air, 'nL');
+    const foot = A.stairPoint(hx, 1, [hx.design.foot[0] + 1.2, hx.design.foot[1], 0]);
+    const Pw = Vs.vesselPoint(V, foot);
+    w.out = O.makeGroundFrame(b, Pw, V.basis.fwd);
+    w.pos = [0, 0, 0];
+    w.vessel = null; w.air = null; w.room = null;
+    // Лицом к соседу: по оси x его корабля к борту (люк слева — это +x).
+    const toShip = Vs.vesselDir(V, [1, 0, 0]);
+    const g = O.worldDirToGround(w.out, toShip);
+    w.yaw = Math.atan2(g[0], g[2]); w.pitch = 0;
+    frames(3);
+    if (!w.out) throw new Error('пилот не за бортом');
+    // Вверх по чужому трапу — в чужой шлюз.
+    holdDown('KeyW');
+    const trace = [];
+    for (let i = 0; i < 60 * 12 && w.out; i++) {
+      if (i % 12 === 0) tickNet();
+      if (i % 30 === 0 && w.out) trace.push(Vs.worldToVessel(V, O.groundToWorld(w.out, w.pos)).map((v) => v.toFixed(1)).join('/'));
+      frames(1);
+    }
+    globalThis.__trace = trace;
+    frames(20); release('KeyW');
+    for (let i = 0; i < 10; i++) { tickNet(); frames(1); }
+    if (w.out || !w.vessel || w.vessel.id !== 900 || w.vessel.own || w.air !== V.air || game.frame !== V) {
+      const at = w.out ? Vs.worldToVessel(V, O.groundToWorld(w.out, w.pos)) : w.pos;
+      throw new Error('по трапу соседа на его борт не поднялись: ' + (w.out ? 'за бортом' : 'борт ' + (w.vessel && w.vessel.id))
+        + ', ноги в осях соседа ' + at.map((v) => v.toFixed(2)).join(', ') + '; пята трапа ' + foot.map((v) => v.toFixed(2)).join(', ')
+        + '; люк ' + hx.open + '/' + hx.stair + ' выход ' + hx.exitOk + ' до грунта ' + (hx.footGap || 0).toFixed(2)
+        + '; путь ' + (globalThis.__trace || []).join(' '));
+    }
+    texts = []; frames(2);
+    let seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('НА БОРТУ: КОРАБЛЬ СОСЕД') >= 0)) throw new Error('нет строки «на борту: корабль соседа»');
+    // Люк — чужой: открыть его можно только просьбой, а сети в прогоне нет.
+    if (!game.walkHatch || game.walkHatchShip !== V) throw new Error('люк под рукой — не соседа');
+    key('KeyE'); frames(2);
+    if (!game.state.messages.some((m) => m.text.indexOf('ЛЮК ЧУЖОГО КОРАБЛЯ') >= 0)) {
+      throw new Error('чужой люк без связи — без отказа: ' + game.state.messages.map((m) => m.text).join(' | '));
+    }
+    // Чужое кресло: не садятся.
+    w.pos = game.interior.seat.stand.slice(); w.room = game.interior.roomById.bridge; w.vel = [0, 0, 0];
+    tickNet(); frames(3);
+    key('KeyE'); frames(10);
+    if (!w.on || !game.state.messages.some((m) => m.text.indexOf('ЗА ХОЗЯИНОМ') >= 0)) {
+      throw new Error('в чужое кресло сели — или не сказали почему');
+    }
+    // Сосед ушёл варпом в систему 2: игра — за ним; свой корабль остался.
+    pin = entry({ sys: 2, mode: 'flight', b: undefined, lx: undefined, ly: undefined, lz: undefined,
+      x: 1.2e6, y: 0, z: 0, fx: 0, fy: 0, fz: 1, ux: 0, uy: 1, uz: 0 });
+    for (let i = 0; i < 6; i++) { tickNet(); frames(1); }
+    if (game.sys.id !== 2 || !sh.away || !w.on || !w.vessel || w.vessel.id !== 900) {
+      throw new Error(`за кораблём в систему 2 не ушли: система ${game.sys.id}, свой ${sh.away ? 'остался' : 'с нами'}`);
+    }
+    const there = JSON.parse(savedJson());
+    if (there.system !== 2 || there.me.aboard !== 900 || !there.ship || there.ship.system !== sys0
+      || !there.ship.landed || there.ship.landed.id !== b.id) {
+      throw new Error('сохранение пассажира не то: ' + JSON.stringify({ s: there.system, me: there.me, ship: there.ship && there.ship.system }));
+    }
+    // Вернулись — свой корабль снова на своей стоянке.
+    pin = entry();
+    for (let i = 0; i < 6; i++) { tickNet(); frames(1); }
+    if (game.sys.id !== sys0 || sh.away || game.state.mode !== 'landed' || !sh.landedAt || sh.landedAt.id !== b.id) {
+      throw new Error(`обратно не вернулись: система ${game.sys.id}, режим ${game.state.mode}`);
+    }
+  } finally {
+    net.peers = []; net.people = []; net.rev++;
+    frames(2);
+    if (game.walk.on) {
+      game.walk.out = null; game.walk.vessel = null; game.walk.air = null;
+      game.walk.pos = game.interior.seat.stand.slice(); game.walk.room = game.interior.roomById.bridge;
+      frames(2); key('KeyE'); frames(50);
+    }
+    if (game.sys.id !== sys0) throw new Error('прогон остался в чужой системе');
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(2);
+  }
+});
+
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
   const before = calls.fill;
   key('KeyV');
@@ -1851,7 +2009,8 @@ await step('квантовый прыжок к пилоту и срыв, ког�
   // именно по нему пилот пропадает сразу: пустого снимка мало, его можно
   // и не дождаться при потере пакета.
   net.peers = [];
-  net.left = 77;
+  // Уходит пилот 7 и уводит свой корабль 77 (Hub, leave).
+  net.left.push({ id: 7, ship: 77 });
   net.rev++;
   frames(3);
   if (game.quantum.phase !== 'idle') {
@@ -2332,9 +2491,10 @@ await step('стоянка на грунте: кнопка вместо экра
 
   // Стоянка обязана попасть в сейв: в локальных осях тела, иначе через
   // сутки эти координаты указывали бы в пустоту.
-  const saved = JSON.parse(savedJson());
-  if (!saved.landed || !saved.landed.pose || !saved.landed.id) {
-    throw new Error('стоянка не сохранена: ' + JSON.stringify(saved.landed));
+  // Место корабля — отдельно от места пилота (сохранение: ship и me).
+  const saved = JSON.parse(savedJson()).ship;
+  if (!saved || !saved.landed || !saved.landed.pose || !saved.landed.id) {
+    throw new Error('стоянка не сохранена: ' + JSON.stringify(saved && saved.landed));
   }
   if (!saved.landed.secured) throw new Error('фиксация не сохранена');
   if (!saved.gear) throw new Error('состояние шасси не сохранено');

@@ -168,7 +168,7 @@ final class Fuel
     /**
      * Корабль сменил систему: списать варп по расстоянию между звёздами.
      *
-     * Зовут те, кто пишет `player.system_id` СО СЛОВ ИГРЫ: сохранение и
+     * Зовут те, кто пишет `ship.system_id` СО СЛОВ ИГРЫ: сохранение и
      * стыковка. Гибель и буксир систему тоже меняют, но это решение
      * сервера, а не прыжок, и платить за него топливом не за что.
      *
@@ -181,13 +181,18 @@ final class Fuel
      */
     public static function arrive(int $playerId, ?int $from, int $to): float
     {
+        return self::arriveShip((int) Players::ship($playerId)['id'], $from, $to);
+    }
+
+    /** То же — для корабля по номеру: платит бак того, кто прыгнул. */
+    public static function arriveShip(int $shipId, ?int $from, int $to): float
+    {
         if ($from === null || $from === $to) {
             return 0.0;
         }
-        $ship = Players::ship($playerId);
-        $m = self::model((int) $ship['id']);
+        $m = self::model($shipId);
         $tons = self::warpTons($m, Galaxy::distance($from, $to));
-        self::burn((int) $ship['id'], $tons);
+        self::burn($shipId, $tons);
         return $tons;
     }
 
@@ -237,14 +242,10 @@ final class Fuel
     public static function refuel(int $playerId, ?float $tons = null): array
     {
         return Db::tx(function () use ($playerId, $tons) {
-            $p = Players::byId($playerId);
-            if ($p['docked_body'] === null || $p['system_id'] === null) {
-                throw ApiError::denied('not_docked', 'заправляют в порту');
-            }
-            $info = Stations::info((int) $p['system_id'], (int) $p['docked_body']);
-            $body = Galaxy::body((int) $p['system_id'], (int) $p['docked_body']);
-            $ship = Players::ship($playerId);
-            $shipId = (int) $ship['id'];
+            $port = Players::portOrDeny($playerId, 'заправляют в порту');
+            $info = Stations::info($port['system_id'], $port['local_id']);
+            $body = Galaxy::body($port['system_id'], $port['local_id']);
+            $shipId = (int) $port['ship']['id'];
             // Строка корабля — с блокировкой: хаб в это время может
             // списывать расход, и две записи иначе разошлись бы.
             Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=? FOR UPDATE', [$shipId]);
@@ -293,6 +294,10 @@ final class Fuel
      * техникой. Где корабль на самом деле, сервер знает лишь со слов
      * игры, и искать по ним «ближайший» значило бы верить им в том, что
      * стоит денег.
+     *
+     * Тянут КОРАБЛЬ, которым пилот командует, — и пилот при этом на его
+     * борту: буксир вызывают из кресла, а не с другого конца системы.
+     * Пассажиры едут вместе с кораблём.
      */
     public static function rescue(int $playerId): array
     {
@@ -301,13 +306,21 @@ final class Fuel
             if ($p === null) {
                 throw ApiError::notFound('нет такого игрока');
             }
-            if ($p['docked_body'] !== null) {
+            $ship = Players::ship($playerId);
+            $shipId = (int) $ship['id'];
+            if ($ship['docked_body'] !== null) {
                 throw ApiError::denied('docked', 'корабль в порту: заправка здесь же');
             }
+            if ((int) $p['aboard_ship'] !== $shipId) {
+                throw ApiError::denied('not_aboard', 'буксир вызывают с борта своего корабля');
+            }
 
-            $sys = $p['system_id'] === null ? null : (int) $p['system_id'];
+            $sys = $ship['system_id'] === null ? null : (int) $ship['system_id'];
             $dest = null;
-            if ($sys !== null && $p['last_station'] !== null) {
+            if ($sys !== null && $p['last_station'] !== null && Db::one(
+                "SELECT `id` FROM `body` WHERE `system_id`=? AND `local_id`=? AND `kind`='station'",
+                [$sys, (int) $p['last_station']]
+            ) !== null) {
                 $dest = ['system_id' => $sys, 'local_id' => (int) $p['last_station']];
             } elseif ($sys !== null) {
                 $row = Db::row(
@@ -325,10 +338,9 @@ final class Fuel
             $info = Stations::info($dest['system_id'], $dest['local_id']);
 
             $fee = min(Content::RESCUE_FEE, max(0, (int) $p['balance']));
-            Db::update('player', [
+            Db::update('ship', [
                 'system_id' => $dest['system_id'],
                 'docked_body' => $dest['local_id'],
-                'last_station' => $dest['local_id'],
                 'landed_body' => null,
                 'landed_pose' => null,
                 'landed_secured' => 0,
@@ -336,11 +348,17 @@ final class Fuel
                 'anchor_pose' => null,
                 'pos_x' => 0, 'pos_y' => 0, 'pos_z' => 0,
                 'basis' => null,
+                'hatches' => null,
+            ], '`id`=?', [$shipId]);
+            Db::update('player', [
+                'last_station' => $dest['local_id'],
                 'last_seen_at' => Db::now(),
             ], '`id`=?', [$playerId]);
+            // Все, кто на борту, — в порту вместе с кораблём.
+            Db::run('UPDATE `player` SET `system_id`=? WHERE `aboard_ship`=?',
+                [$dest['system_id'], $shipId]);
 
-            $ship = Players::ship($playerId);
-            $fuel = self::topUpReserve((int) $ship['id']);
+            $fuel = self::topUpReserve($shipId);
             $money = $fee > 0
                 ? Ledger::add($playerId, 'АВАРИЙНЫЙ БУКСИР · ' . mb_strtoupper($info['name']),
                     -$fee, 'rescue:' . $dest['local_id'])

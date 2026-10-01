@@ -150,10 +150,8 @@ final class Missions
             if ($m['state'] !== 'offered') {
                 throw ApiError::denied('taken', 'этот подряд уже взяли');
             }
-            if ($p['docked_body'] === null) {
-                throw ApiError::denied('not_docked', 'подряд берут в порту');
-            }
-            $here = Galaxy::body((int) $p['system_id'], (int) $p['docked_body']);
+            $port = Players::portOrDeny($playerId, 'подряд берут в порту');
+            $here = Galaxy::body($port['system_id'], $port['local_id']);
             if ((int) $here['id'] !== (int) $m['station_id']) {
                 throw ApiError::denied('wrong_station', 'этот подряд с другой станции');
             }
@@ -192,10 +190,8 @@ final class Missions
             if ($m['state'] !== 'active') {
                 throw ApiError::denied('not_active', 'этот подряд уже закрыт');
             }
-            if ($p['docked_body'] === null) {
-                throw ApiError::denied('not_docked', 'сдают подряд в порту');
-            }
-            $here = Galaxy::body((int) $p['system_id'], (int) $p['docked_body']);
+            $port = Players::portOrDeny($playerId, 'сдают подряд в порту');
+            $here = Galaxy::body($port['system_id'], $port['local_id']);
             if ((int) $here['id'] !== (int) $m['target_body']) {
                 throw ApiError::denied('wrong_station', 'это не тот порт');
             }

@@ -168,6 +168,62 @@ const LOCK_SCENE = (hatch, then) => `
     });
 `;
 
+// Соседи (сокет без сокета, как в сцене pilots): рядом со своим кораблём
+// садится чужой — спящий, с открытым люком и трапом, — а по грунту идёт
+// человек. Всё кладётся туда, куда это кладёт сокет (window.NET), и
+// каждым шагом ожидания заново: иначе снимки «протухают» (PEER_TTL).
+const CREW_SCENE = (then) => LOCK_SCENE('sR', `
+      const b = GAME.ship.landedAt, P = GAME.ship.landedPose, S = window.SCENE;
+      // Точка у грунта рядом со своим кораблём: dr вправо и df вперёд (км,
+      // оси тела), h — над нарисованным грунтом.
+      const at = (dr, df, h) => {
+        const R = P.radius;
+        const x = P.dir.x * R + P.right.x * dr + P.fwd.x * df;
+        const y = P.dir.y * R + P.right.y * dr + P.fwd.y * df;
+        const z = P.dir.z * R + P.right.z * dr + P.fwd.z * df;
+        const l = Math.hypot(x, y, z), d = { x: x / l, y: y / l, z: z / l };
+        const g = S.drawnGround(b, d) + h;
+        return { x: d.x * g, y: d.y * g, z: d.z * g };
+      };
+      const clear = P.radius - S.drawnGround(b, P.dir);
+      const ship2 = at(0.085, -0.012, clear);
+      // Человек на грунте ставится ПОСЛЕ того, как встал пилот: перед
+      // камерой и лицом к ней (place ниже) — иначе он вне кадра.
+      const anna = at(0.032, 0.004, 0);
+      const face = { x: -P.right.x, y: -P.right.y, z: -P.right.z };
+      window.__annaAt = (cam, dist) => import('./js/game/vessels.js').then((Vs) => {
+        const f = cam.basis.fwd, u = Vs.bodyLocal(b, cam.pos);
+        const ul = Math.hypot(u.x, u.y, u.z);
+        const fl = Vs.bodyLocalDir(b, f);
+        const k = (fl.x * u.x + fl.y * u.y + fl.z * u.z) / ul;
+        const h = { x: fl.x - u.x / ul * k, y: fl.y - u.y / ul * k, z: fl.z - u.z / ul * k };
+        const hl = Math.hypot(h.x, h.y, h.z);
+        const p = { x: u.x + h.x / hl * dist, y: u.y + h.y / hl * dist, z: u.z + h.z / hl * dist };
+        const pl = Math.hypot(p.x, p.y, p.z), d = { x: p.x / pl, y: p.y / pl, z: p.z / pl };
+        const g = S.drawnGround(b, d);
+        anna.x = d.x * g; anna.y = d.y * g; anna.z = d.z * g;
+        face.x = -h.x / hl; face.y = -h.y / hl; face.z = -h.z / hl;
+      });
+      const n = window.NET;
+      window.__crew = () => {
+        n.state = 'live';
+        n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+        n.peers = [{ id: 501, by: 9, name: 'АННА', dorm: 1, sys: 0, mode: 'landed', g: 1, h: ['sL', 'nL'],
+          b: b.id, lx: ship2.x, ly: ship2.y, lz: ship2.z,
+          lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }];
+        n.people = [
+          { id: 9, name: 'АННА', st: 'out', b: b.id, lx: anna.x, ly: anna.y, lz: anna.z,
+            lfx: face.x, lfy: face.y, lfz: face.z, yaw: 0, pitch: 0, v: 1.8, air: 0 },
+          { id: 12, name: 'ЗАХАР', st: 'walk', s: 501, x: -1.2, y: -9.0, z: 1.6, yaw: 0.4, pitch: 0, v: 0, air: 0 },
+        ];
+        n.rev++;
+      };
+      window.__crew();
+      const hold0 = window.__hold;
+      window.__hold = () => { if (hold0) hold0(); window.__crew(); };
+      frames(4);
+      ${then}`);
+
 // --- сцены --------------------------------------------------------------------
 //
 // Сцена — это кусок кода, который выполняется В СТРАНИЦЕ после загрузки.
@@ -756,6 +812,42 @@ const SCENES = {
       frames(3);
       if (w.out) { w.pos = [14, w.pos[1] - 5.0, -9]; w.vel = [0, -5, 0]; w.yaw = -0.92; w.pitch = 0.2; }
       frames(12);`),
+  },
+  crew: {
+    url: '&surface=clipmap',
+    title: 'соседи: чужой корабль рядом с открытым люком, человек на грунте',
+    run: CREW_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [14.7, -7.97, -12.67];
+      w.yaw = Math.PI / 2;
+      frames(3);
+      if (w.out) { w.pos = [12, w.pos[1] - 5.0, 4]; w.vel = [0, -5, 0]; w.yaw = 1.42; w.pitch = 0.06; }
+      frames(12);
+      return window.__annaAt(GAME.camera, 0.009).then(() => { window.__crew(); frames(6); });`),
+  },
+  crewin: {
+    url: '&surface=clipmap',
+    title: 'на палубе чужого корабля: трюм, пассажир',
+    run: CREW_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      // Снимок соседа принимается кадром позже, чем положен в NET.
+      for (let i = 0; i < 20 && !GAME.peers.some((p) => p.id === 501 && p.air); i++) { window.__crew(); frames(1); }
+      const w = GAME.walk;
+      const V = GAME.peers.find((p) => p.id === 501);
+      w.phase = 'walk';
+      w.vessel = V;
+      w.air = V.air;
+      w.out = null;
+      w.pos = [0.6, -9.0, 7.0];
+      w.yaw = Math.PI + 0.15;
+      w.pitch = -0.08;
+      frames(6);`),
   },
   cockpitfuel: {
     title: 'кабина на малом топливе: столбик ТОПЛ и лампа',
@@ -1354,6 +1446,27 @@ try {
   // «Деревьев не видно» имеет те же три причины, что и у города, и по
   // снимку они неразличимы: поле не собрано, собрано и не нарисовано,
   // или выросло пусто. Числа различают их сразу.
+  // Отчёт о людях и чужих кораблях: PEOPLEDBG=1 node tools/screen.mjs --scene=crew
+  //
+  // «Человека не видно» — это и «снимок не принят», и «не стоит ни на
+  // чём в этом мире», и «модель не собралась», и «собралась, но не
+  // нарисована». По кадру они неразличимы.
+  if (process.env.PEOPLEDBG) {
+    const info = await run(cdp, `
+      const s = window.SCENE.suit;
+      return JSON.stringify({
+        people: GAME.people.map((p) => ({ id: p.id, st: p.st, here: p.here, ship: p.ship, body: p.body,
+          d: p.place ? Math.hypot(p.place.pos.x - GAME.camera.pos.x, p.place.pos.y - GAME.camera.pos.y,
+            p.place.pos.z - GAME.camera.pos.z) * 1000 : null })),
+        peers: GAME.peers.map((v) => ({ id: v.id, dorm: v.dorm, air: !!v.air, hatches: v.hatches, gear: v.gear.t })),
+        suit: s ? { ready: !!s.S, loading: s.loading, error: s.error ? String(s.error.message || s.error) : null,
+          draws: s.draws } : null,
+        out: window.SCENE.peopleDraws,
+        frame: GAME.frame && GAME.frame.id,
+      });
+    `);
+    console.log('люди: ' + info);
+  }
   if (process.env.SURFDBG) {
     const info = await run(cdp, `
       const st = GAME.renderStats;

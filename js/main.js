@@ -64,13 +64,17 @@ import {
 import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
-  crateSolids, WALK,
+  crateSolids, stepDoors, WALK,
 } from './game/walker.js';
 import { drawWalkHud } from './ui/walkhud.js';
 import {
-  makeAirlocks, updateAirlocks, toggleHatch, closeAll, resetAirlocks, hatchNear, tunnelAt, pastSkin,
-  onStair, airSolids, lockStatus, roomAir, AIR,
+  makeAirlocks, makeAir, updateAirlocks, toggleHatch, closeAll, resetAirlocks, hatchNear, tunnelAt, pastSkin,
+  onStair, airSolids, lockStatus, roomAir, openHatches, setHatches, hatchById, AIR,
 } from './game/airlock.js';
+import {
+  vesselPoint, vesselDir, worldToVessel, nearVessels, bodyLocal, bodyLocalDir, bodyWorld, bodyWorldDir,
+  personPlace,
+} from './game/vessels.js';
 import {
   makeGroundFrame, groundToWorld, groundDirToWorld, worldToGround, groundY, waterUnder,
   shipToGround, shipPointToGround, groundPointToShip, boxToGround, RECENTER, hullUnderside, undersideBoxes,
@@ -85,13 +89,15 @@ import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from '.
 import {
   session, start as sessionStart, queueSave, flushOnExit,
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
-  rescue as serverRescue,
+  rescue as serverRescue, command as serverCommand, flush as flushSave,
 } from './net/session.js';
-import { net, connect as netConnect, shoot, reportHit, reportImpact }
+import { net, connect as netConnect, shoot, reportHit, reportImpact, askHatch }
   from './net/socket.js';
 import { impact as apiImpact, system as apiSystem } from './net/api.js';
 import { linkState } from './net/quality.js';
-import { makePeers, ingestPeers, peerPoses, dropPeer } from './game/peers.js';
+import {
+  makePeers, ingestPeers, peerPoses, dropPeer, makePeople, ingestPeople, peoplePoses, dropPerson,
+} from './game/peers.js';
 import {
   makeGuns, updateGuns, fireGuns, addForeignBolt, aimDir, shieldFlash, hasShieldFlash,
 } from './game/weapons.js';
@@ -148,6 +154,14 @@ if (!scene) renderer = new Renderer(screenCanvas, { camera });
 
 let world = makeSystem(sys);
 const ship = resetFuelBook(makeShip());
+// Номер корабля на сервере (без сервера — null) и система, где он стоит.
+// away — корабль в ДРУГОЙ системе: пилот улетел пассажиром, а свой
+// корабль остался там, где стоял (keep — где именно).
+ship.id = null;
+ship.sysId = 0;
+ship.away = false;
+ship.keep = null;
+ship.hatchesWant = null;
 const shipMesh = buildCobra();
 
 const gearMesh = buildGear();
@@ -227,6 +241,17 @@ const game = {
   walkRoomT: 0,           // сколько ещё показывать название помещения, с
   walkIntro: 0,           // сколько ещё показывать подсказку по клавишам, с
   walkHatch: null,        // люк под рукой (js/game/airlock.js) — для подсказки и E
+  walkHatchShip: null,    // ...и чей это люк: свой корабль или чужой
+  // ПИЛОТ И КОРАБЛЬ — РАЗНЫЕ ВЕЩИ. Корабль (ship) стоит, где оставили;
+  // пилот ходит, где хочет: по своей палубе, по чужой, по грунту.
+  // frame — корабль, в осях которого сейчас глаз и помещения: тот, на
+  // борту которого пилот (свой или чужой), а за бортом и в кресле — свой.
+  frame: null,
+  // Люди, кроме нас самих (js/game/peers.js, peoplePoses): где стоят и
+  // как идут. Рисует их сцена (js/gl/pilot.js), двери открывает ход.
+  people: [],
+  // Кораблей у пилота может быть несколько (Players::command): какие и где.
+  fleet: [],
 };
 
 const dbg = makeDebug();
@@ -310,6 +335,14 @@ function enterSystem(target) {
   // 2. Отпустить видеопамять. Меши планет висят на телах старого мира, но
   //    буферы живут в драйвере, и сборщик мусора до них не дотянется.
   if (scene) scene.forgetSystem(old);
+
+  // Чужие корабли и люди — той системы, что уходит: их номера тел в новой
+  // значат другие тела. Остаётся только тот, на борту которого едем.
+  const ride = game.walk.on && !game.walk.out && game.walk.vessel && !game.walk.vessel.own
+    ? game.walk.vessel.id : null;
+  for (const id of [...peerStore.by.keys()]) if (id !== ride) peerStore.by.delete(id);
+  peopleStore.by.clear();
+  game.people.length = 0;
 
   // 3. Собрать новую.
   sys = target;
@@ -520,6 +553,10 @@ game.restart = () => {
   ship.fuel = SHIP.fuelCap;
   resetFuelBook(ship);
   placeShip(ship, v3(), makeBasis());
+  // Корабль — снова здесь и свой: новая игра начинается в его кресле.
+  ship.away = false;
+  ship.keep = null;
+  ship.sysId = homeSystem().id;
 
   // Начать заново — значит и вернуться домой: в чужой системе нет ни
   // родного порта, ни того, с чего игра начинается.
@@ -570,6 +607,64 @@ game.closeOverlay = () => {
 // работает дальше. Клавиши W/A/S/D и мышь уходят ногам и голове
 // (js/game/walker.js), а в кресло садятся там же, откуда встали, — у
 // кресла, клавишей E.
+//
+// ПАЛУБА — НЕ ОБЯЗАТЕЛЬНО СВОЯ. Пилот ходит по тому кораблю, на борту
+// которого стоит (game.walk.vessel): по своему или по чужому, зайдя к
+// соседу по трапу. Корабль здесь — «место» (js/game/vessels.js): точка,
+// базис, шасси и шлюзы. Свой корабль тоже место — ownVessel, обёртка
+// над ship: у чужого те же поля приходят из сокета (js/game/peers.js).
+
+/**
+ * Свой корабль как место. Поля — геттеры, а не копии: ship.pos и
+ * ship.basis переставляются целиком (placeShip), и копия отстала бы.
+ */
+const ownVessel = {
+  own: true,
+  get id() { return ship.id; },
+  get pos() { return ship.pos; },
+  get basis() { return ship.basis; },
+  get gear() { return ship.gear; },
+  get air() { return game.interior ? game.interior.air : null; },
+  get name() { return session.name || ''; },
+  get by() { return myId(); },
+  get mode() { return game.state.mode === ST.DOCKED ? 'docked' : game.state.mode === ST.LANDED ? 'landed' : 'flight'; },
+};
+game.ownVessel = ownVessel;
+game.frame = ownVessel;
+
+/** Кто я в сети: номер игрока (или null без сервера). */
+function myId() {
+  if (net.you && typeof net.you.id === 'number') return net.you.id;
+  const p = session.player && session.player.player;
+  return p && typeof p.id === 'number' ? p.id : null;
+}
+
+/** Корабль, на борту которого стоит пилот, — или свой, если он в кресле. */
+const aboardVessel = () => (game.walk.on && !game.walk.out && game.walk.vessel) || ownVessel;
+
+/** Все корабли этой системы, по которым можно ходить: свой (если он здесь) и чужие. */
+const _here = [];
+function vesselsHere() {
+  _here.length = 0;
+  if (!ship.away) _here.push(ownVessel);
+  for (const V of game.peers) if (V.air) _here.push(V);
+  return _here;
+}
+
+/** Тело, у которого стоит корабль: у своего — обстановка у поверхности, у чужого — из снимка. */
+function vesselBody(V) {
+  if (V.own) return game.zone && game.zone.body ? game.zone.body : (ship.landedAt || null);
+  if (V.body === null || V.body === undefined) return null;
+  return world.bodies.find((b) => b.id === V.body) || null;
+}
+
+/** Шлюзы чужого корабля: заводятся, как только есть помещения (они одни на тип). */
+function vesselAir(V) {
+  if (V.own || V.air || !game.interior) return V.air;
+  V.air = makeAir(game.interior, SHIP.gearClear);
+  setHatches(V.air, V.hatches, true);
+  return V.air;
+}
 
 let interiorJob = null;
 
@@ -583,7 +678,10 @@ function loadInterior() {
       game.interior = m.buildInterior(shipMesh);
       // Шлюзы: давление, люки и трапы — по высоте корабля на шасси.
       makeAirlocks(game.interior, SHIP.gearClear);
+      // Люки, с которыми корабль оставили (сохранение), — сразу открыты.
+      if (ship.hatchesWant) { setHatches(game.interior.air, ship.hatchesWant, true); ship.hatchesWant = null; }
       syncCargo(true);
+      restoreMe();
       return game.interior;
     }).catch((e) => {
       console.warn('помещения корабля не собрались', e);
@@ -602,9 +700,13 @@ function syncCargo(force = false) {
   let tons = 0;
   for (const c of game.player.cargo || []) tons += c.tons || 0;
   const n = Math.min(I.slots.length, Math.max(0, Math.ceil(tons / I.crate.tons - 1e-9)));
-  if (!force && n === I.cargo) return;
-  I.cargo = n;
-  game.walk.crates = crateSolids(I, n * I.crate.tons);
+  // В чужом трюме — чужой груз: каков он, сокет не говорит, и ящиков
+  // своего трюма там быть не может. Ящики — только на своей палубе.
+  const own = aboardVessel().own;
+  if (!force && n === I.cargo && own === I.cargoOwn) return;
+  I.cargo = own ? n : 0;
+  I.cargoOwn = own;
+  game.walk.crates = own ? crateSolids(I, n * I.crate.tons) : [];
 }
 
 /** Встать с кресла: в полёте, на грунте и в порту. */
@@ -625,6 +727,7 @@ game.rise = () => {
   st.view = 'cockpit';
   // Голова, повёрнутая в кресле, остаётся повёрнутой и на ногах.
   standUp(game.walk, game.interior, { yaw: game.camOrbit.yaw, pitch: 0 });
+  boardVessel(ownVessel);
   game.camOrbit.yaw = 0;
   game.camOrbit.pitch = 0;
   game.menu.open = false;
@@ -639,16 +742,63 @@ game.rise = () => {
   say(st, st.mode === ST.FLIGHT
     ? L('ПИЛОТ ВСТАЛ · КОРАБЛЬ ДЕРЖИТ КУРС И ТЯГУ')
     : L('ПИЛОТ ВСТАЛ С КРЕСЛА'), '#9fd9ff', 3);
+  save();
   return true;
 };
 
-/** Сесть: только у кресла и стоя на палубе. */
+/**
+ * Взойти на борт корабля (свой или чужой): ноги и взгляд уже в его осях,
+ * здесь — чьи шлюзы под ногами, чей груз в трюме, кто ещё на палубе.
+ */
+function boardVessel(V) {
+  const w = game.walk;
+  w.vessel = V;
+  w.air = V.own ? null : vesselAir(V);
+  w.out = null;
+  game.frame = V;
+  syncCargo(true);
+}
+
+/**
+ * Сесть: только у кресла и стоя на палубе — и только в своём корабле.
+ *
+ * Чужой корабль везёт, но не слушается: в его кресле сидит (или
+ * сядет) его хозяин. Свой, но другой (кораблей бывает несколько), —
+ * сесть в кресло значит принять им командование: это решает сервер
+ * (Players::command), и после ответа игра ведёт уже его.
+ */
 game.sit = () => {
   const w = game.walk;
   if (!w.on || w.phase !== 'walk' || !game.interior || !nearSeat(w, game.interior)) return false;
+  const V = aboardVessel();
+  if (!V.own) {
+    if (V.by !== null && V.by === myId()) { takeCommand(V); return true; }
+    say(game.state, L('КРЕСЛО ПИЛОТА — ЗА ХОЗЯИНОМ: ') + (V.name || L('ПИЛОТ')), '#ffcc66', 3);
+    return true;
+  }
   sitDown(w);
   return true;
 };
+
+/** Принять командование другим своим кораблём: сесть в его кресло. */
+async function takeCommand(V) {
+  if (!isOnline()) { say(game.state, L('НЕТ СВЯЗИ С СЕРВЕРОМ'), '#ff7a66', 3); return; }
+  say(game.state, L('ПРИНИМАЮ КОМАНДОВАНИЕ…'), '#9fd9ff', 2);
+  try {
+    // Где стоял прежний корабль — в базу до пересадки: дальше его место
+    // пишет уже не эта игра (он засыпает там, где стоит).
+    save(true);
+    const state = await serverCommand(V.id);
+    seatPilot();
+    applyState(serverToSave(state));
+    applyServer(game.player, state);
+    syncFromServer(game, state);
+    save();
+    say(game.state, L('КОМАНДОВАНИЕ ПРИНЯТО'), '#78e08f', 3);
+  } catch (e) {
+    say(game.state, L('КОМАНДОВАНИЕ: ') + e.message, '#ff7a66', 4);
+  }
+}
 
 /** Сел: мышь — обратно курсором, вид — тот, что был, порт — экраном. */
 function seated() {
@@ -663,14 +813,19 @@ function seated() {
   input.releaseAll();
   st.view = game.walk.prevView || 'cockpit';
   game.walkEye = null;
+  game.frame = ownVessel;
   if (st.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
   say(st, L('ПИЛОТ В КРЕСЛЕ'), '#78e08f', 2);
+  save();
 }
 
 /** В кресло сразу, без шага: крушение, страховка, новая игра. */
 function seatPilot() {
   // Шлюзы — сразу закрыты и под давлением: крушение, страховка, рестарт.
   if (game.interior) resetAirlocks(game.interior.air);
+  game.frame = ownVessel;
+  game.walk.vessel = null;
+  game.walk.air = null;
   if (!game.walk.on) return;
   seatNow(game.walk);
   input.unlock();
@@ -686,7 +841,7 @@ function walkKeys() {
   // Люк под рукой — E открывает и закрывает (у пульта в шлюзе, в проёме,
   // на трапе и под люком снаружи).
   if (game.walkHatch && input.pressed('KeyE')) {
-    useHatch(game.walkHatch);
+    useHatch(game.walkHatch, game.walkHatchShip || ownVessel);
   } else if (input.pressed('KeyE', 'KeyY')) {
     if (!game.sit() && input.pressed('KeyY')) {
       say(st, L('КРЕСЛО ПИЛОТА — В РУБКЕ: ПОДОЙДИТЕ К НЕМУ'), '#ffcc66', 2.5);
@@ -698,6 +853,8 @@ function walkKeys() {
     showHelp(game);
     return;
   }
+  // Список пилотов — и на ногах: кто где, на чьём борту.
+  if (input.pressed('KeyP')) game.showPilots = !game.showPilots;
   // Мышь — щелчком по кадру: браузер отдаёт её только по действию игрока
   // (после Esc её приходится брать заново).
   if (input.mouse.clicked && !input.locked && !Q.touchUi) input.lock(screenCanvas);
@@ -708,18 +865,32 @@ const _walkDrag = { x: 0, y: 0 };
 const _walkTouch = { x: 0, y: 0 };
 const _eyeM = [0, 0, 0];
 
+/**
+ * Кто ещё стоит на этой палубе — точки ног в осях корабля: перед ними
+ * открываются двери (js/game/walker.js, w.others).
+ */
+function othersAboard(V, out) {
+  out.length = 0;
+  if (!V || V.id === null || V.id === undefined) return out;
+  for (const p of game.people) if (p.st !== 'out' && p.ship === V.id) out.push(p.p);
+  return out;
+}
+
 /** Шаг пилота: ноги, голова, двери, комната. По времени кадра. */
 function walkFrame(dt) {
   const w = game.walk, I = game.interior, st = game.state;
   if (!I) return;
+  const V = aboardVessel();
+  othersAboard(V, w.others || (w.others = []));
   // Под справкой, меню и картой ноги стоят: ввод сейчас не их.
   if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open) {
     game.walkEye = w.out ? null : walkerEye(w, I, _eyeM);
     return;
   }
   syncCargo();
-  // Реакторы машинного горят по работе движков: на стоянке — дежурно.
-  I.reactor = st.mode === ST.FLIGHT
+  // Реакторы машинного горят по работе движков: на стоянке — дежурно. У
+  // чужого корабля — по тому, как работают его подъёмные (снимок сокета).
+  I.reactor = !V.own ? clamp(0.08 + (V.lift || 0), 0, 1) : st.mode === ST.FLIGHT
     ? clamp(Math.abs(ship.throttle) + (ship.boosting ? 0.5 : 0) + Math.abs(ship.control.lift || 0) * 0.3, 0, 1)
     : 0.08;
   input.takeLook(_look);
@@ -754,8 +925,32 @@ function walkFrame(dt) {
   game.walkIntro = Math.max(0, game.walkIntro - dt);
   if (ev.seated) seated();
   game.walkEye = w.on && !w.out ? walkerEye(w, I, _eyeM) : null;
-  game.walkHatch = w.on && w.phase === 'walk' && I.air
-    ? hatchNear(I.air, I, w.out ? walkerShipPos() : w.pos, !!w.out) : null;
+  findHatch();
+}
+
+/**
+ * Люк под рукой: на палубе — того корабля, где стоишь; за бортом —
+ * ближайшего, к которому подошёл (свой ли, чужой ли).
+ */
+function findHatch() {
+  const w = game.walk, I = game.interior;
+  game.walkHatch = null;
+  game.walkHatchShip = null;
+  if (!w.on || w.phase !== 'walk' || !I) return;
+  if (!w.out) {
+    const V = aboardVessel();
+    const air = V.own ? I.air : V.air;
+    if (air) { game.walkHatch = hatchNear(air, I, w.pos, false); game.walkHatchShip = V; }
+    return;
+  }
+  groundToWorld(w.out, w.pos, _feetW);
+  for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
+    const air = V.own ? I.air : V.air;
+    if (!air) continue;
+    shipToGround(w.out, V, _outT);
+    const hx = hatchNear(air, I, groundPointToShip(_outT, w.pos, _wsp), true);
+    if (hx) { game.walkHatch = hx; game.walkHatchShip = V; return; }
+  }
 }
 
 // --- шлюзы и пилот за бортом -------------------------------------------------
@@ -763,20 +958,29 @@ function walkFrame(dt) {
 // Шлюзы живут каждый кадр, сидит пилот или ходит: люки закрываются и после
 // того, как он сел (js/game/airlock.js). Отсюда им приходит то, чего сам
 // шлюз не знает: давление за бортом, грунт под трапом и запреты.
+//
+// У ЧУЖОГО корабля люки просит открытыми тот, кто его ведёт (поле h
+// снимка), — а цикл, панель и трап у каждого зрителя идут свои, по тем
+// же правилам: шлюз проверен в Node, и разойтись нечему.
 
 /** Нарисованный грунт (по нему стоят ноги) или настоящий, если сцены нет. */
 const groundOf = (body, dir) => (scene ? scene.drawnGround(body, dir) : groundRadius(body, dir));
 
-/** Давление за бортом, бар: воздух тела на высоте корабля, в порту и в пустоте — ноль. */
-function outsidePressure() {
-  if (game.state.mode === ST.DOCKED) return 0;
+/** Давление у точки мира, бар: воздух тел на этой высоте, в пустоте — ноль. */
+function pressureAt(P) {
   let p = 0;
   for (const b of world.bodies) {
     if (!b.atmo) continue;
-    const alt = Math.hypot(ship.pos.x - b.pos.x, ship.pos.y - b.pos.y, ship.pos.z - b.pos.z) - b.radius;
+    const alt = Math.hypot(P.x - b.pos.x, P.y - b.pos.y, P.z - b.pos.z) - b.radius;
     if (alt < b.radius * ENTRY.top) p = Math.max(p, airDensity(b, Math.max(0, alt)));
   }
   return p;
+}
+
+/** Давление за бортом своего корабля, бар: в порту — ноль. */
+function outsidePressure() {
+  if (game.state.mode === ST.DOCKED) return 0;
+  return pressureAt(ship.pos);
 }
 
 // Выше этой скорости относительно воздуха панель люка сорвало бы потоком,
@@ -802,58 +1006,130 @@ const _gp = v3(), _gd = v3(), _gw = v3();
  * null: тела рядом нет, или до грунта больше трёхсот метров (трапу до
  * него не достать, а считать рельеф незачем).
  */
-function groundShip(x, z) {
-  const zone = game.zone;
-  if (!zone || !zone.body || zone.alt > 0.3 || game.state.mode === ST.DOCKED) return null;
-  const body = zone.body, b = ship.basis, y = -8;
-  _gp.x = ship.pos.x + (b.right.x * x + b.up.x * y + b.fwd.x * z) / 1000;
-  _gp.y = ship.pos.y + (b.right.y * x + b.up.y * y + b.fwd.y * z) / 1000;
-  _gp.z = ship.pos.z + (b.right.z * x + b.up.z * y + b.fwd.z * z) / 1000;
+function groundUnder(V, x, z) {
+  const body = vesselBody(V);
+  if (!body) return null;
+  if (V.own) {
+    const zone = game.zone;
+    if (!zone || zone.alt > 0.3 || game.state.mode === ST.DOCKED) return null;
+  } else {
+    // Высота — над РЕЛЬЕФОМ, а не над уровнем моря: суша бывает на
+    // километры выше, и трап соседа, стоящего на плато, иначе «не видел»
+    // бы грунта под собой.
+    if (V.mode === 'docked') return null;
+    const dirV = localDir(body, V.pos, _gd);
+    if (Math.hypot(V.pos.x - body.pos.x, V.pos.y - body.pos.y, V.pos.z - body.pos.z) - groundOf(body, dirV) > 0.3) return null;
+  }
+  const b = V.basis, y = -8;
+  _gp.x = V.pos.x + (b.right.x * x + b.up.x * y + b.fwd.x * z) / 1000;
+  _gp.y = V.pos.y + (b.right.y * x + b.up.y * y + b.fwd.y * z) / 1000;
+  _gp.z = V.pos.z + (b.right.z * x + b.up.z * y + b.fwd.z * z) / 1000;
   const dir = localDir(body, _gp, _gd);
   worldPoint(body, dir, groundOf(body, dir), _gw);
-  return ((_gw.x - ship.pos.x) * b.up.x + (_gw.y - ship.pos.y) * b.up.y + (_gw.z - ship.pos.z) * b.up.z) * 1000;
+  return ((_gw.x - V.pos.x) * b.up.x + (_gw.y - V.pos.y) * b.up.y + (_gw.z - V.pos.z) * b.up.z) * 1000;
 }
+const groundShip = (x, z) => groundUnder(ownVessel, x, z);
 
-/** Стоит ли пилот в проёме или на трапе этого люка: закрывать его нельзя. */
-function hatchOccupied(hx) {
+/**
+ * Стоит ли кто-нибудь в проёме или на трапе этого люка корабля V: сам
+ * пилот или другие люди (их видно по сокету). Закрывать его нельзя —
+ * трап уехал бы из-под ног, а панель прошла бы сквозь человека.
+ */
+const _occP = [0, 0, 0];
+function hatchOccupied(hx, V = ownVessel, onlyMe = false) {
   const w = game.walk, I = game.interior;
-  if (!w.on || !I) return false;
-  if (w.out) {
-    const p = walkerShipPos();
-    return onStair(hx, p) || Math.abs(Math.abs(p[0]) - hx.h.skin) < 0.8 && Math.abs(p[2] - hx.zc) < 2;
+  if (!I) return false;
+  const air = V.own ? I.air : V.air;
+  const inHatch = (p) => tunnelAt(air, I, p) === hx || onStair(hx, p)
+    || (Math.abs(Math.abs(p[0]) - hx.h.skin) < 0.8 && Math.abs(p[2] - hx.zc) < 2 && p[1] < hx.h.y[1] + 0.5 && p[1] > hx.h.y[0] - 6);
+  if (w.on) {
+    if (w.out) {
+      shipToGround(w.out, V, _outT);
+      if (inHatch(groundPointToShip(_outT, w.pos, _occP))) return true;
+    } else if (aboardVessel() === V && tunnelAt(air, I, w.pos) === hx) return true;
   }
-  return tunnelAt(I.air, I, w.pos) === hx;
+  if (onlyMe) return false;
+  for (const p of game.people) {
+    if (p.st !== 'out' && p.ship === V.id) { if (tunnelAt(air, I, p.p) === hx) return true; continue; }
+    if (p.st === 'out' && p.here && inHatch(worldToVessel(V, p.place.pos, _occP))) return true;
+  }
+  return false;
 }
 
-const _airEnv = { pOut: 0, block: null, ground: groundShip, occupied: hatchOccupied };
+const _airEnv = { pOut: 0, block: null, ground: groundShip, occupied: (hx) => hatchOccupied(hx, ownVessel) };
+const _airEnvV = { pOut: 0, block: null, ground: null, occupied: null };
 
-/** Шаг шлюзов — каждый кадр. */
+/** Шаг шлюзов — каждый кадр: своего корабля и чужих рядом. */
 function airFrame(dt) {
   const I = game.interior;
   if (!I || !I.air) return;
   const st = game.state;
-  _airEnv.pOut = outsidePressure();
-  _airEnv.block = hatchBlock(_airEnv.pOut);
-  const ev = updateAirlocks(I.air, _airEnv, dt);
+  if (!ship.away) {
+    _airEnv.pOut = outsidePressure();
+    _airEnv.block = hatchBlock(_airEnv.pOut);
+    const ev = updateAirlocks(I.air, _airEnv, dt);
+    airSounds(ev, I.air, ownVessel);
+    for (const e of ev) {
+      if (e.kind === 'forced' && game.walk.on) say(st, _airEnv.block + L(' · ЛЮКИ ЗАКРЫВАЮТСЯ'), '#ffcc66', 3);
+    }
+  }
+  for (const V of game.peers) {
+    if (!vesselAir(V)) continue;
+    // Далеко — считать цикл незачем: люки сразу как велено.
+    if (Math.hypot(V.pos.x - camera.pos.x, V.pos.y - camera.pos.y, V.pos.z - camera.pos.z) > 3) {
+      setHatches(V.air, V.hatches, true);
+      continue;
+    }
+    setHatches(V.air, V.hatches);
+    // Сам пилот в проёме чужого люка — у себя он его не закроет под
+    // ногами: хозяин мог не успеть увидеть его там.
+    for (const hx of V.air.hatches) if (!hx.want && hx.open > 0 && hatchOccupied(hx, V, true)) hx.want = true;
+    _airEnvV.pOut = V.mode === 'docked' ? 0 : pressureAt(V.pos);
+    _airEnvV.ground = V._ground || (V._ground = (x, z) => groundUnder(V, x, z));
+    _airEnvV.occupied = V._occ || (V._occ = (hx) => hatchOccupied(hx, V, true));
+    airSounds(updateAirlocks(V.air, _airEnvV, dt), V.air, V);
+  }
+}
+
+/** Звуки шлюза — того корабля, где пилот, или рядом с которым он стоит. */
+function airSounds(ev, air, V) {
+  if (!ev.length) return;
+  const near = aboardVessel() === V
+    || Math.hypot(V.pos.x - camera.pos.x, V.pos.y - camera.pos.y, V.pos.z - camera.pos.z) < 0.08;
+  if (!near) return;
   for (const e of ev) {
     if (e.kind === 'hatch') audioCue(game.audio, 'door', { dur: AIR.hatchTime });
     else if (e.kind === 'stair') audioCue(game.audio, 'door', { dur: AIR.stairTime });
     else if (e.kind === 'cycle') {
-      const L0 = I.air.locks[e.id];
-      const dp = Math.abs((e.dir === 'in' ? AIR.cabin : I.air.pOut) - L0.p);
+      const L0 = air.locks[e.id];
+      const dp = Math.abs((e.dir === 'in' ? AIR.cabin : air.pOut) - L0.p);
       if (dp > 0.02) audioCue(game.audio, 'air', { gain: 0.15 + 0.3 * Math.min(1, dp), dur: dp / AIR.rate + 0.3 });
-    } else if (e.kind === 'rush') {
+    } else if (e.kind === 'rush' && aboardVessel() === V) {
       // Дверь открылась между разными давлениями — воздух рванул.
       const k = Math.min(1, e.dp);
       audioCue(game.audio, 'air', { gain: 0.2 + 0.4 * k, dur: 1 + 3 * k });
-    } else if (e.kind === 'forced' && game.walk.on) say(st, _airEnv.block + L(' · ЛЮКИ ЗАКРЫВАЮТСЯ'), '#ffcc66', 3);
+    }
   }
 }
 
-/** E у люка: открыть или закрыть. */
-function useHatch(hx) {
+/**
+ * E у люка: открыть или закрыть.
+ *
+ * Свой — сразу. Чужой — просьбой (js/net/socket.js, askHatch): решит тот,
+ * кто его ведёт (у него напор воздуха и прыжок), а спящий корабль — сервер.
+ */
+function useHatch(hx, V = ownVessel) {
   const I = game.interior, st = game.state;
-  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx) });
+  if (!V.own) {
+    if (!isOnline() || !askHatch(V.id, hx.id, !hx.want)) {
+      say(st, L('НЕТ СВЯЗИ: ЛЮК ЧУЖОГО КОРАБЛЯ НЕ ОТКРЫТЬ'), '#ff7a66', 3);
+      return;
+    }
+    say(st, (hx.want ? L('ПРОСЬБА ЗАКРЫТЬ ЛЮК') : L('ПРОСЬБА ОТКРЫТЬ ЛЮК')) + ' · ' + (V.name || L('ПИЛОТ')),
+      '#9fd9ff', 2.5);
+    return;
+  }
+  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx, ownVessel) });
   if (res === 'occupied') { say(st, L('ЛЮК НЕ ЗАКРЫТЬ: ОТОЙДИТЕ ОТ ПРОЁМА'), '#ffcc66', 2.5); return; }
   if (res) { say(st, res, '#ff7a66', 3); return; }
   if (hx.want) {
@@ -862,30 +1138,52 @@ function useHatch(hx) {
   } else {
     say(st, L('ЛЮК ЗАКРЫВАЕТСЯ'), '#9fd9ff', 2);
   }
+  save();
+}
+
+/**
+ * Просьба о люке НАШЕГО корабля от другого игрока (сокет, hatchreq):
+ * открываем по своим правилам — те же запреты, что и для себя.
+ */
+function hatchRequest(ev) {
+  const I = game.interior;
+  if (!I || !I.air || ship.away || ev.ship !== ship.id) return;
+  const hx = hatchById(I.air, String(ev.id));
+  if (!hx || hx.want === !!ev.open) return;
+  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx, ownVessel) });
+  if (res === null) {
+    say(game.state, (ev.open ? L('ЛЮК ОТКРЫВАЕТ: ') : L('ЛЮК ЗАКРЫВАЕТ: ')) + (ev.name || L('ПИЛОТ')), '#9fd9ff', 3);
+    save();
+  }
 }
 
 // --- за бортом: оси грунта (js/game/outside.js) --------------------------------
 
+// Корабли дальше этого от ног за бортом не трогаются: на их трап и
+// стойки не наступить, а перекладывать их твёрдое в оси грунта незачем.
+const OUT_NEAR = 0.15;          // км
+
 const _outT = { R: new Float64Array(9), t: [0, 0, 0] };
-const _shipBoxes = [], _outSolids = [], _airBuf = [];
+const _shipBoxes = [], _outSolids = [], _airBuf = [], _nearV = [];
 let _tunnelSolids = null, _under = null;
 const _feetW = v3();
 const _wsp2 = [0, 0, 0];
 
-/** Ноги пилота за бортом — в осях корабля, м. */
+/** Ноги пилота за бортом — в осях корабля V, м. */
 const _wsp = [0, 0, 0];
-function walkerShipPos() {
+function walkerShipPos(V = ownVessel) {
   const w = game.walk;
   if (!w.out) return w.pos;
-  shipToGround(w.out, ship, _outT);
+  shipToGround(w.out, V, _outT);
   return groundPointToShip(_outT, w.pos, _wsp);
 }
 
 /** Стойки шасси — коробками (оси корабля, м): мимо них ходят, а не сквозь. */
-function gearBoxes(out) {
-  if (!ship.gear || ship.gear.t < 0.5) return;
+function gearBoxes(V, out) {
+  const g = V.gear;
+  if (!g || g.t < 0.5) return;
   gearMesh.hardpoints.forEach((hp, i) => {
-    const len = (gearMesh.legLengths[i] + (ship.gear.drop ? ship.gear.drop[i] : 0)) * ship.gear.t * 1000;
+    const len = (gearMesh.legLengths[i] + (g.drop ? g.drop[i] : 0)) * g.t * 1000;
     const x = hp.x * 1000, y = hp.y * 1000, z = hp.z * 1000;
     out.push({ lo: [x - 0.3, y - len, z - 0.3], hi: [x + 0.3, y, z + 0.3], gear: i });
   });
@@ -894,26 +1192,35 @@ function gearBoxes(out) {
 const groundOut = (x, z) => groundY(game.walk.out, x, z, groundOf);
 const waterOut = (x, z) => waterUnder(game.walk.out, x, z);
 
-/** Мир за бортом на этот кадр: твёрдое корабля в осях грунта, грунт, вода, тяжесть. */
+/**
+ * Мир за бортом на этот кадр: твёрдое КАЖДОГО корабля рядом в осях
+ * грунта (порог, трап, стойки, днище), грунт, вода, тяжесть. Кораблей два
+ * рядом — и упираешься в стойки обоих.
+ */
 function outsideFrame() {
   const w = game.walk, G = w.out, I = game.interior;
-  shipToGround(G, ship, _outT);
   if (!_tunnelSolids || _tunnelSolids.of !== I) {
     const ids = new Set(I.hatches.map((h) => h.id));
     _tunnelSolids = I.solids.filter((s) => (s.sill && ids.has(s.sill)) || s.hatchWall);
     _tunnelSolids.of = I;
   }
-  _shipBoxes.length = 0;
-  for (const s of _tunnelSolids) _shipBoxes.push(s);
-  for (const s of airSolids(I.air, _airBuf)) _shipBoxes.push(s);
-  gearBoxes(_shipBoxes);
-  // Днище — коробками вокруг пилота: на лёгком теле прыгают выше, чем
-  // висит корпус.
   if (!_under) _under = hullUnderside(shipMesh);
-  undersideBoxes(_under, groundPointToShip(_outT, w.pos, _wsp2), 2.5, _shipBoxes);
-  _outSolids.length = _shipBoxes.length;
-  for (let i = 0; i < _shipBoxes.length; i++) _outSolids[i] = boxToGround(_outT, _shipBoxes[i], _outSolids[i] || {});
   groundToWorld(G, w.pos, _feetW);
+  let n = 0;
+  for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
+    const air = V.own ? I.air : V.air;
+    const T = V._T || (V._T = { R: new Float64Array(9), t: [0, 0, 0] });
+    shipToGround(G, V, T);
+    _shipBoxes.length = 0;
+    for (const s of _tunnelSolids) _shipBoxes.push(s);
+    for (const s of airSolids(air, _airBuf)) _shipBoxes.push(s);
+    gearBoxes(V, _shipBoxes);
+    // Днище — коробками вокруг пилота: на лёгком теле прыгают выше, чем
+    // висит корпус.
+    undersideBoxes(_under, groundPointToShip(T, w.pos, _wsp2), 2.5, _shipBoxes);
+    for (const s of _shipBoxes) { _outSolids[n] = boxToGround(T, s, _outSolids[n] || {}); n++; }
+  }
+  _outSolids.length = n;
   return outsideWorld(_outSolids, groundOut, waterOut, gravityAt(G.body, _feetW) * 1000);
 }
 
@@ -945,34 +1252,46 @@ function reframe(w, rot) {
 /**
  * Порог люка: шаг за обшивку — в оси грунта, шаг с трапа в тоннель — в
  * оси корабля. Переносится всё: ноги, скорость, взгляд.
+ *
+ * С трапа входят в ЛЮБОЙ корабль рядом — в тот, в чей тоннель шагнули.
  */
 function crossThreshold() {
   const w = game.walk, I = game.interior;
   if (!w.on || w.phase !== 'walk' || !I || !I.air) return;
   if (!w.out) {
-    const hx = pastSkin(I.air, w.pos);
-    if (!hx || !hx.exitOk || !game.zone || !game.zone.body) return;
-    const b = ship.basis, p = w.pos;
-    _feetW.x = ship.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
-    _feetW.y = ship.pos.y + (b.right.y * p[0] + b.up.y * p[1] + b.fwd.y * p[2]) / 1000;
-    _feetW.z = ship.pos.z + (b.right.z * p[0] + b.up.z * p[1] + b.fwd.z * p[2]) / 1000;
-    const G = makeGroundFrame(game.zone.body, _feetW, b.fwd);
-    shipToGround(G, ship, _outT);
+    const V = aboardVessel();
+    const air = V.own ? I.air : V.air;
+    const hx = pastSkin(air, w.pos);
+    const body = vesselBody(V);
+    if (!hx || !hx.exitOk || !body) return;
+    vesselPoint(V, w.pos, _feetW);
+    const G = makeGroundFrame(body, _feetW, V.basis.fwd);
+    shipToGround(G, V, _outT);
     reframe(w, shipDirToGround);
     w.pos = worldToGround(G, _feetW);
     w.out = G;
     w.room = null;
+    w.vessel = null;
+    w.air = null;
+    game.frame = ownVessel;
     game.walkRoomT = 3;
+    save();
     return;
   }
-  shipToGround(w.out, ship, _outT);
-  const p = groundPointToShip(_outT, w.pos, [0, 0, 0]);
-  if (tunnelAt(I.air, I, p)) {
+  groundToWorld(w.out, w.pos, _feetW);
+  for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
+    const air = V.own ? I.air : V.air;
+    if (!air) continue;
+    shipToGround(w.out, V, _outT);
+    const p = groundPointToShip(_outT, w.pos, [0, 0, 0]);
+    if (!tunnelAt(air, I, p)) continue;
     reframe(w, groundDirToShip);
     w.pos = p;
-    w.out = null;
+    boardVessel(V);
     w.room = I.roomAt(p);
     game.walkRoomT = 2.6;
+    if (!V.own) say(game.state, L('НА БОРТУ: КОРАБЛЬ ') + (V.name || L('ПИЛОТА')), '#9fd9ff', 3);
+    save();
     return;
   }
   // Далеко от начала осей — перенести их к пилоту: кривизна тела.
@@ -989,9 +1308,16 @@ function crossThreshold() {
 function walkHints() {
   const w = game.walk;
   const fl = fuelLevel(ship);
+  const V = aboardVessel();
+  const seat = game.interior && nearSeat(w, game.interior);
   return {
-    seat: game.interior && nearSeat(w, game.interior)
-      ? (Q.touchUi ? L('СЕСТЬ — КНОПКА «СЕСТЬ»') : L('E — СЕСТЬ В КРЕСЛО ПИЛОТА')) : null,
+    seat: !seat ? null : !V.own
+      ? (V.by !== null && V.by === myId()
+        ? (Q.touchUi ? L('«СЕСТЬ» — ПРИНЯТЬ КОМАНДОВАНИЕ') : L('E — СЕСТЬ И ПРИНЯТЬ КОМАНДОВАНИЕ'))
+        : L('КРЕСЛО ПИЛОТА — ЗА ХОЗЯИНОМ: ') + (V.name || L('ПИЛОТ')))
+      : (Q.touchUi ? L('СЕСТЬ — КНОПКА «СЕСТЬ»') : L('E — СЕСТЬ В КРЕСЛО ПИЛОТА')),
+    // На чьём борту: свой корабль — не пишем, чужой — чей.
+    aboard: !w.out && !V.own ? L('НА БОРТУ: КОРАБЛЬ ') + (V.name || L('ПИЛОТА')) : null,
     mouse: !Q.touchUi && !input.locked && w.phase === 'walk'
       ? L('ЩЁЛКНИТЕ ПО КАДРУ — ВЗГЛЯД МЫШЬЮ · ESC — ОТПУСТИТЬ МЫШЬ') : null,
     intro: game.walkIntro > 0
@@ -1008,9 +1334,14 @@ function walkHints() {
 
 /** Подсказка у люка: что сделает E. */
 function hatchHint() {
-  const hx = game.walkHatch, I = game.interior;
+  const hx = game.walkHatch, I = game.interior, V = game.walkHatchShip || ownVessel;
   if (!hx || !I || !I.air) return null;
   const key = Q.touchUi ? L('«ЛЮК»') : 'E';
+  if (!V.own) {
+    // Люк чужого корабля: попросить того, кто его ведёт (или сервер).
+    return [key + (hx.want ? L(' — ПОПРОСИТЬ ЗАКРЫТЬ ЛЮК') : L(' — ПОПРОСИТЬ ОТКРЫТЬ ЛЮК'))
+      + ' · ' + (V.name || L('ПИЛОТ')), hx.want ? AIR_AMBER : AIR_GREEN];
+  }
   if (hx.want) {
     if (hx.stair >= 1 && !hx.exitOk && !game.walk.out) {
       return [key + L(' — ЗАКРЫТЬ ЛЮК · ЗА БОРТОМ НЕ НА ЧТО ВСТАТЬ'), AIR_AMBER];
@@ -1024,9 +1355,9 @@ const AIR_AMBER = '#ffcc66', AIR_RED = '#ff7a66', AIR_GREEN = '#78e08f';
 
 /** Строка о шлюзе, когда пилот в нём: давление и что происходит. */
 function lockHint() {
-  const w = game.walk, I = game.interior;
-  if (!I || !I.air || w.out || !w.room || w.room.kind !== 'lock') return null;
-  const s = lockStatus(I.air, w.room.id);
+  const w = game.walk, I = game.interior, air = airHere();
+  if (!I || !air || w.out || !w.room || w.room.kind !== 'lock') return null;
+  const s = lockStatus(air, w.room.id);
   const bar = s.p.toFixed(2) + L(' БАР');
   if (s.state === 'sealed') return [L('ШЛЮЗ ЗАДРАЕН · ') + bar, AIR_GREEN];
   if (s.state === 'cycle') return [(s.p > s.out ? L('СТРАВЛИВАНИЕ · ') : L('НАДДУВ · ')) + bar, AIR_AMBER];
@@ -1039,9 +1370,9 @@ function lockHint() {
  * в скафандре это не помеха — это видно, и только.
  */
 function pressHint() {
-  const w = game.walk, I = game.interior;
-  if (!I || !I.air || w.out || !w.room || w.room.kind === 'lock') return null;
-  const r = roomAir(I.air, w.room.id);
+  const w = game.walk, I = game.interior, air = airHere();
+  if (!I || !air || w.out || !w.room || w.room.kind === 'lock') return null;
+  const r = roomAir(air, w.room.id);
   if (!r || Math.abs(r.p - AIR.cabin) < 0.02) return null;
   const bar = r.p.toFixed(2) + L(' БАР');
   if (r.leak) return [L('РАЗГЕРМЕТИЗАЦИЯ · ') + bar, AIR_RED];
@@ -1068,11 +1399,17 @@ function stepSurface() {
   return growth(body, terrainOf(body), _stepDir.x, _stepDir.y, _stepDir.z) > STEP_GRASS ? 'grass' : 'ground';
 }
 
+/** Шлюзы корабля, на палубе которого пилот. */
+function airHere() {
+  const V = aboardVessel();
+  return V.own ? (game.interior && game.interior.air) : V.air;
+}
+
 /** Воздух у ног, бар: в помещении — его давление (js/game/airlock.js), за бортом — тела. */
 function feetAir() {
-  const w = game.walk, I = game.interior;
+  const w = game.walk, air = airHere();
   if (!w.out) {
-    const r = I && I.air && w.room ? roomAir(I.air, w.room.id) : null;
+    const r = air && w.room ? roomAir(air, w.room.id) : null;
     return r ? r.p : 1;
   }
   const G = w.out;
@@ -1089,7 +1426,9 @@ function outHint() {
   groundToWorld(G, w.pos, _feetW);
   const g = gravityAt(G.body, _feetW) * 1000;
   const p = feetAir();
-  const d = Math.hypot(_feetW.x - ship.pos.x, _feetW.y - ship.pos.y, _feetW.z - ship.pos.z) * 1000;
+  // До своего корабля — если он в этой системе: пассажир чужого корабля
+  // мог оставить свой за световые годы отсюда.
+  const d = ship.away ? 0 : Math.hypot(_feetW.x - ship.pos.x, _feetW.y - ship.pos.y, _feetW.z - ship.pos.z) * 1000;
   return {
     name: L('ЗА БОРТОМ') + ' · ' + G.body.name,
     info: L('ТЯЖЕСТЬ ') + g.toFixed(1) + L(' М/С²') + ' · ' + (p > 0.005 ? L('ВОЗДУХ ') + p.toFixed(2) + L(' БАР') : L('ВАКУУМ')),
@@ -1227,6 +1566,84 @@ function selectTarget(t) {
 }
 
 // --- сохранение --------------------------------------------------------------
+//
+// В сохранении ДВА места, и это главное, что здесь надо помнить:
+//
+//   ship — где корабль, которым пилот командует: система, порт, стоянка,
+//          якорь, точка, люки. Корабль стоит там, где его оставили, —
+//          даже если сам пилот ушёл пешком или улетел пассажиром;
+//   me   — где сам пилот: в кресле своего корабля, на палубе (своего
+//          или чужого), на грунте.
+//
+// При входе в игру пилот оказывается там, где был, а не за штурвалом.
+
+/** Где корабль, которым пилот командует: то, что пишет сервер в `ship`. */
+function shipRecord() {
+  if (ship.away && ship.keep) return ship.keep;
+  return {
+    id: ship.id,
+    system: ship.away ? ship.sysId : sys.id,
+    pos: ship.pos,
+    basis: ship.basis,
+    docked: ship.dockedAt ? ship.dockedAt.id : null,
+    // Стоянка на поверхности хранится в локальных осях тела: мировые
+    // координаты через сутки указывали бы в пустоту.
+    landed: ship.landedAt
+      ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
+      : null,
+    // ...и место в ПОЛЁТЕ — по той же причине и в тех же осях
+    // (js/game/anchor.js). Мир при входе ставится на серверное «сейчас»,
+    // а корабль — туда, где он был записан: за час между этими двумя
+    // моментами грунт Lave IV уезжает на восемьсот километров.
+    anchor: game.state.mode === ST.FLIGHT ? shipAnchor(game.capture, ship) : null,
+    gear: ship.gear.out,
+    // Открытые люки: корабль, который хозяин оставил с открытым трапом,
+    // так и стоит — и в него можно зайти.
+    hatches: ship.hatchesWant ? ship.hatchesWant.slice()
+      : openHatches(game.interior && game.interior.air),
+  };
+}
+
+const r3 = (v) => Math.round(v * 1000) / 1000;
+const r6 = (v) => Math.round(v * 1e6) / 1e6;
+
+/** Куда смотрит идущий — по горизонту палубы или грунта: [x, 0, z]. */
+function walkFace(w, out = [0, 0, 1]) {
+  out[0] = Math.sin(w.yaw); out[1] = 0; out[2] = Math.cos(w.yaw);
+  return out;
+}
+
+/** Где сам пилот: то, что пишет сервер в `me`. */
+function meRecord() {
+  const w = game.walk, I = game.interior;
+  // Пилота ещё не поставили (помещения грузятся): где он, знает запись,
+  // с которой игра поднялась. Иначе первое же сохранение после входа
+  // усадило бы в кресло того, кто вышел из игры на грунте.
+  if (game.pendingMe) return game.pendingMe;
+  if (!w.on) return { aboard: ship.id, own: true, seated: true };
+  if (w.out) {
+    const G = w.out;
+    groundToWorld(G, w.pos, _feetW);
+    const o = bodyLocal(G.body, _feetW);
+    const f = bodyLocalDir(G.body, groundDirToWorld(G, walkFace(w)));
+    return {
+      system: sys.id,
+      out: {
+        body: G.body.id,
+        o: { x: r6(o.x), y: r6(o.y), z: r6(o.z) },
+        f: { x: r6(f.x), y: r6(f.y), z: r6(f.z) },
+        pitch: r3(w.pitch),
+      },
+    };
+  }
+  const V = aboardVessel();
+  // Встаёт или садится — точка за креслом: там он и окажется при входе.
+  const p = w.phase === 'walk' ? w.pos : (I ? I.seat.stand : w.pos);
+  return {
+    aboard: V.id, own: !!V.own, seated: false,
+    walk: { pos: [r3(p[0]), r3(p[1]), r3(p[2])], yaw: r3(w.yaw), pitch: r3(w.pitch) },
+  };
+}
 
 /**
  * Что именно сохраняется. Вынесено из save() отдельно, потому что этот
@@ -1236,15 +1653,15 @@ function selectTarget(t) {
  */
 function savePayload() {
   return {
-    // Система — первым делом: всё остальное в сейве (цель, порт, точка
+    // Система, где САМ ПИЛОТ. Всё остальное в сейве (цель, порт, точка
     // стоянки) хранится идентификаторами тел, а те имеют смысл только
     // внутри своей системы.
     system: sys.id,
+    ship: shipRecord(),
+    me: meRecord(),
     // Цель варпа — часть плана полёта, как и обычная цель: выбрал
     // систему, отложил игру, вернулся.
     warpTo: game.warpTarget ? game.warpTarget.id : null,
-    pos: ship.pos,
-    basis: ship.basis,
     hull: ship.hull,
     shield: ship.shield,
     // Бак — для автономной игры: сервер это поле не читает вовсе, топливо
@@ -1257,20 +1674,8 @@ function savePayload() {
     // тем же полем хранится номер тела. Записав одно вместо другого, при
     // следующем входе получим цель «планета номер семь».
     target: savedTargetId(),
-    view: game.state.view,
-    docked: ship.dockedAt ? ship.dockedAt.id : null,
+    view: game.walk.on ? (game.walk.prevView || 'cockpit') : game.state.view,
     last: game.lastStation ? game.lastStation.id : null,
-    // Стоянка на поверхности хранится в локальных осях тела: мировые
-    // координаты через сутки указывали бы в пустоту.
-    landed: ship.landedAt
-      ? { id: ship.landedAt.id, pose: ship.landedPose, secured: ship.secured }
-      : null,
-    // ...и место в ПОЛЁТЕ — по той же причине и в тех же осях
-    // (js/game/anchor.js). Мир при входе ставится на серверное «сейчас»,
-    // а корабль — туда, где он был записан: за час между этими двумя
-    // моментами грунт Lave IV уезжает на восемьсот километров.
-    anchor: game.state.mode === ST.FLIGHT ? shipAnchor(game.capture, ship) : null,
-    gear: ship.gear.out,
     audio: { on: game.audio.on, vol: game.audio.vol },
     stats: game.stats,
     // Дела пилота переживают и смену системы, и смену корпуса.
@@ -1279,15 +1684,22 @@ function savePayload() {
   };
 }
 
-function save() {
+/**
+ * Сохранить: в браузер сразу, на сервер — фоном.
+ * @param now не ждать очереди (js/net/session.js): пересадка в другой корабль
+ */
+function save(now = false) {
   const data = savePayload();
   // Местное сохранение остаётся ВСЕГДА, даже когда есть сервер: это кэш,
   // с которого игра поднимется, если сети не окажется в следующий раз.
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
   } catch (e) { /* приватный режим — просто не сохраняем */ }
+  // Свой корабль в другой системе — его место серверу не пишем: где он
+  // стоит, сервер знает лучше нас (мы его давно не видели).
+  const out = ship.away ? Object.assign({}, data, { ship: null }) : data;
   // А на сервер оно уходит фоном и не чаще, чем нужно (js/net/session.js).
-  queueSave(data);
+  if (now) { session.dirty = out; flushSave(); } else queueSave(out);
 }
 
 function load() {
@@ -1295,6 +1707,14 @@ function load() {
   try { s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { s = null; }
   if (!s) return false;
   return applyState(s);
+}
+
+/** Место корабля в сохранении старого вида (полями верхнего уровня). */
+function legacyShip(s) {
+  return {
+    id: undefined, system: s.system === undefined ? 0 : s.system, pos: s.pos, basis: s.basis,
+    docked: s.docked, landed: s.landed, anchor: s.anchor, gear: s.gear, hatches: [],
+  };
 }
 
 /**
@@ -1308,12 +1728,16 @@ function load() {
  */
 function applyState(s) {
   if (!s) return false;
-  // Система восстанавливается ДО всего остального: пока она не та, любой
-  // идентификатор из сейва указывает в чужой список тел.
-  const saved = systemById(s.system === undefined ? 0 : s.system);
+  const me = s.me || null;
+  const rec = s.ship || legacyShip(s);
+  // Система — ДО всего остального: пока она не та, любой идентификатор
+  // из сейва указывает в чужой список тел. И это система ПИЛОТА: его
+  // корабль мог остаться в другой.
+  const personSys = me && typeof me.system === 'number' ? me.system
+    : (typeof s.system === 'number' ? s.system : (typeof rec.system === 'number' ? rec.system : 0));
+  const saved = systemById(personSys);
   if (saved && saved.seed !== sys.seed) enterSystem(saved);
   game.warpTarget = s.warpTo === null || s.warpTo === undefined ? null : systemById(s.warpTo);
-  const findStation = (id) => world.stations.find((x) => x.id === id) || null;
   // Время мира СТАВИТСЯ, а не прибавляется: система могла быть собрана
   // чуть выше (enterSystem), и её часы уже стоят на общем времени —
   // прибавка дала бы удвоенное время и орбиты, где их никто не увидит.
@@ -1329,9 +1753,7 @@ function applyState(s) {
   // корпус. Щит строкой ниже всегда читался правильно — тем обиднее.
   ship.hull = typeof s.hull === 'number' ? s.hull : SHIP.maxHull;
   ship.shield = typeof s.shield === 'number' ? s.shield : SHIP.maxShield;
-  game.lastStation = findStation(s.last);
-  ship.gear.out = !!s.gear;
-  ship.gear.t = s.gear ? 1 : 0;
+  game.lastStation = world.stations.find((x) => x.id === s.last) || null;
   if (s.audio) {
     game.audio.on = s.audio.on !== false;
     game.audio.vol = typeof s.audio.vol === 'number' ? s.audio.vol : game.audio.vol;
@@ -1343,21 +1765,59 @@ function applyState(s) {
   ship.warpDebt = 0;
   game.fuelSaid = fuelLevel(ship);
 
-  if (s.landed && s.landed.pose) {
-    const body = world.bodies.find((b) => b.id === s.landed.id);
+  if (typeof rec.id === 'number') ship.id = rec.id;
+  ship.sysId = typeof rec.system === 'number' ? rec.system : sys.id;
+  ship.away = ship.sysId !== sys.id;
+  ship.keep = ship.away ? rec : null;
+  // Пилот — после того, как встанут на места корабли: ставить его не на
+  // что, пока не известно, где его палуба. Помещения грузятся лениво, и
+  // ставит его restoreMe, когда они готовы.
+  game.pendingMe = me;
+  game.pendingAboard = s.aboard || null;
+  seatPilot();
+  let res;
+  if (ship.away) {
+    // Свой корабль — в другой системе: пилот здесь пассажиром или на
+    // грунте. Вести нечего, режим — нейтральный полёт.
+    game.state.mode = ST.FLIGHT;
+    res = 'away';
+  } else {
+    res = placeOwnShip(rec);
+  }
+  if (game.interior) restoreMe();
+  else if (me && (me.out || me.seated === false)) loadInterior();
+  return res;
+}
+
+/**
+ * Поставить свой корабль туда, где он записан: в порт, на грунт, в
+ * полёт у тела или в мировую точку.
+ */
+function placeOwnShip(rec) {
+  ship.gear.out = !!rec.gear;
+  ship.gear.t = rec.gear ? 1 : 0;
+  ship.hatchesWant = Array.isArray(rec.hatches) ? rec.hatches.slice() : [];
+  if (game.interior) {
+    setHatches(game.interior.air, ship.hatchesWant, true);
+    ship.hatchesWant = null;
+  }
+  const findStation = (id) => world.stations.find((x) => x.id === id) || null;
+  if (rec.landed && rec.landed.pose) {
+    const body = world.bodies.find((b) => b.id === rec.landed.id);
     if (body) {
       ship.landedAt = body;
-      ship.landedPose = s.landed.pose;
-      ship.secured = !!s.landed.secured;
+      ship.landedPose = rec.landed.pose;
+      ship.secured = !!rec.landed.secured;
       ship.gear.out = true;
       ship.gear.t = 1;
       updateLandedPose(ship);
       game.state.mode = ST.LANDED;
+      game.zone = landingContext(world, ship);
       return 'landed';
     }
   }
 
-  const dockedStation = findStation(s.docked);
+  const dockedStation = findStation(rec.docked);
   if (dockedStation) {
     ship.dockedAt = dockedStation;
     game.lastStation = dockedStation;
@@ -1367,24 +1827,110 @@ function applyState(s) {
   // Место у тела — ПЕРЕД мировыми координатами: пока пилота не было,
   // планета и повернулась, и уехала по орбите, и мировая точка теперь
   // указывает либо в пустоту, либо внутрь горы (js/game/anchor.js).
-  if (anchorOk(s.anchor)) {
-    const host = world.bodies.find((b) => b.id === s.anchor.id);
-    const pose = anchorPose(host, s.anchor);
+  if (anchorOk(rec.anchor)) {
+    const host = world.bodies.find((b) => b.id === rec.anchor.id);
+    const pose = anchorPose(host, rec.anchor);
     if (pose) {
       placeShip(ship, pose.pos, pose.basis);
       game.state.mode = ST.FLIGHT;
       return 'flight';
     }
   }
-  if (s.pos) {
+  if (rec.pos) {
     // Базис может не прийти вовсе: у нового пилота на сервере он пуст, а
     // место уже есть. Ставим корабль как есть — с нынешним разворотом,
     // иначе игра решит, что сохранения нет, и начнёт с порта.
-    placeShip(ship, s.pos, s.basis || ship.basis);
+    placeShip(ship, rec.pos, rec.basis || ship.basis);
     game.state.mode = ST.FLIGHT;
     return 'flight';
   }
   return false;
+}
+
+/**
+ * Поставить пилота туда, где он был: в кресло, на палубу своего или
+ * чужого корабля, на грунт. Зовётся, когда готовы помещения.
+ */
+function restoreMe() {
+  const me = game.pendingMe, I = game.interior;
+  if (!me || !I) return;
+  game.pendingMe = null;
+  const w = game.walk;
+  if (me.out && me.out.o && typeof me.out.body === 'number') {
+    const body = world.bodies.find((b) => b.id === me.out.body);
+    if (!body) return;
+    const P = bodyWorld(body, me.out.o);
+    const F = bodyWorldDir(body, me.out.f || { x: 0, y: 0, z: 1 });
+    standUp(w, I);
+    w.phase = 'walk';
+    w.out = makeGroundFrame(body, P, F);
+    w.vessel = null;
+    w.air = null;
+    w.room = null;
+    w.pos = [0, 0, 0];
+    w.yaw = 0;
+    w.pitch = clamp(me.out.pitch || 0, -1.2, 1.2);
+    game.frame = ownVessel;
+  } else if (me.seated === false && me.walk && Array.isArray(me.walk.pos)) {
+    const own = me.own || me.aboard === ship.id;
+    const V = own ? (ship.away ? null : ownVessel) : pinVessel(me.aboard);
+    if (!V) return;
+    standUp(w, I);
+    w.phase = 'walk';
+    w.pos = me.walk.pos.slice(0, 3);
+    w.yaw = me.walk.yaw || 0;
+    w.pitch = clamp(me.walk.pitch || 0, -1.2, 1.2);
+    boardVessel(V);
+    w.room = I.roomAt(w.pos) || w.room;
+  } else {
+    return;                     // в кресле — так и стоит после seatPilot
+  }
+  // На ногах — взгляд от первого лица, а не из-за корабля.
+  w.prevView = game.state.view || 'cockpit';
+  game.state.view = 'cockpit';
+  game.walkIntro = 0;
+  syncCargo(true);
+  if (game.state.mode === ST.DOCKED) hideOverlay();
+}
+
+/**
+ * Чужой корабль, на борту которого пилот вышел из игры: пока сокет не
+ * прислал его снимка, ставим по тому, что знает сервер (state.aboard), —
+ * спящим, на его стоянке.
+ */
+function pinVessel(id) {
+  const a = game.pendingAboard;
+  if (a && a.id === id) aboardPin = vesselEntry(a);
+  if (!aboardPin || aboardPin.id !== id) return null;
+  const tNow = performance.now() / 1000;
+  ingestPeers(peerStore, [aboardPin], tNow);
+  game.peers = peerPoses(peerStore, tNow, game.peers, world);
+  const V = game.peers.find((p) => p.id === id) || null;
+  if (V) vesselAir(V);
+  return V;
+}
+
+/** Запись корабля, как её шлёт хаб (dorm), — из того, что отдал сервер. */
+function vesselEntry(a) {
+  const e = {
+    id: a.id, by: a.ownerId, name: a.ownerName || '', dorm: 1, sys: a.systemId,
+    mode: a.landedBody !== null && a.landedBody !== undefined ? 'landed' : 'flight',
+    g: a.gearOut || a.landedBody !== null ? 1 : 0, h: a.hatches || [],
+  };
+  const lp = a.landedPose, ap = a.anchorPose;
+  if (a.landedBody !== null && a.landedBody !== undefined && lp && lp.dir && lp.fwd && lp.up) {
+    Object.assign(e, { b: a.landedBody, lx: lp.dir.x * lp.radius, ly: lp.dir.y * lp.radius, lz: lp.dir.z * lp.radius,
+      lfx: lp.fwd.x, lfy: lp.fwd.y, lfz: lp.fwd.z, lux: lp.up.x, luy: lp.up.y, luz: lp.up.z });
+  } else if (a.anchorBody !== null && a.anchorBody !== undefined && ap && ap.pos) {
+    Object.assign(e, { b: a.anchorBody, lx: ap.pos.x, ly: ap.pos.y, lz: ap.pos.z,
+      lfx: ap.fwd.x, lfy: ap.fwd.y, lfz: ap.fwd.z, lux: ap.up.x, luy: ap.up.y, luz: ap.up.z });
+  } else if (a.pos) {
+    const bs = a.basis || {};
+    Object.assign(e, { x: a.pos.x, y: a.pos.y, z: a.pos.z,
+      fx: bs.fwd ? bs.fwd.x : 0, fy: bs.fwd ? bs.fwd.y : 0, fz: bs.fwd ? bs.fwd.z : 1,
+      ux: bs.up ? bs.up.x : 0, uy: bs.up ? bs.up.y : 1, uz: bs.up ? bs.up.z : 0 });
+  }
+  return e;
 }
 
 /**
@@ -1404,24 +1950,37 @@ function serverToSave(st) {
   // модулям, а какие из них стоят в гнёздах, знает база (ship_equipment).
   // До этого момента корабль собран по заводской комплектации каталога.
   if (sh.equipment) useShipEquipment(sh.equipment);
+  game.fleet = Array.isArray(st.fleet) ? st.fleet : [];
+  const me = st.me || null;
+  const shipSys = pos.systemId === null || pos.systemId === undefined ? 0 : pos.systemId;
   return {
-    system: pos.systemId === null || pos.systemId === undefined ? 0 : pos.systemId,
+    system: me && typeof me.systemId === 'number' ? me.systemId : shipSys,
     warpTo: pos.warpTo === undefined ? null : pos.warpTo,
-    pos: pos.pos,
-    basis: pos.basis,
     hull: sh.hull,
     shield: sh.shield,
     fuel: sh.fuelT,
     target: pos.targetBody === undefined ? null : pos.targetBody,
     view: pos.view,
-    docked: pos.dockedBody === undefined ? null : pos.dockedBody,
     last: pos.lastStation === undefined ? null : pos.lastStation,
-    landed: pos.landedBody
-      ? { id: pos.landedBody, pose: pos.landedPose, secured: pos.landedSecured }
-      : null,
-    anchor: pos.anchorBody && pos.anchorPose
-      ? Object.assign({ id: pos.anchorBody }, pos.anchorPose) : null,
-    gear: !!sh.gearOut,
+    ship: {
+      id: typeof sh.id === 'number' ? sh.id : undefined,
+      system: shipSys,
+      pos: pos.pos,
+      basis: pos.basis,
+      docked: pos.dockedBody === undefined ? null : pos.dockedBody,
+      landed: pos.landedBody
+        ? { id: pos.landedBody, pose: pos.landedPose, secured: pos.landedSecured }
+        : null,
+      anchor: pos.anchorBody && pos.anchorPose
+        ? Object.assign({ id: pos.anchorBody }, pos.anchorPose) : null,
+      gear: !!(pos.gearOut === undefined ? sh.gearOut : pos.gearOut),
+      hatches: Array.isArray(pos.hatches) ? pos.hatches : [],
+    },
+    me: me ? {
+      system: me.systemId, aboard: me.aboard, own: me.aboard === sh.id,
+      seated: me.seated !== false, walk: me.walk || null, out: me.out || null,
+    } : null,
+    aboard: st.aboard || null,
     stats: st.player ? st.player.stats : null,
     // ВРЕМЯ МИРА, а не налёт пилота. Здесь стоял playTimeS, и это была
     // ровно та ошибка, из-за которой у двоих в одном месте станция была
@@ -1430,6 +1989,91 @@ function serverToSave(st) {
     // Звук — настройка браузера, а не игрока: он остаётся местным.
     audio: null,
   };
+}
+
+/**
+ * Пилот едет пассажиром, и корабль ушёл в другую систему (варп хозяина):
+ * игра переходит туда же. Свой корабль остаётся, где стоял: его место
+ * запоминается (ship.keep) и возвращается, когда пилот вернётся туда.
+ */
+function rideTo(target) {
+  if (!ship.away) ship.keep = shipRecord();
+  enterSystem(target);
+  ship.away = ship.sysId !== sys.id;
+  if (!ship.away && ship.keep) {
+    placeOwnShip(ship.keep);
+    ship.keep = null;
+  } else {
+    game.state.mode = ST.FLIGHT;
+  }
+  say(game.state, L('СИСТЕМА ') + target.name.toUpperCase(), '#9fd9ff', 3);
+  save();
+}
+
+/** Пассажиром — за своим кораблём: он в другой системе, значит, и мы. */
+function followVessel() {
+  const w = game.walk;
+  if (!w.on || w.out || !w.vessel || w.vessel.own) { game.rideWarp = false; return; }
+  const r = peerStore.by.get(w.vessel.id);
+  // Хозяин ушёл в варп — сказать: за бортом в тоннеле не видно ничего,
+  // а через полминуты будет другая система.
+  const warp = !!r && r.out.mode === 'warp';
+  if (warp && !game.rideWarp) say(game.state, L('ВАРП · КОРАБЛЬ УХОДИТ В ПРЫЖОК'), '#9fd9ff', 4);
+  game.rideWarp = warp;
+  const vs = r ? r.out.sys : (aboardPin ? aboardPin.sys : null);
+  if (typeof vs !== 'number' || vs === sys.id) return;
+  const target = systemById(vs);
+  if (target) rideTo(target);
+}
+
+/** Длина шага при скорости v (js/game/walker.js) — ноги чужих по ней. */
+const strideAt = (v) => {
+  const k = clamp((v - WALK.speed) / (WALK.run - WALK.speed), 0, 1);
+  return WALK.stride + (WALK.strideRun - WALK.stride) * k;
+};
+
+/** Где в мире стоят люди: ноги и оси (js/game/vessels.js, personPlace). */
+function placePeople() {
+  for (const p of game.people) {
+    if (!p.place) p.place = { pos: v3(), basis: makeBasis() };
+    let V = null, body = null;
+    if (p.st !== 'out') V = p.ship === ship.id && !ship.away ? ownVessel : game.peers.find((x) => x.id === p.ship) || null;
+    else body = world.bodies.find((b) => b.id === p.body) || null;
+    p.vessel = V;
+    p.here = personPlace(p, V, body, p.place);
+  }
+}
+
+/** Пилот на ногах — его снимок для хаба (сокет, поле me). */
+function meNet() {
+  const w = game.walk, I = game.interior;
+  if (game.pendingMe) return null;
+  if (!w.on) {
+    if (ship.id === null || ship.away) return null;
+    const e = I ? I.seat.eye : [EYE.x, EYE.y, EYE.z];
+    return { st: 'seat', s: ship.id, x: r3(e[0]), y: r3(e[1]), z: r3(e[2]), yaw: 0, pitch: 0, v: 0, air: 0 };
+  }
+  const v = r3(Math.hypot(w.vel[0], w.vel[2]));
+  if (w.out) {
+    const G = w.out;
+    groundToWorld(G, w.pos, _feetW);
+    const o = bodyLocal(G.body, _feetW);
+    const f = bodyLocalDir(G.body, groundDirToWorld(G, walkFace(w)));
+    return { st: 'out', b: G.body.id, lx: r6(o.x), ly: r6(o.y), lz: r6(o.z),
+      lfx: r3(f.x), lfy: r3(f.y), lfz: r3(f.z), yaw: 0, pitch: r3(w.pitch), v, air: w.ground ? 0 : 1 };
+  }
+  const V = aboardVessel();
+  if (V.id === null || V.id === undefined) return null;
+  return { st: 'walk', s: V.id, x: r3(w.pos[0]), y: r3(w.pos[1]), z: r3(w.pos[2]),
+    yaw: r3(w.yaw), pitch: r3(w.pitch), v, air: w.ground ? 0 : 1 };
+}
+
+/** Свой корабль у тела — в его осях (для соседей, js/game/peers.js). */
+function shipLocal() {
+  const body = ship.landedAt || game.capture;
+  if (!body) return null;
+  return { b: body.id, pos: bodyLocal(body, ship.pos), fwd: bodyLocalDir(body, ship.basis.fwd),
+    up: bodyLocalDir(body, ship.basis.up) };
 }
 
 /**
@@ -1526,6 +2170,19 @@ function tellImpact(m, fatal = false) {
   }).catch(() => { /* сеть моргнула: корпус поправится следующим состоянием */ });
 }
 
+/**
+ * Корабль, на борту которого мы ехали, погиб: сервер увёл его в порт с
+ * пассажирами. Где мы теперь, — спрашиваем у него.
+ */
+async function rideLost() {
+  say(game.state, L('КОРАБЛЬ, НА КОТОРОМ ВЫ ЕХАЛИ, УНИЧТОЖЕН'), '#ff7a66', 5);
+  const st = await serverRefresh();
+  if (!st) return;
+  applyState(serverToSave(st));
+  applyServer(game.player, st);
+  save();
+}
+
 /** Что пришло по сокету из боя. */
 function applyNetEvent(ev) {
   if (ev.t === 'shot') {
@@ -1579,7 +2236,18 @@ function applyNetEvent(ev) {
     if (ev.dead) killedInAction(L('ГРУНТ'));
     return;
   }
+  if (ev.t === 'hatchreq') {
+    hatchRequest(ev);
+    return;
+  }
   if (ev.t === 'boom') {
+    // Корабль, на борту которого мы едем, уничтожен: страховка увела его в
+    // порт вместе с пассажирами (Combat::respawnShip) — забираем место.
+    const w = game.walk;
+    if (w.on && !w.out && w.vessel && !w.vessel.own && ev.id === w.vessel.id) {
+      rideLost();
+      return;
+    }
     say(game.state, L('ГДЕ-ТО РЯДОМ УНИЧТОЖЕН КОРАБЛЬ'), '#ffcc66', 3);
     return;
   }
@@ -2037,6 +2705,16 @@ function step(dt) {
   // оттого, что корабль стоит в порту.
   updatePlayer(game.player, dt);
 
+  // Свой корабль в другой системе (пилот улетел пассажиром): вести,
+  // сажать и стыковать здесь нечего — мир идёт, корабль стоит там.
+  if (ship.away) {
+    game.zone = null;
+    game.capture = null;
+    game.entry = null;
+    return;
+  }
+  ship.sysId = sys.id;
+
   // Болты летят и ищут цель. Попадание находит СТРЕЛЯВШИЙ — у него на
   // экране и болт, и цель в одном времени, — но урон применяет сервер
   // (server/src/Combat.php), и корпус мы узнаём от него.
@@ -2465,11 +3143,16 @@ function setupCamera() {
     return;
   }
   if (game.walk.on && game.walkEye) {
-    // Глаз идущего: точка в осях корабля, взгляд — его голова.
-    const b = ship.basis, e = game.walkEye;
-    cam.pos.x = ship.pos.x + (b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]) / 1000;
-    cam.pos.y = ship.pos.y + (b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]) / 1000;
-    cam.pos.z = ship.pos.z + (b.right.z * e[0] + b.up.z * e[1] + b.fwd.z * e[2]) / 1000;
+    // Глаз идущего: точка в осях корабля, взгляд — его голова. Корабль —
+    // тот, по палубе которого он идёт: свой или чужой.
+    const V = aboardVessel();
+    const b = V.basis, e = game.walkEye;
+    cam.pos.x = V.pos.x + (b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]) / 1000;
+    cam.pos.y = V.pos.y + (b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]) / 1000;
+    cam.pos.z = V.pos.z + (b.right.z * e[0] + b.up.z * e[1] + b.fwd.z * e[2]) / 1000;
+    cam.basis.right = { ...b.right };
+    cam.basis.up = { ...b.up };
+    cam.basis.fwd = { ...b.fwd };
     walkerLook(game.walk, _wLook);
     const f = _wLook.fwd, u = _wLook.up;
     _camDir.x = b.right.x * f[0] + b.up.x * f[1] + b.fwd.x * f[2];
@@ -2695,7 +3378,12 @@ let netMode = 'none';
 // временем снимка время его прихода, и принять один список дважды значит
 // сказать, что корабль полтика простоял (js/game/peers.js).
 const peerStore = makePeers();
+const peopleStore = makePeople();
 let peerRev = -1;
+// Последний снимок корабля, на борту которого едем: если снимки пропали
+// (связь, сервер), корабль остаётся под ногами там, где был, — а не
+// исчезает, роняя пассажира в пустоту.
+let aboardPin = null;
 // Часы мира. Пока сервера нет, цель null и время идёт как шло — в
 // одиночной игре подводить его не по чему и незачем.
 const worldClock = makeClock();
@@ -2733,6 +3421,16 @@ function frame(now) {
 
   handleKeys(dt);
   if (game.walk.on) walkFrame(dt);
+  else if (game.interior) {
+    // В кресле — а по палубе ходят пассажиры: двери перед ними те же.
+    othersAboard(ownVessel, game.walk.others || (game.walk.others = []));
+    if (game.walk.others.length) stepDoors(game.walk, game.interior, dt);
+  }
+  // Корабль кадра — в чьих помещениях глаз — и его тело: свет снаружи
+  // для кабины (js/gl/cabin.js). У чужого корабля тело из снимка, у своего
+  // — обстановка у поверхности.
+  game.frame = aboardVessel();
+  game.frameBody = game.frame.own ? undefined : vesselBody(game.frame);
   airFrame(dt);
 
   acc += dt;
@@ -2750,13 +3448,48 @@ function frame(now) {
   // никуда не деваются и когда мы пристыкованы.
   {
     const tNow = now / 1000;
-    if (net.left !== null) { dropPeer(peerStore, net.left); net.left = null; }
+    // Корабль, на борту которого едем: его не выбрасывает ни уход его
+    // хозяина в прыжок, ни пропавшие снимки.
+    const w = game.walk;
+    const ride = w.on && !w.out && w.vessel && !w.vessel.own ? w.vessel.id : null;
+    for (const L of net.left) {
+      if (L.ship !== null && L.ship !== ride) dropPeer(peerStore, L.ship);
+      if (L.id !== null) dropPerson(peopleStore, L.id);
+    }
+    net.left.length = 0;
     if (net.rev !== peerRev) {
       peerRev = net.rev;
-      ingestPeers(peerStore, net.peers, tNow);
+      // Свой корабль, которым командуем, приходит и спящим (пока игра его
+      // не повела), — он не чужой, и рисовать его дважды нельзя.
+      ingestPeers(peerStore, ship.id === null ? net.peers : net.peers.filter((p) => p.id !== ship.id), tNow);
+      ingestPeople(peopleStore, net.people, tNow);
+      if (ride !== null) {
+        const e = net.peers.find((p) => p.id === ride);
+        if (e) aboardPin = e;
+      }
       clockFromServer(worldClock, net.wt, tNow);
     }
-    game.peers = peerPoses(peerStore, tNow, game.peers);
+    if (ride !== null && !peerStore.by.has(ride) && aboardPin && aboardPin.id === ride) {
+      ingestPeers(peerStore, [aboardPin], tNow);
+    }
+    game.peers = peerPoses(peerStore, tNow, game.peers, world);
+    for (const V of game.peers) {
+      vesselAir(V);
+      // Шасси чужого корабля выходит с той же скоростью, что у своего;
+      // спящий стоит на стойках сразу.
+      if (V.dorm || V._seen === undefined) V.gear.t = V.gear.out ? 1 : 0;
+      else updateGear(V, dt);
+      V._seen = true;
+    }
+    followVessel();
+    // Корабль, на котором едем, мог исчезнуть из мира (его тела здесь
+    // нет, а за ним ещё не перешли) — палуба остаётся та же запись.
+    if (ride !== null && w.vessel && !game.peers.includes(w.vessel)) {
+      const again = game.peers.find((p) => p.id === ride);
+      if (again) boardVessel(again);
+    }
+    game.people = peoplePoses(peopleStore, tNow, game.people, strideAt);
+    placePeople();
 
     // Цель-пилот могла уйти из системы или закрыть игру. Привод обязан
     // это заметить: иначе прыжок идёт к призраку — к последнему месту,
@@ -2825,10 +3558,10 @@ function frame(now) {
   // от него меняться не должен.
   updateAudio(game.audio, game, dt);
   playAudio(game.audio, sound);
-  if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) prepareHud();
+  if ((game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) && !ship.away) prepareHud();
   // Софт мониторов — после приборов (он читает то же, что они), и только
   // когда кабина в кадре: рисовать восемь холстов для вида снаружи незачем.
-  if (game.displays && game.state.view === 'cockpit' && !game.walk.out
+  if (game.displays && game.state.view === 'cockpit' && !game.walk.out && aboardVessel().own && !ship.away
       && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED || game.walk.on)) {
     updateDisplays(game.displays, game, now / 1000);
   }
@@ -3025,18 +3758,30 @@ async function boot() {
       // Сокет поднимаем только при живом сервере: без входа он всё равно
       // не пустит, а стучаться в закрытый порт незачем.
       netConnect(() => ({
+        // Система, где САМ пилот.
         sys: sys.id,
-        x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
-        v: ship.speed,
-        // Осанка корабля, а не только след: без неё чужой корабль нечем
-        // развернуть, и на месте он смотрел бы в никуда.
-        fwd: ship.basis.fwd, up: ship.basis.up,
-        // Работа сопел — измерение, из которого топливо считает сервер, и
-        // то, сколько игра уже списала сама: по нему сверяется ответ.
-        work: ship.work, burned: ship.burned,
-        mode: game.state.mode === ST.DOCKED ? 'docked'
-          : game.state.mode === ST.LANDED ? 'landed'
-            : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
+        // Корабль, который игра ведёт: свой и только если он здесь. Пассажир
+        // чужого корабля, оставивший свой в другой системе, не ведёт ничего.
+        ship: ship.away || ship.id === null ? null : {
+          id: ship.id,
+          x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
+          v: ship.speed,
+          // Осанка корабля, а не только след: без неё чужой корабль нечем
+          // развернуть, и на месте он смотрел бы в никуда.
+          fwd: ship.basis.fwd, up: ship.basis.up,
+          // Работа сопел — измерение, из которого топливо считает сервер, и
+          // то, сколько игра уже списала сама: по нему сверяется ответ.
+          work: ship.work, burned: ship.burned,
+          mode: game.state.mode === ST.DOCKED ? 'docked'
+            : game.state.mode === ST.LANDED ? 'landed'
+              : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
+          gear: ship.gear.out || ship.gear.t > 0.5,
+          hatches: ship.hatchesWant || openHatches(game.interior && game.interior.air),
+          lift: Math.abs(ship.lift || 0),
+          local: shipLocal(),
+        },
+        // Сам пилот: в кресле, на палубе, на грунте (js/game/peers.js).
+        me: meNet(),
       }));
     } else {
       // Вход есть, а связи нет. Играем с местного кэша и продолжаем
@@ -3114,7 +3859,8 @@ async function boot() {
     booted = true;
     wake();
     bootEl.classList.add('hidden');
-    if (game.state.mode === ST.DOCKED) game.launch();
+    // Стоял в порту в кресле — вылет. На ногах — игрок сам решит, когда.
+    if (game.state.mode === ST.DOCKED && !game.walk.on) game.launch();
     else hideOverlay();
     say(game.state, L('СИСТЕМА ') + world.name.toUpperCase() +
       L(' — ЦЕЛЬ: ') + (currentTarget(game.nav) ? currentTarget(game.nav).name : '—'));

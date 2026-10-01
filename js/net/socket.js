@@ -38,7 +38,11 @@ const BACKOFF = [1000, 2000, 5000, 10000, 20000];
 export const net = {
   // 'off' — не подключались; 'connecting'; 'live'; 'down' — оборвалось.
   state: 'off',
-  peers: [],          // [{id, name, x, y, z, v, mode, fx..uz}] — своя система
+  // Корабли своей системы: [{id — номер корабля, by — кто ведёт, name,
+  // x..z или b, lx..lz (оси тела), осанка, шасси, люки, dorm — спит}].
+  peers: [],
+  // Люди: [{id — игрок, name, st, s | b, x..z | lx..lz, yaw, pitch, v, air}].
+  people: [],
   // Состав сети целиком: [{id, name, sys}] по ВСЕЙ галактике. Не
   // то же, что peers: те рядом и с координатами, а эти где угодно и
   // только числом системы. Приходит не в тик, а при изменениях
@@ -49,9 +53,9 @@ export const net = {
   // прихода, и принять один список дважды значит сказать, что корабль
   // полтика простоял на месте.
   rev: 0,
-  // id пилота, о чьём уходе только что сообщили; игра забирает его и
-  // ставит обратно null.
-  left: null,
+  // Кто ушёл: [{id — игрок или null, ship — корабль или null}]; игра
+  // разбирает и очищает.
+  left: [],
   // Время мира из последнего снимка (server/src/Clock.php). По нему игра
   // держит орбиты в одной фазе со всеми — иначе станция у каждого своя.
   wt: null,
@@ -113,6 +117,7 @@ export function disconnect() {
   ws = null;
   net.state = 'off';
   net.peers = [];
+  net.people = [];
   net.roster = [];
 }
 
@@ -158,6 +163,7 @@ function open() {
       if (typeof msg.tick === 'number' && msg.tick > 0) net.tick = msg.tick;
       mark();
       net.peers = msg.peers || [];
+      net.people = msg.people || [];
       net.roster = msg.roster || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
@@ -168,6 +174,7 @@ function open() {
       // это и есть потери, других признаков у нас нет.
       mark();
       net.peers = msg.list || [];
+      net.people = msg.people || [];
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
     } else if (msg.t === 'roster') {
@@ -176,9 +183,10 @@ function open() {
       // отметить их значило бы завысить качество связи на ровном месте.
       net.roster = msg.list || [];
     } else if (msg.t === 'leave') {
-      net.peers = net.peers.filter((p) => p.id !== msg.id);
-      net.rev++;
-      net.left = msg.id;
+      // Уходит человек, корабль — или оба. Корабль, на борту которого мы
+      // едем, игра не выбросит: его ей пришлют и из прыжка.
+      net.left.push({ id: msg.id === undefined ? null : msg.id, ship: msg.ship === undefined ? null : msg.ship });
+      if (net.left.length > 64) net.left.shift();
     } else if (msg.t === 'fuel') {
       // Бак по счёту сервера. Идёт в ту же очередь, что и бой: разбирает
       // её игра, в своём темпе, — и к числу приложено, сколько игра
@@ -190,7 +198,7 @@ function open() {
       });
       if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
-               || msg.t === 'boom' || msg.t === 'impact') {
+               || msg.t === 'boom' || msg.t === 'impact' || msg.t === 'hatchreq') {
       // Очередь не копим бесконечно: если игра почему-то перестала её
       // разбирать, сотня событий в памяти полезнее тысячи, а тысяча
       // ничем не лучше сотни.
@@ -207,6 +215,7 @@ function open() {
 
   ws.onclose = () => {
     net.peers = [];
+    net.people = [];
     net.roster = [];
     net.ping = null;
     net.beats.length = 0;
@@ -255,27 +264,67 @@ function pushPose() {
   if (!p) return;
   lastSend = now;
   seq++;
-  const w = p.work || { main: 0, lift: 0, rcs: 0 };
-  burnAt[seq % BURN_RING] = { n: seq, b: p.burned || 0 };
-  send({
-    t: 'pos', sys: p.sys,
-    // Округляем до метра: дальше идут разряды, которых не видит ни один
-    // прибор, а трафик они удваивают.
-    x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
-    v: +p.v.toFixed(3), mode: p.mode,
-    // Куда смотрит нос и где у корабля верх. Без этого чужой корабль
-    // нечем развернуть: по положению видно только путь, а не осанку, и
-    // на месте он вообще смотрел бы в никуда. Четырёх знаков хватает —
-    // это сотые доли градуса.
-    fx: +p.fwd.x.toFixed(4), fy: +p.fwd.y.toFixed(4), fz: +p.fwd.z.toFixed(4),
-    ux: +p.up.x.toFixed(4), uy: +p.up.y.toFixed(4), uz: +p.up.z.toFixed(4),
-    // Работа сопел с начала связи, км/с: маршевые, подъёмные, маневровые.
-    // Это ИЗМЕРЕНИЕ, а не расход: тонны из него считает сервер своими
-    // числами и не больше, чем двигатель может дать (server/src/Hub.php,
-    // meter). Пять знаков — это сантиметры в секунду.
-    wm: +w.main.toFixed(5), wl: +w.lift.toFixed(5), wr: +w.rcs.toFixed(5),
-    n: seq,
-  });
+  send(poseMessage(p, seq));
+}
+
+/**
+ * Снимок для хаба: корабль, который игра ведёт (если ведёт), и сам пилот.
+ *
+ * Вынесено ради проверок (tools/test.mjs): что именно и с какой
+ * точностью уходит в сеть, видно без сокета.
+ */
+export function poseMessage(p, n = 0) {
+  const msg = { t: 'pos', sys: p.sys };
+  if (p.ship) {
+    const s = p.ship;
+    const w = s.work || { main: 0, lift: 0, rcs: 0 };
+    burnAt[n % BURN_RING] = { n, b: s.burned || 0 };
+    Object.assign(msg, {
+      sid: s.id,
+      // Округляем до метра: дальше идут разряды, которых не видит ни один
+      // прибор, а трафик они удваивают.
+      x: +s.x.toFixed(3), y: +s.y.toFixed(3), z: +s.z.toFixed(3),
+      v: +s.v.toFixed(3), mode: s.mode,
+      // Куда смотрит нос и где у корабля верх. Без этого чужой корабль
+      // нечем развернуть: по положению видно только путь, а не осанку, и
+      // на месте он вообще смотрел бы в никуда. Четырёх знаков хватает —
+      // это сотые доли градуса.
+      fx: +s.fwd.x.toFixed(4), fy: +s.fwd.y.toFixed(4), fz: +s.fwd.z.toFixed(4),
+      ux: +s.up.x.toFixed(4), uy: +s.up.y.toFixed(4), uz: +s.up.z.toFixed(4),
+      // Шасси, открытые люки и работа подъёмных: соседу — чтобы корабль
+      // стоял на стойках, люк был открыт, а сопла тлели как у нас.
+      g: s.gear ? 1 : 0, h: s.hatches || [], k: +(s.lift || 0).toFixed(2),
+      // Работа сопел с начала связи, км/с: маршевые, подъёмные, маневровые.
+      // Это ИЗМЕРЕНИЕ, а не расход: тонны из него считает сервер своими
+      // числами и не больше, чем двигатель может дать (server/src/Hub.php,
+      // meter). Пять знаков — это сантиметры в секунду.
+      wm: +w.main.toFixed(5), wl: +w.lift.toFixed(5), wr: +w.rcs.toFixed(5),
+      n,
+    });
+    // У тела — то же в его осях: сосед рисует корабль с опозданием в
+    // четверть секунды, а грунт под ним за это время уезжает на десятки
+    // метров (js/game/peers.js). Шесть знаков километра — миллиметр.
+    if (s.local) {
+      const L = s.local;
+      Object.assign(msg, {
+        b: L.b, lx: +L.pos.x.toFixed(6), ly: +L.pos.y.toFixed(6), lz: +L.pos.z.toFixed(6),
+        lfx: +L.fwd.x.toFixed(4), lfy: +L.fwd.y.toFixed(4), lfz: +L.fwd.z.toFixed(4),
+        lux: +L.up.x.toFixed(4), luy: +L.up.y.toFixed(4), luz: +L.up.z.toFixed(4),
+      });
+    }
+  }
+  if (p.me) msg.me = p.me;
+  return msg;
+}
+
+/**
+ * Попросить люк ЧУЖОГО корабля (свой игра открывает сама). Решает тот,
+ * кто его ведёт, а у спящего — сервер; просить можно только стоя рядом.
+ */
+export function askHatch(shipId, hatchId, open) {
+  if (!ws || ws.readyState !== 1) return false;
+  send({ t: 'hatch', ship: shipId | 0, id: String(hatchId), open: !!open });
+  return true;
 }
 
 /**

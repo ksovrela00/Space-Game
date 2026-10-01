@@ -76,10 +76,22 @@ export function stairDesign(drop) {
 }
 
 /**
- * Состояние шлюзов — один раз на помещения (interior.air).
+ * Состояние шлюзов своего корабля — на помещения (interior.air).
  * @param gearClear высота центра корабля над грунтом на шасси, км (SHIP.gearClear)
  */
 export function makeAirlocks(I, gearClear) {
+  I.air = makeAir(I, gearClear);
+  return I.air;
+}
+
+/**
+ * Состояние шлюзов ОДНОГО корабля: люки, трапы, давление по помещениям.
+ *
+ * Помещения у всех кораблей одного типа одинаковые (js/models/interior.js),
+ * а люки и воздух у каждого свои: у соседа на грунте трап выдвинут, у
+ * своего — убран. Поэтому планировка одна (I), а это — на каждый корабль.
+ */
+export function makeAir(I, gearClear) {
   const ground = -gearClear * 1000;
   const hatches = I.hatches.map((h) => ({
     h,
@@ -125,8 +137,41 @@ export function makeAirlocks(I, gearClear) {
       state: 'sealed',   // sealed | cycle | open | close
     };
   }
-  I.air = { hatches, locks, rooms, links, pOut: 0, block: null };
-  return I.air;
+  return { hatches, locks, rooms, links, pOut: 0, block: null };
+}
+
+/** Какие люки просят открытыми: имена (в сохранение и в снимок сокета). */
+export function openHatches(air, out = []) {
+  out.length = 0;
+  if (air) for (const hx of air.hatches) if (hx.want) out.push(hx.id);
+  return out;
+}
+
+/**
+ * Поставить просьбы люков по списку имён — так чужой корабль открывает
+ * люки, как ему велит тот, кто его ведёт (снимок сокета).
+ *
+ * @param snap true — сразу в конечное положение, без цикла: корабль
+ *   впервые в кадре или игра только что загрузилась. Смотреть, как люк,
+ *   открытый полчаса назад, открывается заново, незачем.
+ */
+export function setHatches(air, names, snap = false) {
+  if (!air) return;
+  const list = Array.isArray(names) ? names : [];
+  for (const hx of air.hatches) {
+    hx.want = list.includes(hx.id);
+    if (!snap) continue;
+    hx.open = hx.want ? 1 : 0;
+    hx.stair = hx.want ? 1 : 0;
+    hx.solids = null; hx.solidsKey = '';
+  }
+  if (!snap) return;
+  for (const L of Object.values(air.locks)) {
+    const open = L.hatches.some((x) => x.want);
+    L.state = open ? 'open' : 'sealed';
+    L.room.p = open ? air.pOut : AIR.cabin;
+    L.p = L.room.p;
+  }
 }
 
 /** Воздух в помещении: давление и открыт ли его отсек забортному. */

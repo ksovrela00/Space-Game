@@ -84,6 +84,9 @@ Db::run('DELETE FROM `player`');
 
 $a = Auth::register('alfa', 'secret', 'АЛЬФА');
 $b = Auth::register('beta', 'secret', 'БЕТА');
+// Попадают в КОРАБЛЬ, а не в пилота: цель в сокете — номер корабля.
+$shipA = (int) Players::ship($a['player_id'])['id'];
+$shipB = (int) Players::ship($b['player_id'])['id'];
 
 $hub = new Hub();
 $t = 1000.0;
@@ -225,21 +228,21 @@ $before = $hullOf($b['player_id']);
 // Первым принимает ЩИТ, и корпус при этом цел. В этом весь его смысл:
 // щит отрастает сам, а корпус чинят за деньги.
 $t += 1;
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 $hurt = $cb->last('hurt');
 $okShot = $ca->last('hitok');
 ok(abs($hullOf($b['player_id']) - $before) < 1e-9 && $shieldOf($b['player_id']) < 40,
     'первым урон принимает щит, корпус цел: щит ' . $shieldOf($b['player_id']));
 ok($hurt !== null && $hurt['by'] === $a['player_id'] && $hurt['absorbed'] > 0,
     'жертва знает, сколько принял щит: ' . ($hurt['absorbed'] ?? '—'));
-ok($okShot !== null && $okShot['id'] === $b['player_id']
+ok($okShot !== null && $okShot['id'] === $shipB
     && abs($okShot['shield'] - $hurt['shield']) < 1e-9,
     'обе стороны видят одно и то же число щита');
 
 // Щит пробит — дальше идёт корпус.
 Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
 $t += 1;
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 $after = $hullOf($b['player_id']);
 ok($after < $before, 'по пробитому щиту попадание снимает корпус: '
     . $before . ' -> ' . $after);
@@ -257,7 +260,7 @@ ok($shieldOf($b['player_id']) < 1e-9, 'а сразу после попадани
 // Темп: второе попадание в тот же миг не проходит. Иначе клиент с
 // подкрученным циклом снимал бы корпус пачками.
 $mid = $hullOf($b['player_id']);
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 ok(abs($hullOf($b['player_id']) - $mid) < 1e-9, 'попадания чаще оружейного темпа не принимаются');
 
 // УДАР О ГРУНТ идёт тем же путём, что и бой, — сообщением в сокет. И по
@@ -288,7 +291,7 @@ $t += 1;
 $hub->message($cb, json_encode(['t' => 'impact', 'fatal' => true]), $t);
 $boom = $ca->last('boom');
 ok(abs($hullOf($b['player_id']) - 100) < 1e-9 && $boom !== null
-    && $boom['id'] === $b['player_id'],
+    && $boom['id'] === $shipB,
     'смертельный удар: корабль восстановлен в порту, соседи оповещены');
 
 // Дальность: за её пределом попадания нет вовсе.
@@ -296,26 +299,27 @@ $t += 1;
 $hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 50, 'y' => 0, 'z' => 0]), $t);
 $hub->tick($t);
 $far = $hullOf($b['player_id']);
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 ok(abs($hullOf($b['player_id']) - $far) < 1e-9, 'за 50 км лазером не достать');
 
 // Оружия нет на борту — попадание отвергается словами, а не молча.
 $t += 1;
 $hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0]), $t);
 $hub->tick($t);
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'missile']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'missile']), $t);
 ok(($ca->last('error')['code'] ?? '') === 'no_gun', 'оружием, которого нет на борту, не попасть');
 
 // Гибель: корпус в ноль, и пилот сразу возвращается в строй — в порт, из
 // которого уходил. Экрана гибели у сервера нет и быть не может.
 Db::update('ship', ['hull' => 2, 'shield' => 0, 'hit_at' => Db::now()],
     '`owner_id`=?', [$b['player_id']]);
-Db::update('player', ['last_station' => 4, 'docked_body' => null], '`id`=?', [$b['player_id']]);
+Db::update('player', ['last_station' => 4], '`id`=?', [$b['player_id']]);
+Db::update('ship', ['docked_body' => null], '`id`=?', [$shipB]);
 $t += 1;
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 $dead = $cb->last('hurt');
-$row = Db::row('SELECT p.`docked_body`, s.`hull`, t.`hull_max`, p.`crashes`
-                FROM `player` p JOIN `ship` s ON s.`owner_id`=p.`id`
+$row = Db::row('SELECT s.`docked_body`, s.`hull`, t.`hull_max`, p.`crashes`
+                FROM `player` p JOIN `ship` s ON s.`id`=p.`ship_id`
                 JOIN `ship_type` t ON t.`id`=s.`type_id` WHERE p.`id`=?', [$b['player_id']]);
 ok($dead !== null && $dead['dead'] === true, 'о гибели сказано прямо');
 ok((int) $row['docked_body'] === 4 && abs((float) $row['hull'] - (float) $row['hull_max']) < 1e-9,
@@ -352,8 +356,8 @@ ok(count($ca->last('peers')['list'] ?? []) === 1, 'до прыжка сосед 
 $t += 1;
 $hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0,
     'mode' => 'warp']), $t);
-ok(($ca->last('leave')['id'] ?? 0) === $b['player_id'],
-    'об уходе в прыжок сказано сразу, а не по истечении срока');
+ok(($ca->last('leave')['ship'] ?? 0) === $shipB,
+    'об уходе корабля в прыжок сказано сразу, а не по истечении срока');
 $hub->tick($t);
 ok(($ca->last('peers')['list'] ?? []) === [],
     'в прыжке пилота в снимке нет, хотя координаты он прислал здешние');
@@ -363,7 +367,7 @@ ok(($ca->last('peers')['list'] ?? []) === [],
 $hullWarp = $hullOf($b['player_id']);
 Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
 $t += 1;
-$hub->message($ca, json_encode(['t' => 'hit', 'id' => $b['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($ca, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
 ok(abs($hullOf($b['player_id']) - $hullWarp) < 1e-9,
     'по ушедшему в прыжок попасть нельзя: корпус ' . round($hullOf($b['player_id']), 1));
 
@@ -383,7 +387,7 @@ ok(!$shotSeen, 'выстрел из прыжка соседям не показ�
 $hullA = $hullOf($a['player_id']);
 Db::update('ship', ['shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$a['player_id']]);
 $t += 1;
-$hub->message($cb, json_encode(['t' => 'hit', 'id' => $a['player_id'], 'w' => 'laser_g']), $t);
+$hub->message($cb, json_encode(['t' => 'hit', 'id' => $shipA, 'w' => 'laser_g']), $t);
 ok(abs($hullOf($a['player_id']) - $hullA) < 1e-9,
     'и попаданий из прыжка не бывает: корпус цели ' . round($hullOf($a['player_id']), 1));
 
@@ -500,7 +504,6 @@ echo PHP_EOL . '== сокет: топливо ==' . PHP_EOL;
 
 $hub3 = new Hub();
 $t = 5000.0;
-$shipA = (int) Db::one('SELECT `id` FROM `ship` WHERE `owner_id`=?', [$a['player_id']]);
 $fuelA = static fn() => (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipA]);
 Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=?', [$shipA]);
 Players::ensureStock($shipA);
@@ -617,6 +620,138 @@ ok(abs(($f2->last('fuel')['cap'] ?? 0) - 20) < 1e-9,
 Db::run('DELETE FROM `ship_equipment` WHERE `ship_id`=? AND `equipment_id`=?', [$shipA, $tankId]);
 Loadout::forget();
 $hub3->close($f2, $t);
+
+// --- пилот и корабль --------------------------------------------------------------
+//
+// Соединение — игрок. Корабль он ведёт, только если тот его и здесь;
+// сам он может быть где угодно — и это видно соседям отдельным списком.
+// Корабль без хозяина в игре не пропадает: он спит в базе и виден.
+
+echo PHP_EOL . '== сокет: пилот и корабль ==' . PHP_EOL;
+
+$hub4 = new Hub();
+$t = 9000.0;
+$land = Db::row("SELECT `local_id`, `radius_km` FROM `body` WHERE `system_id`=0 AND `name`='Lave II'");
+$L = (int) $land['local_id'];
+$R = (float) $land['radius_km'];
+$pose = static fn(float $dx) => json_encode(['dir' => ['x' => $dx / sqrt($dx * $dx + $R * $R), 'y' => $R / sqrt($dx * $dx + $R * $R), 'z' => 0],
+    'radius' => $R + 0.006, 'right' => ['x' => 1, 'y' => 0, 'z' => 0], 'up' => ['x' => 0, 'y' => 1, 'z' => 0],
+    'fwd' => ['x' => 0, 'y' => 0, 'z' => 1]]);
+// Альфа стоит на Lave II и вышла из игры — её корабль спит у грунта.
+Db::update('ship', ['system_id' => 0, 'docked_body' => null, 'landed_body' => $L, 'landed_pose' => $pose(0),
+    'gear_out' => 1, 'hatches' => json_encode(['sR'])], '`id`=?', [$shipA]);
+Db::update('ship', ['system_id' => 0, 'docked_body' => null, 'landed_body' => $L, 'landed_pose' => $pose(0.09),
+    'gear_out' => 1, 'hatches' => null], '`id`=?', [$shipB]);
+Db::update('player', ['system_id' => 0], '`id` IN (?, ?)', [$a['player_id'], $b['player_id']]);
+
+$cb4 = new FakeConn('p1');
+$hub4->open($cb4, $t);
+$hub4->message($cb4, json_encode(['t' => 'hello', 'token' => $b['token']]), $t);
+$t += 1;
+$hub4->tick($t);
+$ships = $cb4->last('peers')['list'] ?? [];
+$sleepA = array_values(array_filter($ships, static fn($s) => $s['id'] === $shipA))[0] ?? null;
+ok($sleepA !== null && ($sleepA['dorm'] ?? 0) === 1 && $sleepA['b'] === $L && $sleepA['h'] === ['sR']
+    && $sleepA['g'] === 1 && abs(hypot($sleepA['lx'], $sleepA['ly']) - ($R + 0.006)) < 1e-6,
+    'корабль ушедшей Альфы виден спящим: на своей стоянке, в осях тела, с открытым люком');
+ok(!in_array($shipB, array_column($ships, 'id'), true),
+    'свой корабль, которым пилот командует, ему самому спящим не показывается: его ведёт игра');
+
+// Бета ведёт свой корабль и сама выходит на грунт, к трапу Альфы.
+$me = ['st' => 'out', 'b' => $L, 'lx' => 0.01, 'ly' => $R, 'lz' => 0.004, 'lfx' => 1, 'lfy' => 0, 'lfz' => 0,
+    'yaw' => 0, 'pitch' => 0.1, 'v' => 1.9, 'air' => 0];
+$posB = ['t' => 'pos', 'sys' => 0, 'sid' => $shipB, 'x' => 5, 'y' => 0, 'z' => 0, 'mode' => 'landed',
+    'b' => $L, 'lx' => 0.09, 'ly' => $R + 0.006, 'lz' => 0, 'g' => 1, 'h' => ['nL', '../etc'], 'me' => $me];
+$t += 1;
+$hub4->message($cb4, json_encode($posB), $t);
+
+// Альфа возвращается: видит Бету — и её корабль, и её саму.
+$ca4 = new FakeConn('p2');
+$hub4->open($ca4, $t);
+$hub4->message($ca4, json_encode(['t' => 'hello', 'token' => $a['token']]), $t);
+$t += 1;
+$hub4->tick($t);
+$snap = $ca4->last('peers');
+$shipSeen = array_values(array_filter($snap['list'] ?? [], static fn($s) => $s['id'] === $shipB))[0] ?? null;
+$annaSeen = array_values(array_filter($snap['people'] ?? [], static fn($p) => $p['id'] === $b['player_id']))[0] ?? null;
+ok($shipSeen !== null && empty($shipSeen['dorm']) && $shipSeen['by'] === $b['player_id']
+    && $shipSeen['b'] === $L && $shipSeen['h'] === ['nL'],
+    'корабль, который ведут, — по снимку хозяина: в осях тела, люки из снимка (мусорное имя отброшено)');
+ok($annaSeen !== null && $annaSeen['st'] === 'out' && $annaSeen['b'] === $L && abs($annaSeen['lx'] - 0.01) < 1e-9,
+    'и сама Бета — человеком на грунте, отдельно от своего корабля');
+
+// Пилот, который шлёт снимок за чужой корабль, его не ведёт.
+$t += 1;
+$hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 0, 'sid' => $shipB, 'x' => 999, 'y' => 0, 'z' => 0,
+    'me' => ['st' => 'walk', 's' => $shipA, 'x' => 0, 'y' => -9, 'z' => 3]]), $t);
+$hub4->tick($t);
+$still = array_values(array_filter($cb4->last('peers')['list'] ?? [], static fn($s) => $s['id'] === $shipA))[0] ?? null;
+ok($still !== null && ($still['dorm'] ?? 0) === 1,
+    'снимок за чужой корабль не делает игрока его водителем: корабль Альфы по-прежнему спящий у Беты в списке');
+
+// Люк спящего корабля просят стоя у трапа — и он открывается в базе.
+$t += 1;
+$hub4->message($cb4, json_encode(['t' => 'hatch', 'ship' => $shipA, 'id' => 'nL', 'open' => true]), $t);
+$hatches = Players::hatchesOf(Players::shipRow($shipA));
+ok(in_array('nL', $hatches, true) && in_array('sR', $hatches, true),
+    'стоя у трапа спящего корабля, люк попросили — открылся: ' . json_encode($hatches));
+// Издалека — нет.
+$far = $posB;
+$far['me']['lx'] = 40;
+$t += 1;
+$hub4->message($cb4, json_encode($far), $t);
+$t += 1;
+$hub4->message($cb4, json_encode(['t' => 'hatch', 'ship' => $shipA, 'id' => 'sR', 'open' => false]), $t);
+ok(in_array('sR', Players::hatchesOf(Players::shipRow($shipA)), true),
+    'за 40 км люк чужого корабля не закрыть');
+
+// Альфа начинает вести свой корабль — люк Беты просят у неё, а не у базы.
+$t += 1;
+$hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 0, 'sid' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0, 'mode' => 'landed',
+    'b' => $L, 'lx' => 0, 'ly' => $R + 0.006, 'lz' => 0, 'g' => 1, 'h' => ['sR', 'nL'],
+    'me' => ['st' => 'walk', 's' => $shipA, 'x' => 0, 'y' => -9, 'z' => 3]]), $t);
+$hub4->message($cb4, json_encode($posB), $t + 0.1);
+$t += 1;
+$hub4->message($cb4, json_encode(['t' => 'hatch', 'ship' => $shipA, 'id' => 'sR', 'open' => false]), $t);
+$req = $ca4->last('hatchreq');
+ok($req !== null && $req['ship'] === $shipA && $req['id'] === 'sR' && $req['open'] === false
+    && $req['by'] === $b['player_id'],
+    'люк корабля, который ведут, просят у того, кто ведёт: просьба дошла до Альфы');
+
+// Бета поднимается на борт к Альфе и улетает с ней в прыжок: корабль
+// пропадает у всех, кроме тех, кто на его борту.
+$cc4 = new FakeConn('p3');
+$hub4->open($cc4, $t);
+$c = Auth::register('gamma', 'secret', 'ГАММА');
+$hub4->message($cc4, json_encode(['t' => 'hello', 'token' => $c['token']]), $t);
+$hub4->message($cc4, json_encode(['t' => 'pos', 'sys' => 0, 'me' => ['st' => 'out', 'b' => $L, 'lx' => 1, 'ly' => $R, 'lz' => 0]]), $t);
+$t += 1;
+$aboard = $posB;
+$aboard['me'] = ['st' => 'walk', 's' => $shipA, 'x' => 1, 'y' => -9, 'z' => 4, 'yaw' => 0, 'v' => 0];
+$hub4->message($cb4, json_encode($aboard), $t);
+$hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 0, 'sid' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0, 'mode' => 'warp',
+    'me' => ['st' => 'seat', 's' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0]]), $t + 0.1);
+$t += 1;
+$hub4->tick($t);
+$rideB = in_array($shipA, array_column($cb4->last('peers')['list'] ?? [], 'id'), true);
+$rideC = in_array($shipA, array_column($cc4->last('peers')['list'] ?? [], 'id'), true);
+ok($rideB && !$rideC, 'в прыжке корабль Альфы видит только пассажир на его борту, а не тот, кто остался на грунте');
+// Корабль вышел в другой системе: пассажир по-прежнему его видит — и
+// Альфу в кресле, хоть сам ещё в старой системе.
+$t += 1;
+$hub4->message($ca4, json_encode(['t' => 'pos', 'sys' => 3, 'sid' => $shipA, 'x' => 7e5, 'y' => 0, 'z' => 0, 'mode' => 'flight',
+    'me' => ['st' => 'seat', 's' => $shipA, 'x' => 0, 'y' => 0, 'z' => 0]]), $t);
+$hub4->tick($t);
+$list = $cb4->last('peers')['list'] ?? [];
+$there = array_values(array_filter($list, static fn($s) => $s['id'] === $shipA))[0] ?? null;
+$pilot = array_values(array_filter($cb4->last('peers')['people'] ?? [], static fn($p) => $p['id'] === $a['player_id']))[0] ?? null;
+ok($there !== null && $there['sys'] === 3 && $there['pilot'] === $a['player_id'] && $pilot !== null && $pilot['st'] === 'seat',
+    'корабль ушёл в систему 3 — пассажир его видит (sys 3, в кресле Альфа): за ним игра и перейдёт');
+
+// Корабль погиб — весть о нём получает и пассажир, где бы ни был.
+$t += 1;
+$hub4->message($ca4, json_encode(['t' => 'impact', 'fatal' => true]), $t);
+ok(($cb4->last('boom')['id'] ?? 0) === $shipA, 'корабль погиб — пассажир узнаёт об этом сразу (boom)');
 
 echo PHP_EOL . ($fails === 0
     ? "ХАБ: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ($checks)"

@@ -5871,8 +5871,8 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // корабль встанет по мировым, а якорь никто не спросит.
   {
     const src = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
-    const byAnchor = src.indexOf('anchorOk(s.anchor)');
-    const byPos = src.indexOf('placeShip(ship, s.pos');
+    const byAnchor = src.indexOf('anchorOk(rec.anchor)');
+    const byPos = src.indexOf('placeShip(ship, rec.pos');
     ok(byAnchor > 0 && byPos > byAnchor && src.includes('shipAnchor(game.capture'),
       'при входе место у тела спрашивают раньше мировых координат');
   }
@@ -6212,8 +6212,9 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   const { net, connect, disconnect, SEND_EVERY } = await import('../js/net/socket.js');
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  connect(() => ({ sys: 0, x: 1, y: 2, z: 3, v: 0.4, mode: 'flight',
-    fwd: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } }));
+  let poseNow = { sys: 0, ship: { id: 12, x: 1, y: 2, z: 3, v: 0.4, mode: 'flight',
+    fwd: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } } };
+  connect(() => poseNow);
   await wait(30);
   ok(sent.length === 1 && sent[0].t === 'hello',
     'первым делом представляемся: ' + (sent[0] ? sent[0].t : '—'));
@@ -6225,8 +6226,26 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // Первый же удар таймера шлёт и положение, и замер задержки.
   await wait(SEND_EVERY + 60);
   const pos = sent.find((m) => m.t === 'pos');
-  ok(pos && pos.fx === 0 && pos.fz === 1 && pos.uy === 1,
-    'положение уходит вместе с осанкой');
+  ok(pos && pos.fx === 0 && pos.fz === 1 && pos.uy === 1 && pos.sid === 12,
+    'положение уходит вместе с осанкой и номером корабля');
+
+  // Пилот — отдельно от корабля. Пассажир чужого корабля, оставивший
+  // свой в другой системе, не ведёт никакого корабля: в снимке только он.
+  {
+    const { poseMessage } = await import('../js/net/socket.js');
+    const me = { st: 'walk', s: 40, x: 1.5, y: -2.3, z: 10, yaw: 0.5, pitch: 0, v: 1.9, air: 0 };
+    const rider = poseMessage({ sys: 3, ship: null, me });
+    const host = poseMessage({ sys: 0, me: { st: 'seat', s: 12, x: 0, y: 0, z: 0 }, ship: {
+      id: 12, x: 1e5, y: 2, z: 3, v: 0, mode: 'landed', fwd: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 },
+      gear: true, hatches: ['nL'], lift: 0.3,
+      local: { b: 3, pos: { x: 0.0123456789, y: 4200.006, z: -1 }, fwd: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 } },
+    } });
+    ok(rider.x === undefined && rider.sid === undefined && rider.me.s === 40 && rider.sys === 3
+      && host.b === 3 && host.ly === 4200.006 && host.lx === 0.012346 && host.g === 1
+      && host.h[0] === 'nL' && host.me.st === 'seat',
+      'пассажир шлёт только себя; хозяин — и корабль, у тела ещё и в осях тела (до мм): b ' + host.b
+      + ', ly ' + host.ly);
+  }
   ok(sent.some((m) => m.t === 'ping'), 'замер задержки уходит на сервер');
 
   live.say({ t: 'pong', time: 1 });
@@ -8499,6 +8518,151 @@ console.log('\n== наземный город ==');
   const sh = { throttle: 0.2 };
   touchApply(t, sh);
   ok(t.thr.id === null && sh.throttle === 0.2, 'на ногах ползунок тяги палец не ловит: тяга не меняется');
+}
+
+// Пилот и корабль — разные вещи (схема 10): чужие корабли приходят в
+// осях тела, люди — в осях того, на чём стоят, у каждого корабля свои
+// люки, а фигура пилота идёт ногами по пройденному пути.
+{
+  console.log('\n== пилот и корабль: чужие корабли и люди ==');
+  const P = await import('../js/game/peers.js');
+  const Vs = await import('../js/game/vessels.js');
+  const A = await import('../js/game/airlock.js');
+  const W = await import('../js/game/world.js');
+  const G = await import('../js/game/galaxy.js');
+  const world = W.makeSystem(G.systemById(0));
+  W.updateWorld(world, 3600);
+  const body = world.bodies.find((b) => b.name === 'Lave II');
+
+  // Стоящий корабль соседа: в осях тела он стоит, хотя тело за четверть
+  // секунды опоздания картинки провернулось. В мировых осях он бы уехал.
+  {
+    const st = P.makePeers();
+    // На экваторе (ось вращения — верх тела): там грунт идёт быстрее всего.
+    const l = { x: body.radius + 0.006, y: 0, z: 10 };
+    const shot = (t) => P.ingestPeers(st, [{ id: 5, by: 2, name: 'Б', mode: 'landed', sys: 0, b: body.id,
+      lx: l.x, ly: l.y, lz: l.z, lfx: 0, lfy: 0, lfz: 1, lux: 0, luy: 1, luz: 0, g: 1, h: ['nL'] }], t);
+    shot(10); shot(10.2);
+    const was = Vs.bodyWorld(body, l);
+    // Мир ушёл вперёд на секунду: тело повернулось.
+    W.updateWorld(world, 1);
+    const V = P.peerPoses(st, 10.3, [], world)[0];
+    const want = Vs.bodyWorld(body, l);
+    const off = Math.hypot(V.pos.x - want.x, V.pos.y - want.y, V.pos.z - want.z) * 1000;
+    // Как было бы по мировым координатам: точка, снятая на секунду раньше.
+    const drift = Math.hypot(was.x - want.x, was.y - want.y, was.z - want.z) * 1000;
+    ok(V && off < 0.01 && V.gear.out && V.hatches[0] === 'nL' && V.body === body.id && V.by === 2,
+      `стоящий корабль соседа — в осях тела: на месте с точностью ${off.toFixed(3)} м; `
+      + `в мировых осях за секунду он уехал бы на ${drift.toFixed(0)} м`);
+    // Без тела в мире (корабль в другой системе) — не показывается.
+    ok(P.peerPoses(st, 10.3, [], null).length === 0, 'корабль у тела, которого здесь нет, не рисуется');
+    // Сменил систему (варп) — прежние снимки не тянутся к новым.
+    P.ingestPeers(st, [{ id: 5, sys: 3, x: 1e6, y: 0, z: 0 }], 10.4);
+    ok(st.by.get(5).samples.length === 1 && st.by.get(5).out.sys === 3,
+      'сменил систему — история снимков сброшена: корабль не летит сквозь полгалактики');
+  }
+
+  // Люди: точка в осях опоры, сменил опору — история заново; ноги идут
+  // по пройденному пути.
+  {
+    const st = P.makePeople();
+    const shot = (t, z, extra = {}) => P.ingestPeople(st, [Object.assign({ id: 9, name: 'АННА', st: 'walk', s: 5,
+      x: 0, y: -9, z, yaw: 0, pitch: 0, v: 2, air: 0 }, extra)], t);
+    shot(1, 0); shot(1.2, 0.4);
+    const p = P.peoplePoses(st, 1.35, [], () => 1)[0];
+    ok(p && p.ship === 5 && p.st === 'walk' && Math.abs(p.p[2] - 0.2) < 1e-9,
+      'человек на палубе — между снимками, в осях корабля: z = ' + (p && p.p[2].toFixed(2)));
+    const ph0 = p.phase;
+    for (let i = 1; i <= 30; i++) P.peoplePoses(st, 1.35 + i / 60, [], () => 1.5);
+    const ph1 = P.peoplePoses(st, 1.35 + 31 / 60, [], () => 1.5)[0].phase;
+    ok(Math.abs((ph1 - ph0) - 2 * (31 / 60) / 1.5) < 0.02,
+      `фаза шага — по пути: ${(ph1 - ph0).toFixed(3)} цикла за полсекунды на 2 м/с при цикле 1.5 м`);
+    P.ingestPeople(st, [{ id: 9, st: 'out', b: 3, lx: 1, ly: 2, lz: 3, lfx: 1, lfy: 0, lfz: 0, v: 0 }], 1.4);
+    ok(st.by.get(9).samples.length === 1, 'сошёл с трапа на грунт — история сброшена (оси другие)');
+  }
+
+  // Где в мире человек: ноги, «вверх» по кораблю или от центра тела.
+  {
+    const V = { pos: { x: 100, y: 50, z: -20 }, basis: makeBasis() };
+    rotateBasis(V.basis, 0.3, 1.1, -0.2);
+    const out = { pos: v3(), basis: makeBasis() };
+    const okA = Vs.personPlace({ st: 'walk', p: [1.5, -9, 4], yaw: 0.7 }, V, null, out);
+    const back = Vs.worldToVessel(V, out.pos);
+    const ortho = Math.abs(dot(out.basis.right, out.basis.up)) + Math.abs(dot(out.basis.up, out.basis.fwd))
+      + Math.abs(dot(out.basis.fwd, out.basis.right));
+    const upOk = dot(out.basis.up, V.basis.up) > 0.9999;
+    const okB = Vs.personPlace({ st: 'out', p: [0, body.radius, 0], face: { x: 1, y: 0, z: 0 } }, null, body, out);
+    const r = v3(out.pos.x - body.pos.x, out.pos.y - body.pos.y, out.pos.z - body.pos.z);
+    ok(okA && okB && Math.hypot(back[0] - 1.5, back[1] + 9, back[2] - 4) < 1e-6 && ortho < 1e-9 && upOk
+      && dot(normalize(r), out.basis.up) > 0.99999,
+      'человек на палубе стоит по палубе, на грунте — по вертикали тела; оси ортонормальны');
+  }
+
+  // У каждого корабля свои люки: открыл у соседа — у себя закрыт.
+  {
+    const { buildCobra } = await import('../js/models/ships.js');
+    const I = await import('../js/models/interior.js');
+    const In = I.buildInterior(buildCobra());
+    const own = A.makeAirlocks(In, SHIP.gearClear);
+    const other = A.makeAir(In, SHIP.gearClear);
+    A.setHatches(other, ['sR'], true);
+    const hx = A.hatchById(other, 'sR');
+    ok(In.air === own && other !== own && hx.open === 1 && hx.stair === 1 && !A.hatchById(own, 'sR').want
+      && A.openHatches(other).join() === 'sR' && other.locks.lockS.state === 'open',
+      'люки — у каждого корабля свои: у соседа открыт и трап выдвинут, у своего закрыт');
+  }
+
+  // Фигура пилота: ноги не скользят. Человек идёт со скоростью v, фаза
+  // шага копится по длине цикла, которую конвертер измерил по ступне, —
+  // и ступня на грунте стоит на месте, пока тело идёт над ней.
+  {
+    const SU = await import('../js/models/spacesuit.js');
+    const S = await SU.loadSuit();
+    const bones = new Float32Array(S.bones * 16);
+    // Вершина подошвы левого ботинка: самая низкая из тех, что целиком на Foot.L.
+    const footL = 17;
+    let foot = -1, low = Infinity;
+    for (let v = 0; v < S.verts; v++) {
+      if (S.joints[v * 4] === footL && S.weights[v * 4] === 255 && S.pos[v * 3 + 1] < low) { low = S.pos[v * 3 + 1]; foot = v; }
+    }
+    const slide = (v) => {
+      const cyc = SU.suitCycle(S, v);
+      const dt = 1 / 120, steps = Math.round(cyc / v / dt);
+      let body = 0, phase = 0, prev = null, worst = 0, contact = 0;
+      const q = [0, 0, 0];
+      for (let i = 0; i < steps; i++) {
+        SU.suitPose(S, { st: 'walk', v, phase, air: false }, 0, bones);
+        SU.skinVertex(S, bones, foot, q);
+        const wz = body + q[2];
+        // На грунте — пока подошва на нём (в пределах 6 мм): отрыв пятки
+        // и касание — уже не опора.
+        if (q[1] < 0.006) {
+          if (prev !== null) worst = Math.max(worst, Math.abs(wz - prev) / dt);
+          prev = wz;
+          contact++;
+        } else prev = null;
+        body += v * dt;
+        phase += v * dt / cyc;
+      }
+      return { worst, contact: contact / steps, cyc };
+    };
+    const walk = slide(2.0), run = slide(4.6);
+    ok(walk.contact > 0.2 && walk.worst < 0.35 && run.worst < 0.8,
+      `ноги не скользят: ступня на грунте едет ${walk.worst.toFixed(2)} м/с при шаге 2 м/с `
+      + `и ${run.worst.toFixed(2)} при беге 4.6 (цикл ${walk.cyc.toFixed(2)} и ${run.cyc.toFixed(2)} м; `
+      + `без фазы по пути — 2 и 4.6)`);
+
+    // Сидящий — головой на глаз кресла, и не сквозь пол рубки.
+    const { buildCobra } = await import('../js/models/ships.js');
+    const I = await import('../js/models/interior.js');
+    const In = I.buildInterior(buildCobra());
+    const at = SU.seatPlace(S, In.seat.eye, In.INT.deck.bridge);
+    const head = at[1] + S.head.sit[1] + 0.12;
+    const feet = at[1] + S.sitLow;
+    ok(feet >= In.INT.deck.bridge - 1e-9 && Math.abs(head - In.seat.eye[1]) < 0.15,
+      `сидящий в кресле: глаз на ${(head - In.seat.eye[1]).toFixed(2)} м от глаза кресла, `
+      + `ступни на ${(feet - In.INT.deck.bridge).toFixed(2)} м над полом рубки — не сквозь него`);
+  }
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

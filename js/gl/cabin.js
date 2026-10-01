@@ -171,6 +171,8 @@ in vec2 vUv;
 in vec2 vUv2;
 in float vFragDepth;
 uniform float uLogFC;
+// Нормаль грани — по производным (пилот в скафандре, js/gl/spacesuit.js).
+uniform float uFlatN;
 
 uniform vec3 uEye;
 uniform vec3 uSunL;              // на солнце, оси кабины
@@ -242,7 +244,7 @@ void main() {
   if (m == ${CMAT.lamp}) { outColor = vec4(vColor.rgb * mix(0.55, 1.0, vColor.a), 1.0); return; }
   if (m == ${CMAT.led}) { outColor = vec4(vColor.rgb * vColor.a * uLedK, 1.0); return; }
 
-  vec3 n0 = normalize(vN);
+  vec3 n0 = uFlatN > 0.5 ? normalize(cross(dFdx(vPos), dFdy(vPos))) : normalize(vN);
   if (dot(n0, V) < 0.0) n0 = -n0;
   vec3 n = n0;
 
@@ -874,7 +876,8 @@ export class CabinView {
    * отражённый планетой свет.
    */
   outside(game, sunPos, out) {
-    const ship = game.ship, b = ship.basis, p = ship.pos;
+    // Корабль кадра: тот, в чьих помещениях глаз (свой или чужой).
+    const ship = game.frame || game.ship, b = ship.basis, p = ship.pos;
     const toCab = (x, y, z, o) => {
       const l = Math.hypot(x, y, z) || 1;
       o[0] = (x * b.right.x + y * b.right.y + z * b.right.z) / l;
@@ -891,7 +894,9 @@ export class CabinView {
     out.planetDir[0] = 0; out.planetDir[1] = -1; out.planetDir[2] = 0;
 
     // Ближайшее тело: от него небо, отражённый свет и краснеющее солнце.
-    const body = game.zone && game.zone.body ? game.zone.body : game.capture;
+    // У чужого корабля — его тело (js/main.js, frameBody).
+    const body = game.frameBody !== undefined ? game.frameBody
+      : (game.zone && game.zone.body ? game.zone.body : game.capture);
     if (body && body.radius) {
       const ux = p.x - body.pos.x, uy = p.y - body.pos.y, uz = p.z - body.pos.z;
       const d = Math.hypot(ux, uy, uz) || 1;
@@ -1061,7 +1066,7 @@ export class CabinView {
     // Кабина -> камера: поворот головы относительно корпуса и сдвиг на
     // глаз. Сдвиг считается в метрах: начало кабины смещено от глаза на
     // -eye в осях корабля, а эти оси в мире — базис корпуса.
-    const b = game.ship.basis, e = this.eye;
+    const b = (game.frame || game.ship).basis, e = this.eye;
     const off = this._off || (this._off = { x: 0, y: 0, z: 0 });
     off.x = -(b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]);
     off.y = -(b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]);
@@ -1230,7 +1235,9 @@ export class CabinView {
         const k = l.kind === 'reactor' ? glow : 1;
         // Свет шлюза — по его циклу (js/game/airlock.js): дежурный, жёлтый
         // мигающий на стравливании и наддуве, красный при открытом люке.
-        const lc = l.kind === 'lock' && I.air ? lockLight(I.air, l.room, now, this._lc || (this._lc = [0, 0, 0])) : l.color;
+        // Шлюзы — того корабля, чьи помещения рисуем (свой или чужой).
+        const air = this._air || (game.frame && game.frame.air) || I.air;
+        const lc = l.kind === 'lock' && air ? lockLight(air, l.room, now, this._lc || (this._lc = [0, 0, 0])) : l.color;
         out.push({
           pos, dir: l.dir, cos: l.cos, range: l.range,
           color: [lc[0] * k, lc[1] * k, lc[2] * k],
@@ -1256,9 +1263,9 @@ export class CabinView {
    *
    * @returns сколько вызовов отрисовки ушло
    */
-  drawLocksOutside(game, cam, size, sunPos, logFC) {
-    const I = game.interior, air = I && I.air;
-    if (!air || !game.ship) return 0;
+  drawLocksOutside(game, cam, size, sunPos, logFC, ship = game.ship, air = game.interior && game.interior.air) {
+    const I = game.interior;
+    if (!air || !ship) return 0;
     const vis = [];
     for (const hx of air.hatches) if (hx.open > 0.01 && !vis.includes(hx.lock)) vis.push(hx.lock);
     if (!vis.length) return 0;
@@ -1279,7 +1286,7 @@ export class CabinView {
       r: new Float32Array([1, 0, 0]), u: new Float32Array([0, 1, 0]), f: new Float32Array([0, 0, 1]),
     });
     // Глаз — сама камера, в осях кабины (метры от глаза пилота).
-    const ship = game.ship, b = ship.basis;
+    const b = ship.basis;
     const dx = (cam.pos.x - ship.pos.x) * 1000, dy = (cam.pos.y - ship.pos.y) * 1000, dz = (cam.pos.z - ship.pos.z) * 1000;
     const e = this.eye;
     e[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z - EYE.x;
@@ -1301,10 +1308,12 @@ export class CabinView {
     pc.use();
     this.game = game;
     this._visOverride = vis;
+    this._air = air;
     this.bindCommon(pc, L, lb, 0, null);
     gl.uniform1f(pc.loc('uLogFC'), logFC);
     this.drawInterior(game, pc);
     this._visOverride = null;
+    this._air = null;
     gl.bindVertexArray(null);
     for (const u of [4, 5, 6]) {
       gl.activeTexture(gl.TEXTURE0 + u);

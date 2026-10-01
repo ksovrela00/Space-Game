@@ -32,7 +32,7 @@ try {
                     s.`name` AS `system`, sh.`hull`
              FROM `player` p
              LEFT JOIN `star_system` s ON s.`id` = p.`system_id`
-             LEFT JOIN `ship` sh ON sh.`owner_id` = p.`id`
+             LEFT JOIN `ship` sh ON sh.`id` = p.`ship_id`
              ORDER BY p.`id`'
         );
         if (!$rows) {

@@ -177,6 +177,25 @@ try {
   ok(st.ok && Math.abs(st.data.ship.fuelT - fuel1) < 0.002,
     'и записан в базу: бак ' + (st.ok ? st.data.ship.fuelT : '—') + ' т');
 
+  // Пилот — не корабль: B вышла на грунт к кораблю A и поднялась к нему
+  // на борт. Всё это — вложенным полем me, люки — списком: проверяется,
+  // что такое проходит через настоящий Ratchet и JSON туда-обратно.
+  const L = 3, R = 4200;
+  a.send({ t: 'pos', sys: 0, x: 100, y: 0, z: 0, v: 0, mode: 'landed', b: L, lx: 0, ly: R + 0.006, lz: 0,
+    g: 1, h: ['nL'], wm: 1.5, wl: 0, wr: 0, n: 3, me: { st: 'walk', s: (a.last('welcome').you.ship), x: 0, y: -9, z: 3, yaw: 0 } });
+  b.send({ t: 'pos', sys: 0, me: { st: 'out', b: L, lx: 0.02, ly: R, lz: 0, lfx: 1, lfy: 0, lfz: 0, v: 1.9 } });
+  const person = (who, name) => ((who.last('peers') || { people: [] }).people || []).find((p) => p.name === name) || null;
+  await until(() => person(a, TEMP[1]) && sees(b, TEMP[0]) && sees(b, TEMP[0]).b === L, 'снимка с человеком на грунте');
+  const onGround = person(a, TEMP[1]);
+  const shipA = sees(b, TEMP[0]);
+  ok(!!onGround && onGround.st === 'out' && onGround.b === L && Math.abs(onGround.lx - 0.02) < 1e-9
+    && !!shipA && shipA.h[0] === 'nL' && shipA.g === 1,
+    'A видит B человеком на грунте, B видит корабль A на стоянке в осях тела с открытым люком');
+  // B поднялась на борт: теперь она стоит на палубе корабля A.
+  b.send({ t: 'pos', sys: 0, me: { st: 'walk', s: shipA.id, x: 1.5, y: -9, z: 4, yaw: 0.5, v: 0 } });
+  await until(() => (person(a, TEMP[1]) || {}).s === shipA.id, 'пассажира на борту');
+  ok((person(a, TEMP[1]) || {}).s === shipA.id, 'B на палубе корабля A — так её и видит A');
+
   // Уход: сообщение приходит сразу.
   b.close();
   await until(() => a.last('leave') !== null, 'сообщения об уходе');

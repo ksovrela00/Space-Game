@@ -14,6 +14,7 @@
     "check:all": "npm run check && npm run api:test",
     "sounds": "node tools/sounds.mjs",
     "ship": "node tools/ship.mjs",
+    "spacesuit": "node tools/spacesuit.mjs",
     "station": "node tools/station.mjs",
     "city": "node tools/city.mjs",
     "nature": "node tools/nature.mjs",
