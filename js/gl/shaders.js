@@ -5,6 +5,7 @@ import { DETAIL_GLSL, BAKE_DETAIL_GLSL } from './detail.js';
 import { GRAIN_GLSL } from './ground.js';
 import { WASH_GLSL } from './wash.js';
 import { HULL_GLSL } from './hull.js';
+import { MAT } from '../models/hulldetail.js';
 import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
 
@@ -326,8 +327,12 @@ out vec4 outColor;
 
 void main() {
 ${LOG_DEPTH_FRAG}
-  // Свой корпус изнутри: там, где стоят помещения, обшивки нет.
-  if (uHullInside > 0.5 && vMat > 0.5 && hullCarved(vLocal * 1000.0)) discard;
+  // Свой корпус изнутри: там, где стоят помещения, обшивки нет. Стекло
+  // фонаря не вырезается никогда: нижний край лобового стекла спускается к
+  // носу ниже палубы рубки, к самому коридору, и вырез средней палубы
+  // задевал его.
+  if (uHullInside > 0.5 && vMat > 0.5 && floor(vMat + 0.5) != ${MAT.glass}.0
+    && hullCarved(vLocal * 1000.0)) discard;
   vec3 n = normalize(vNormal);
   vec3 albedo = vColor.rgb;
   // Собственный свет узора — окна мостика, жар сопел. Постоянный: его

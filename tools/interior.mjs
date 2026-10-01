@@ -82,6 +82,10 @@ const ROLE_OF = {
 /**
  * Что берём. `name` — как деталь зовётся у нас, `file` — в паке.
  * У модульных деталей (стены, плитки, колонны) сетка пака сохраняется.
+ *
+ * Только то, что стоит в планировке (js/models/interior.js): деталь
+ * сверх неё — это сотни килобайт чисел, которые грузит каждый телефон.
+ * Проверка (tools/test.mjs, «помещения») следит, чтобы лишних не было.
  */
 const PARTS = [
   // Стены: лицо в +z на z ≈ −0.21 м, ширина 4 м, высота 4.43 м.
@@ -100,21 +104,14 @@ const PARTS = [
   { name: 'floor', pack: 'q', file: 'FloorTile_Basic' },
   { name: 'floor2', pack: 'q', file: 'FloorTile_Basic2' },
   { name: 'floorPlain', pack: 'q', file: 'FloorTile_Empty' },
-  { name: 'floorSide', pack: 'q', file: 'FloorTile_Side' },
   { name: 'roof', pack: 'q', file: 'RoofTile_Plate' },
-  { name: 'roofVents', pack: 'q', file: 'RoofTile_Vents' },
-  { name: 'roofPipes', pack: 'q', file: 'RoofTile_Pipes1' },
   { name: 'roofDetails', pack: 'q', file: 'RoofTile_Details' },
   { name: 'roofSmallVents', pack: 'q', file: 'RoofTile_SmallVents' },
   { name: 'roofPlain', pack: 'q', file: 'RoofTile_Empty' },
   { name: 'column', pack: 'q', file: 'Column_1' },
   { name: 'columnSlim', pack: 'q', file: 'Column_Slim' },
-  { name: 'pipes', pack: 'q', file: 'Pipes' },
   // Груз и машинерия.
   { name: 'crate', pack: 'q', file: 'Props_Crate', center: true },
-  { name: 'crateLong', pack: 'q', file: 'Props_CrateLong', center: true },
-  { name: 'container', pack: 'q', file: 'Props_ContainerFull', center: true },
-  { name: 'chest', pack: 'q', file: 'Props_Chest', center: true },
   { name: 'shelf', pack: 'q', file: 'Props_Shelf', center: true },
   { name: 'shelfTall', pack: 'q', file: 'Props_Shelf_Tall', center: true },
   { name: 'computer', pack: 'q', file: 'Props_Computer', center: true },
@@ -123,9 +120,6 @@ const PARTS = [
   { name: 'pod', pack: 'q', file: 'Props_Pod', center: true },
   { name: 'vessel', pack: 'q', file: 'Props_Vessel', center: true },
   { name: 'vesselTall', pack: 'q', file: 'Props_Vessel_Tall', center: true },
-  { name: 'ventPlate', pack: 'q', file: 'Details_Vent_1', center: true },
-  { name: 'plateLarge', pack: 'q', file: 'Details_Plate_Large', center: true },
-  { name: 'pipesLong', pack: 'q', file: 'Details_Pipes_Long', center: true },
   // Мебель: камбуз, кают-компания, каюта, санузел.
   { name: 'bunk', pack: 'k', file: 'bedBunk' },
   { name: 'cabinet', pack: 'k', file: 'kitchenCabinet' },
@@ -142,7 +136,6 @@ const PARTS = [
   { name: 'desk', pack: 'k', file: 'desk' },
   { name: 'deskChair', pack: 'k', file: 'chairDesk' },
   { name: 'screen', pack: 'k', file: 'computerScreen' },
-  { name: 'laptop', pack: 'k', file: 'laptop' },
   { name: 'locker', pack: 'k', file: 'bookcaseClosedDoors' },
   { name: 'sideTable', pack: 'k', file: 'sideTableDrawers' },
   { name: 'shower', pack: 'k', file: 'shower' },

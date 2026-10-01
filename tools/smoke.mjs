@@ -667,6 +667,111 @@ await step('кабина: софт мониторов, осмотр голово
   }
 });
 
+await step('пилот на ногах: Y — встать, ходьба, голова, двери, E — сесть; ручки корабля отпущены', async () => {
+  // Помещения рисует проход кабины, а smoke идёт на Canvas-2D: модель
+  // кабины подставляется руками, как в шаге про кабину. Сами помещения
+  // собирает игра — лениво, тем же вызовом, что и в браузере.
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { input } = await import('../js/core/input.js');
+  const { WALK } = await import('../js/game/walker.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+  };
+  try {
+    game.cockpit = buildCockpit();
+    if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+    await game.loadInterior();
+    if (!game.interior) throw new Error('помещения корабля не собрались');
+    const view0 = game.state.view;
+    // Тяга — ноль: брошенный на ходу корабль у станции за прогулку в
+    // него и врежется (это проверено — и пилот тогда возвращается в
+    // кресло, как при любом крушении).
+    sh.throttle = 0;
+    frames(2);
+    const fwd0 = { ...sh.basis.fwd };
+
+    key('KeyY'); frames(2);
+    if (!game.walk.on) throw new Error('Y не поднял пилота');
+    if (game.state.view !== 'cockpit') throw new Error('на ногах вид не от первого лица');
+    frames(Math.ceil(WALK.rise * 60) + 2);
+    if (game.walk.phase !== 'walk') throw new Error('пилот не встал: ' + game.walk.phase);
+
+    // Приборы на ногах: подсказка клавиш (на сенсорном профиле — своя),
+    // состояние брошенного корабля и название помещения.
+    texts = []; frames(2);
+    let seen = texts.map((t) => t.s); texts = null;
+    for (const want of ['ДЖОЙСТИК — ИДТИ', 'КОРАБЛЬ БЕЗ ПИЛОТА']) {
+      if (!seen.some((s) => s.indexOf(want) >= 0)) throw new Error('в приборах на ногах нет «' + want + '»');
+    }
+    if (seen.some((s) => s === 'ТЯГА' || s === 'КОРПУС')) throw new Error('на ногах остались полётные панели');
+
+    // Клавиши ходьбы — ногам: S уводит назад, а нос корабля стоит.
+    const z0 = game.walk.pos[2];
+    holdDown('KeyS'); frames(30); release('KeyS'); frames(10);
+    if (!(game.walk.pos[2] < z0 - 0.6)) {
+      throw new Error('S не повёл пилота назад: ' + z0.toFixed(2) + ' -> ' + game.walk.pos[2].toFixed(2));
+    }
+    const d = fwd0.x * sh.basis.fwd.x + fwd0.y * sh.basis.fwd.y + fwd0.z * sh.basis.fwd.z;
+    // Shift на ногах — бег, а не прибавка тяги.
+    holdDown('ShiftLeft'); holdDown('KeyS'); frames(30); release('KeyS'); release('ShiftLeft'); frames(10);
+    if (d < 0.99999 || sh.control.pitch !== 0 || sh.throttle !== 0) {
+      throw new Error('клавиши ходьбы дошли до ручек корабля: тяга ' + sh.throttle);
+    }
+    // Бегом отошли назад ещё — вернёмся вперёд.
+    holdDown('KeyW'); frames(45); release('KeyW'); frames(10);
+    // Голова: мышь в захвате вертит взгляд без кнопки, стрелки — без мыши.
+    const yaw0 = game.walk.yaw;
+    input.locked = true;
+    for (const fn of winListeners.mousemove || []) fn({ movementX: 100, movementY: 0 });
+    frames(1);
+    input.locked = false;
+    if (Math.abs(game.walk.yaw - yaw0 - 100 * WALK.look) > 1e-6) {
+      throw new Error('мышь в захвате не повернула голову: ' + (game.walk.yaw - yaw0).toFixed(3));
+    }
+    holdDown('ArrowLeft'); frames(20); release('ArrowLeft'); frames(1);
+    if (!(game.walk.yaw < yaw0 + 100 * WALK.look - 0.4)) throw new Error('стрелка не повернула голову');
+
+    // Пробел — прыжок, а не форсаж.
+    const y0 = game.walk.pos[1];
+    key('Space'); frames(10);
+    if (!(game.walk.pos[1] > y0 + 0.2) || sh.boosting) throw new Error('пробел на ногах — не прыжок');
+    frames(40);
+
+    // К двери рубки: развернуться к корме и идти. Дверь открывается сама.
+    game.walk.yaw = Math.PI;
+    const door = game.interior.doors.find((x) => x.id === 'bridge');
+    holdDown('KeyW'); frames(150); release('KeyW'); frames(5);
+    if (!(door.open > 0.9) || !(game.walk.pos[2] < -14.0)) {
+      throw new Error(`к двери рубки не дошли: z ${game.walk.pos[2].toFixed(2)}, дверь ${door.open.toFixed(2)}`);
+    }
+    // Обратно к креслу — до упора в его спинку.
+    game.walk.yaw = 0;
+    holdDown('KeyW'); frames(240); release('KeyW'); frames(30);
+    if (door.open !== 0) throw new Error('дверь рубки не закрылась за спиной');
+    texts = []; frames(2);
+    seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('СЕСТЬ') >= 0)) throw new Error('у кресла нет подсказки «сесть»');
+
+    key('KeyE'); frames(Math.ceil(WALK.sit * 60) + 3);
+    if (game.walk.on) throw new Error('E у кресла не посадил пилота');
+    if (game.state.view !== view0) throw new Error('вид не вернулся: ' + game.state.view);
+    // Сидя ручки снова у пилота.
+    holdDown('KeyW'); frames(10); release('KeyW');
+    if (!(sh.control.pitch !== 0 || game.yoke.pitch !== 0)) throw new Error('сев, пилот не взял ручку');
+    frames(20);
+  } finally {
+    if (game.walk.on) { key('KeyE'); frames(50); }
+    game.cockpit = saved;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+  }
+});
+
 await step('вид от 3-го лица (V) рисует свой корабль', () => {
   const before = calls.fill;
   key('KeyV');
@@ -1742,6 +1847,35 @@ await step('экран станции: разделы, клавиши 1–4, а�
   // Справка поверх порта — в своей рамке, а не в широкой станционной.
   key('KeyH'); frames(2);
   key('KeyH'); frames(2);
+});
+
+await step('в порту: Y — пройтись по кораблю (экран порта прячется), E у кресла — экран обратно', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const saved = game.cockpit;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+    if (nodes.panel.innerHTML.indexOf('ПРОЙТИСЬ ПО КОРАБЛЮ') < 0) {
+      // Кнопка появляется, когда кабина есть: перерисуем экран с ней.
+      key('Digit1'); frames(1);
+      if (nodes.panel.innerHTML.indexOf('ПРОЙТИСЬ ПО КОРАБЛЮ') < 0) throw new Error('на экране порта нет кнопки «пройтись»');
+    }
+    key('KeyY'); frames(70);
+    if (!game.walk.on || game.walk.phase !== 'walk') throw new Error('в порту Y не поднял пилота');
+    if (!nodes.overlay.classList.contains('hidden')) throw new Error('экран порта остался поверх идущего');
+    // Пробел в порту на ногах — прыжок, а не вылет.
+    key('Space'); frames(40);
+    if (game.state.mode !== 'docked') throw new Error('пробел на ногах увёл корабль из порта');
+    key('KeyE'); frames(50);
+    if (game.walk.on) throw new Error('E у кресла не посадил пилота');
+    if (nodes.overlay.classList.contains('hidden') || nodes.panel.innerHTML.indexOf('СТЫКОВКА') < 0) {
+      throw new Error('сев, пилот не увидел экран порта');
+    }
+  } finally {
+    game.cockpit = saved;
+    key('Digit1'); frames(1);
+  }
 });
 
 await step('в порту меню пилота не открывается', () => {

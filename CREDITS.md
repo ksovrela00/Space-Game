@@ -8,6 +8,8 @@
 |---|---|---|---|
 | корпус корабля игрока («Challenger») | [LowPoly Spaceships Pack](https://opengameart.org/content/lowpoly-spaceships-pack) | CC0 | Quaternius |
 | детали станций (тарелки, генераторы, баки, фермы, турели) | [Space Kit](https://kenney.nl/assets/space-kit) | CC0 | Kenney |
+| помещения корабля: стены, пол, потолок, двери, колонны, ящики, пульты, капсулы, реакторы | [LowPoly Modular Sci-Fi Environments](https://opengameart.org/content/lowpoly-modular-sci-fi-environments) | CC0 | Quaternius |
+| мебель корабля: койки, камбуз, стол, стулья, санузел | [Furniture Kit](https://kenney.nl/assets/furniture-kit) | CC0 | Kenney |
 | здания наземного города (кварталы, башни) | [City Kit (Commercial)](https://kenney.nl/assets/city-kit-commercial) | CC0 | Kenney |
 | космопорт города (ангары, баки, монорельс, техника) | [Space Kit](https://kenney.nl/assets/space-kit) | CC0 | Kenney |
 | растительность (деревья, кусты, трава, цветы) | [Nature Kit](https://kenney.nl/assets/nature-kit) | CC0 | Kenney |
@@ -94,6 +96,24 @@ node tools/nature.mjs --clean # удалить скачанный пак
 бирюзовая, кора лососевая), хотя и в этом тоже: растения чужой планеты
 не обязаны быть земной зеленью, и цвет им должен задавать грунт, на
 котором они стоят. Геометрия при этом авторская, до единой вершины.
+
+## Помещения корабля
+
+Стены, пол, потолок, двери и машинерия — пак Quaternius, мебель — пак
+Kenney; оба без текстур, цвет в материалах. Мебель перекрашивается
+кораблём по ролям (дерево — графитовый композит, ткань — обивка), геометрия
+авторская. Как это раскладывается по ярусам корабля — [README.md](README.md),
+раздел «Пилот на ногах».
+
+```
+npm run interior                # пересобрать js/models/interior.parts.js
+node tools/interior.mjs --list  # что есть в обоих паках
+node tools/interior.mjs --clean # удалить скачанные паки (13 МБ во временной папке)
+```
+
+В файл попадает только то, что стоит в планировке: лишняя деталь — это
+сотни килобайт чисел, которые грузит каждый телефон, и проверка
+(`tools/test.mjs`, «помещения корабля») такую ловит.
 
 ## Грунт
 

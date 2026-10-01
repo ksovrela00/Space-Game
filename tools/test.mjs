@@ -7700,5 +7700,294 @@ console.log('\n== наземный город ==');
   }
 }
 
+// --- помещения корабля и пилот на ногах -----------------------------------
+//
+// js/models/interior.js и js/game/walker.js. Проверяется не картинка (её
+// снимает tools/screen.mjs), а то, без чего ходить нельзя или нечестно:
+// комнаты внутри корпуса, корпус в них вырезан, по кораблю проходится
+// весь маршрут — от кресла до трюма и обратно, — двери открываются сами,
+// ступени берутся ногой, голова не цепляет кромки проёмов, человек
+// прыгает на свои сорок пять сантиметров.
+{
+  console.log('\n== помещения корабля ==');
+  const { buildCobra } = await import('../js/models/ships.js');
+  const I = await import('../js/models/interior.js');
+  const Wk = await import('../js/game/walker.js');
+  const { INTERIOR_PARTS } = await import('../js/models/interior.parts.js');
+  const { EYE } = await import('../js/models/cockpit.js');
+  const hull = buildCobra();
+  const t0 = performance.now();
+  const In = I.buildInterior(hull);
+  const buildMs = performance.now() - t0;
+  let tris = 0;
+  for (const m of Object.values(In.meshes)) tris += m.tris;
+  ok(tris > 50000 && tris < 260000 && buildMs < 2000,
+    `собрано ${In.rooms.length} помещений: ${Math.round(tris / 1000)} тыс. треугольников за ${buildMs.toFixed(0)} мс`);
+
+  // --- внутри корпуса. Точка внутри замкнутой обшивки видит её во все
+  // шесть сторон. Проверяются грани коробки комнаты, раздутые на толщину
+  // стен (0.45 м) и плитки (0.15 м): снаружи не должно торчать ничего.
+  const MM = 1000;
+  const T = [];
+  for (const f of hull.faces) {
+    for (let k = 1; k + 1 < f.v.length; k++) {
+      T.push([f.v[0], f.v[k], f.v[k + 1]].map((i) => [hull.verts[i].x * MM, hull.verts[i].y * MM, hull.verts[i].z * MM]));
+    }
+  }
+  const hits = (o, d) => {
+    for (const [a, b, c] of T) {
+      const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
+      const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+      if (Math.abs(det) < 1e-12) continue;
+      const s = [o[0] - a[0], o[1] - a[1], o[2] - a[2]];
+      const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) / det;
+      if (u < 0 || u > 1) continue;
+      const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
+      const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) / det;
+      if (v < 0 || u + v > 1) continue;
+      if ((e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) / det > 0) return true;
+    }
+    return false;
+  };
+  const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  const inside = (x, y, z) => DIRS.every((d) => hits([x + 0.0013, y + 0.0017, z + 0.0011], d));
+  const outRooms = [];
+  for (const r of In.rooms) {
+    if (r.kind === 'bridge') continue;
+    const L = [r.lo[0] - 0.45, r.lo[1] - 0.15, r.lo[2] - 0.45], H = [r.hi[0] + 0.45, r.hi[1] + 0.15, r.hi[2] + 0.45];
+    const span = (a, b) => { const n = Math.max(1, Math.ceil((b - a) / 0.7)); return Array.from({ length: n + 1 }, (_, i) => a + (b - a) * i / n); };
+    let bad = 0;
+    for (const x of span(L[0], H[0])) {
+      for (const y of span(L[1], H[1])) {
+        for (const z of span(L[2], H[2])) {
+          if (x !== L[0] && x !== H[0] && y !== L[1] && y !== H[1] && z !== L[2] && z !== H[2]) continue;
+          if (!inside(x, y, z)) bad++;
+        }
+      }
+    }
+    if (bad) outRooms.push(r.id + ' (' + bad + ')');
+  }
+  ok(outRooms.length === 0, 'все помещения со стенами и плиткой — внутри обшивки' +
+    (outRooms.length ? ': торчат ' + outRooms.join(', ') : ''));
+
+  // --- вырез корпуса: где комната, там обшивки изнутри нет, а фонарь
+  // рубки остаётся целым.
+  const inBox = (p, b, m = 0) => p[0] > b.lo[0] - m && p[0] < b.hi[0] + m && p[1] > b.lo[1] - m
+    && p[1] < b.hi[1] + m && p[2] > b.lo[2] - m && p[2] < b.hi[2] + m;
+  // Стекло фонаря не вырезается вовсе (правило шейдера), поэтому его в
+  // комнатах быть не должно, а остальная обшивка в них — вся в вырезе.
+  let uncut = 0, glassIn = 0;
+  const { MAT } = await import('../js/models/hulldetail.js');
+  const { MESH_FS } = await import('../js/gl/shaders.js');
+  for (const f of hull.faces) {
+    const P = f.v.map((i) => [hull.verts[i].x * MM, hull.verts[i].y * MM, hull.verts[i].z * MM]);
+    const c = [0, 1, 2].map((a) => P.reduce((s, p) => s + p[a], 0) / P.length);
+    for (const r of In.rooms) {
+      if (r.kind === 'bridge' || !inBox(c, r)) continue;
+      if (f.mat === MAT.glass) glassIn++;
+      else if (!In.carve.some((b) => inBox(c, b))) uncut++;
+    }
+  }
+  ok(In.carve.length <= 6 && uncut === 0 && glassIn === 0
+    && new RegExp('floor\\(vMat \\+ 0\\.5\\) != ' + MAT.glass + '\\.0').test(MESH_FS),
+    `корпус вырезан во всех помещениях (${In.carve.length} коробок), стекла фонаря в них нет, и шейдер его не режет`);
+
+  // --- детали: всё, что лежит в паке, стоит в планировке.
+  const src = (await import('node:fs')).readFileSync(new URL('../js/models/interior.js', import.meta.url), 'utf8');
+  const unused = Object.keys(INTERIOR_PARTS).filter((n) => !new RegExp("'" + n + "'").test(src));
+  ok(unused.length === 0, 'в паке помещений нет лишних деталей' + (unused.length ? ': ' + unused.join(', ') : ''));
+
+  // --- трапы: ступень корабельная, а голова спускающегося проходит под
+  // кромкой потолочного проёма.
+  for (const s of In.stairs) {
+    ok(s.r >= 0.17 && s.r <= 0.2 && Math.abs(Math.atan2(s.r, I.INT.tread) * 180 / Math.PI - 35) < 3,
+      `трап ${s.id}: ${s.n} подъёмов по ${(s.r * 100).toFixed(1)} см, уклон ${(Math.atan2(s.r, I.INT.tread) * 180 / Math.PI).toFixed(0)}°`);
+  }
+
+  // --- свет: у каждой комнаты свой, и каждая лампа — в своей комнате.
+  const lit = new Set(In.lamps.map((l) => l.room));
+  const dark = In.rooms.filter((r) => r.kind !== 'bridge' && !lit.has(r.id)).map((r) => r.id);
+  const strays = In.lamps.filter((l) => !inBox(l.pos, In.roomById[l.room], 0.01));
+  ok(dark.length === 0 && strays.length === 0,
+    `${In.lamps.length} ламп, ни одной комнаты без света и ни одной лампы вне своей комнаты`);
+  ok(inBox([0, 0.5, -10], In.sunBox) && !inBox([0, -4.5, -18], In.sunBox) && !inBox([0, 1, -15.5], In.sunBox),
+    'солнце и небо — только под стеклом рубки, в закрытых помещениях их нет');
+
+  // --- видимость: за закрытой дверью комнаты не рисуются.
+  for (const d of In.doors) d.open = 0;
+  const seen = (id) => In.visibleNow(id).slice().sort().join(',');
+  ok(seen('bridge') === 'bridge', 'сидя в рубке при закрытой двери видна одна рубка');
+  ok(In.visibleNow('corridor').includes('hold') && !In.visibleNow('corridor').includes('cabin'),
+    'из коридора виден трюм (трап — проём), а каюта за закрытой дверью — нет');
+  In.doors.find((d) => d.id === 'cabin').open = 0.5;
+  ok(In.visibleNow('corridor').includes('cabin'), 'дверь каюты открылась — каюта видна');
+  for (const d of In.doors) d.open = 0;
+
+  // --- груз: ящик на тонну, вдоль бортов, проход свободен.
+  const slots = In.slots;
+  let overlapPairs = 0, outHold = 0, inAisle = 0;
+  const holdBox = In.roomById.hold;
+  for (let i = 0; i < slots.length; i++) {
+    const a = slots[i];
+    if (a.x - a.half < holdBox.lo[0] || a.x + a.half > holdBox.hi[0] || a.z - a.half < holdBox.lo[2]
+      || a.z + a.half > holdBox.hi[2] || a.y + a.h > holdBox.hi[1]) outHold++;
+    if (Math.abs(a.x) - a.half < 1.2) inAisle++;
+    for (let j = i + 1; j < slots.length; j++) {
+      const b = slots[j];
+      if (Math.abs(a.x - b.x) < a.half + b.half - 1e-6 && Math.abs(a.z - b.z) < a.half + b.half - 1e-6
+        && Math.abs(a.y - b.y) < Math.min(a.h, b.h) - 1e-6) overlapPairs++;
+    }
+  }
+  ok(slots.length >= 36 && overlapPairs === 0 && outHold === 0 && inAisle === 0,
+    `${slots.length} мест под ящики (трюм расширенный — 36 т): в трюме, без наложений, проход в 2.4 м свободен`);
+  const crates = Wk.crateSolids(In, 13.2);
+  ok(crates.length === 14, '13.2 т груза — 14 ящиков');
+
+  // --- пилот: встал за креслом, ничего не задевая.
+  const w = Wk.makeWalker();
+  Wk.standUp(w, In);
+  const W0 = { grid: Wk.solidGrid(In.solids), extra: [] };
+  ok(!Wk.blocked(W0, w.pos) && Wk.nearSeat({ ...w, phase: 'walk' }, In),
+    'встав, пилот стоит за креслом свободно — и сесть отсюда можно');
+  const eye0 = Wk.walkerEye(w, In);
+  ok(Math.abs(eye0[1] - EYE.y) < 1e-9 && Math.abs(eye0[2] - EYE.z) < 1e-9, 'в начале подъёма глаз — там же, где у сидящего пилота');
+  for (let i = 0; i < 60; i++) Wk.updateWalker(w, In, {}, 1 / 60);
+  const eye1 = Wk.walkerEye(w, In);
+  ok(w.phase === 'walk' && Math.abs(eye1[1] - (I.INT.deck.bridge + Wk.WALK.eye)) < 0.01,
+    `за ${Wk.WALK.rise} с встал: глаз на ${(eye1[1] - I.INT.deck.bridge).toFixed(2)} м над палубой`);
+
+  // --- шаг, бег и прыжок — человеческие.
+  {
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In); p.phase = 'walk'; p.pos = [0, I.INT.deck.mid, -11.0]; p.room = In.roomById.corridor;
+    for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, { fwd: 1 }, 1 / 60);
+    const walkV = Math.hypot(p.vel[0], p.vel[2]);
+    for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, { fwd: -1, run: true }, 1 / 60);
+    const runV = Math.hypot(p.vel[0], p.vel[2]);
+    for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const y0 = p.pos[1];
+    let peak = y0;
+    Wk.updateWalker(p, In, { jump: true }, 1 / 60);
+    for (let i = 0; i < 90; i++) { Wk.updateWalker(p, In, {}, 1 / 60); peak = Math.max(peak, p.pos[1]); }
+    ok(Math.abs(walkV - Wk.WALK.speed) < 0.01 && Math.abs(runV - Wk.WALK.run) < 0.01,
+      `шаг ${walkV.toFixed(2)} м/с, бег ${runV.toFixed(2)} м/с`);
+    ok(Math.abs(peak - y0 - Wk.WALK.jump) < 0.02 && p.ground && Math.abs(p.pos[1] - y0) < 1e-6,
+      `прыжок с места — ${((peak - y0) * 100).toFixed(0)} см, и пилот вернулся на палубу`);
+  }
+
+  // --- весь корабль ногами: маршрут от кресла по всем помещениям и
+  // обратно. Робот смотрит на точку и идёт вперёд; застрять — значит
+  // упереться в стену, ступень выше порога или кромку проёма головой.
+  {
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const route = [
+      ['bridge', 0, -13.6], ['shaftA', 0, -15.5], ['hall', 0, -23.6], ['hall', -2.0, -20.5],
+      ['hall', 0, -15.5], ['corridor', 0, -11.5], ['cabin', -3.0, -11.5], ['corridor', 0, -11.5],
+      ['medbay', 2.5, -8.5], ['corridor', 0, -8.5], ['storage', -2.5, -5.5], ['corridor', 0, -5.5],
+      ['corridor', 0, -12.9], ['washroom', 2.4, -12.9], ['corridor', 0, -12.9], ['corridor', 0, -4.5], ['hold', 0, 2.5],
+      ['hold', 0, 12.0], ['hold', 0, 2.0], ['corridor', 0, -4.6], ['corridor', 0, -14.0],
+      ['hall', -1.6, -21.0], ['hall', 0, -24.0], ['engine', 0, -26.0], ['hall', 0, -23.8],
+      ['shaftA', 0, -15.4], ['bridge', 0, -12.0], ['bridge', 0, -8.6],
+    ];
+    const opened = new Set();
+    let fail = null, time = 0, headBump = false;
+    for (const [room, tx, tz] of route) {
+      let t = 0, stuck = 0;
+      let last = p.pos.slice();
+      while (t < 25) {
+        const dx = tx - p.pos[0], dz = tz - p.pos[2];
+        if (Math.hypot(dx, dz) < 0.25) break;
+        const want = Math.atan2(dx, dz);
+        const turn = Math.atan2(Math.sin(want - p.yaw), Math.cos(want - p.yaw));
+        const vy = p.vel[1];
+        const ev = Wk.updateWalker(p, In, { fwd: 1, lookX: Math.max(-0.2, Math.min(0.2, turn)) }, 1 / 60);
+        for (const id of ev.opened) opened.add(id);
+        // Удар головой — это вертикальная скорость вверх, обнулённая не
+        // землёй; на ходу без прыжков её быть не должно вовсе.
+        if (vy > 0.5 && p.vel[1] === 0) headBump = true;
+        t += 1 / 60;
+        stuck = Math.hypot(p.pos[0] - last[0], p.pos[2] - last[2]) < 0.002 ? stuck + 1 : 0;
+        last = p.pos.slice();
+        if (stuck > 60) break;
+      }
+      time += t;
+      const at = p.room && p.room.id;
+      if (Math.hypot(tx - p.pos[0], tz - p.pos[2]) >= 0.3 || at !== room) {
+        fail = `${room} (${tx}, ${tz}): стоит в ${at} на ${p.pos.map((v) => v.toFixed(2)).join(', ')}`;
+        break;
+      }
+    }
+    ok(!fail, 'весь корабль ногами — рубка, трап, кают-компания, коридор, каюта, медотсек, кладовая, ' +
+      'санузел, трюм, машинное и обратно к креслу' + (fail ? ': застрял — ' + fail : ` за ${time.toFixed(0)} с ходьбы`));
+    ok(opened.size === In.doors.length, `по дороге открылись все двери: ${[...opened].join(', ')}`);
+    ok(!headBump, 'ни на трапах, ни в дверях голова ничего не задела');
+    ok(Wk.nearSeat(p, In), 'вернувшись, пилот стоит у кресла');
+    // Сесть.
+    Wk.sitDown(p);
+    let seated = false;
+    for (let i = 0; i < 60 && !seated; i++) seated = Wk.updateWalker(p, In, {}, 1 / 60).seated;
+    const e = Wk.walkerEye(p, In);
+    ok(seated && !p.on && Math.abs(e[1] - EYE.y) < 1e-9 && Math.abs(e[2] - EYE.z) < 1e-9,
+      `сел за ${Wk.WALK.sit} с: глаз снова на месте пилота`);
+  }
+
+  // --- двери: открываются, когда подходишь, закрываются, когда уходишь,
+  // и закрытая не пускает.
+  {
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In); p.phase = 'walk';
+    const d = In.doors.find((x) => x.id === 'cabin');
+    d.open = 0;
+    p.pos = [0, I.INT.deck.mid, -6.0]; p.room = In.roomById.corridor;
+    for (let i = 0; i < 30; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const shut = d.open;
+    p.pos = [0, I.INT.deck.mid, -11.5];
+    for (let i = 0; i < 40; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const near = d.open;
+    ok(shut === 0 && near === 1, `дверь каюты: вдали закрыта, в двух шагах открыта за ${Wk.WALK.doorTime} с`);
+    // Закрытая не пускает: держим её закрытой и идём в неё.
+    const W = { grid: Wk.solidGrid(In.solids), extra: [] };
+    const doorBox = { lo: [-1.55, I.INT.deck.mid, -12.1], hi: [-0.85, I.INT.deck.mid + 2, -10.9] };
+    W.extra.push(doorBox);
+    ok(Wk.blocked(W, [-1.2, I.INT.deck.mid, -11.5]) && !Wk.blocked({ grid: W.grid, extra: [] }, [-1.2, I.INT.deck.mid, -11.5]),
+      'в проёме двери тело упирается в створку, а открытый проём свободен');
+    for (const x of In.doors) x.open = 0;
+  }
+}
+
+// --- сенсорный набор пилота на ногах ---------------------------------------
+//
+// На ногах полётных кнопок нет: на их местах — прыжок, бег и «сесть», а
+// ползунок тяги палец не ловит (тягой на ногах не управляют).
+{
+  console.log('\n== пилот на ногах: телефон ==');
+  const lay = touchLayout(852, 393, { left: 59, right: 0, bottom: 21, top: 0 });
+  const tapAt = (walk, id, extra = {}) => {
+    const t = Object.assign(makeTouch(), { walk }, extra);
+    const b = lay.buttons.find((x) => x.id === id);
+    touchUpdate(t, [{ id: 1, x: b.x, y: b.y }], lay);
+    return t;
+  };
+  const jump = tapAt(true, 'wJump');
+  const boost = tapAt(false, 'boost');
+  ok(jump.taps.has('wJump') && jump.press.get(1) === 'wJump',
+    'на ногах кнопка под правым большим пальцем — прыжок (Space)');
+  ok(boost.press.get(1) === 'boost', 'в кресле на том же месте — форсаж, как и было');
+  const sitNo = tapAt(true, 'wSit');
+  const sitYes = tapAt(true, 'wSit', { seat: true });
+  ok(!sitNo.taps.has('wSit') && sitYes.taps.has('wSit'), 'кнопка «сесть» — только у кресла');
+  const standOff = tapAt(false, 'stand');
+  const standOn = tapAt(false, 'stand', { stand: true });
+  ok(!standOff.taps.has('stand') && standOn.taps.has('stand'), 'кнопка «встать» — когда помещения собраны');
+  const t = Object.assign(makeTouch(), { walk: true });
+  touchUpdate(t, [{ id: 3, x: lay.thr.x, y: lay.thr.y - lay.thr.h / 2 + 4 }], lay);
+  const sh = { throttle: 0.2 };
+  touchApply(t, sh);
+  ok(t.thr.id === null && sh.throttle === 0.2, 'на ногах ползунок тяги палец не ловит: тяга не меняется');
+}
+
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));
 process.exit(fails ? 1 : 0);

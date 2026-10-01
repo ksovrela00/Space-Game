@@ -527,6 +527,35 @@ export function interiorArrays(buf, o = { x: 0, y: 0, z: 0 }) {
   return { ab, count: n };
 }
 
+/**
+ * Сетка помещения, упакованная один раз и навсегда.
+ *
+ * Сборка кладёт вершины в обычные массивы чисел — по восемь байт на
+ * число, и у помещений это около сорока мегабайт. После упаковки они не
+ * нужны: остаётся буфер в 24 байта на вершину (он же переживает потерю
+ * контекста — сцена пересобирает кабину из него), а исходные массивы
+ * отпускаются. Заодно считается габарит сетки (оси кабины): по нему
+ * комната отсекается из кадра — по самой сетке, а не по коробке комнаты:
+ * у рубки в коробке сидит глаз, а сетка — одна переборка за спиной.
+ */
+function packed(m, o = { x: 0, y: 0, z: 0 }) {
+  if (m.packed) return m.packed;
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < m.pos.length; i += 3) {
+    for (let a = 0; a < 3; a++) {
+      const v = m.pos[i + a];
+      if (v < lo[a]) lo[a] = v;
+      if (v > hi[a]) hi[a] = v;
+    }
+  }
+  const pk = interiorArrays(m, o);
+  pk.lo = [lo[0] - o.x, lo[1] - o.y, lo[2] - o.z];
+  pk.hi = [hi[0] - o.x, hi[1] - o.y, hi[2] - o.z];
+  m.packed = pk;
+  m.pos = null; m.nrm = null; m.col = null; m.mat = null;
+  return pk;
+}
+
 function uploadInterior(gl, data) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -798,17 +827,13 @@ export class CabinView {
     for (const r of interior.rooms) {
       const m = interior.meshes[r.id];
       if (!m || !m.tris) continue;
-      rooms[r.id] = {
-        part: uploadInterior(gl, interiorArrays(m, EYE)),
-        // Коробка комнаты с запасом на мебель у стен и стены пака.
-        lo: [r.lo[0] - EYE.x - 0.7, r.lo[1] - EYE.y - 0.6, r.lo[2] - EYE.z - 0.7],
-        hi: [r.hi[0] - EYE.x + 0.7, r.hi[1] - EYE.y + 0.6, r.hi[2] - EYE.z + 0.7],
-      };
+      const pk = packed(m, EYE);
+      rooms[r.id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
     }
     this.inter = {
       rooms,
-      door: uploadInterior(gl, interiorArrays(interior.doorMesh)),
-      crate: uploadInterior(gl, interiorArrays(interior.crateMesh)),
+      door: uploadInterior(gl, packed(interior.doorMesh)),
+      crate: uploadInterior(gl, packed(interior.crateMesh)),
     };
     this.interOf = interior;
   }

@@ -3405,6 +3405,85 @@ console.log('\n== мок GL: путь отрисовки ==');
     game.displays = null;
   }
 
+  // Помещения корабля (js/models/interior.js) в проходе кабины. Рисуются
+  // только видимые комнаты — та, где глаз, и куда из неё ведут проёмы и
+  // открытые двери, — и только те, что в кадре; корпус в них вырезан, а
+  // светят лампы своих комнат.
+  {
+    const { buildInterior } = await import('../js/models/interior.js');
+    const Wk = await import('../js/game/walker.js');
+    const { CAB_LAMPS } = await import('../js/gl/cabin.js');
+    const { buildCockpit } = await import('../js/models/cockpit.js');
+    const cp = buildCockpit(game.shipMesh);
+    game.cockpit = cp;
+    game.interior = buildInterior(game.shipMesh);
+    game.walk = Wk.makeWalker();
+    game.walkEye = null;
+    game.state.view = 'cockpit';
+    const nan0 = state.nan;
+    const sb = ship.basis;
+    const look = (back) => {
+      const k = back ? -1 : 1;
+      cam.basis.right = { x: sb.right.x * k, y: sb.right.y * k, z: sb.right.z * k };
+      cam.basis.up = { ...sb.up };
+      cam.basis.fwd = { x: sb.fwd.x * k, y: sb.fwd.y * k, z: sb.fwd.z * k };
+    };
+    // Сидя, лицом вперёд: переборка рубки за спиной, рисовать нечего.
+    look(false);
+    scene.render(game);
+    const ahead = scene.cabin.interDraws;
+    const carveN = state.ints.uCarveN;
+    const carve0 = state.vecName['uCarveLo[0]'];
+    // Сидя, обернувшись: переборка и створка двери рубки.
+    look(true);
+    scene.render(game);
+    const behind = scene.cabin.interDraws;
+    ok(ahead === 0 && behind === 2,
+      `сидя: впереди помещений нет (${ahead} вызовов), за спиной — переборка и дверь рубки (${behind})`);
+    ok(carveN === game.interior.carve.length && carve0
+      && Math.abs(carve0[0] - game.interior.carve[0].lo[0]) < 1e-6,
+      `корпус изнутри вырезан по ${carveN} коробкам помещений`);
+
+    // На ногах в кают-компании, лицом в коридор.
+    const w = game.walk;
+    Wk.standUp(w, game.interior);
+    w.phase = 'walk';
+    w.pos = [0.0, -4.94, -16.6];
+    w.room = game.interior.roomById.hall;
+    game.walkEye = Wk.walkerEye(w, game.interior);
+    look(false);
+    scene.render(game);
+    const hallDraws = scene.cabin.interDraws, hallTris = scene.cabin.interTris;
+    let total = 0;
+    for (const m of Object.values(game.interior.meshes)) total += m.tris;
+    const lampsN = state.ints.uCabLampN;
+    const eyeU = state.vecName.uEye;
+    ok(hallDraws >= 2 && hallTris > 0 && hallTris < total * 0.75,
+      `из кают-компании — ${hallDraws} вызовов, ${Math.round(hallTris / 1000)} тыс. треугольников из ${Math.round(total / 1000)}: ` +
+      'за закрытыми дверями и за спиной не рисуется ничего');
+    ok(lampsN > 0 && lampsN <= CAB_LAMPS && state.vecName['uCabLampLo[0]'] && state.vecName['uCabLampHi[0]'],
+      `светят ${lampsN} ламп (не больше ${CAB_LAMPS}), у каждой — коробка её комнаты`);
+    ok(eyeU && Math.abs(eyeU[1] - (game.walkEye[1] - cp.eye.y)) < 1e-6,
+      'глаз шейдера — в голове идущего, а не в кресле');
+
+    // Трюм с грузом: ящик на тонну.
+    game.interior.cargo = 10;
+    w.pos = [0, -9.0, 2.6];
+    w.room = game.interior.roomById.hold;
+    game.walkEye = Wk.walkerEye(w, game.interior);
+    scene.render(game);
+    const with10 = scene.cabin.interDraws;
+    game.interior.cargo = 0;
+    scene.render(game);
+    const empty = scene.cabin.interDraws;
+    ok(with10 - empty === 10, `10 т в трюме — 10 ящиков в кадре (${with10} вызовов против ${empty} в пустом)`);
+    ok(state.nan === nan0, 'в помещениях ни одного NaN');
+    game.interior = null;
+    game.walk = null;
+    game.walkEye = null;
+    game.cockpit = null;
+  }
+
   // Пылинки за бортом (js/game/flow.js): то, чем в пустоте видно
   // скорость. Проверяем не картинку, а цену и повод — один вызов
   // отрисовки на кадр на форсаже и ни одного, когда корабль стоит.

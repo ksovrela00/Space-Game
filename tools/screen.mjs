@@ -117,6 +117,26 @@ const PORT_SCENE = (tab) => `
   });
 `;
 
+// Пилот на ногах в помещении корабля (js/models/interior.js): встать с
+// кресла и поставить ноги и взгляд. Подъём не проигрывается — в
+// программном рендере каждый кадр с помещениями стоит секунду, а снимок
+// нужен не подъёма, а комнаты. tons — сколько груза в трюме.
+const WALK_SCENE = (pos, yaw, pitch = 0, tons = 0) => `
+  liftoff();
+  GAME.player.cargo = ${tons} ? [{ code: 'grain', name: 'ЗЕРНО', tons: ${tons}, avgPrice: 50 }] : [];
+  return GAME.loadInterior().then(() => {
+    GAME.state.view = 'cockpit';
+    frames(1);
+    GAME.rise();
+    const w = GAME.walk;
+    w.phase = 'walk';
+    w.pos = [${pos.join(', ')}];
+    w.yaw = ${yaw};
+    w.pitch = ${pitch};
+    frames(4);
+  });
+`;
+
 // --- сцены --------------------------------------------------------------------
 //
 // Сцена — это кусок кода, который выполняется В СТРАНИЦЕ после загрузки.
@@ -642,6 +662,30 @@ const SCENES = {
       GAME.state.view = 'chase';
       frames(6);
     `,
+  },
+  walkbridge: {
+    title: 'на ногах в рубке: переборка с дверью, переплёт фонаря',
+    run: WALK_SCENE([0, 0.2, -10.0], 'Math.PI', -0.08),
+  },
+  walkstair: {
+    title: 'верх трапа: вниз, в кают-компанию',
+    run: WALK_SCENE([0, 0.2, -15.3], 'Math.PI', -0.55),
+  },
+  walkhall: {
+    title: 'кают-компания: камбуз, стол, трап сверху',
+    run: WALK_SCENE([-0.4, -4.94, -23.7], 0.15, 0.05),
+  },
+  walkcorridor: {
+    title: 'коридор средней палубы: двери кают',
+    run: WALK_SCENE([0, -4.94, -14.7], 0, -0.05),
+  },
+  walkhold: {
+    title: 'грузовой трюм: 14 т груза — 14 ящиков',
+    run: WALK_SCENE([0, -9.0, 2.8], 0.12, -0.05, 14),
+  },
+  walkengine: {
+    title: 'машинное отделение: реакторы',
+    run: WALK_SCENE([-0.2, -4.94, -25.4], 'Math.PI + 0.5', 0),
   },
   cockpitfuel: {
     title: 'кабина на малом топливе: столбик ТОПЛ и лампа',

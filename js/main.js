@@ -1301,6 +1301,8 @@ function fuelWatch() {
  * демо-деньгами и затёр бы им серверного.
  */
 async function killedInAction(by) {
+  // Корабль погиб — пилот возвращается в кресло: восстанавливают его там.
+  seatPilot();
   game.guns.bolts.length = 0;
   audioCue(game.audio, 'crash');
   say(game.state, L('КОРАБЛЬ УНИЧТОЖЕН · ') + by, '#ff7a66', 6);
