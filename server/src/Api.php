@@ -36,6 +36,10 @@ final class Api
             'outfit.list' => [[self::class, 'outfitList'], true],
             'outfit.buy' => [[self::class, 'outfitBuy'], true],
             'outfit.sell' => [[self::class, 'outfitSell'], true],
+            // Верфь корпусов: что продают в этом порту, купить корабль.
+            // Пересесть на купленный — ship.command (один док).
+            'shipyard.list' => [[self::class, 'shipyardList'], true],
+            'shipyard.buy' => [[self::class, 'shipyardBuy'], true],
             'catalog.commodities' => [[self::class, 'commodities'], false],
             'catalog.ships' => [[self::class, 'shipTypes'], false],
             // Характеристики корабля, оружия и модулей. Без токена
@@ -230,6 +234,16 @@ final class Api
     public static function outfitSell(array $in, ?int $playerId): array
     {
         return Outfit::sell($playerId, self::str($in, 'code'));
+    }
+
+    public static function shipyardList(array $in, ?int $playerId): array
+    {
+        return Shipyard::offer($playerId);
+    }
+
+    public static function shipyardBuy(array $in, ?int $playerId): array
+    {
+        return Shipyard::buy($playerId, self::str($in, 'code'));
     }
 
     public static function commodities(array $in, ?int $playerId): array

@@ -223,6 +223,11 @@ final class Specs
             if (!empty($m['flight'])) {
                 $spec['flight'] = $m['flight'];
             }
+            // На какие корпуса ставится (нет списка — на любой): крейсерский
+            // привод требует реактора крейсера (server/src/Outfit.php).
+            if (!empty($m['hulls'])) {
+                $spec['hulls'] = array_values($m['hulls']);
+            }
             $rows[] = [
                 'code' => $m['code'],
                 'name' => $m['name'],

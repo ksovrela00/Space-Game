@@ -3473,6 +3473,35 @@ console.log('\n== мок GL: путь отрисовки ==');
     ok(inCockpit === (sunOn ? 9 : 5) && inChase === 0,
       `рубка: ${inCockpit} вызовов от первого лица (${sunOn ? 'тень, ' : ''}корпус изнутри, пост, ручка, РУД, стекло), ` +
       `${inChase} от третьего`);
+
+    // Свой корабль — «Прометей» (js/game/hull.js). Поста «Челленджера» на
+    // его мостике нет: из рубки рисуется только сам корпус изнутри, сквозь
+    // окна мостика — мир. И без выреза помещений «Челленджера»: их коробки
+    // прорезали бы обшивку крейсера там, где комнат нет.
+    {
+      const { useShipType } = await import('../js/game/specs.js');
+      const { HULL } = await import('../js/game/hull.js');
+      const keep = { mesh: game.shipMesh, gear: game.gearMesh, cockpit: game.cockpit, displays: game.displays };
+      useShipType('prometheus');
+      game.shipMesh = HULL.mesh; game.gearMesh = HULL.gear; game.cockpit = null; game.displays = null;
+      const nanP = state.nan;
+      const maxWas = state.intsMax;
+      state.intsMax = {};
+      game.state.view = 'cockpit';
+      scene.render(game);
+      const onBridge = scene.cabinDraws, gearP = scene.gearDraws;
+      const carveP = state.intsMax.uCarveN ?? 0;
+      state.intsMax = maxWas;
+      game.state.view = 'chase';
+      scene.render(game);
+      const chaseP = scene.cabinDraws;
+      ok(HULL.code === 'prometheus' && onBridge === 1 + gearP && chaseP === 0 && carveP === 0 && state.nan === nanP,
+        `свой «Прометей»: с мостика ${onBridge} вызов${onBridge === 1 ? '' : 'а'} — корпус изнутри` +
+        `${gearP ? ' и стойки' : ''}, без поста «Челленджера» и без выреза его помещений; от третьего лица — ${chaseP}`);
+      useShipType('challenger');
+      Object.assign(game, { shipMesh: keep.mesh, gearMesh: keep.gear, cockpit: keep.cockpit, displays: keep.displays });
+      game.state.view = 'cockpit';
+    }
     ok(uploaded === game.displays.list.length && again === 0,
       `экраны: в атлас ушли все ${uploaded} перерисованных, а в следующем кадре без перерисовки — ${again}`);
     ok(lamps === game.cockpit.lights.length && state.nan === nan0,
@@ -4328,15 +4357,16 @@ console.log('\n== мок GL: путь отрисовки ==');
   // на момент выхода.
   {
     // Кабина рисуется и под тоннелем (она внутри корабля), поэтому её
-    // вызовы из сравнения вычитаются: меряется МИР, а не кабина.
-    const normal = frame() - (scene.cabinDraws || 0);
+    // вызовы из сравнения вычитаются: меряется МИР, а не кабина. Так же
+    // и ступени выпущенных стоек — это свой корабль.
+    const normal = frame() - (scene.cabinDraws || 0) - scene.gearDraws;
     scene.forgetSystem(world);
     game.warp = makeWarp();
     startWarp(game.warp, makeGalaxy().systems[0], makeGalaxy().systems[3]);
     game.warp.phase = 'tunnel';
     game.warp.t = game.warp.total * 0.5;     // середина: тоннель глухой
     game.warp.power = warpPower(game.warp);
-    const covered = frame() - (scene.cabinDraws || 0);
+    const covered = frame() - (scene.cabinDraws || 0) - scene.gearDraws;
     const warmed = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
     ok(warpPower(game.warp) > 0.97 && covered < normal / 3 && covered > 0 && warmed > 0,
       `в тоннеле кадр из ${covered} вызовов против ${normal} обычных, ` +

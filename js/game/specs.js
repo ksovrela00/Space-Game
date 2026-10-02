@@ -27,6 +27,7 @@ import { applyWeaponSpecs } from './weapons.js';
 import { applyModuleSpecs, applyShipEquipment, flightModel, installedIn, moduleSpec } from './loadout.js';
 import { applyLampSpec } from './lamps.js';
 import { applyQuantumSpec } from './quantum.js';
+import { setHull } from './hull.js';
 
 /** Последний полученный набор — из него берут корпуса и цены. */
 let doc = null;
@@ -40,6 +41,15 @@ let doc = null;
 let source = null;
 
 export const specsDoc = () => doc;
+
+/**
+ * Числа корпуса типа code из каталога: у соседа другого типа свой радиус
+ * попадания (js/game/peers.js). Нет такого типа — null.
+ */
+export function typeSpec(code) {
+  const t = doc && code ? doc.shipTypes.find((x) => x.code === code) : null;
+  return t ? t.spec : null;
+}
 export const specsSource = () => source;
 
 /** Где лежит слепок: рядом с игрой, как и сервер (см. js/net/api.js). */
@@ -77,8 +87,13 @@ export function applySpecs(data, code = null) {
  * местах значило бы три разных корабля из одних и тех же чисел.
  */
 function refit(type) {
+  // Корпус — до лётной модели: просветы, плечи и масштаб берутся у него
+  // (js/game/hull.js, js/game/ship.js).
+  setHull(type.code);
   applyShipSpec(flightModel(type.spec));
   SHIP.code = type.code;
+  SHIP.typeName = type.name;
+  SHIP.typeTitle = type.title;
   // Привод берёт свои числа из своего же модуля — того, который стоит на
   // корабле. Отдельным вызовом, а не внутри loadout.js: снаряжение — это
   // список для карточки, а привод — работающая часть игры, и знать друг о
@@ -109,9 +124,9 @@ export function useShipEquipment(list) {
  * Пересесть на другой корпус.
  *
  * Зовётся, когда сервер сказал, на чём летит этот пилот (его type.code
- * приходит в player.state). Пока корпус один, вызов ничего не меняет —
- * но именно он делает «у каждого свой корабль» вопросом данных, а не
- * новой правки в игре.
+ * приходит в player.state): корабль пересобирается под тот корпус —
+ * сетка, стойки, масса и лётная модель (js/game/hull.js). Сетку в кадре
+ * меняет игра (js/main.js, syncHull).
  */
 export function useShipType(code) {
   if (!doc || !code) return null;

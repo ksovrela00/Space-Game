@@ -146,7 +146,8 @@ function doorSolids(interior) {
   for (const d of interior.doors) {
     if (d.open >= WALK.doorPass) continue;
     const INT = interior.INT;
-    const thick = d.id === 'bridge' ? INT.bulkT : INT.gap;
+    // Толщина — у самой двери: переборка рубки тоньше перегородки.
+    const thick = d.thick || (d.id === 'bridge' ? INT.bulkT : INT.gap);
     const lo = [0, d.pos[1], 0], hi = [0, d.pos[1] + d.height, 0];
     const t = d.ax === 0 ? 2 : 0;
     lo[d.ax] = d.pos[d.ax] - thick / 2 - 0.02; hi[d.ax] = d.pos[d.ax] + thick / 2 + 0.02;
@@ -411,7 +412,7 @@ export function standUp(w, interior, look = { yaw: 0, pitch: 0 }) {
   w.height = WALK.height;
   w.lag = 0;
   w.out = null;
-  w.room = interior.rooms.find((r) => r.id === 'bridge');
+  w.room = interior.roomById[interior.seat.room || 'bridge'] || interior.rooms.find((r) => r.id === 'bridge');
   return w;
 }
 
@@ -692,7 +693,9 @@ function updateDoors(w, interior, dt, ev) {
   for (const d of interior.doors) {
     let near = w.on && w.phase !== 'seated' && !w.out && nearDoor(d, w.pos);
     for (let i = 0; !near && i < others.length; i++) near = nearDoor(d, others[i]);
-    const want = near ? 1 : 0;
+    // Запертая (двери остановок лифта в пути, js/game/lift.js) закрыта,
+    // кто бы ни стоял рядом.
+    const want = near && !d.lock ? 1 : 0;
     if (want && !d.want) ev.opened.push(d.id);
     d.want = want;
     const k = dt / WALK.doorTime;

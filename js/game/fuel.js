@@ -24,10 +24,10 @@
 
 import { clamp } from '../core/vec3.js';
 import { SHIP } from './ship.js';
-import { SHIP_MASS } from './downwash.js';
+import { shipMass } from './downwash.js';
 
 /** Масса корабля, т. */
-export const massT = () => SHIP_MASS / 1000;
+export const massT = () => shipMass() / 1000;
 
 /** Объём бака: корпусной плюс дополнительный (SHIP.fuelCap, applyShipSpec). */
 export const fuelCap = () => SHIP.fuelCap;

@@ -137,18 +137,44 @@ const WALK_SCENE = (pos, yaw, pitch = 0, tons = 0) => `
   });
 `;
 
+// Пилот на ногах на «Прометее» (js/models/interior.prom.js): точка —
+// в осях СБОРКИ корпуса (м, как в плане), её переводит сдвиг корпуса.
+const PROM_WALK = (pos, yaw, pitch = 0, then = '') => `
+  liftoff();
+  return Promise.all([import('./js/game/specs.js'), import('./js/game/ship.js')]).then(([S, M]) => {
+    S.useShipType('prometheus');
+    GAME.syncHull();
+    GAME.ship.fuel = M.SHIP.fuelCap;
+    GAME.ship.hull = M.SHIP.maxHull;
+    aimAt(GAME.world.stations[0], 2.5);
+    return GAME.loadInterior();
+  }).then(() => {
+    GAME.state.view = 'cockpit';
+    frames(1);
+    GAME.rise();
+    const sh = GAME.shipMesh.prom.shift;
+    const w = GAME.walk;
+    w.phase = 'walk';
+    w.pos = [${pos[0]}, ${pos[1]} - sh.y, ${pos[2]} - sh.z];
+    w.yaw = ${yaw};
+    w.pitch = ${pitch};
+    frames(6);
+    ${then}
+  });
+`;
+
 // Шлюз на стоянке у моря (js/game/airlock.js): корабль на сухом ровном
 // месте океанического мира, люк hatch открыт и трап выдвинут сразу —
 // цикл в программном рендере занял бы минуты. then — что дальше: вид,
 // пилот на ногах и где он.
-const LOCK_SCENE = (hatch, then) => `
+const LOCK_SCENE = (hatch, then, pre = '') => `
   liftoff();
-  return standWhere(atmoWorld(),
+  return Promise.resolve().then(() => { ${pre} }).then(() => standWhere(atmoWorld(),
     (t, F, b, d) => {
       if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
       const g = F.growth(b, t, d.x, d.y, d.z);
       return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
-    }, 0.02, 30, 60, 0)
+    }, 0.02, 30, 60, 0))
     .then(() => {
       window.__hold = null;
       GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
@@ -223,6 +249,44 @@ const CREW_SCENE = (then) => LOCK_SCENE('sR', `
       window.__hold = () => { if (hold0) hold0(); window.__crew(); };
       frames(4);
       ${then}`);
+
+// «Прометей» соседом: тот же подложенный сокет, что в CREW_SCENE, но с
+// типом корпуса (поле ty — js/game/peers.js, js/models/hulls.js). Стоит
+// он правее своего корабля и чуть впереди, на собственных стойках: центр
+// масс над грунтом — по его модели, а не по нашей.
+const PROM_SCENE = (then, dr = 0.125, df = 0.05, side = false) => LOCK_SCENE('sR', `
+      const b = GAME.ship.landedAt, P = GAME.ship.landedPose, S = window.SCENE;
+      // Нос соседа — вперёд, как у своего, или вправо (side): тогда к
+      // камере он стоит бортом целиком.
+      const F = ${side} ? P.right : P.fwd;
+      const at = (dr, df, h) => {
+        const R = P.radius;
+        const x = P.dir.x * R + P.right.x * dr + P.fwd.x * df;
+        const y = P.dir.y * R + P.right.y * dr + P.fwd.y * df;
+        const z = P.dir.z * R + P.right.z * dr + P.fwd.z * df;
+        const l = Math.hypot(x, y, z), d = { x: x / l, y: y / l, z: z / l };
+        const g = S.drawnGround(b, d) + h;
+        return { x: d.x * g, y: d.y * g, z: d.z * g };
+      };
+      return import('./js/models/hulls.js').then((Hm) => {
+        const prom = Hm.hullOf('prometheus').mesh;
+        const ship2 = at(${dr}, ${df}, -prom.prom.ground / 1000);
+        const n = window.NET;
+        window.__crew = () => {
+          n.state = 'live';
+          n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+          n.peers = [{ id: 502, by: 9, name: 'АННА', dorm: 1, sys: 0, mode: 'landed', g: 1, h: [], ty: 'prometheus',
+            b: b.id, lx: ship2.x, ly: ship2.y, lz: ship2.z,
+            lfx: F.x, lfy: F.y, lfz: F.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }];
+          n.people = [];
+          n.rev++;
+        };
+        window.__crew();
+        const hold0 = window.__hold;
+        window.__hold = () => { if (hold0) hold0(); window.__crew(); };
+        frames(4);
+        ${then}
+      });`);
 
 // --- сцены --------------------------------------------------------------------
 //
@@ -550,6 +614,33 @@ const SCENES = {
         });
     `,
   },
+  gear: {
+    url: '&surface=clipmap',
+    title: 'шасси на стоянке: стойки-телескопы и пяты сбоку, от земли',
+    run: `
+      liftoff();
+      // Ровное голое место (как у стоянки со шлюзом): трава закрыла бы пяты.
+      return standWhere(atmoWorld(),
+        (t, F, b, d) => {
+          if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
+          const g = F.growth(b, t, d.x, d.y, d.z);
+          return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
+        }, 0.02, 30, 60, 0)
+        .then(() => {
+          window.__hold = null;
+          GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+          frames(2);
+          GAME.landHere();
+          GAME.state.view = 'chase';
+          GAME.chase.ready = false;
+          GAME.chase.below = true; GAME.chase.low = 1;
+          // Осмотр — сбоку и чуть сверху: видно все три стойки.
+          window.__hold = () => { GAME.camOrbit.yaw = 1.15; GAME.camOrbit.pitch = 0.06; };
+          window.__hold();
+          frames(24);
+        });
+    `,
+  },
   ground: {
     url: '&surface=clipmap',
     title: 'грунт с восьмидесяти метров: зерно и цвет земли',
@@ -811,6 +902,29 @@ const SCENES = {
       window.__hold();
       frames(6);`),
   },
+  promlockopen: {
+    url: '&surface=clipmap',
+    title: '«Прометей» на стоянке: бортовой шлюз носа открыт, трап в 52 ступени на грунте',
+    run: LOCK_SCENE('bowL', `
+      GAME.state.view = 'chase';
+      window.__hold = () => { GAME.camOrbit.yaw = 1.2; GAME.camOrbit.pitch = 0.05; };
+      window.__hold();
+      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`),
+  },
+  promlockdoor: {
+    url: '&surface=clipmap',
+    title: 'из бортового шлюза «Прометея» наружу: тоннель, проём, трап',
+    run: LOCK_SCENE('bowL', `
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk, I = GAME.interior, r = I.roomById.airBL;
+      w.phase = 'walk';
+      w.pos = [r.hi[0] - 1.0, r.lo[1], (r.lo[2] + r.hi[2]) / 2];
+      w.yaw = -Math.PI / 2;
+      w.pitch = -0.15;
+      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`),
+  },
   lockdoor: {
     url: '&surface=clipmap',
     title: 'из носового шлюза наружу: проём, трап, грунт',
@@ -839,6 +953,127 @@ const SCENES = {
       w.yaw = Math.PI / 2;
       frames(3);
       if (w.out) { w.pos = [14, w.pos[1] - 5.0, -9]; w.vel = [0, -5, 0]; w.yaw = -0.92; w.pitch = 0.2; }
+      frames(12);`),
+  },
+  promchase: {
+    title: 'свой «Прометей» у станции: вид из-за спины (камера отходит по длине корабля)',
+    run: `
+      liftoff();
+      return Promise.all([import('./js/game/specs.js'), import('./js/game/ship.js')]).then(([S, M]) => {
+        // Без сервера пересадки нет: корпус ставится так, как его ставит
+        // ответ сервера (serverToSave → useShipType, syncHull), а бак и
+        // корпус — по его числам.
+        S.useShipType('prometheus');
+        GAME.syncHull();
+        GAME.ship.fuel = M.SHIP.fuelCap;
+        GAME.ship.hull = M.SHIP.maxHull;
+        aimAt(GAME.world.stations[0], 2.5);
+        GAME.state.view = 'chase';
+        GAME.chase.ready = false;
+        frames(12);
+      });
+    `,
+  },
+  prombridge: {
+    title: 'мостик «Прометея»: из кресла командира — три окна, палуба до носа, станция впереди',
+    run: `
+      liftoff();
+      return Promise.all([import('./js/game/specs.js'), import('./js/game/ship.js')]).then(([S, M]) => {
+        // Без сервера пересадки нет: корпус ставится так, как его ставит
+        // ответ сервера (serverToSave → useShipType, syncHull), а бак и
+        // корпус — по его числам.
+        S.useShipType('prometheus');
+        GAME.syncHull();
+        GAME.ship.fuel = M.SHIP.fuelCap;
+        GAME.ship.hull = M.SHIP.maxHull;
+        aimAt(GAME.world.stations[0], 2.5);
+        GAME.state.view = 'cockpit';
+        // Помещения мостика: пульты, кресла, рамы окон.
+        return GAME.loadInterior().then(() => frames(12));
+      });
+    `,
+  },
+  promwalkbridge: {
+    title: 'мостик «Прометея» на ногах: за креслом командира, лицом к окнам',
+    run: PROM_WALK([1.6, 46, 61.0], -0.08, -0.06),
+  },
+  promwalkback: {
+    title: 'мостик «Прометея»: от окон назад — планшет-карта, экраны, дверь в лифтовой холл',
+    run: PROM_WALK([2.5, 46, 69.0], 'Math.PI + 0.15', -0.12),
+  },
+  promwalkcabin: {
+    title: 'каюта палубы 8: иллюминатор там же, где его рисует корпус',
+    run: PROM_WALK([-5.0, 18, 85.0], '-Math.PI / 2 + 0.3', -0.02),
+  },
+  promwalkmess: {
+    title: 'кают-компания жилой палубы: окна в корму',
+    run: PROM_WALK([0.0, 22, 18.5], 'Math.PI', 0.0),
+  },
+  promwalkhangar: {
+    title: 'носовой ангар: две палубы в высоту, двери бортовых шлюзов',
+    run: PROM_WALK([0.0, -3, 156.0], 0.35, 0.05),
+  },
+  promplan: {
+    title: 'план палубы 8 (M): пилот в каюте, путь к креслу командира проложен',
+    run: PROM_WALK([-5.0, 18, 85.0], '-Math.PI / 2 + 0.3', -0.02, `
+      return import('./js/ui/deckmap.js').then((D) => {
+        GAME.setWalkGoal('bridge');
+        D.openDeckMap(GAME.deckMap, GAME.interior, GAME.walk.room, GAME.walkGoal);
+        frames(3);
+      });`),
+  },
+  promroute: {
+    title: 'путь к креслу командира: метка следующей двери в коридоре палубы 8',
+    run: PROM_WALK([0.0, 18, 100.0], 'Math.PI', -0.02, `
+      GAME.setWalkGoal('bridge');
+      frames(3);`),
+  },
+  promwalkreactor: {
+    title: 'реакторный зал палубы 10',
+    run: PROM_WALK([-4.0, 10, 47.0], '-Math.PI * 0.75', -0.05),
+  },
+  prometheus: {
+    url: '&surface=clipmap',
+    title: '«Прометей» на стоянке впереди, бортом: вид из кабины «Челленджера»',
+    run: PROM_SCENE(`
+      // Вид из-за спины тут не годится: камера целится в свой корабль, и
+      // он закрывает соседа. Из кабины сосед — за стеклом, в трёхстах
+      // шестидесяти метрах, во весь борт.
+      GAME.state.view = 'cockpit';
+      frames(24);`, 0.0, 0.36, true),
+  },
+  prometheusfoot: {
+    url: '&surface=clipmap',
+    title: '«Прометей» с роста человека: нос и носовая стойка в шестидесяти метрах',
+    run: PROM_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [14.7, -7.97, -12.67];
+      w.yaw = Math.PI / 2;
+      frames(3);
+      // С порога правого люка — на грунт, наискось к носу соседа: до его
+      // носовой стойки шестьдесят метров (оси грунта — от порога).
+      if (w.out) { w.pos = [65.3, w.pos[1] - 5.0, 201.3]; w.vel = [0, -5, 0]; w.yaw = 2.36; w.pitch = 0.12; }
+      frames(12);`),
+  },
+  gearclose: {
+    url: '&surface=clipmap',
+    title: 'главная стойка вблизи, с роста человека: телескоп, подкос, пята',
+    run: LOCK_SCENE('sR', `
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [14.7, -7.97, -12.67];
+      w.yaw = Math.PI / 2;
+      frames(3);
+      // Правая главная стойка — почти под бортовым люком (оси грунта от
+      // порога): встаём в шести метрах сбоку и сзади и смотрим на неё.
+      if (w.out) { w.pos = [5.5, w.pos[1] - 5.0, 4.0]; w.vel = [0, -5, 0]; w.yaw = -2.33; w.pitch = 0.16; }
       frames(12);`),
   },
   crew: {

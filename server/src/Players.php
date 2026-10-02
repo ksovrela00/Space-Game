@@ -51,6 +51,28 @@ final class Players
     /** Палуба корабля, м: дальше этого от центра точки на борту нет. */
     public const DECK_M = 60.0;
 
+    /**
+     * Палуба корабля его типа, м: дальше этого от центра масс точки на
+     * борту нет. У «Челленджера» — прежние 60, у «Прометея» (195 м) —
+     * шесть десятых длины: нос ангара в ста метрах от центра масс,
+     * а корма жилой палубы — в семидесяти. Без корабля — по самому
+     * большому типу (хаб разбирает снимок, ещё не зная, чей он).
+     */
+    public static function deckM(?array $ship = null): float
+    {
+        static $byType = null;
+        if ($byType === null) {
+            $byType = [];
+            foreach (Db::all('SELECT `id`, `length_m` FROM `ship_type`') as $t) {
+                $byType[(int) $t['id']] = max(self::DECK_M, 0.6 * (float) $t['length_m']);
+            }
+        }
+        if ($ship === null) {
+            return $byType ? max($byType) : self::DECK_M;
+        }
+        return $byType[(int) ($ship['type_id'] ?? 0)] ?? self::DECK_M;
+    }
+
     /** Новый пилот: корабль с завода, стартовый капитал, место в порту. */
     public static function create(string $login, string $passHash, string $name): int
     {
@@ -408,6 +430,24 @@ final class Players
     public static function shipRow(int $shipId): ?array
     {
         return Db::row('SELECT * FROM `ship` WHERE `id`=?', [$shipId]);
+    }
+
+    /**
+     * Пилот на борту своего корабля, стоящего в том же порту, что и `$ship`:
+     * оба в доке одной станции одной системы.
+     */
+    public static function sameDock(array $p, array $ship): bool
+    {
+        if ($p['aboard_ship'] === null || $ship['docked_body'] === null || $ship['system_id'] === null) {
+            return false;
+        }
+        // Чей корабль, на борту которого стоит пилот, — неважно: пассажир
+        // чужого корабля в том же доке тоже переходит к своему по станции.
+        $from = self::shipRow((int) $p['aboard_ship']);
+        return $from !== null
+            && $from['docked_body'] !== null && $from['system_id'] !== null
+            && (int) $from['docked_body'] === (int) $ship['docked_body']
+            && (int) $from['system_id'] === (int) $ship['system_id'];
     }
 
     /**
@@ -983,7 +1023,8 @@ final class Players
             $set['walk_pose'] = null;
             $w = $me['walk'] ?? null;
             if (!$seated && is_array($w) && is_array($w['pos'] ?? null)) {
-                $pos = array_map(static fn($x) => max(-self::DECK_M, min(self::DECK_M, self::num($x))),
+                $dm = self::deckM($target);
+                $pos = array_map(static fn($x) => max(-$dm, min($dm, self::num($x))),
                     array_slice(array_values($w['pos']), 0, 3));
                 if (count($pos) === 3) {
                     $set['walk_pose'] = json_encode([
@@ -1040,6 +1081,11 @@ final class Players
      * только стоя на его борту: командование не передаётся по радио.
      * Прежний корабль остаётся там, где стоял, — со всеми люками и
      * грузом.
+     *
+     * Исключение — ОДИН ДОК: оба корабля стоят в одном порту, и пилот
+     * переходит из одного в другой по станции. Так пересаживаются на
+     * купленный на верфи корпус (server/src/Shipyard.php): шагов по
+     * станции в игре нет, а до кресла нового корабля — один переход.
      */
     public static function command(int $playerId, int $shipId): array
     {
@@ -1052,10 +1098,10 @@ final class Players
             if ($row === null || (int) $row['owner_id'] !== $playerId) {
                 throw ApiError::denied('not_owner', 'это не ваш корабль');
             }
-            if ((int) $p['aboard_ship'] !== $shipId) {
+            if ((int) $p['aboard_ship'] !== $shipId && !self::sameDock($p, $row)) {
                 throw ApiError::denied('not_aboard', 'командуют из кресла: сначала на борт');
             }
-            Db::update('player', ['ship_id' => $shipId, 'seated' => 1, 'walk_pose' => null],
+            Db::update('player', ['ship_id' => $shipId, 'aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null],
                 '`id`=?', [$playerId]);
             return self::state($playerId);
         });

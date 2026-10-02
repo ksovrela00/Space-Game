@@ -120,7 +120,8 @@ export function flightModel(hull) {
 export function moduleSpec(m) {
   const spec = {};
   for (const [k, v] of Object.entries((m && m.spec) || {})) {
-    if (k !== 'flight') spec[k] = v;
+    // hulls — не число модуля, а на какие корпуса он встаёт (верфь).
+    if (k !== 'flight' && k !== 'hulls') spec[k] = v;
   }
   for (const [k, v] of Object.entries((m && m.spec && m.spec.flight) || {})) spec[k] = v;
   return spec;

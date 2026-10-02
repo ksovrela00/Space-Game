@@ -3,6 +3,7 @@
 
 import { v3, dot, clamp, normalize } from '../core/vec3.js';
 import { SHIP } from '../game/ship.js';
+import { HULL } from '../game/hull.js';
 import { QUANTUM } from '../game/quantum.js';
 import { warpDistance, offWarpAxis, warpAxis } from '../game/warp.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
@@ -171,8 +172,10 @@ export function drawHud(r, game) {
   }
 
   // Стойки фонаря штрихами нужны только там, где кабины нет в кадре, —
-  // на запасном пути Canvas-2D. С настоящей кабиной они бы двоились.
-  if (state.view === 'cockpit' && !game.cockpit) drawCockpitFrame(ctx, w, h);
+  // на запасном пути Canvas-2D. С настоящей кабиной они бы двоились. И
+  // только у корпуса с фонарём: на мостике «Прометея» рамы — сами окна
+  // мостика (js/game/hull.js).
+  if (state.view === 'cockpit' && !game.cockpit && HULL.cockpit) drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam, ship);
   drawVelocityMarker(ctx, cam, ship);
   drawWarpAim(ctx, cam, game);
@@ -1497,6 +1500,18 @@ function drawDockAssist(ctx, cx, cy, a) {
   ctx.moveTo(-w * 0.62, 0); ctx.lineTo(-w * 0.5, 0);
   ctx.moveTo(w * 0.5, 0); ctx.lineTo(w * 0.62, 0);
   ctx.stroke();
+  ctx.restore();
+
+  // Где должен идти центр масс, чтобы прошёл весь корпус
+  // (js/game/docking.js, slotFit): у «Прометея» эта полоса на 10 м ниже
+  // оси щели и высотой 30 м — при щели в 96.
+  const f = a.q.fit;
+  ctx.save();
+  ctx.setLineDash([sc(3), sc(3)]);
+  ctx.strokeStyle = a.q.inSlot ? GREEN : CY;
+  ctx.globalAlpha = 0.7;
+  ctx.strokeRect((f.x - f.mx) / SLOT.hw * (w / 2), -(f.y + f.my) / SLOT.hh * (h / 2),
+    f.mx / SLOT.hw * w, f.my / SLOT.hh * h);
   ctx.restore();
 
   // Положение корабля в створе.

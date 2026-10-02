@@ -171,6 +171,14 @@ export const outfitBuy = (code) => call('outfit.buy', { code });
 export const outfitSell = (code) => call('outfit.sell', { code });
 
 /**
+ * Верфь корпусов: какие корабли продают в этом порту и какие свои стоят
+ * в этом доке (server/src/Shipyard.php). Купленный встаёт рядом; пересесть
+ * на него — command (два корабля в одном доке).
+ */
+export const shipyard = () => call('shipyard.list');
+export const shipyardBuy = (code) => call('shipyard.buy', { code });
+
+/**
  * Удар о грунт, когда сокета нет.
  *
  * Обычно об ударе докладывают в сокет (js/net/socket.js) — там же, где

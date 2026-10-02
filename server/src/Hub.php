@@ -47,8 +47,9 @@
  *     {"t":"welcome","you":{...},"peers":[...],"people":[...],"wt":123.4}
  *     {"t":"peers","list":[...],"people":[...],"wt":123.4}  раз в тик, своя система
  *       list — корабли: id корабля, by — кто ведёт (или хозяин),
- *         место, осанка, корпус и щит, шасси, люки; dorm — без водителя:
- *         хозяин в игре, но ведёт не его, и стоит он по базе;
+ *         место, осанка, корпус и щит, шасси, люки; ty — тип корпуса
+ *         (ship_type.code: соседа рисуют его корпусом); dorm — без
+ *         водителя: хозяин в игре, но ведёт не его, и стоит он по базе;
  *       people — люди: id игрока, где и как стоит
  *
  * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
@@ -276,6 +277,9 @@ final class Hub
             // попадании и раз в STAT_EVERY — гонять запрос на каждый тик
             // ради двух чисел незачем.
             'hull' => 0.0, 'hullMax' => 0.0,
+            // Тип корпуса (ship_type.code): соседи рисуют корабль его
+            // корпусом (js/game/peers.js, поле ty), а не своим.
+            'ty' => null,
             'shield' => 0.0, 'shieldMax' => 0.0,
             'regen' => 0.0, 'delay' => 0.0,
             'shieldAt' => $now, 'statAt' => 0.0,
@@ -863,7 +867,7 @@ final class Hub
             $peer['qOk'] = false;
         }
         $row = Db::row(
-            'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`
+            'SELECT s.`id`, s.`hull`, s.`shield`, s.`hit_at`, t.`hull_max`, t.`code` AS `type_code`
              FROM `player` p JOIN `ship` s ON s.`id` = p.`ship_id`
              JOIN `ship_type` t ON t.`id` = s.`type_id`
              WHERE p.`id`=? AND s.`owner_id`=p.`id`',
@@ -892,6 +896,7 @@ final class Hub
         $row += Loadout::shield($id);
         $peer['hull'] = (float) $row['hull'];
         $peer['hullMax'] = (float) $row['hull_max'];
+        $peer['ty'] = (string) $row['type_code'];
         $peer['shieldMax'] = (float) $row['shield_max'];
         $peer['regen'] = (float) $row['shield_regen'];
         $peer['delay'] = (float) $row['shield_delay'];
@@ -1182,6 +1187,7 @@ final class Hub
                 'mode' => $p['mode'],
                 'sys' => $p['sys'],
                 'g' => $p['g'], 'h' => $p['h'], 'k' => $p['k'],
+                'ty' => $p['ty'],
                 // Кто в кресле: хозяин, если сидит в нём.
                 'pilot' => $p['me'] !== null && $p['me']['st'] === 'seat' && $p['me']['s'] === $p['ship']
                     ? $p['player'] : null,
@@ -1239,7 +1245,7 @@ final class Hub
         }
         $list = [];
         foreach (Db::all(
-            'SELECT s.*, t.`hull_max`, p.`name` AS `owner_name`, p.`login` AS `owner_login`
+            'SELECT s.*, t.`hull_max`, t.`code` AS `type_code`, p.`name` AS `owner_name`, p.`login` AS `owner_login`
              FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
              JOIN `player` p ON p.`id` = s.`owner_id`
              WHERE s.`system_id`=? AND s.`docked_body` IS NULL',
@@ -1258,6 +1264,7 @@ final class Hub
                 'g' => (int) $r['gear_out'] || $r['landed_body'] !== null ? 1 : 0,
                 'h' => Players::hatchesOf($r),
                 'k' => 0.0,
+                'ty' => (string) $r['type_code'],
                 'pilot' => null,
             ];
             $pose = $r['landed_body'] !== null ? json_decode((string) $r['landed_pose'], true) : null;
@@ -1339,7 +1346,10 @@ final class Hub
         if (!isset($v['s']) || !is_numeric($v['s'])) {
             return null;
         }
-        $deck = static fn($x) => self::clamp(self::num($x), -self::DECK_M, self::DECK_M);
+        // Палуба — по самому большому типу корпуса (Players::deckM): чей
+        // это корабль, снимок ещё не сказал.
+        $dm = Players::deckM();
+        $deck = static fn($x) => self::clamp(self::num($x), -$dm, $dm);
         $out += ['s' => (int) $v['s'], 'x' => $deck($v['x'] ?? 0), 'y' => $deck($v['y'] ?? 0),
             'z' => $deck($v['z'] ?? 0)];
         return $out;

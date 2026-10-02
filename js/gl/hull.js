@@ -217,6 +217,18 @@ void hullDetail(vec3 viewPos, inout vec3 n, inout vec3 albedo, inout vec3 emit) 
     return;
   }
 
+  if (mat == ${f(MAT.clear)}) {
+    // Смотровое стекло (мостик «Прометея»): без переплёта. Изнутри —
+    // сквозное, снаружи — тёмное с отражением неба, как стекло фонаря.
+    if (uHullInside > 0.5) discard;
+    vec3 r = reflect(normalize(viewPos), n);
+    float sky = smoothstep(-0.15, 0.5, r.y) * uSkyK;
+    float fres = 0.25 + 0.75 * pow(1.0 - abs(dot(normalize(viewPos), n)), 3.0);
+    albedo = vec3(0.035, 0.045, 0.06);
+    emit += vec3(0.42, 0.55, 0.75) * sky * fres * 0.6 + ${v3s(HULL.bridgeGlow)} * 0.6;
+    return;
+  }
+
   if (mat == ${f(MAT.vent)}) {
     // Ламели поперёк корпуса и жар между ними.
     float d = hGrid(uv.x, ${f(HULL.slat)});

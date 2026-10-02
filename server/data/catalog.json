@@ -1,6 +1,6 @@
 {
  "version": 2,
- "generatedAt": "2026-10-01T10:23:59.817Z",
+ "generatedAt": "2026-10-02T11:05:26.901Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
@@ -9,6 +9,13 @@
    "widthM": 67.1,
    "heightM": 19.3,
    "massT": 1682.2
+  },
+  {
+   "code": "prometheus",
+   "lengthM": 195,
+   "widthM": 80,
+   "heightM": 65.8,
+   "massT": 38500.8
   }
  ],
  "systems": [

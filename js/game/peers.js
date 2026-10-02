@@ -29,6 +29,7 @@
 
 import { v3, set, cross, normalize } from '../core/vec3.js';
 import { SHIP } from './ship.js';
+import { typeSpec } from './specs.js';
 import { makeBasis, orthonormalize, toWorld, dirToWorld } from '../core/basis.js';
 import { bodyBasis } from './world.js';
 
@@ -110,6 +111,10 @@ function record(id) {
       // берётся — стрелять по пустому кораблю незачем. Корабля того, кого
       // нет в игре, хаб не шлёт вовсе (server/src/Hub.php).
       dorm: false,
+      // Тип корпуса (код ship_type): по нему корабль рисуется своим
+      // корпусом и стойками (js/models/hulls.js). Нет в снимке — такой же,
+      // как у нас.
+      type: null,
       // Шасси (0..1), открытые люки и работа подъёмных — чтобы корабль
       // стоял на стойках, люк был открыт и сопла тлели как у хозяина.
       gear: { out: false, t: 0, drop: null },
@@ -162,6 +167,11 @@ export function ingestPeers(store, list, now) {
     o.gear.out = !!(num(p.g) > 0.5);
     o.hatches = Array.isArray(p.h) ? p.h.filter((s) => typeof s === 'string') : [];
     o.lift = num(p.k) ?? 0;
+    o.type = typeof p.ty === 'string' && p.ty ? p.ty : null;
+    // Прицел берёт корабль по половине его корпуса — у «Прометея» она втрое
+    // больше, и радиус приезжает с его типом.
+    const ts = typeSpec(o.type);
+    o.radius = ts && ts.hitRadius > 0 ? ts.hitRadius : SHIP.hitRadius;
     o.pilot = num(p.pilot);
     o.body = local ? b : null;
     r.seen = now;

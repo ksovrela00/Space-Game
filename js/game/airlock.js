@@ -137,7 +137,10 @@ export function makeAir(I, gearClear) {
       state: 'sealed',   // sealed | cycle | open | close
     };
   }
-  return { hatches, locks, rooms, links, pOut: 0, block: null };
+  // I — планировка, по которой собраны эти шлюзы: у корабля другого типа
+  // она своя (js/models/interior.prom.js), и проёмы люков, тоннели и
+  // комнаты берутся отсюда, а не из помещений, где стоит пилот.
+  return { I, hatches, locks, rooms, links, pOut: 0, block: null };
 }
 
 /** Какие люки просят открытыми: имена (в сохранение и в снимок сокета). */
@@ -162,7 +165,7 @@ export function setHatches(air, names, snap = false) {
     hx.want = list.includes(hx.id);
     if (!snap) continue;
     hx.open = hx.want ? 1 : 0;
-    hx.stair = hx.want ? 1 : 0;
+    hx.stair = hx.want && hx.h.stair !== false ? 1 : 0;
     hx.solids = null; hx.solidsKey = '';
   }
   if (!snap) return;
@@ -277,7 +280,10 @@ export function updateAirlocks(air, env, dt) {
         if (hx.open < 1) {
           if (hx.open === 0) ev.push({ kind: 'hatch', id: hx.id, dir: 'open' });
           hx.open = Math.min(1, hx.open + dt / AIR.hatchTime);
-        } else if (hx.stair < 1) {
+        } else if (hx.stair < 1 && hx.h.stair !== false) {
+          // Люк без трапа (stair: false — шлюзы среднего корпуса
+          // «Прометея», порог в двадцати метрах над грунтом): панель
+          // отъезжает, а трапа нет, и проём перекрыт, как в пустоте.
           if (hx.stair === 0) ev.push({ kind: 'stair', id: hx.id, dir: 'out' });
           hx.stair = Math.min(1, hx.stair + dt / AIR.stairTime);
         }

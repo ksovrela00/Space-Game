@@ -34,7 +34,7 @@
 
 import { v3, set, dot, normalize } from '../core/vec3.js';
 import { toWorld, toLocal, dirToWorld } from '../core/basis.js';
-import { SHIELD_AXES } from '../models/ships.js';
+import { HULL } from './hull.js';
 import { SHIP } from './ship.js';
 
 const DEG = Math.PI / 180;
@@ -356,9 +356,10 @@ const _hit = v3();
  */
 export function shieldFlash(guns, id, own, point, center, basis) {
   toLocal(basis, center, point, _hit);
-  const x = _hit.x / SHIELD_AXES[0];
-  const y = _hit.y / SHIELD_AXES[1];
-  const z = _hit.z / SHIELD_AXES[2];
+  const A = HULL.shield;
+  const x = _hit.x / A[0];
+  const y = _hit.y / A[1];
+  const z = _hit.z / A[2];
   const l = Math.hypot(x, y, z) || 1;
   guns.shields.push({
     id, own, age: 0, life: COMBAT.shieldLife,

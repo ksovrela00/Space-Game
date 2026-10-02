@@ -19,8 +19,8 @@ import { galaxy } from '../js/game/galaxy.js';
 import { makeSystem } from '../js/game/world.js';
 import { isLandable } from '../js/game/surface.js';
 import { cityRecord } from '../js/game/city.js';
-import { HULL_SIZE } from '../js/models/ships.js';
-import { SHIP_MASS } from '../js/game/downwash.js';
+import { extentOf, HULL_DENSITY } from '../js/models/ships.js';
+import { hullOf, HULL_TYPES } from '../js/models/hulls.js';
 
 const out = process.argv[2] || 'server/data/catalog.json';
 
@@ -110,14 +110,21 @@ const catalog = {
   // завести второй ответ на вопрос, какой корабль длины и сколько он
   // весит. Масса нужна серверу для расхода топлива (server/src/Fuel.php):
   // тонны на км/с — это масса, делённая на скорость струи, и считать их
-  // обязаны обе стороны по одной и той же массе.
-  shipTypes: [{
-    code: 'challenger',
-    lengthM: num(HULL_SIZE.z * 1000, 1),
-    widthM: num(HULL_SIZE.x * 1000, 1),
-    heightM: num(HULL_SIZE.y * 1000, 1),
-    massT: num(SHIP_MASS / 1000, 1),
-  }],
+  // обязаны обе стороны по одной и той же массе. Корпусов столько,
+  // сколько моделей (js/models/hulls.js): у каждого типа в
+  // server/data/specs.php обязана быть строка здесь — без массы сервер
+  // тип не заводит (server/src/Seeder.php).
+  shipTypes: HULL_TYPES.map((code) => {
+    const mesh = hullOf(code).mesh;
+    const size = extentOf(mesh.verts).size;
+    return {
+      code,
+      lengthM: num(size.z * 1000, 1),
+      widthM: num(size.x * 1000, 1),
+      heightM: num(size.y * 1000, 1),
+      massT: num(mesh.volumeM3 * HULL_DENSITY / 1000, 1),
+    };
+  }),
   systems,
 };
 

@@ -10,7 +10,9 @@ import { Camera } from './render/camera.js';
 import { Starfield } from './render/starfield.js';
 import { drawBody } from './render/planetview.js';
 import { GlScene } from './gl/scene.js';
-import { buildCobra, buildGear, GUN_PORTS } from './models/ships.js';
+import { stageLift, legBoxes } from './models/gear.js';
+import { hullOf, ROOMS_TYPE } from './models/hulls.js';
+import { HULL } from './game/hull.js';
 import { stationMesh } from './models/stations.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
 import { homeSystem, systemById, systemDistance } from './game/galaxy.js';
@@ -72,6 +74,9 @@ import {
   makeAirlocks, makeAir, updateAirlocks, toggleHatch, closeAll, resetAirlocks, hatchNear, tunnelAt, pastSkin,
   onStair, airSolids, lockStatus, roomAir, openHatches, setHatches, hatchById, AIR,
 } from './game/airlock.js';
+import { panelNear, startRide, stepRide, cancelRide } from './game/lift.js';
+import { routeTo, deckOf } from './game/route.js';
+import { makeDeckMap, openDeckMap, deckMapKeys, deckMapClick, drawDeckMap, roomName } from './ui/deckmap.js';
 import {
   vesselPoint, vesselDir, worldToVessel, nearVessels, bodyLocal, bodyLocalDir, bodyWorld, bodyWorldDir,
   personPlace,
@@ -163,9 +168,10 @@ ship.sysId = 0;
 ship.away = false;
 ship.keep = null;
 ship.hatchesWant = null;
-const shipMesh = buildCobra();
-
-const gearMesh = buildGear();
+// Свой корпус — текущий (js/game/hull.js): по умолчанию «Челленджер»,
+// а на чём пилот летит на самом деле, скажет сервер (syncHull).
+let shipMesh = HULL.mesh;
+let gearMesh = HULL.gear;
 // Кабина есть только в объёмном рендере: на запасном пути Canvas-2D
 // рисовать её нечем, и приборы там остаются по углам экрана, а стойки
 // фонаря — штрихами поверх кадра (js/ui/hud.js). Поэтому game.cockpit
@@ -238,6 +244,12 @@ const game = {
   // первого кадра: это мегабайт деталей, и ждать его на старте незачем.
   walk: makeWalker(),
   interior: null,
+  // План палубы (M на ногах) и путь по кораблю: куда идти, следующая
+  // точка в кадре (js/ui/deckmap.js, js/game/route.js).
+  deckMap: makeDeckMap(),
+  walkGoal: null,
+  walkGoalOf: null,
+  walkRoute: null,
   walkEye: null,          // глаз идущего в осях корабля, м (null — сидит)
   walkRoomT: 0,           // сколько ещё показывать название помещения, с
   walkIntro: 0,           // сколько ещё показывать подсказку по клавишам, с
@@ -625,7 +637,7 @@ const ownVessel = {
   get pos() { return ship.pos; },
   get basis() { return ship.basis; },
   get gear() { return ship.gear; },
-  get air() { return game.interior ? game.interior.air : null; },
+  get air() { return ownAir(); },
   get name() { return session.name || ''; },
   get by() { return myId(); },
   get mode() { return game.state.mode === ST.DOCKED ? 'docked' : game.state.mode === ST.LANDED ? 'landed' : 'flight'; },
@@ -643,6 +655,15 @@ function myId() {
 /** Корабль, на борту которого стоит пилот, — или свой, если он в кресле. */
 const aboardVessel = () => (game.walk.on && !game.walk.out && game.walk.vessel) || ownVessel;
 
+// Помещения, где пилот: своего корабля или чужого, на палубе которого он
+// стоит. Записать — положить свои (так делают проверки).
+Object.defineProperty(game, 'interior', {
+  configurable: true,
+  enumerable: true,
+  get() { return vesselInterior(aboardVessel()); },
+  set(I) { if (I) interiors.set(I.code || HULL.code, I); else interiors.delete(HULL.code); },
+});
+
 /** Все корабли этой системы, по которым можно ходить: свой (если он здесь) и чужие. */
 const _here = [];
 function vesselsHere() {
@@ -659,40 +680,109 @@ function vesselBody(V) {
   return world.bodies.find((b) => b.id === V.body) || null;
 }
 
-/** Шлюзы чужого корабля: заводятся, как только есть помещения (они одни на тип). */
+// --- помещения по типам корпуса ------------------------------------------------
+//
+// У каждого типа свои (js/models/interior.js: план «Челленджера» там же,
+// «Прометея» — js/models/interior.prom.js), и собираются они лениво:
+// свои — когда пилот впервые встаёт, чужие — когда к соседу этого типа
+// подходят. game.interior — помещения того корабля, на палубе которого
+// пилот (свой или чужой); шлюзы своего корабля — ownAir().
+const interiors = new Map();
+const interiorJobs = new Map();
+const interiorOf = (code) => interiors.get(code) || null;
+/** Помещения корабля V: своего — по своему корпусу, чужого — по его типу. */
+const vesselInterior = (V) => interiorOf(V.own ? HULL.code : (V.type || ROOMS_TYPE));
+/** Шлюзы своего корабля. */
+function ownAir() {
+  const I = interiorOf(HULL.code);
+  return I ? I.air : null;
+}
+/** Высота центра корпуса типа code над грунтом на шасси, км. */
+function gearClearOf(code) {
+  const H = hullOf(code);
+  return H ? H.gear.legLengths[0] - H.gear.hardpoints[0].y : SHIP.gearClear;
+}
+
+/** Собрать помещения типа code (один раз; модули грузятся лениво). */
+function loadInteriorOf(code) {
+  if (interiors.has(code)) return Promise.resolve(interiors.get(code));
+  // Помещения рисует проход кабины; на запасном пути Canvas 2D его нет
+  // (проверки подставляют модель кабины руками — тогда есть).
+  const H = hullOf(code);
+  if ((!scene && !game.cockpit) || !H || !H.rooms) return Promise.resolve(null);
+  if (!interiorJobs.has(code)) {
+    interiorJobs.set(code, import('./models/interior.js').then(async (m) => {
+      const plan = code === 'prometheus'
+        ? (await import('./models/interior.prom.js')).prometheusPlan(H.mesh) : m.CHALLENGER;
+      const I = m.buildInterior(H.mesh, plan);
+      interiors.set(code, I);
+      return I;
+    }).catch((e) => {
+      console.warn('помещения корабля не собрались', e);
+      interiorJobs.delete(code);
+      return null;
+    }));
+  }
+  return interiorJobs.get(code);
+}
+
+/** Шлюзы чужого корабля: заводятся, как только есть помещения его типа. */
 function vesselAir(V) {
-  if (V.own || V.air || !game.interior) return V.air;
-  V.air = makeAir(game.interior, SHIP.gearClear);
+  if (V.own || V.air) return V.air;
+  const code = V.type || ROOMS_TYPE;
+  const I = interiorOf(code);
+  if (!I) { loadInteriorOf(code); return null; }
+  V.air = makeAir(I, gearClearOf(code));
   setHatches(V.air, V.hatches, true);
   return V.air;
 }
 
-let interiorJob = null;
-
-/** Собрать помещения (один раз; модуль грузится лениво). */
+/** Собрать свои помещения и завести свои шлюзы. */
 function loadInterior() {
-  if (game.interior) return Promise.resolve(game.interior);
-  // Помещения рисует проход кабины; на запасном пути Canvas 2D его нет.
-  if (!game.cockpit) return Promise.resolve(null);
-  if (!interiorJob) {
-    interiorJob = import('./models/interior.js').then((m) => {
-      game.interior = m.buildInterior(shipMesh);
-      // Шлюзы: давление, люки и трапы — по высоте корабля на шасси.
-      makeAirlocks(game.interior, SHIP.gearClear);
-      // Люки, с которыми корабль оставили (сохранение), — сразу открыты.
-      if (ship.hatchesWant) { setHatches(game.interior.air, ship.hatchesWant, true); ship.hatchesWant = null; }
-      syncCargo(true);
-      restoreMe();
-      return game.interior;
-    }).catch((e) => {
-      console.warn('помещения корабля не собрались', e);
-      interiorJob = null;
-      return null;
-    });
-  }
-  return interiorJob;
+  const code = HULL.code;
+  const have = interiorOf(code);
+  if (have && have.air) return Promise.resolve(have);
+  if ((!scene && !game.cockpit) || !HULL.rooms) return Promise.resolve(null);
+  return loadInteriorOf(code).then((I) => {
+    if (!I || code !== HULL.code || I.air) return I;
+    // Шлюзы: давление, люки и трапы — по высоте корабля на шасси.
+    makeAirlocks(I, SHIP.gearClear);
+    // Люки, с которыми корабль оставили (сохранение), — сразу открыты.
+    if (ship.hatchesWant) { setHatches(I.air, ship.hatchesWant, true); ship.hatchesWant = null; }
+    syncCargo(true);
+    restoreMe();
+    return I;
+  });
 }
 game.loadInterior = loadInterior;
+// Шлюзы своего корабля — сцене (вырез обшивки, створки и трапы снаружи).
+game.ownAir = ownAir;
+
+/**
+ * Свой корпус — тот, что сейчас в HULL (js/game/hull.js). Зовётся, когда
+ * сервер сказал, на чём летит пилот (serverToSave): после пересадки на
+ * корабль другого типа в кадре его корпус и стойки, а пост пилота с
+ * экранами — только там, где он есть. Помещения «Челленджера» остаются:
+ * по ним ходят соседи того же типа.
+ */
+function syncHull() {
+  if (shipMesh === HULL.mesh) return false;
+  shipMesh = HULL.mesh;
+  gearMesh = HULL.gear;
+  game.shipMesh = shipMesh;
+  game.gearMesh = gearMesh;
+  ship.mesh = shipMesh;
+  game.cockpit = HULL.cockpit ? cockpitModel : null;
+  game.displays = HULL.cockpit ? cockpitScreens : null;
+  // Стоял на палубе своего корабля, а корпус сменился (пересадка) — в
+  // кресло нового: палубы у него может не быть вовсе.
+  if (game.walk.on && aboardVessel().own) seatPilot();
+  // Помещения нового корпуса — заранее: мостик «Прометея» с пультами
+  // виден уже из кресла.
+  if (HULL.rooms) setTimeout(() => { loadInterior(); }, 0);
+  return true;
+}
+game.syncHull = syncHull;
 // Мир за бортом в осях G — замерам (tools/, отладка): во что упёрся пешеход.
 game.outsideFrame = (G = game.walk.out, pos = game.walk.pos) => (G && game.interior ? outsideFrame(G, pos) : null);
 
@@ -716,11 +806,15 @@ function syncCargo(force = false) {
 game.rise = () => {
   const st = game.state;
   if (game.walk.on) return false;
-  if (!game.cockpit) {
+  if (!HULL.rooms) {
+    say(st, L('ВСТАТЬ НЕКУДА: ПОМЕЩЕНИЙ НА ЭТОМ КОРАБЛЕ ЕЩЁ НЕТ'), '#ffcc66', 3);
+    return false;
+  }
+  if (!scene && !game.cockpit) {
     say(st, L('ВСТАТЬ НЕКУДА: БЕЗ WEBGL2 ПОМЕЩЕНИЙ НЕТ'), '#ff7a66', 3);
     return false;
   }
-  if (!game.interior) {
+  if (!game.interior || !ownAir()) {
     say(st, L('ПОМЕЩЕНИЯ КОРАБЛЯ ЕЩЁ ГОТОВЯТСЯ…'), '#ffcc66', 2);
     loadInterior();
     return false;
@@ -784,32 +878,44 @@ game.sit = () => {
 };
 
 /** Принять командование другим своим кораблём: сесть в его кресло. */
-async function takeCommand(V) {
-  if (!isOnline()) { say(game.state, L('НЕТ СВЯЗИ С СЕРВЕРОМ'), '#ff7a66', 3); return; }
+const takeCommand = (V) => commandShip(V.id);
+
+/**
+ * Принять командование своим кораблём по номеру: из его кресла или из
+ * соседнего корабля в том же доке (экран порта, «ПЕРЕСЕСТЬ»). Решает
+ * сервер (Players::command); после ответа игра ведёт уже его — с его
+ * корпусом, стойками и лётной моделью (serverToSave → syncHull).
+ */
+async function commandShip(id) {
+  if (!isOnline()) { say(game.state, L('НЕТ СВЯЗИ С СЕРВЕРОМ'), '#ff7a66', 3); return false; }
   say(game.state, L('ПРИНИМАЮ КОМАНДОВАНИЕ…'), '#9fd9ff', 2);
   try {
     // Где стоял прежний корабль — в базу до пересадки: дальше его место
     // пишет уже не эта игра (он засыпает там, где стоит).
     save(true);
-    const state = await serverCommand(V.id);
+    const state = await serverCommand(id);
     seatPilot();
     applyState(serverToSave(state));
     applyServer(game.player, state);
     syncFromServer(game, state);
     save();
-    say(game.state, L('КОМАНДОВАНИЕ ПРИНЯТО'), '#78e08f', 3);
+    say(game.state, L('КОМАНДОВАНИЕ ПРИНЯТО: ') + (SHIP.typeName || ''), '#78e08f', 3);
+    if (game.state.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
+    return true;
   } catch (e) {
     say(game.state, L('КОМАНДОВАНИЕ: ') + e.message, '#ff7a66', 4);
+    return false;
   }
 }
+game.switchShip = commandShip;
 
 /** Сел: мышь — обратно курсором, вид — тот, что был, порт — экраном. */
 function seated() {
   const st = game.state;
   // Пилот в кресле — и шлюзы задраиваются сами: улететь с открытым люком
   // и трапом до земли значит оставить трап на площадке.
-  if (game.interior && game.interior.air && game.interior.air.hatches.some((x) => x.want || x.open > 0)) {
-    closeAll(game.interior.air);
+  if (ownAir() && ownAir().hatches.some((x) => x.want || x.open > 0)) {
+    closeAll(ownAir());
     say(st, L('ЛЮКИ ЗАКРЫВАЮТСЯ'), '#ffcc66', 2);
   }
   input.unlock();
@@ -817,6 +923,10 @@ function seated() {
   st.view = game.walk.prevView || 'cockpit';
   game.walkEye = null;
   game.frame = ownVessel;
+  // Сел — путь снят и план закрыт.
+  game.walkGoal = null;
+  game.walkRoute = null;
+  game.deckMap.open = false;
   if (st.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
   say(st, L('ПИЛОТ В КРЕСЛЕ'), '#78e08f', 2);
   save();
@@ -825,7 +935,9 @@ function seated() {
 /** В кресло сразу, без шага: крушение, страховка, новая игра. */
 function seatPilot() {
   // Шлюзы — сразу закрыты и под давлением: крушение, страховка, рестарт.
-  if (game.interior) resetAirlocks(game.interior.air);
+  if (ownAir()) resetAirlocks(ownAir());
+  // Ехал в лифте — поездка брошена, двери отперты.
+  cancelRide(game.walk, game.interior);
   game.frame = ownVessel;
   game.walk.vessel = null;
   game.walk.air = null;
@@ -841,9 +953,61 @@ function walkKeys() {
   const st = game.state;
   const w = game.walk;
   if (w.phase !== 'walk') return;
+  // План палубы: пока открыт, ноги стоят, клавиши и мышь — его.
+  const DM = game.deckMap;
+  if (DM.open) {
+    const I0 = game.interior;
+    if (!I0 || w.out) { DM.open = false; return; }
+    let act = deckMapKeys(DM, I0, input);
+    if (input.mouse.clicked) {
+      const id = deckMapClick(DM, input.mouse.x, input.mouse.y);
+      if (id) { DM.sel = id; act = 'route'; }
+    }
+    if (act === 'route') setWalkGoal(DM.sel);
+    if (act) {
+      DM.open = false;
+      if (!Q.touchUi) input.lock(screenCanvas);
+    }
+    return;
+  }
+  if (input.pressed('KeyM') && game.interior && !w.out && !w.ride) {
+    openDeckMap(DM, game.interior, w.room, game.walkGoal);
+    input.unlock();
+    input.releaseAll();
+    return;
+  }
   // Люк под рукой — E открывает и закрывает (у пульта в шлюзе, в проёме,
   // на трапе и под люком снаружи).
-  if (game.walkHatch && input.pressed('KeyE')) {
+  const lift = !w.out && game.interior ? panelNear(w, game.interior) : null;
+  if (lift) {
+    // У пульта лифта: колесо и ↑↓ — палуба, E — ехать (js/game/lift.js).
+    const n = lift.lift.stops.length;
+    if (game.liftPick === null || game.liftPick === undefined || game.liftPickOf !== lift.stop) {
+      game.liftPick = lift.to; game.liftPickOf = lift.stop;
+    }
+    // Путь проложен через лифт — палуба пути уже выбрана (один раз: колесом
+    // её можно сменить).
+    const R = game.walkRoute;
+    if (R && R.next.kind === 'lift' && game.liftPickRoute !== R.next.stop + ':' + lift.stop) {
+      game.liftPick = R.next.stop; game.liftPickRoute = R.next.stop + ':' + lift.stop;
+    }
+    const wheel = input.takeWheel();
+    let step = (wheel > 0 ? 1 : wheel < 0 ? -1 : 0) + (input.pressed('ArrowDown') ? 1 : 0) - (input.pressed('ArrowUp') ? 1 : 0);
+    while (step) {
+      const d = Math.sign(step);
+      game.liftPick = (game.liftPick + d + n) % n;
+      if (game.liftPick === lift.stop) game.liftPick = (game.liftPick + d + n) % n;
+      step -= d;
+    }
+  } else {
+    game.liftPick = null;
+  }
+  if (lift && input.pressed('KeyE')) {
+    lift.to = game.liftPick;
+    const r = startRide(w, game.interior, lift);
+    audioCue(game.audio, 'lift', { dur: r.T + 0.45, up: r.off[1] > 0 });
+    say(st, L('ЛИФТ: ') + L(lift.lift.stops[lift.to].deck), '#9fd9ff', 2);
+  } else if (game.walkHatch && input.pressed('KeyE')) {
     useHatch(game.walkHatch, game.walkHatchShip || ownVessel);
   } else if (input.pressed('KeyE', 'KeyY')) {
     if (!game.sit() && input.pressed('KeyY')) {
@@ -886,7 +1050,7 @@ function walkFrame(dt) {
   const V = aboardVessel();
   othersAboard(V, w.others || (w.others = []));
   // Под справкой, меню и картой ноги стоят: ввод сейчас не их.
-  if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open) {
+  if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open || game.deckMap.open) {
     game.walkEye = w.out ? null : walkerEye(w, I, _eyeM);
     return;
   }
@@ -919,6 +1083,13 @@ function walkFrame(dt) {
   };
   const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
+  // Лифт в пути: двери закрылись — кабина пошла; приехали — пилот уже в
+  // кабине той палубы (js/game/lift.js).
+  if (w.ride) {
+    const rv = stepRide(w, I, dt);
+    if (rv === 'arrive') { ev.room = true; game.liftPick = null; game.liftPickRoute = null; }
+  }
+  updateRoute();
   if (ev.step) {
     audioCue(game.audio, 'step', { run: ev.step.run, land: ev.step.land, surface: stepSurface(), air: feetAir() });
   }
@@ -942,16 +1113,16 @@ function findHatch() {
   if (!w.on || w.phase !== 'walk' || !I) return;
   if (!w.out) {
     const V = aboardVessel();
-    const air = V.own ? I.air : V.air;
-    if (air) { game.walkHatch = hatchNear(air, I, w.pos, false); game.walkHatchShip = V; }
+    const air = V.own ? ownAir() : V.air;
+    if (air) { game.walkHatch = hatchNear(air, air.I, w.pos, false); game.walkHatchShip = V; }
     return;
   }
   groundToWorld(w.out, w.pos, _feetW);
   for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
-    const air = V.own ? I.air : V.air;
+    const air = V.own ? ownAir() : V.air;
     if (!air) continue;
     shipToGround(w.out, V, _outT);
-    const hx = hatchNear(air, I, groundPointToShip(_outT, w.pos, _wsp), true);
+    const hx = hatchNear(air, air.I, groundPointToShip(_outT, w.pos, _wsp), true);
     if (hx) { game.walkHatch = hx; game.walkHatchShip = V; return; }
   }
 }
@@ -1056,9 +1227,10 @@ const groundShip = (x, z) => groundUnder(ownVessel, x, z);
  */
 const _occP = [0, 0, 0];
 function hatchOccupied(hx, V = ownVessel, onlyMe = false) {
-  const w = game.walk, I = game.interior;
-  if (!I) return false;
-  const air = V.own ? I.air : V.air;
+  const w = game.walk;
+  const air = V.own ? ownAir() : V.air;
+  if (!air) return false;
+  const I = air.I;
   const inHatch = (p) => tunnelAt(air, I, p) === hx || onStair(hx, p)
     || (Math.abs(Math.abs(p[0]) - hx.h.skin) < 0.8 && Math.abs(p[2] - hx.zc) < 2 && p[1] < hx.h.y[1] + 0.5 && p[1] > hx.h.y[0] - 6);
   if (w.on) {
@@ -1080,10 +1252,9 @@ const _airEnvV = { pOut: 0, block: null, ground: null, occupied: null };
 
 /** Шаг шлюзов — каждый кадр: своего корабля и чужих рядом. */
 function airFrame(dt) {
-  const I = game.interior;
-  if (!I || !I.air) return;
+  const I = interiorOf(HULL.code);
   const st = game.state;
-  if (!ship.away) {
+  if (!ship.away && I && I.air) {
     _airEnv.pOut = outsidePressure();
     _airEnv.block = hatchBlock(_airEnv.pOut);
     const ev = updateAirlocks(I.air, _airEnv, dt);
@@ -1138,7 +1309,7 @@ function airSounds(ev, air, V) {
  * кто его ведёт (у него напор воздуха и прыжок), а спящий корабль — сервер.
  */
 function useHatch(hx, V = ownVessel) {
-  const I = game.interior, st = game.state;
+  const st = game.state, air = ownAir();
   if (!V.own) {
     if (!isOnline() || !askHatch(V.id, hx.id, !hx.want)) {
       say(st, L('НЕТ СВЯЗИ: ЛЮК ЧУЖОГО КОРАБЛЯ НЕ ОТКРЫТЬ'), '#ff7a66', 3);
@@ -1148,11 +1319,12 @@ function useHatch(hx, V = ownVessel) {
       '#9fd9ff', 2.5);
     return;
   }
-  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx, ownVessel) });
+  if (!air) return;
+  const res = toggleHatch(air, hx, { occupied: hatchOccupied(hx, ownVessel) });
   if (res === 'occupied') { say(st, L('ЛЮК НЕ ЗАКРЫТЬ: ОТОЙДИТЕ ОТ ПРОЁМА'), '#ffcc66', 2.5); return; }
   if (res) { say(st, res, '#ff7a66', 3); return; }
   if (hx.want) {
-    say(st, I.air.pOut < 0.01 ? L('ШЛЮЗ: СТРАВЛИВАНИЕ · ЗА БОРТОМ ПУСТОТА') : L('ШЛЮЗ: ДАВЛЕНИЕ ПО ЗАБОРТНОМУ'),
+    say(st, air.pOut < 0.01 ? L('ШЛЮЗ: СТРАВЛИВАНИЕ · ЗА БОРТОМ ПУСТОТА') : L('ШЛЮЗ: ДАВЛЕНИЕ ПО ЗАБОРТНОМУ'),
       '#9fd9ff', 3);
   } else {
     say(st, L('ЛЮК ЗАКРЫВАЕТСЯ'), '#9fd9ff', 2);
@@ -1165,11 +1337,11 @@ function useHatch(hx, V = ownVessel) {
  * открываем по своим правилам — те же запреты, что и для себя.
  */
 function hatchRequest(ev) {
-  const I = game.interior;
-  if (!I || !I.air || ship.away || ev.ship !== ship.id) return;
-  const hx = hatchById(I.air, String(ev.id));
+  const air = ownAir();
+  if (!air || ship.away || ev.ship !== ship.id) return;
+  const hx = hatchById(air, String(ev.id));
   if (!hx || hx.want === !!ev.open) return;
-  const res = toggleHatch(I.air, hx, { occupied: hatchOccupied(hx, ownVessel) });
+  const res = toggleHatch(air, hx, { occupied: hatchOccupied(hx, ownVessel) });
   if (res === null) {
     say(game.state, (ev.open ? L('ЛЮК ОТКРЫВАЕТ: ') : L('ЛЮК ЗАКРЫВАЕТ: ')) + (ev.name || L('ПИЛОТ')), '#9fd9ff', 3);
     save();
@@ -1184,7 +1356,17 @@ const OUT_NEAR = 0.15;          // км
 
 const _outT = { R: new Float64Array(9), t: [0, 0, 0] };
 const _shipBoxes = [], _outSolids = [], _airBuf = [], _nearV = [];
-let _tunnelSolids = null, _under = null;
+// Твёрдое тоннелей люков — по планировке (у каждого типа своя).
+const _tunnels = new Map();
+function tunnelsOf(I) {
+  let t = _tunnels.get(I);
+  if (!t) {
+    const ids = new Set(I.hatches.map((h) => h.id));
+    t = I.solids.filter((s) => (s.sill && ids.has(s.sill)) || s.hatchWall);
+    _tunnels.set(I, t);
+  }
+  return t;
+}
 const _feetW = v3();
 const _wsp2 = [0, 0, 0];
 
@@ -1197,16 +1379,27 @@ function walkerShipPos(V = ownVessel) {
   return groundPointToShip(_outT, w.pos, _wsp);
 }
 
-/** Стойки шасси — коробками (оси корабля, м): мимо них ходят, а не сквозь. */
-function gearBoxes(V, out) {
+/**
+ * Стойки шасси — коробками (оси корабля, м): мимо них ходят, а не сквозь.
+ * Ствол и пята отдельно (js/models/gear.js): пята широкая и низкая, на
+ * неё можно встать.
+ */
+function gearBoxes(V, G, out) {
   const g = V.gear;
   if (!g || g.t < 0.5) return;
-  gearMesh.hardpoints.forEach((hp, i) => {
-    const len = (gearMesh.legLengths[i] + (g.drop ? g.drop[i] : 0)) * g.t * 1000;
-    const x = hp.x * 1000, y = hp.y * 1000, z = hp.z * 1000;
-    out.push({ lo: [x - 0.3, y - len, z - 0.3], hi: [x + 0.3, y, z + 0.3], gear: i });
+  G.hardpoints.forEach((hp, i) => {
+    const len = (G.legLengths[i] + (g.drop ? g.drop[i] : 0)) * g.t * 1000;
+    legBoxes(G.legs[i], hp, len, out, i);
   });
 }
+
+// Карта днища — у каждого корпуса своя (js/game/outside.js).
+const _unders = new Map();
+const underOf = (mesh) => {
+  let u = _unders.get(mesh);
+  if (!u) { u = hullUnderside(mesh); _unders.set(mesh, u); }
+  return u;
+};
 
 // Оси грунта, для которых собран мир за бортом: обычно пилота, а на пороге —
 // те, в которые он только собирается шагнуть (crossThreshold).
@@ -1220,27 +1413,25 @@ const waterOut = (x, z) => waterUnder(_outG, x, z);
  * рядом — и упираешься в стойки обоих.
  */
 function outsideFrame(G = game.walk.out, pos = game.walk.pos) {
-  const I = game.interior;
   _outG = G;
-  if (!_tunnelSolids || _tunnelSolids.of !== I) {
-    const ids = new Set(I.hatches.map((h) => h.id));
-    _tunnelSolids = I.solids.filter((s) => (s.sill && ids.has(s.sill)) || s.hatchWall);
-    _tunnelSolids.of = I;
-  }
-  if (!_under) _under = hullUnderside(shipMesh);
   groundToWorld(G, pos, _feetW);
   let n = 0;
   for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
-    const air = V.own ? I.air : V.air;
+    const air = V.own ? ownAir() : V.air;
     const T = V._T || (V._T = { R: new Float64Array(9), t: [0, 0, 0] });
     shipToGround(G, V, T);
     _shipBoxes.length = 0;
-    for (const s of _tunnelSolids) _shipBoxes.push(s);
-    for (const s of airSolids(air, _airBuf)) _shipBoxes.push(s);
-    gearBoxes(V, _shipBoxes);
+    // Корпус своего типа (js/models/hulls.js): его стойки и днище, а
+    // пороги, тоннели и трапы — по его же планировке (air.I).
+    const H = V.own ? HULL : hullOf(V.type || ROOMS_TYPE);
+    if (air) {
+      for (const s of tunnelsOf(air.I)) _shipBoxes.push(s);
+      for (const s of airSolids(air, _airBuf)) _shipBoxes.push(s);
+    }
+    gearBoxes(V, H.gear, _shipBoxes);
     // Днище — коробками вокруг пилота: на лёгком теле прыгают выше, чем
     // висит корпус.
-    undersideBoxes(_under, groundPointToShip(T, pos, _wsp2), 2.5, _shipBoxes);
+    undersideBoxes(underOf(H.mesh), groundPointToShip(T, pos, _wsp2), 2.5, _shipBoxes);
     // Коробка корабля в осях грунта — повёрнутая (ob), а не охватывающая:
     // на склоне охватывающая раздувается и запирает проём (js/game/walker.js).
     for (const s of _shipBoxes) {
@@ -1353,6 +1544,67 @@ function crossThreshold() {
   }
 }
 
+/** Проложить путь к помещению id (план палубы, js/ui/deckmap.js). */
+function setWalkGoal(id) {
+  const I = game.interior, r = I && I.roomById[id];
+  if (!r) return;
+  game.walkGoal = id;
+  game.walkGoalOf = I;
+  game.liftPickRoute = null;
+  updateRoute();
+  const R = game.walkRoute;
+  say(game.state, R && R.here && R.dist < 1.5 ? L('ВЫ НА МЕСТЕ: ') + roomName(r)
+    : L('ПУТЬ: ') + roomName(r) + ' · ' + L(deckOf(r)) + (R ? ' · ' + Math.round(R.dist) + L(' м') : ''), '#78e08f', 3);
+}
+
+/**
+ * Путь к цели — каждый кадр: с того места, где пилот сейчас (он мог
+ * свернуть). Дошёл — путь снят. Сменились помещения (пересел, вышел за
+ * борт) — тоже.
+ */
+function updateRoute() {
+  const w = game.walk, I = game.interior;
+  if (!game.walkGoal) { game.walkRoute = null; return; }
+  if (!I || I !== game.walkGoalOf) { game.walkGoal = null; game.walkRoute = null; return; }
+  if (w.out || !w.room) { game.walkRoute = null; return; }
+  if (w.ride) return;
+  const R = routeTo(I, w.room, w.pos, game.walkGoal);
+  game.walkRoute = R;
+  if (R && R.here && Math.hypot(w.pos[0] - R.end[0], w.pos[2] - R.end[2]) < 1.5) {
+    say(game.state, L('ВЫ НА МЕСТЕ: ') + roomName(I.roomById[game.walkGoal]), '#78e08f', 3);
+    game.walkGoal = null;
+    game.walkRoute = null;
+  }
+}
+
+// Проложить путь — и снимкам и проверкам (tools/screen.mjs).
+game.setWalkGoal = (id) => setWalkGoal(id);
+
+/** Подсказка пути: куда и сколько. */
+function routeHint() {
+  const R = game.walkRoute, I = game.interior;
+  if (!R || !I || !game.walkGoal) return null;
+  const goal = roomName(I.roomById[game.walkGoal]);
+  const next = R.next.kind === 'lift' ? L('ЛИФТ НА ') + L(R.next.lift.stops[R.next.stop].deck)
+    : R.next.kind === 'goal' ? goal : roomName(I.roomById[R.next.to]);
+  return [L('ПУТЬ: ') + goal + ' · ' + Math.round(R.dist) + L(' м') + (R.here ? '' : L(' · ДАЛЬШЕ: ') + next), '#78e08f'];
+}
+
+/** Подсказка у пульта лифта: куда поедем и как выбрать. */
+function liftHint() {
+  const w = game.walk, I = game.interior;
+  if (!I || w.out) return null;
+  if (w.ride) {
+    const L0 = w.ride.lift, to = L0.stops[w.ride.to];
+    return [L('ЛИФТ ИДЁТ: ') + L(to.deck) + ' · ' + L(to.what), '#9fd9ff'];
+  }
+  const at = panelNear(w, I);
+  if (!at) return null;
+  const pick = game.liftPick === null || game.liftPick === undefined ? at.to : game.liftPick;
+  const to = at.lift.stops[pick];
+  return [(Q.touchUi ? '' : L('E — ЛИФТ: ')) + L(to.deck) + ' · ' + L(to.what) + (Q.touchUi ? '' : L(' · КОЛЕСО ИЛИ ↑↓ — ПАЛУБА')), '#78e08f'];
+}
+
 /** Подсказки внизу кадра пилоту на ногах. */
 function walkHints() {
   const w = game.walk;
@@ -1375,6 +1627,10 @@ function walkHints() {
     fuel: fl === 'dry' ? L('ТОПЛИВО КОНЧИЛОСЬ') : fl === 'reserve' ? L('ТОПЛИВО НА РЕЗЕРВЕ') : null,
     touch: Q.touchUi,
     hatch: hatchHint(),
+    lift: liftHint(),
+    route: routeHint(),
+    plan: !w.out && !Q.touchUi && game.interior && game.interior.rooms.length > 20 && !game.walkRoute
+      ? L('M — ПЛАН ПАЛУБЫ И ПУТЬ') : null,
     lock: lockHint(),
     press: pressHint(),
     out: outHint(),
@@ -1383,8 +1639,9 @@ function walkHints() {
 
 /** Подсказка у люка: что сделает E. */
 function hatchHint() {
-  const hx = game.walkHatch, I = game.interior, V = game.walkHatchShip || ownVessel;
-  if (!hx || !I || !I.air) return null;
+  const hx = game.walkHatch, V = game.walkHatchShip || ownVessel;
+  const air = V.own ? ownAir() : V.air;
+  if (!hx || !air) return null;
   const key = Q.touchUi ? L('«ЛЮК»') : 'E';
   if (!V.own) {
     // Люк чужого корабля: попросить того, кто его ведёт (или сервер).
@@ -1397,7 +1654,7 @@ function hatchHint() {
     }
     return [key + L(' — ЗАКРЫТЬ ЛЮК'), AIR_AMBER];
   }
-  if (I.air.block) return [I.air.block, AIR_RED];
+  if (air.block) return [air.block, AIR_RED];
   return [key + L(' — ОТКРЫТЬ ЛЮК'), AIR_GREEN];
 }
 const AIR_AMBER = '#ffcc66', AIR_RED = '#ff7a66', AIR_GREEN = '#78e08f';
@@ -1451,7 +1708,7 @@ function stepSurface() {
 /** Шлюзы корабля, на палубе которого пилот. */
 function airHere() {
   const V = aboardVessel();
-  return V.own ? (game.interior && game.interior.air) : V.air;
+  return V.own ? ownAir() : V.air;
 }
 
 /** Воздух у ног, бар: в помещении — его давление (js/game/airlock.js), за бортом — тела. */
@@ -1649,7 +1906,7 @@ function shipRecord() {
     // Открытые люки: корабль, который хозяин оставил с открытым трапом,
     // так и стоит — и в него можно зайти.
     hatches: ship.hatchesWant ? ship.hatchesWant.slice()
-      : openHatches(game.interior && game.interior.air),
+      : openHatches(ownAir()),
   };
 }
 
@@ -1846,8 +2103,8 @@ function placeOwnShip(rec) {
   ship.gear.out = !!rec.gear;
   ship.gear.t = rec.gear ? 1 : 0;
   ship.hatchesWant = Array.isArray(rec.hatches) ? rec.hatches.slice() : [];
-  if (game.interior) {
-    setHatches(game.interior.air, ship.hatchesWant, true);
+  if (ownAir()) {
+    setHatches(ownAir(), ship.hatchesWant, true);
     ship.hatchesWant = null;
   }
   const findStation = (id) => world.stations.find((x) => x.id === id) || null;
@@ -1996,6 +2253,7 @@ function serverToSave(st) {
   // не меняет; когда их станет несколько, корабль соберётся по тому, что
   // записано в базе, а не по первому из списка.
   if (sh.type && sh.type.code) useShipType(sh.type.code);
+  syncHull();
   // ...и на чём именно: числа двигателя, щита и трюма принадлежат
   // модулям, а какие из них стоят в гнёздах, знает база (ship_equipment).
   // До этого момента корабль собран по заводской комплектации каталога.
@@ -2100,7 +2358,7 @@ function meNet() {
   if (game.pendingMe) return null;
   if (!w.on) {
     if (ship.id === null || ship.away) return null;
-    const e = I ? I.seat.eye : [EYE.x, EYE.y, EYE.z];
+    const e = I && I.code === HULL.code ? I.seat.eye : (HULL.cockpit ? [EYE.x, EYE.y, EYE.z] : [HULL.eye.x * 1000, HULL.eye.y * 1000, HULL.eye.z * 1000]);
     return { st: 'seat', s: ship.id, x: r3(e[0]), y: r3(e[1]), z: r3(e[2]), yaw: 0, pitch: 0, v: 0, air: 0 };
   }
   const v = r3(Math.hypot(w.vel[0], w.vel[2]));
@@ -2179,7 +2437,7 @@ function gunTarget() {
 }
 
 function fireNow() {
-  const fired = fireGuns(game.guns, ship, gunTarget(), GUN_PORTS, _fired);
+  const fired = fireGuns(game.guns, ship, gunTarget(), HULL.guns, _fired);
   if (!fired.length) return;
   const b = fired[0];
   // Чужие увидят выстрел только если мы о нём скажем: сервер пересылает
@@ -3238,7 +3496,11 @@ function setupCamera() {
     // снаружи корпуса, — и своего носа из кабины не было видно. В этой же
     // точке начало координат кабины (js/models/cockpit.js).
     const b = ship.basis;
-    const ex = EYE.x / 1000, ey = EYE.y / 1000, ez = EYE.z / 1000;
+    // Глаз — у текущего корпуса: в кокпите «Челленджера» или в кресле
+    // командира на мостике «Прометея» (js/game/hull.js).
+    const ex = HULL.cockpit ? EYE.x / 1000 : HULL.eye.x;
+    const ey = HULL.cockpit ? EYE.y / 1000 : HULL.eye.y;
+    const ez = HULL.cockpit ? EYE.z / 1000 : HULL.eye.z;
     cam.pos.x = ship.pos.x + b.right.x * ex + b.up.x * ey + b.fwd.x * ez;
     cam.pos.y = ship.pos.y + b.right.y * ex + b.up.y * ey + b.fwd.y * ez;
     cam.pos.z = ship.pos.z + b.right.z * ex + b.up.z * ey + b.fwd.z * ez;
@@ -3277,11 +3539,14 @@ function render2d() {
     if (ship.gear.t > 0.01) {
       const b = ship.basis;
       gearMesh.hardpoints.forEach((hp, i) => {
-        _tmp.x = ship.pos.x + b.right.x * hp.x + b.up.x * hp.y + b.fwd.x * hp.z;
-        _tmp.y = ship.pos.y + b.right.y * hp.x + b.up.y * hp.y + b.fwd.y * hp.z;
-        _tmp.z = ship.pos.z + b.right.z * hp.x + b.up.z * hp.y + b.fwd.z * hp.z;
-        const len = gearMesh.legLengths[i] + (ship.gear.drop ? ship.gear.drop[i] : 0);
-        renderer.drawMesh(gearMesh, _tmp, b, Math.max(0.001, len) * ship.gear.t, _sun, {});
+        const drop = ship.gear.drop ? ship.gear.drop[i] : 0;
+        for (const part of gearMesh.legs[i].parts) {
+          const y = hp.y + stageLift(gearMesh.legs[i], gearMesh.legLengths[i], drop, ship.gear.t, part.k);
+          _tmp.x = ship.pos.x + b.right.x * hp.x + b.up.x * y + b.fwd.x * hp.z;
+          _tmp.y = ship.pos.y + b.right.y * hp.x + b.up.y * y + b.fwd.y * hp.z;
+          _tmp.z = ship.pos.z + b.right.z * hp.x + b.up.z * y + b.fwd.z * hp.z;
+          renderer.drawMesh(part.mesh, _tmp, b, 1, _sun, {});
+        }
       });
     }
     if (ship.throttle > 0.03) {
@@ -3410,7 +3675,10 @@ function render() {
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
-  else if (game.walk.on && game.state.mode !== ST.HELP) drawWalkHud(hud, game, walkHints());
+  else if (game.walk.on && game.state.mode !== ST.HELP) {
+    drawWalkHud(hud, game, walkHints());
+    if (game.deckMap.open && game.interior) drawDeckMap(hud.ctx, hud.camera.w, hud.camera.h, game, game.interior);
+  }
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
   // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в
   // справке: там свои экраны целиком.
@@ -3845,7 +4113,7 @@ async function boot() {
             : game.state.mode === ST.LANDED ? 'landed'
               : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
           gear: ship.gear.out || ship.gear.t > 0.5,
-          hatches: ship.hatchesWant || openHatches(game.interior && game.interior.air),
+          hatches: ship.hatchesWant || openHatches(ownAir()),
           lift: Math.abs(ship.lift || 0),
           local: shipLocal(),
         },

@@ -51,6 +51,13 @@
 //
 // Всё здесь в осях МОДЕЛИ корабля (метры). В оси кабины (от глаза
 // пилота, js/models/cockpit.js) сетки переводятся только на выходе.
+//
+// ПЛАН. Корабль — это план (makePlan): комнаты, трапы, двери, люки, окна,
+// проёмы, мебель, коробки выреза и кресло. Сборщик (buildInterior) один на
+// все типы: стены, полы, двери, трапы, люки и твёрдое он кладёт по плану,
+// а что у корабля своё (переборка рубки «Челленджера», лифт «Прометея»),
+// — делают крючки плана (special, furnish). План «Челленджера» — здесь же
+// (CHALLENGER), «Прометея» — js/models/interior.prom.js.
 
 import { INTERIOR_PARTS as PARTS, INTERIOR_ROLES as ROLES } from './interior.parts.js';
 import { EYE, CMAT } from './cockpit.js';
@@ -225,6 +232,20 @@ export class MeshBuf {
   }
 }
 
+/**
+ * Сетка, которая ничего не копит: проход сборки «без геометрии». Им
+ * собирается всё, кроме нужной комнаты, — твёрдое, лампы и двери
+ * считаются как обычно, а грани не кладутся никуда (ленивые планы,
+ * buildInterior).
+ */
+class DryBuf extends MeshBuf {
+  poly() {}
+  part() {}
+  box() {}
+  beam() {}
+}
+const DRY = new DryBuf();
+
 /** Габарит детали, м пака: [lo, hi]. */
 const bounds = (name) => {
   const P = PARTS[name];
@@ -336,7 +357,7 @@ const WIN_DEPTH = 2.5;
  * до восьми метров, корпуса быть не должно: окно в крыло не нужно.
  * @returns окна с глубиной откоса у углов: [u0v0, u1v0, u1v1, u0v1], м
  */
-function fitWindows(hullM) {
+function fitWindows(P, hullM) {
   const T = [];
   for (const f of hullM.faces) {
     for (let k = 1; k + 1 < f.v.length; k++) {
@@ -344,10 +365,11 @@ function fitWindows(hullM) {
       T.push([a.x, a.y, a.z, b.x - a.x, b.y - a.y, b.z - a.z, c.x - a.x, c.y - a.y, c.z - a.z]);
     }
   }
-  // Пересечения луча (o, вдоль x со знаком s) с корпусом — расстояния.
-  const hits = (o, s) => {
+  // Пересечения луча (o, вдоль оси ax со знаком s) с корпусом — расстояния.
+  const hits = (o, s, ax = 0) => {
     const out = [];
-    const d = [s, 0, 0];
+    const d = [0, 0, 0];
+    d[ax] = s;
     for (const t of T) {
       const e1 = [t[3], t[4], t[5]], e2 = [t[6], t[7], t[8]];
       const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
@@ -365,19 +387,24 @@ function fitWindows(hullM) {
     return out;
   };
   const out = [];
-  for (const w of WINDOWS) {
-    const r = R[w.room];
-    const at = w.side < 0 ? r.lo[0] : r.hi[0];
+  for (const w of P.windows) {
+    const r = P.R[w.room];
+    // Стена окна: боковая (ax 0, u — по z) или торцевая (ax 2, u — по x).
+    const ax = w.ax || 0, uAx = ax === 0 ? 2 : 0;
+    const at = w.side < 0 ? r.lo[ax] : r.hi[ax];
     const u0 = w.c - w.w / 2, u1 = w.c + w.w / 2, v0 = r.lo[1] + w.y, v1 = v0 + w.h;
     const depth = [];
     for (const [u, v] of [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]) {
       // Угол — чуть внутри проёма: ребро корпуса ровно по углу не в счёт.
-      const h = hits([at, v + (v === v0 ? 0.03 : -0.03), u + (u === u0 ? 0.03 : -0.03)], w.side);
+      const o = [0, v + (v === v0 ? 0.03 : -0.03), 0];
+      o[ax] = at;
+      o[uAx] = u + (u === u0 ? 0.03 : -0.03);
+      const h = hits(o, w.side, ax);
       const skin = Math.max(-1, ...h.filter((t) => t <= WIN_DEPTH));
       if (skin < 0 || h.some((t) => t > skin + 0.08)) { depth.length = 0; break; }
       depth.push(skin);
     }
-    if (depth.length === 4) out.push({ ...w, at, u0, u1, v0, v1, depth });
+    if (depth.length === 4) out.push({ ...w, ax, at, u0, u1, v0, v1, depth });
   }
   return out;
 }
@@ -400,14 +427,55 @@ export const OPENINGS = [
   { a: 'hall', b: 'shaftA', ceil: true, x: [-0.8, 0.8], z: [-22.0, STAIRS[0].zTop] },
 ];
 
-// Проходы для воздуха без дверей (js/game/airlock.js): проёмы — с
-// площадью сечения, м². Рубка от шахты отделена дверью переборки.
-const AIRWAYS = OPENINGS.map((o) => {
-  if (o.ceil) return { a: o.a, b: o.b, area: (o.x[1] - o.x[0]) * (o.z[1] - o.z[0]) };
-  const A = R[o.a], B = R[o.b];
-  const y = o.y || [Math.max(A.lo[1], B.lo[1]), Math.min(A.hi[1], B.hi[1])];
-  return { a: o.a, b: o.b, area: (o.u[1] - o.u[0]) * (y[1] - y[0]) };
-});
+/** Трапы: число подъёмов, подъём и нижний край марша — по ярусам. */
+export function deriveStairs(stairs) {
+  for (const s of stairs) {
+    if (s.n) continue;
+    s.n = Math.round((s.yTop - s.yBot) / INT.rise);
+    s.r = (s.yTop - s.yBot) / s.n;
+    // Ступеней n − 1: последний подъём — это уже пол нижней палубы.
+    s.zBot = s.zTop + s.dir * (s.n - 1) * INT.tread;
+  }
+  return stairs;
+}
+
+/**
+ * План корабля: планировка и всё, что из неё выводится.
+ *
+ * def: code — тип корпуса; rooms, stairs, doors, hatches, windows,
+ * openings — как у «Челленджера» ниже; links — пары комнат, связанных
+ * не проёмом и не дверью из списка (дверь переборки рубки); крючки:
+ * special(ctx, faces, hullM) — своё (переборки, площадки трапов),
+ * extraDoors(ctx) — двери, собранные не по DOORS, skipFace(room, f) —
+ * грань комнаты, которую делает не она, roomAtExtra(p) — места не-коробки,
+ * furnish(ctx) — мебель и лампы; carve, sunBox, seat, origin — как в
+ * выходе buildInterior; slots() и crate — груз.
+ */
+export function makePlan(def) {
+  const P = { links: [], windows: [], openings: [], hatches: [], lifts: [], ...def };
+  P.R = Object.fromEntries(P.rooms.map((r) => [r.id, r]));
+  deriveStairs(P.stairs);
+  // Проходы для воздуха без дверей (js/game/airlock.js): проёмы — с
+  // площадью сечения, м². Двери считает сам шлюз.
+  P.airways = P.openings.map((o) => {
+    if (o.ceil) return { a: o.a, b: o.b, area: (o.x[1] - o.x[0]) * (o.z[1] - o.z[0]) };
+    const A = P.R[o.a], B = P.R[o.b];
+    const y = o.y || [Math.max(A.lo[1], B.lo[1]), Math.min(A.hi[1], B.hi[1])];
+    return { a: o.a, b: o.b, area: (o.u[1] - o.u[0]) * (y[1] - y[0]) };
+  });
+  // Соседство комнат: через проёмы и двери.
+  const adj = {};
+  for (const r of P.rooms) adj[r.id] = new Set();
+  const link = (a, b) => { adj[a].add(b); adj[b].add(a); };
+  for (const o of P.openings) link(o.a, o.b);
+  for (const d of P.doors) link(d.a, d.b);
+  for (const [a, b] of P.links) link(a, b);
+  P.adj = adj;
+  P.openLinks = new Set(P.openings.map((o) => o.a + '|' + o.b));
+  P.doorById = Object.fromEntries(P.doors.map((d) => [d.id, d]));
+  P.seen = new Map();
+  return P;
+}
 
 /** Грань комнаты, к которой примыкает соседняя: ось, знак, координата. */
 function sharedFace(a, b) {
@@ -434,24 +502,28 @@ function sharedFace(a, b) {
 
 function roomFaces(room) {
   const [x0, y0, z0] = room.lo, [x1, y1, z1] = room.hi;
-  const wall = (side, ax, at, n, u, uAx) => ({ side, ax, at, n, u, uAx, v: [y0, y1], holes: [], doors: [] });
+  // Крупность отделки — у комнаты (tile, plain): большим залам «Прометея»
+  // хватает плитки покрупнее и гладких стен почаще (см. ROOM_FINISH).
+  const fin = { tile: room.tile || INT.tile, plain: room.plain || 0 };
+  const wall = (side, ax, at, n, u, uAx) => ({ side, ax, at, n, u, uAx, v: [y0, y1], holes: [], doors: [], ...fin });
   return [
     wall('x-', 0, x0, [1, 0, 0], [z0, z1], 2),
     wall('x+', 0, x1, [-1, 0, 0], [z0, z1], 2),
     wall('z-', 2, z0, [0, 0, 1], [x0, x1], 0),
     wall('z+', 2, z1, [0, 0, -1], [x0, x1], 0),
-    { side: 'y-', ax: 1, at: y0, n: [0, 1, 0], u: [x0, x1], v: [z0, z1], holes: [] },
-    { side: 'y+', ax: 1, at: y1, n: [0, -1, 0], u: [x0, x1], v: [z0, z1], holes: [] },
+    { side: 'y-', ax: 1, at: y0, n: [0, 1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...fin },
+    { side: 'y+', ax: 1, at: y1, n: [0, -1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...fin },
   ];
 }
 
 const faceOf = (faces, ax, s) => faces.find((f) => f.ax === ax && f.side.endsWith(s > 0 ? '+' : '-'));
 
-/** Грани всех комнат; проёмы и двери разложены по ним. */
-function layoutFaces(wins = []) {
+/** Грани всех комнат плана; проёмы и двери разложены по ним. */
+function layoutFaces(P, wins = []) {
   const Fs = {};
-  for (const r of ROOMS) Fs[r.id] = roomFaces(r);
-  for (const o of OPENINGS) {
+  const R = P.R;
+  for (const r of P.rooms) Fs[r.id] = roomFaces(r);
+  for (const o of P.openings) {
     const a = R[o.a], b = R[o.b];
     if (o.ceil) {
       faceOf(Fs[o.a], 1, 1).holes.push({ u: o.x, v: o.z, to: o.b });
@@ -464,7 +536,7 @@ function layoutFaces(wins = []) {
     faceOf(Fs[o.a], sf.ax, sf.s).holes.push({ u: o.u, v: yr, to: o.b });
     faceOf(Fs[o.b], sf.ax, -sf.s).holes.push({ u: o.u, v: yr, to: o.a });
   }
-  for (const d of DOORS) {
+  for (const d of P.doors) {
     const a = R[d.a], b = R[d.b];
     const sf = sharedFace(a, b);
     if (!sf) throw new Error('дверь ' + d.id + ': комнаты не соседи');
@@ -486,7 +558,7 @@ function layoutFaces(wins = []) {
   // Люки: проём в боковой стене шлюза — по краям панели обшивки, но не
   // выше потолка (у носового люка панель выше шлюза: над проёмом снаружи
   // ставится перемычка, buildHatch).
-  for (const h of HATCHES) {
+  for (const h of P.hatches) {
     const r = R[h.lock];
     faceOf(Fs[h.lock], 0, h.side).holes.push({
       u: [h.z[0], h.z[1]], v: [Math.max(r.lo[1], h.y[0]), Math.min(r.hi[1], h.y[1])], hatch: h.id, to: 'out',
@@ -494,7 +566,7 @@ function layoutFaces(wins = []) {
   }
   // Окна: проём в боковой стене (откос и рама — buildWindow).
   for (const w of wins) {
-    faceOf(Fs[w.room], 0, w.side).holes.push({ u: [w.u0, w.u1], v: [w.v0, w.v1], window: w.id, win: w, to: 'out' });
+    faceOf(Fs[w.room], w.ax || 0, w.side).holes.push({ u: [w.u0, w.u1], v: [w.v0, w.v1], window: w.id, win: w, to: 'out' });
   }
   return Fs;
 }
@@ -564,7 +636,10 @@ function fillWall(buf, f, u0, u1, y0, y1, seed) {
   const w = len / n;
   for (let r = 0; r < rows; r++) {
     for (let i = 0; i < n; i++) {
-      const pick = w < INT.wallW * 0.6 || h < INT.wallH * 0.6 ? 'wallPlain'
+      // Доля гладких сверх рисунка (f.plain): у длинной стены рельефная
+      // деталь через одну — это тысячи граней на метр без пользы.
+      const plain = f.plain && hash(seed + i * 3.7, f.at + r * 1.9) < f.plain;
+      const pick = plain || w < INT.wallW * 0.6 || h < INT.wallH * 0.6 ? 'wallPlain'
         : WALLS[Math.floor(hash(seed + i * 7.1, f.at + r * 3.3) * WALLS.length)];
       wallPiece(buf, f, pick, u0 + w * (i + 0.5), y0 + h * r, w, h);
     }
@@ -629,6 +704,12 @@ function codeDoor(buf, f, d, u0, u1, y0, y1, frame = null) {
  * видна комната b, а комната a — нет (js/gl/cabin.js).
  */
 function frameOf(ctx, id) {
+  // Ленивый проход (ctx.target — комната или 'frame:<дверь>'): рама
+  // настоящая только у той, ради которой он идёт.
+  if (ctx.target !== '*') {
+    const d = ctx.P.doorById[id];
+    if (ctx.target !== 'frame:' + id && !(d && d.a === ctx.target)) return DRY;
+  }
   return ctx.frames[id] || (ctx.frames[id] = new MeshBuf());
 }
 
@@ -801,8 +882,10 @@ function buildWall(ctx, buf, room, f) {
       // Кромки проёма — колонны: торец детали пака открыт, а колонна его
       // закрывает (так пак и задуман). У проёмов к трапу их нет: там
       // кромку продолжает стена шахты, а колонна встала бы на ступень.
-      const toShaft = R[h.to] && R[h.to].kind === 'shaft';
-      if (room.kind !== 'shaft' && !toShaft && h.v[1] - h.v[0] > 2) {
+      // У окна колонн нет: окно в рост на мостике «Прометея» — не проход, и
+      // колонны по его краям встали бы столбами между стёклами.
+      const toShaft = ctx.P.R[h.to] && ctx.P.R[h.to].kind === 'shaft';
+      if (room.kind !== 'shaft' && !toShaft && !h.win && h.v[1] - h.v[0] > 2) {
         for (const ue of [h.u[0], h.u[1]]) {
           const p = wallPoint(f, ue, y0, 0);
           column(ctx, buf, 'columnSlim', p[0], y0, p[2], y1 - y0, true);
@@ -828,15 +911,17 @@ function buildFlat(buf, f) {
   const kinds = ceil
     ? ['roofPlain', 'roof', 'roofPlain', 'roofPlain', 'roofSmallVents', 'roofPlain', 'roofDetails', 'roofPlain', 'roof', 'roofPlain']
     : ['floorPlain', 'floor', 'floorPlain', 'floorPlain', 'floor2', 'floorPlain', 'floor', 'floorPlain'];
+  const tile = f.tile || INT.tile;
   for (const r of subtract({ u: f.u, v: f.v }, f.holes)) {
     const w = r.u[1] - r.u[0], d = r.v[1] - r.v[0];
     if (w < 0.05 || d < 0.05) continue;
-    const nx = Math.max(1, Math.round(w / INT.tile)), nz = Math.max(1, Math.round(d / INT.tile));
+    const nx = Math.max(1, Math.round(w / tile)), nz = Math.max(1, Math.round(d / tile));
     const sx = w / nx / 2, sz = d / nz / 2;
     for (let i = 0; i < nx; i++) {
       for (let j = 0; j < nz; j++) {
         const x = r.u[0] + (i + 0.5) * w / nx, z = r.v[0] + (j + 0.5) * d / nz;
-        const name = kinds[Math.floor(hash(x * 1.7, z * 2.3) * kinds.length)];
+        const plain = f.plain && hash(x * 2.9, z * 1.3) < f.plain;
+        const name = plain ? (ceil ? 'roofPlain' : 'floorPlain') : kinds[Math.floor(hash(x * 1.7, z * 2.3) * kinds.length)];
         const top = bounds(name)[1][1];
         // Потолок — та же плитка, перевёрнутая узором вниз (поворот на
         // пол-оборота вокруг x, а не зеркало).
@@ -972,7 +1057,7 @@ function lamp(ctx, buf, room, x, z, opts = {}) {
  * считает js/game/airlock.js.
  */
 function buildHatch(ctx, buf, h) {
-  const r = R[h.lock], s = h.side;
+  const r = ctx.P.R[h.lock], s = h.side;
   const xw = s > 0 ? r.hi[0] : r.lo[0];
   const xo = s * (h.inset + 0.02);
   const [z0, z1] = h.z, y0 = h.y[0];
@@ -1246,11 +1331,12 @@ export function hullMeters(hull) {
 // --- твёрдое: стены, пол, потолок ---------------------------------------------------
 
 /** Стены, пол и потолок комнаты — плиты от лица наружу, на полперегородки. */
-function roomSolids(room, faces, solids) {
+function roomSolids(P, room, faces, solids) {
   const th = INT.gap / 2;
   for (const f of faces) {
-    // Переборку рубки (передняя стенка шахты A) делает сама рубка.
-    if (room.id === 'shaftA' && f.side === 'z+') continue;
+    // Грань, которую делает не комната (переборку рубки «Челленджера» —
+    // сама рубка), — крючок плана.
+    if (P.skipFace && P.skipFace(room, f)) continue;
     // Окно — стекло: стена в нём такая же твёрдая.
     for (const r of subtract({ u: f.u, v: f.v }, f.holes.filter((h) => !h.window))) {
       const lo = [0, 0, 0], hi = [0, 0, 0];
@@ -1282,35 +1368,82 @@ function bulkheadSolids(solids) {
 // --- сборка ----------------------------------------------------------------------
 
 /**
+ * Створка пака под проём, собранный кодом (кодовая дверь, дверь рубки):
+ * в середине перегородки, по ширине проёма с рамой.
+ * @param mid середина проёма на полу, в середине перегородки (оси корабля)
+ * @param t ось стены (вдоль неё створка едет), n — нормаль в комнату a
+ */
+export function codeLeaf(id, rooms, pos, ax, mid, t, n, extra = {}) {
+  const bw = 2 * INT.doorHalf + 0.1, bsx = bw / 1.674, bsy = INT.doorTop / 2.79, bsz = 0.4;
+  return {
+    id, rooms, pos, ax,
+    origin: mid.map((v, i) => v + n[i] * 0.4175 * bsz), tangent: t,
+    ux: t.map((c) => c * bsx), uy: [0, bsy, 0], uz: n.map((c) => c * bsz),
+    slide: bw, half: bw / 2, height: INT.doorTop, open: 0, want: 0, ...extra,
+  };
+}
+
+/**
  * Собрать помещения по корпусу.
  *
  * @param hull корпус (js/models/ships.js, в километрах)
+ * @param P план (makePlan): по умолчанию — «Челленджер»
  */
-export function buildInterior(hull) {
+export function buildInterior(hull, P = CHALLENGER) {
   const hullM = hullMeters(hull);
-  const wins = fitWindows(hullM);
-  const faces = layoutFaces(wins);
-  const ctx = { meshes: {}, frames: {}, lamps: [], solids: [], columns: new Set() };
-  for (const r of ROOMS) ctx.meshes[r.id] = new MeshBuf();
+  const wins = fitWindows(P, hullM);
+  const faces = layoutFaces(P, wins);
+  // Ленивый план (P.lazy, «Прометей»: сто с лишним помещений) — первый
+  // проход без геометрии: твёрдое, лампы и двери. Сетка комнаты
+  // собирается, когда её впервые просят (meshOf), тем же проходом, где
+  // настоящая лишь она.
+  const ctx = assemble(P, hullM, faces, P.lazy ? null : '*');
+  const out = finish(P, hullM, faces, wins, ctx);
+  if (!P.lazy) return out;
+  out.meshes = {};
+  out.doorFrames = {};
+  out.meshOf = (id) => {
+    if (!out.meshes[id] && P.R[id]) {
+      const c = assemble(P, hullM, faces, id);
+      out.meshes[id] = c.meshes[id];
+      for (const [k, m] of Object.entries(c.frames)) if (!out.doorFrames[k]) out.doorFrames[k] = m;
+    }
+    return out.meshes[id] || null;
+  };
+  out.frameOf = (id) => {
+    if (!(id in out.doorFrames)) {
+      const c = assemble(P, hullM, faces, 'frame:' + id);
+      out.doorFrames[id] = c.frames[id] || null;
+    }
+    return out.doorFrames[id];
+  };
+  // Отпустить сетку комнаты (кабина отпустила её видеопамять): понадобится
+  // — соберётся заново.
+  out.dropMesh = (id) => { delete out.meshes[id]; };
+  return out;
+}
 
-  // Рубка: переборка с дверью по сечению фонаря.
-  // Переборка — в рубке и ещё раз в раме двери рубки: из шахты трапа при
-  // закрытой двери рубку не рисуют, и без этого переборки с её стороны не
-  // было вовсе — сквозь неё светились фонарь и небо.
-  const prof = canopyProfile(hullM, INT.bulkZ + 0.05);
-  buildBulkhead(ctx.meshes.bridge, prof);
-  buildBulkhead(frameOf(ctx, 'bridge'), prof);
-  bridgeSolids(hullM, ctx.solids);
-  bulkheadSolids(ctx.solids);
+/**
+ * Один проход сборки по плану.
+ * @param target '*' — все комнаты; id комнаты — только её сетка (и рамы
+ *   её дверей); 'frame:<дверь>' — только рама; null — ни одной сетки
+ */
+function assemble(P, hullM, faces, target) {
+  const ctx = { P, target, meshes: {}, frames: {}, lamps: [], solids: [], columns: new Set(), hullM, faces };
+  for (const r of P.rooms) ctx.meshes[r.id] = target === '*' || target === r.id ? new MeshBuf() : DRY;
 
-  for (const r of ROOMS) {
+  // Своё у корабля — до комнат: у «Челленджера» переборка рубки по
+  // сечению фонаря и твёрдое рубки.
+  if (P.special) P.special(ctx, faces, hullM);
+
+  for (const r of P.rooms) {
     if (r.kind === 'bridge') continue;
     const buf = ctx.meshes[r.id];
     const rf = faces[r.id];
     for (const f of rf) {
-      if (r.id === 'shaftA' && f.side === 'z+') continue;     // это переборка рубки
+      if (P.skipFace && P.skipFace(r, f)) continue;
       if (f.ax === 1) {
-        // Пол шахты — ступени (у шахты B пол под трапом кладётся ниже).
+        // Пол шахты — ступени (пол под трапом кладёт план).
         if (r.kind === 'shaft' && f.side === 'y-') continue;
         buildFlat(buf, f);
       } else {
@@ -1323,40 +1456,26 @@ export function buildInterior(hull) {
         for (const z of [r.lo[2], r.hi[2]]) column(ctx, buf, 'column', x, r.lo[1], z, r.hi[1] - r.lo[1]);
       }
     }
-    roomSolids(r, rf, ctx.solids);
+    roomSolids(P, r, rf, ctx.solids);
   }
 
-  // Площадка трапа A и её торец над потолком кают-компании.
-  const sA = STAIRS[0];
-  const land = ctx.meshes.shaftA;
-  buildFlat(land, { side: 'y-', at: INT.deck.bridge, u: [-0.8, 0.8], v: [sA.zTop, INT.bulkZ - INT.bulkT], holes: [] });
-  land.poly([[-0.8, CEIL_MID, sA.zTop], [0.8, CEIL_MID, sA.zTop], [0.8, INT.deck.bridge - 0.05, sA.zTop],
-    [-0.8, INT.deck.bridge - 0.05, sA.zTop]], C.steel, CMAT.paint);
-  // Пол шахты B под трапом.
-  buildFlat(ctx.meshes.shaftB, { side: 'y-', at: INT.deck.low, u: [-0.8, 0.8], v: [R.shaftB.lo[2], R.shaftB.hi[2]], holes: [] });
-  for (const s of STAIRS) buildStair(ctx.meshes[s.room], ctx.solids, s);
-  for (const h of HATCHES) buildHatch(ctx, ctx.meshes[h.lock], h);
+  if (P.landings) P.landings(ctx, faces, hullM);
+  for (const s of P.stairs) buildStair(ctx.meshes[s.room], ctx.solids, s);
+  for (const h of P.hatches) buildHatch(ctx, ctx.meshes[h.lock], h);
 
-  furnish(ctx);
+  P.furnish(ctx);
 
   // Двери: створка пака в тоннеле рамы, едет вбок вдоль стены.
-  const doors = DOORS.map((d) => {
+  const doors = P.doors.map((d) => {
     const f = faces[d.a].find((ff) => ff.doors && ff.doors.some((x) => x.id === d.id));
     const t = tangentOf(f.n);
     if (d.code) {
       // Створка пака под проём кодовой двери — как у двери рубки: в
       // середине перегородки, по ширине проёма с рамой.
-      const bw = 2 * INT.doorHalf + 0.1, bsx = bw / 1.674, bsy = INT.doorTop / 2.79, bsz = 0.4;
-      const mid = wallPoint(f, d.c, d.y, -INT.gap / 2);
-      return {
-        id: d.id, rooms: [d.a, d.b], pos: d.pos, ax: d.ax,
-        origin: mid.map((v, i) => v + f.n[i] * 0.4175 * bsz), tangent: t,
-        ux: t.map((c) => c * bsx), uy: [0, bsy, 0], uz: f.n.map((c) => c * bsz),
-        slide: bw, half: bw / 2, height: INT.doorTop, open: 0, want: 0,
-      };
+      return codeLeaf(d.id, [d.a, d.b], d.pos, d.ax, wallPoint(f, d.c, d.y, -INT.gap / 2), t, f.n, { thick: INT.gap });
     }
     return {
-      id: d.id, rooms: [d.a, d.b], pos: d.pos, ax: d.ax,
+      id: d.id, rooms: [d.a, d.b], pos: d.pos, ax: d.ax, thick: INT.gap,
       origin: wallPoint(f, d.c, d.y, FACE * K), tangent: t,
       ux: t.map((c) => c * K), uy: [0, K, 0], uz: f.n.map((c) => c * K),
       slide: 1.674 * K, half: 1.674 * K / 2, height: INT.doorTop, open: 0, want: 0,
@@ -1364,41 +1483,16 @@ export function buildInterior(hull) {
   });
   // Порог: в толщине перегородки пола нет ни у одной из двух комнат, и
   // без него пилот проваливался в зазор между ними.
-  for (const d of DOORS) {
+  for (const d of P.doors) {
     const lo = [0, d.y - 0.5, 0], hi = [0, d.y, 0];
     const t = d.ax === 0 ? 2 : 0;
     lo[d.ax] = Math.min(d.at, d.at + d.s * INT.gap) - 0.05; hi[d.ax] = Math.max(d.at, d.at + d.s * INT.gap) + 0.05;
     lo[t] = d.c - INT.doorHalf - 0.05; hi[t] = d.c + INT.doorHalf + 0.05;
     ctx.solids.push({ lo, hi, sill: d.id });
   }
-  ctx.solids.push({ lo: [-INT.doorHalf - 0.05, INT.deck.bridge - 0.5, INT.bulkZ - INT.bulkT - 0.05],
-    hi: [INT.doorHalf + 0.05, INT.deck.bridge, INT.bulkZ + 0.05], sill: 'bridge' });
-  // Дверь рубки: та же створка пака под проём переборки (1.13 × 1.97 м
-  // плюс по пять сантиметров на раму), в толщине переборки.
-  const bw = 2 * INT.doorHalf + 0.1, bsx = bw / 1.674, bsy = INT.doorTop / 2.79, bsz = 0.4;
-  doors.push({
-    id: 'bridge', rooms: ['bridge', 'shaftA'], ax: 2,
-    pos: [0, INT.deck.bridge, INT.bulkZ - INT.bulkT / 2],
-    origin: [0, INT.deck.bridge, INT.bulkZ - INT.bulkT / 2 + 0.4175 * bsz], tangent: [1, 0, 0],
-    ux: [bsx, 0, 0], uy: [0, bsy, 0], uz: [0, 0, bsz],
-    slide: bw, half: bw / 2, height: INT.doorTop, open: 0, want: 0,
-  });
-
-  // Вырез корпуса: всё, где стоят комнаты (кроме рубки), — по ярусам.
-  const carve = [
-    { lo: [-4.25, INT.deck.mid - 0.05, -28.45], hi: [4.25, CEIL_MID + 0.05, -3.95] },
-    { lo: [-4.55, INT.deck.low - 0.05, 1.35], hi: [4.55, CEIL_LOW + 0.05, 17.35] },
-    { lo: [-0.85, CEIL_MID - 0.05, -22.05], hi: [0.85, 2.5, INT.bulkZ - INT.bulkT + 0.02] },
-    { lo: [-0.85, INT.deck.low - 0.05, -4.0], hi: [0.85, -2.7, 1.45] },
-    { lo: [1.35, INT.deck.low - 0.05, -10.35], hi: [4.05, CEIL_LOW + 0.05, 0.85] },
-    { lo: [-14.05, INT.deck.lock - 0.05, -14.45], hi: [14.05, CEIL_LOCK + 0.05, -10.85] },
-  ];
-
-  // Рубка — единственное место, куда попадает свет снаружи: стекло
-  // только здесь. Остальные помещения закрыты, и солнце, небо и отсвет
-  // планеты в них не входят — иначе карта теней (а она покрывает лишь
-  // рубку) пускала бы солнце сквозь переборки.
-  const sunBox = { lo: [-4.5, -0.6, INT.bulkZ - 0.02], hi: [4.5, 5.5, 6] };
+  // Двери не по списку (дверь переборки рубки «Челленджера») — от плана.
+  if (P.extraDoors) for (const d of P.extraDoors(ctx)) doors.push(d);
+  ctx.doors = doors;
 
   // Створка двери и ящик груза — по одной сетке на всех, в своих осях:
   // их ставит и двигает рисование (js/gl/cabin.js).
@@ -1408,97 +1502,143 @@ export function buildInterior(hull) {
   // и в раму двери (рисуется ровно одна из двух, js/gl/cabin.js).
   const sil = leafSilhouette(doorMesh);
   for (const d of doors) {
-    const def = DOORS.find((x) => x.id === d.id);
-    if (d.id !== 'bridge' && !(def && def.code)) continue;
+    const def = P.doors.find((x) => x.id === d.id);
+    if (!d.filler && !(def && def.code)) continue;
     for (const b of [ctx.meshes[d.rooms[0]], frameOf(ctx, d.id)]) leafFiller(b, d, sil, INT.doorHalf, INT.doorTop);
   }
+  ctx.doorMesh = doorMesh;
+  return ctx;
+}
+
+/** Помещения из первого прохода: двери, твёрдое, лампы, окна и всё прочее. */
+function finish(P, hullM, faces, wins, ctx) {
+  const doors = ctx.doors, doorMesh = ctx.doorMesh;
   const crateMesh = new MeshBuf();
   crateMesh.part(CRATE.name, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]);
 
+  const R = P.R;
   const out = {
-    INT, rooms: ROOMS, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
-    carve, sunBox, stairs: STAIRS, slots: crateSlots(), crate: CRATE, hullM, doorMesh, crateMesh,
-    doorFrames: ctx.frames,
+    code: P.code,
+    INT: P.INT || INT, rooms: P.rooms, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
+    carve: P.carve, sunBox: P.sunBox, stairs: P.stairs, slots: P.slots ? P.slots() : [], crate: P.crate || CRATE,
+    hullM, doorMesh, crateMesh, doorFrames: ctx.frames,
     // Окна: стекло у обшивки (оси корабля, м) — его рисует проход стекла
     // кабины; и коробки выреза обшивки в проёмах — только изнутри, как
     // вырез помещений (js/gl/scene.js, setShipCarveAir).
     windows: wins.map((w) => {
-      const f = faceOf(faces[w.room], 0, w.side);
+      const f = faceOf(faces[w.room], w.ax, w.side);
       const g = (k) => -(w.depth[k] - 0.03);
       return { id: w.id, room: w.room, glass: [wallPoint(f, w.u0, w.v0, g(0)), wallPoint(f, w.u1, w.v0, g(1)),
         wallPoint(f, w.u1, w.v1, g(2)), wallPoint(f, w.u0, w.v1, g(3))] };
     }),
-    windowCarve: wins.map((w) => {
+    // Вырез в проёмах: у «Челленджера» — по окну (обшивка у окна цела, и
+    // её надо снять), у плана со своим списком — по нему (у «Прометея»
+    // окна рубки — настоящие проёмы корпуса, а боковые — один вырез на
+    // борт: коробок в шейдере шестнадцать).
+    windowCarve: P.windowCarve || wins.map((w) => {
       const xa = w.at, xb = w.at + w.side * (Math.max(...w.depth) + 0.3);
-      return { room: w.room, lo: [Math.min(xa, xb), w.v0 + 0.005, w.u0 + 0.005], hi: [Math.max(xa, xb), w.v1 - 0.005, w.u1 - 0.005] };
+      const lo = [0, w.v0 + 0.005, 0], hi = [0, w.v1 - 0.005, 0];
+      const uAx = w.ax === 0 ? 2 : 0;
+      lo[w.ax] = Math.min(xa, xb); hi[w.ax] = Math.max(xa, xb);
+      lo[uAx] = w.u0 + 0.005; hi[uAx] = w.u1 - 0.005;
+      return { room: w.room, lo, hi };
     }),
     // Люки (данные; их ход и трапы ведёт js/game/airlock.js — он же
     // кладёт сюда своё состояние, air).
-    hatches: HATCHES, air: null, airways: AIRWAYS,
-    roomAt,
+    hatches: P.hatches, air: null, airways: P.airways,
+    // Проёмы без дверей — для дороги по кораблю (js/game/route.js).
+    openings: P.openings,
+    // Лифты (js/game/lift.js): кабины по палубам и куда они ходят.
+    lifts: P.lifts,
+    roomAt: (p) => roomAtIn(P, p),
     // Сколько ящиков в трюме и как горят реакторы — ставит игра.
     cargo: 0,
     reactor: 0,
     // Кресло: глаз сидящего — глаз пилота; встав, он оказывается за
     // креслом, лицом вперёд. Сесть можно, стоя за креслом.
-    seat: {
-      eye: [EYE.x, EYE.y, EYE.z], stand: [0, INT.deck.bridge, -8.55],
-      zone: { lo: [-1.4, -0.5, -10.0], hi: [1.4, 2.6, -7.75] },
-    },
+    seat: P.seat,
+    // Начало осей кабины (js/gl/cabin.js): глаз в кресле, оси корабля, м.
+    origin: P.origin || P.seat.eye,
+    // Комната с грузом (её ящики рисует кабина).
+    holdRoom: P.holdRoom || 'hold',
+    // Вырез по комнатам (у ленивых планов): коробка каждой — своя, и
+    // в шейдер идут только видимых (js/gl/scene.js, setShipCarveAir).
+    roomCarve: P.roomCarve ? roomCarveOf(P) : null,
+    lazy: !!P.lazy,
+    // Есть ли в рубке пост пилота «Челленджера» (js/models/cockpit.js):
+    // без него кабина рисует одни помещения (js/gl/cabin.js, deck).
+    pod: !!P.pod,
+    // Радиус карты теней солнца в осях кабины, м: у большого мостика —
+    // во весь мостик (js/gl/cabin.js, prepare).
+    sunR: P.sunR || 0,
   };
-  out.visibleNow = (id) => visibleNow(id, doors);
+  out.visibleNow = (id) => visibleNow(id, doors, P);
+  // Сетка комнаты и рама двери (у ленивых планов собираются по
+  // требованию — см. buildInterior).
+  out.meshOf = (id) => out.meshes[id] || null;
+  out.frameOf = (id) => out.doorFrames[id] || null;
+  return out;
+}
+
+/**
+ * Коробки выреза по комнатам: комната и полперегородки вокруг (вырез
+ * соседних комнат сходится в проёме двери — внутренние грани корпуса,
+ * попавшие в перегородку, не перегородят дверь), по высоте — плитка.
+ * Это внутри того, что проверка держит внутри обшивки (стены — 0.45 м).
+ */
+function roomCarveOf(P) {
+  const out = {};
+  for (const r of P.rooms) {
+    out[r.id] = { lo: [r.lo[0] - 0.35, r.lo[1] - 0.1, r.lo[2] - 0.35], hi: [r.hi[0] + 0.35, r.hi[1] + 0.1, r.hi[2] + 0.35] };
+  }
   return out;
 }
 
 /** В какой комнате точка (оси корабля, м); в проёме двери — в комнате a. */
-export function roomAt(p) {
-  for (const r of ROOMS) {
+function roomAtIn(P, p) {
+  for (const r of P.rooms) {
     if (r.kind === 'bridge') continue;
     if (p[0] >= r.lo[0] - 0.05 && p[0] <= r.hi[0] + 0.05 && p[1] >= r.lo[1] - 0.3
       && p[1] <= r.hi[1] + 0.05 && p[2] >= r.lo[2] - 0.05 && p[2] <= r.hi[2] + 0.05) return r;
   }
-  if (p[2] >= INT.bulkZ - 0.05 && p[2] <= -4 && p[1] >= INT.deck.bridge - 0.3 && Math.abs(p[0]) < 4) return R.bridge;
+  if (P.roomAtExtra) {
+    const r = P.roomAtExtra(p);
+    if (r) return r;
+  }
   // Тоннель люка — часть своего шлюза: от стены до обшивки.
-  for (const h of HATCHES) {
-    const r = R[h.lock], ax = Math.abs(p[0]);
+  for (const h of P.hatches) {
+    const r = P.R[h.lock], ax = Math.abs(p[0]);
     if (Math.sign(p[0]) === h.side && ax >= Math.abs(h.side > 0 ? r.hi[0] : r.lo[0]) - 0.05
       && ax <= h.skin + 0.02 && p[2] >= h.z[0] - 0.05 && p[2] <= h.z[1] + 0.05
       && p[1] >= h.y[0] - 0.3 && p[1] <= h.y[1]) return r;
   }
-  for (const d of DOORS) {
+  for (const d of P.doors) {
     if (!d.pos) continue;
     if (Math.abs(p[d.ax] - d.pos[d.ax]) <= INT.gap / 2 + 0.05
-      && Math.abs(p[d.ax === 0 ? 2 : 0] - d.c) <= INT.doorHalf && p[1] >= d.y - 0.3 && p[1] <= d.y + 2.2) return R[d.a];
+      && Math.abs(p[d.ax === 0 ? 2 : 0] - d.c) <= INT.doorHalf && p[1] >= d.y - 0.3 && p[1] <= d.y + 2.2) return P.R[d.a];
   }
   return null;
 }
 
-// Соседство комнат: через проёмы и двери.
-const ADJ = (() => {
-  const adj = {};
-  for (const r of ROOMS) adj[r.id] = new Set();
-  const link = (a, b) => { adj[a].add(b); adj[b].add(a); };
-  for (const o of OPENINGS) link(o.a, o.b);
-  for (const d of DOORS) link(d.a, d.b);
-  link('bridge', 'shaftA');
-  return adj;
-})();
-const SEEN = new Map();
+/** То же для «Челленджера» (проверки зовут его напрямую). */
+export function roomAt(p) {
+  return roomAtIn(CHALLENGER, p);
+}
 
 /**
  * Комнаты, видимые из данной: она сама и всё в два шага через проёмы и
  * двери. Стены непрозрачны, и дальше двух проёмов взгляд не проходит —
  * рисовать остальное значит рисовать за стеной.
  */
-export function visibleFrom(id) {
-  if (SEEN.has(id)) return SEEN.get(id);
+export function visibleFrom(id, P = CHALLENGER) {
+  if (P.seen.has(id)) return P.seen.get(id);
   const out = new Set([id]);
-  for (const n of ADJ[id] || []) {
+  for (const n of P.adj[id] || []) {
     out.add(n);
-    for (const m of ADJ[n]) out.add(m);
+    for (const m of P.adj[n]) out.add(m);
   }
   const list = [...out];
-  SEEN.set(id, list);
+  P.seen.set(id, list);
   return list;
 }
 
@@ -1507,22 +1647,101 @@ export function visibleFrom(id) {
  * рисовать её незачем. Двери открываются, только когда к ним подходят, —
  * так что обычно видна одна-две комнаты из одиннадцати.
  */
-export function visibleNow(id, doors) {
+export function visibleNow(id, doors, P = CHALLENGER) {
   const open = new Set();
   for (const d of doors) if (d.open > 0.01) open.add(d.rooms[0] + '|' + d.rooms[1]);
   const passable = (a, b) => {
-    if (OPEN_LINKS.has(a + '|' + b) || OPEN_LINKS.has(b + '|' + a)) return true;
+    if (P.openLinks.has(a + '|' + b) || P.openLinks.has(b + '|' + a)) return true;
     return open.has(a + '|' + b) || open.has(b + '|' + a);
   };
   const out = new Set([id]);
-  for (const n of ADJ[id] || []) {
+  for (const n of P.adj[id] || []) {
     if (!passable(id, n)) continue;
     out.add(n);
-    for (const m of ADJ[n]) if (passable(n, m)) out.add(m);
+    for (const m of P.adj[n]) if (passable(n, m)) out.add(m);
   }
   return [...out];
 }
 
-const OPEN_LINKS = new Set(OPENINGS.map((o) => o.a + '|' + o.b));
+// --- план «Челленджера» ---------------------------------------------------------
+//
+// Всё, что у него своё: рубка-фонарь (не коробка), переборка с дверью по
+// сечению фонаря, площадка трапа A над кают-компанией, пол шахты B под
+// трапом, вырез и кресло.
 
-export { R as ROOM_BY_ID, CEIL_MID, CEIL_LOW, CEIL_LOCK };
+function challengerSpecial(ctx, faces, hullM) {
+  // Рубка: переборка с дверью по сечению фонаря.
+  // Переборка — в рубке и ещё раз в раме двери рубки: из шахты трапа при
+  // закрытой двери рубку не рисуют, и без этого переборки с её стороны не
+  // было вовсе — сквозь неё светились фонарь и небо.
+  const prof = canopyProfile(hullM, INT.bulkZ + 0.05);
+  buildBulkhead(ctx.meshes.bridge, prof);
+  buildBulkhead(frameOf(ctx, 'bridge'), prof);
+  bridgeSolids(hullM, ctx.solids);
+  bulkheadSolids(ctx.solids);
+}
+
+function challengerLandings(ctx) {
+  // Площадка трапа A и её торец над потолком кают-компании.
+  const sA = STAIRS[0];
+  const land = ctx.meshes.shaftA;
+  buildFlat(land, { side: 'y-', at: INT.deck.bridge, u: [-0.8, 0.8], v: [sA.zTop, INT.bulkZ - INT.bulkT], holes: [] });
+  land.poly([[-0.8, CEIL_MID, sA.zTop], [0.8, CEIL_MID, sA.zTop], [0.8, INT.deck.bridge - 0.05, sA.zTop],
+    [-0.8, INT.deck.bridge - 0.05, sA.zTop]], C.steel, CMAT.paint);
+  // Пол шахты B под трапом.
+  buildFlat(ctx.meshes.shaftB, { side: 'y-', at: INT.deck.low, u: [-0.8, 0.8], v: [R.shaftB.lo[2], R.shaftB.hi[2]], holes: [] });
+}
+
+function challengerDoors(ctx) {
+  ctx.solids.push({ lo: [-INT.doorHalf - 0.05, INT.deck.bridge - 0.5, INT.bulkZ - INT.bulkT - 0.05],
+    hi: [INT.doorHalf + 0.05, INT.deck.bridge, INT.bulkZ + 0.05], sill: 'bridge' });
+  // Дверь рубки: та же створка пака под проём переборки (1.13 × 1.97 м
+  // плюс по пять сантиметров на раму), в толщине переборки.
+  return [codeLeaf('bridge', ['bridge', 'shaftA'], [0, INT.deck.bridge, INT.bulkZ - INT.bulkT / 2], 2,
+    [0, INT.deck.bridge, INT.bulkZ - INT.bulkT / 2], [1, 0, 0], [0, 0, 1], { thick: INT.bulkT, filler: true })];
+}
+
+export const CHALLENGER = makePlan({
+  code: 'challenger',
+  rooms: ROOMS, stairs: STAIRS, doors: DOORS, hatches: HATCHES, windows: WINDOWS, openings: OPENINGS,
+  // Рубка и шахта трапа связаны дверью переборки — её нет в DOORS.
+  links: [['bridge', 'shaftA']],
+  // Переборку рубки (передняя стенка шахты A) делает сама рубка.
+  skipFace: (room, f) => room.id === 'shaftA' && f.side === 'z+',
+  special: challengerSpecial,
+  landings: challengerLandings,
+  extraDoors: challengerDoors,
+  furnish,
+  roomAtExtra: (p) => (p[2] >= INT.bulkZ - 0.05 && p[2] <= -4 && p[1] >= INT.deck.bridge - 0.3 && Math.abs(p[0]) < 4
+    ? R.bridge : null),
+  // Вырез корпуса: всё, где стоят комнаты (кроме рубки), — по ярусам.
+  carve: [
+    { lo: [-4.25, INT.deck.mid - 0.05, -28.45], hi: [4.25, CEIL_MID + 0.05, -3.95] },
+    { lo: [-4.55, INT.deck.low - 0.05, 1.35], hi: [4.55, CEIL_LOW + 0.05, 17.35] },
+    { lo: [-0.85, CEIL_MID - 0.05, -22.05], hi: [0.85, 2.5, INT.bulkZ - INT.bulkT + 0.02] },
+    { lo: [-0.85, INT.deck.low - 0.05, -4.0], hi: [0.85, -2.7, 1.45] },
+    { lo: [1.35, INT.deck.low - 0.05, -10.35], hi: [4.05, CEIL_LOW + 0.05, 0.85] },
+    { lo: [-14.05, INT.deck.lock - 0.05, -14.45], hi: [14.05, CEIL_LOCK + 0.05, -10.85] },
+  ],
+  // Рубка — единственное место, куда попадает свет снаружи: стекло
+  // только здесь. Остальные помещения закрыты, и солнце, небо и отсвет
+  // планеты в них не входят — иначе карта теней (а она покрывает лишь
+  // рубку) пускала бы солнце сквозь переборки.
+  sunBox: { lo: [-4.5, -0.6, INT.bulkZ - 0.02], hi: [4.5, 5.5, 6] },
+  seat: {
+    eye: [EYE.x, EYE.y, EYE.z], stand: [0, INT.deck.bridge, -8.55],
+    zone: { lo: [-1.4, -0.5, -10.0], hi: [1.4, 2.6, -7.75] },
+    room: 'bridge',
+  },
+  origin: [EYE.x, EYE.y, EYE.z],
+  pod: true,
+  slots: crateSlots,
+  crate: CRATE,
+  holdRoom: 'hold',
+});
+
+// Детали и сборщики, из которых другие планы собирают своё.
+export {
+  R as ROOM_BY_ID, CEIL_MID, CEIL_LOW, CEIL_LOCK,
+  K, F, C, prop, lamp, buildFlat, wallBox, column, panel, hash, faceOf, wallPoint, frameOf, bounds as partBounds,
+};

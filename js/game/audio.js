@@ -144,6 +144,12 @@ export function audioCue(a, kind, opts = {}) {
       // сэмпл, что у шасси, ускоренный до хода двери.
       push(a, { kind: 'servo', dur: opts.dur || 0.45, up: true });
       break;
+    case 'lift':
+      // Кабина лифта (js/game/lift.js): привод на всю поездку и стук
+      // ловителей на остановке.
+      push(a, { kind: 'servo', dur: opts.dur || 8, up: !!opts.up });
+      push(a, { kind: 'clunk', gain: 0.25, freq: 180, dur: 0.2, delay: opts.dur || 8 });
+      break;
     case 'air':
       // Шлюз стравливает или набирает воздух (js/game/airlock.js).
       push(a, { kind: 'hiss', gain: clamp(opts.gain || 0.35, 0, 1), dur: opts.dur || 2 });

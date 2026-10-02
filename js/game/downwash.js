@@ -31,17 +31,16 @@
 // ни из чего.
 
 import { SHIP } from './ship.js';
-import { HULL_VOLUME_M3 } from '../models/ships.js';
+import { HULL_VOLUME_M3, HULL_DENSITY } from '../models/ships.js';
+import { HULL } from './hull.js';
 import { bodyBasis } from './world.js';
 import { toLocal } from '../core/basis.js';
 import { v3 } from '../core/vec3.js';
 
 export const WASH = {
-  // Средняя плотность корабля, кг/м³. Взята плотность авиалайнера на
-  // взлётном весе: у «Боинга-747» четыреста тонн на две с половиной
-  // тысячи кубометров фюзеляжа и крыла — около ста пятидесяти. Корпус
-  // здешнего корабля — 11 200 м³, значит в нём тысяча семьсот тонн.
-  density: 150,
+  // Средняя плотность корабля, кг/м³ — живёт рядом с объёмом корпуса
+  // (js/models/ships.js, HULL_DENSITY): по массе считаются и стойки шасси.
+  density: HULL_DENSITY,
   // Плотность воздуха при давлении в один бар и 15 °C, кг/м³. Давление
   // тела (bodyinfo.js, press) масштабирует её линейно — температуры в
   // модели мира нет, и ради пыли заводить её незачем.
@@ -61,8 +60,10 @@ export const WASH = {
   minCos: 0.2,
 };
 
-/** Масса корабля, кг. */
+/** Масса «Челленджера», кг — числом: его сверяют проверки. */
 export const SHIP_MASS = HULL_VOLUME_M3 * WASH.density;
+/** Масса корабля, на котором летим, кг (js/game/hull.js). */
+export const shipMass = () => HULL.mass;
 
 /** Плотность воздуха у поверхности тела, кг/м³ (0 — воздуха нет). */
 export const airDensity = (body) =>
@@ -96,11 +97,11 @@ export function engineLoad(ship, out = { lift: 0, main: 0 }, weight = true) {
 /** Тяга подъёмных, Н: полный ход — liftTWR местных весов. */
 export function liftThrust(body, lift) {
   const g = Math.max((SHIP.liftMin || 0) * 1000, (body && body.g0 || 0) * (SHIP.liftTWR || 3));
-  return SHIP_MASS * g * lift;
+  return shipMass() * g * lift;
 }
 
 /** Тяга маршевых, Н: ровно та, что даёт ускорение лётной модели. */
-export const mainThrust = (main) => SHIP_MASS * (SHIP.accel || 0) * 1000 * main;
+export const mainThrust = (main) => shipMass() * (SHIP.accel || 0) * 1000 * main;
 
 /**
  * Скоростной напор подъёмной струи у грунта, Па.

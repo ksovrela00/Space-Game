@@ -27,7 +27,7 @@ import {
   dirToWorldBody, groundRadius, findSite, bodyFrame, latLon, waterAt, hasSea,
 } from './surface.js';
 import { groundDrift, gravityAt } from './gravity.js';
-import { GEAR_FEET } from '../models/ships.js';
+import { HULL } from './hull.js';
 import { lookAlong } from '../core/basis.js';
 import { L } from '../core/lang.js';
 
@@ -402,6 +402,7 @@ const _fdir = { dir: v3() };
 
 export function feetGround(ship, body, out = _feet, alts = _falt) {
   const b = ship.basis;
+  const GEAR_FEET = HULL.feet;
   for (let i = 0; i < GEAR_FEET.length; i++) {
     const f = GEAR_FEET[i];
     const p = out[i];

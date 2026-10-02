@@ -16,7 +16,7 @@
 // никто бы не заметил.
 
 import { v3 } from '../core/vec3.js';
-import { HULL_HALF } from '../models/ships.js';
+import { noseOf } from './hull.js';
 
 export const LAMP = {};
 
@@ -69,8 +69,9 @@ const _beams = [
 export function lampBeams(ship, out = _beams) {
   if (!ship || !ship.lights || !lampsReady()) return [];
   const b = ship.basis;
-  // Нос корпуса: половина длины вперёд от центра.
-  const nose = HULL_HALF.z;
+  // Нос корпуса — самая передняя его точка (у «Прометея» центр масс
+  // ближе к корме, и нос дальше половины длины).
+  const nose = noseOf();
   const px = ship.pos.x + b.fwd.x * nose;
   const py = ship.pos.y + b.fwd.y * nose;
   const pz = ship.pos.z + b.fwd.z * nose;

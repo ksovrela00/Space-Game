@@ -18,7 +18,7 @@
 
 import { CY, CY_DIM, AMBER, GREEN, RED, INK } from './theme.js';
 import { SHIP } from '../game/ship.js';
-import { HULL_SIZE } from '../models/ships.js';
+import { HULL } from '../game/hull.js';
 import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.js';
 import { fmtTime, fmtSpeed } from './hud.js';
 import { modules } from '../game/loadout.js';
@@ -153,11 +153,11 @@ function drawShip(ctx, b, game, fs) {
   // держать для этого две копии вёрстки — верный способ развести их.
   const left = [
     { t: 'name', s: (ship.mesh && ship.mesh.name ? ship.mesh.name : L('КОРАБЛЬ')).toUpperCase() },
-    { t: 'sub', s: L('ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ') },
+    { t: 'sub', s: L(SHIP.typeTitle || 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ') },
     { t: 'head', s: L('ГАБАРИТЫ') },
-    { t: 'row', a: L('ДЛИНА'), b: m(HULL_SIZE.z) },
-    { t: 'row', a: L('ШИРИНА'), b: m(HULL_SIZE.x) },
-    { t: 'row', a: L('ВЫСОТА'), b: m(HULL_SIZE.y) },
+    { t: 'row', a: L('ДЛИНА'), b: m(HULL.size.z) },
+    { t: 'row', a: L('ШИРИНА'), b: m(HULL.size.x) },
+    { t: 'row', a: L('ВЫСОТА'), b: m(HULL.size.y) },
     { t: 'head', s: L('СОСТОЯНИЕ') },
     { t: 'row', a: L('КОРПУС'), b: Math.round(ship.hull) + ' %', c: hullColor(hullFrac) },
     { t: 'bar', frac: hullFrac, c: hullColor(hullFrac) },

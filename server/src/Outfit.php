@@ -42,6 +42,16 @@ final class Outfit
         return $info;
     }
 
+    /**
+     * Встаёт ли модуль на корпус этого типа. Нет списка корпусов — на
+     * любой; крейсерский квантовый привод — только на крейсер.
+     */
+    public static function fits(array $mod, string $typeCode): bool
+    {
+        $hulls = $mod['spec']['hulls'] ?? null;
+        return !is_array($hulls) || !$hulls || in_array($typeCode, $hulls, true);
+    }
+
     /** Сколько верфь платит за снятый модуль. Кроны целые, вниз. */
     public static function resale(int $price): int
     {
@@ -90,6 +100,7 @@ final class Outfit
         $info = self::port($playerId);
         $ship = Players::ship($playerId);
         $shipId = (int) $ship['id'];
+        $typeCode = (string) $ship['type_code'];
         $open = (bool) $info['services']['outfit'];
         $have = self::installed($shipId);
         $required = Specs::required();
@@ -129,7 +140,9 @@ final class Outfit
             $s['offers'][] = [
                 'code' => $m['code'], 'name' => $m['name'], 'price' => $m['price'],
                 'tech' => $m['tech'], 'spec' => $m['spec'],
-                'sold' => $open && $m['tech'] <= (int) $info['tech'],
+                'sold' => $open && $m['tech'] <= (int) $info['tech'] && self::fits($m, $typeCode),
+                'fits' => self::fits($m, $typeCode),
+                'hulls' => $m['spec']['hulls'] ?? null,
                 'credit' => $credit,
                 'net' => $m['price'] - $credit,
             ];
@@ -170,6 +183,14 @@ final class Outfit
 
             $ship = Players::ship($playerId);
             $shipId = (int) $ship['id'];
+            if (!self::fits($mod, (string) $ship['type_code'])) {
+                $names = [];
+                foreach ($mod['spec']['hulls'] as $c) {
+                    $names[] = (string) (Db::one('SELECT `name` FROM `ship_type` WHERE `code`=?', [$c]) ?? $c);
+                }
+                throw ApiError::denied('wrong_hull', 'этот модуль ставят только на ' . implode(', ', $names)
+                    . ': ему нужен реактор этого корпуса');
+            }
             $here = array_values(array_filter(self::installed($shipId), fn($h) => $h['slot'] === $mod['slot']));
             foreach ($here as $h) {
                 if ($h['code'] === $mod['code']) {

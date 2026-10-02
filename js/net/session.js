@@ -187,11 +187,13 @@ export const buyGoods = (code, tons) => act(() => api.buy(code, tons));
 export const sellGoods = (code, tons) => act(() => api.sell(code, tons));
 export const buyModule = (code) => act(() => api.outfitBuy(code));
 export const sellModule = (code) => act(() => api.outfitSell(code));
+export const buyHull = (code) => act(() => api.shipyardBuy(code));
 export const rescue = () => act(() => api.rescue());
 
 /** Прайс порта и верфь — чтения, состояние от них не меняется. */
 export async function readPort(what) {
   if (!isOnline()) throw Object.assign(new Error(L('нет связи с сервером')), { code: 'offline' });
+  if (what === 'ships') return api.shipyard();
   return what === 'outfit' ? api.outfit() : api.prices();
 }
 

@@ -2262,10 +2262,10 @@ await step('докинг-компьютер доводит до стыковки
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode + ', фаза ' + (game.ship.docking && game.ship.docking.phase) + ', причина: ' + game.crashReason);
 });
 
-await step('экран станции: разделы, клавиши 1–4, автономная заправка, английский', () => {
+await step('экран станции: разделы, клавиши 1–5, автономная заправка, английский', () => {
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
   const html = () => nodes.panel.innerHTML;
-  for (const want of ['СТЫКОВКА', '1 ПОРТ', '2 РЫНОК', '3 ВЕРФЬ', '4 ЗАПРАВКА', 'ВЫЛЕТ']) {
+  for (const want of ['СТЫКОВКА', '1 ПОРТ', '2 РЫНОК', '3 ВЕРФЬ', '4 ЗАПРАВКА', '5 КОРАБЛИ', 'ВЫЛЕТ']) {
     if (html().indexOf(want) < 0) throw new Error('на экране порта нет «' + want + '»');
   }
   if (!nodes.panel.classList.contains('station')) throw new Error('панель без разметки станции');
@@ -2278,11 +2278,13 @@ await step('экран станции: разделы, клавиши 1–4, а�
   if (!/class="fuelbar/.test(html()) || !/заправляет даром/.test(html())) {
     throw new Error('раздел заправки не нарисован');
   }
-  // Английский: во всех четырёх разделах ни одной русской буквы.
+  key('Digit5'); frames(1);
+  if (!/Корабли продаёт верфь/.test(html())) throw new Error('раздел кораблей без сервера не объяснился');
+  // Английский: во всех пяти разделах ни одной русской буквы.
   const CYR = /[А-Яа-яЁё]/;
   try {
     setLang('en');
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 5; i++) {
       key('Digit' + i); frames(1);
       const text = html().replace(/<[^>]+>/g, ' ');
       if (CYR.test(text)) {

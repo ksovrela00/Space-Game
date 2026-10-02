@@ -24,7 +24,7 @@
 import { v3, copy, normalize, clamp } from '../core/vec3.js';
 import { makeBasis, lookAlong } from '../core/basis.js';
 import { SHIP } from './ship.js';
-import { HULL_CLEAR } from '../models/ships.js';
+import { HULL, REF } from './hull.js';
 import { isSolid, localDir, groundRadius } from './surface.js';
 import { engineLoad } from './downwash.js';
 import { cityLocal } from './city.js';
@@ -83,7 +83,15 @@ export const CHASE = {
 };
 
 // Камера висит ПОД брюхом на столько, км (отрицательно — вниз от центра).
-export const CHASE_UNDER = -(HULL_CLEAR + CHASE.underGap);
+// У каждого корпуса своё брюхо: считается по текущему (js/game/hull.js).
+export const chaseUnder = () => -(HULL.clear + CHASE.underGap);
+// Для «Челленджера» — числом: его сверяют проверки.
+export const CHASE_UNDER = chaseUnder();
+
+// Вынос растёт с длиной корабля: камера держится в одной-двух его
+// длинах. «Прометей» втрое длиннее — и снимают его втрое дальше; на
+// прежнем выносе он не влезал бы в кадр и закрывал бы собой весь вид.
+const reach = () => HULL.length / REF.length;
 
 /**
  * Самая низкая высота камеры над грунтом, км.
@@ -121,8 +129,13 @@ export const eyeHeight = (cam) => cam.near * CHASE.eyeK * Math.tan(cam.fov / 2);
 const CHASE_LAG_MAX = 0.8;       // с
 
 export function chaseRates() {
+  // Предел отставания растёт вместе с медлительностью корпуса (√k, как
+  // у его приводов, js/game/ship.js): тяжёлый корабль и разворачивается
+  // медленнее, и угол отставания в развороте остаётся прежним —
+  // пятнадцать-семнадцать градусов.
+  const cap = CHASE_LAG_MAX * Math.sqrt(SHIP.hullK > 0 ? SHIP.hullK : 1);
   const ramp = SHIP.pitchAccel > 0 && SHIP.pitchRate > 0
-    ? Math.min(SHIP.pitchRate / SHIP.pitchAccel, CHASE_LAG_MAX) : 0;
+    ? Math.min(SHIP.pitchRate / SHIP.pitchAccel, cap) : 0;
   const turn = ramp > 0 ? 1 / ramp : 7;
   return { turn, roll: turn / 2 };
 }
@@ -239,7 +252,7 @@ export function updateChase(c, game, dt, settled = false) {
   // Снос камеры: она отстаёт от того, что разгоняется.
   if (railed) return c;
   const am = Math.hypot(c.acc.x, c.acc.y, c.acc.z);
-  const k = am > 1e-9 ? -Math.min(CHASE.sway * am, CHASE.swayMax) / am : 0;
+  const k = am > 1e-9 ? -Math.min(CHASE.sway * am * reach(), CHASE.swayMax * reach()) / am : 0;
   c.sway.x = c.acc.x * k;
   c.sway.y = c.acc.y * k;
   c.sway.z = c.acc.z * k;
@@ -293,8 +306,9 @@ export function placeChase(c, game, cam, ground = null) {
 
   // Вынос: наверху — над крышей, у земли — под брюхом.
   const s = ease(c.low);
-  const back = CHASE.back * c.near * (1 - s) + CHASE.back * CHASE.lowK * s;
-  const up = CHASE.up * c.near * (1 - s) + CHASE_UNDER * s;
+  const R = reach();
+  const back = (CHASE.back * c.near * (1 - s) + CHASE.back * CHASE.lowK * s) * R;
+  const up = CHASE.up * R * c.near * (1 - s) + chaseUnder() * s;
   const p = cam.pos;
   p.x = ship.pos.x - _dir.x * back + b.up.x * up + c.sway.x;
   p.y = ship.pos.y - _dir.y * back + b.up.y * up + c.sway.y;

@@ -43,9 +43,9 @@
     ],
     'game/': [
       'airlock', 'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
-      'entry', 'flow', 'fuel',
-      'city', 'galaxy', 'gravity', 'lamps', 'landing', 'loadout', 'nav', 'peers', 'pilot',
-      'outside', 'player', 'quantum', 'ship', 'specs', 'state', 'surface',
+      'entry', 'flow', 'fuel', 'hull',
+      'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'peers', 'pilot',
+      'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface',
       'vessels', 'walker', 'warp', 'weapons', 'world'
     ],
     'gl/': [
@@ -56,9 +56,9 @@
       'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [
-      'airstair', 'city', 'city.parts', 'cockpit', 'geometry', 'hull.data', 'hulldetail',
-      'interior', 'interior.parts',
-      'nature.parts', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations'
+      'airstair', 'city', 'city.parts', 'cockpit', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
+      'interior', 'interior.parts', 'interior.prom', 'kit',
+      'nature.parts', 'prometheus', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'
@@ -67,7 +67,7 @@
       'camera', 'clip', 'planetview', 'renderer', 'starfield'
     ],
     'ui/': [
-      'debug', 'displays', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
+      'debug', 'deckmap', 'displays', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
       'touch', 'walkhud'
     ]
   };

@@ -154,6 +154,9 @@ void main() {
     vec3 p = vPos + uEyeM;
     if (hullFrame(p, hullUv(p, vN), vec2(0.02)) < 0.5) discard;
   }
+  // Смотровое стекло без переплёта (окна мостика «Прометея») — свет
+  // проходит целиком.
+  if (uHullPass > 0.5 && int(vMat + 0.5) == ${HULL_MAT.clear}) discard;
 }`;
 
 // Лампы кабины названы uCabLamp*, а не как фары корабля в общем шейдере
@@ -651,6 +654,15 @@ const ZERO3 = { x: 0, y: 0, z: 0 };
 const LZ_MID = (CABIN.lightFront - CABIN.lightBack) / 2;
 const LZ_HALF = (CABIN.lightFront + CABIN.lightBack) / 2;
 
+/**
+ * Сколько треугольников помещений держать в видеопамяти разом. У
+ * «Челленджера» их двести с небольшим тысяч, и они загружены все. У
+ * «Прометея» — три с лишним миллиона на полторы сотни комнат, и комнаты
+ * грузятся, когда их впервые видно, а давно не виденные отпускаются
+ * (сетка в памяти — тоже: её соберут заново, если вернуться).
+ */
+export const ROOM_BUDGET = 900000;
+
 /** Деталь -> кабина: поворот вокруг осей x, z, y и перенос в ось качания. */
 function partMatrix(p, ax, az, ay, out) {
   const cx = Math.cos(ax), sx = Math.sin(ax);
@@ -707,6 +719,15 @@ export class CabinView {
     // Глаз в осях кабины: сидя — ноль, на ногах — там, где голова пилота.
     this.eye = [0, 0, 0];
     this.lightC = CABIN.lightC.slice();
+    this.lightR = CABIN.lightR;
+    this.lz = [LZ_MID, LZ_HALF];
+    // Начало осей кабины — глаз в кресле (оси корабля, м): у «Челленджера»
+    // глаз пилота (EYE), у «Прометея» — кресло командира (interior.origin).
+    this.org = { x: EYE.x, y: EYE.y, z: EYE.z };
+    this.deck = false;          // кадр без поста пилота (только помещения)
+    this.deckHull = null;       // корпус «в карту теней» для такого кадра
+    this.inters = new Map();    // помещения -> их сетки на видеокарте
+    this.frameNo = 0;
     this.inter = null;
     this.interOf = null;
     this.interDraws = 0;
@@ -827,23 +848,31 @@ export class CabinView {
    */
   buildInterior(interior) {
     const gl = this.gl;
-    this.disposeInterior();
+    const O = interior.origin ? { x: interior.origin[0], y: interior.origin[1], z: interior.origin[2] }
+      : { x: EYE.x, y: EYE.y, z: EYE.z };
+    this.org = O;
+    const had = this.inters.get(interior);
+    if (had) { this.inter = had; this.interOf = interior; return; }
     const rooms = {};
-    for (const r of interior.rooms) {
-      const m = interior.meshes[r.id];
-      if (!m || !m.tris) continue;
-      const pk = packed(m, EYE);
-      rooms[r.id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
-    }
     const frames = {};
-    for (const [id, m] of Object.entries(interior.doorFrames || {})) {
-      if (!m.tris) continue;
-      const pk = packed(m, EYE);
-      frames[id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
+    // Ленивая планировка («Прометей»): комнаты — когда их впервые видно
+    // (roomPart). Остальные — все сразу, как раньше.
+    if (!interior.lazy) {
+      for (const r of interior.rooms) {
+        const m = interior.meshes[r.id];
+        if (!m || !m.tris) continue;
+        const pk = packed(m, O);
+        rooms[r.id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
+      }
+      for (const [id, m] of Object.entries(interior.doorFrames || {})) {
+        if (!m.tris) continue;
+        const pk = packed(m, O);
+        frames[id] = { part: uploadInterior(gl, pk), lo: pk.lo, hi: pk.hi };
+      }
     }
     // Стекло окон — сетка в осях кабины (от глаза), как стекло фонаря.
     const windows = (interior.windows || []).map((w) => {
-      const verts = w.glass.map((p) => ({ x: p[0] - EYE.x, y: p[1] - EYE.y, z: p[2] - EYE.z }));
+      const verts = w.glass.map((p) => ({ x: p[0] - O.x, y: p[1] - O.y, z: p[2] - O.z }));
       const a = verts[0], b = verts[1], c = verts[2];
       const n = { x: (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
         y: (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
@@ -863,19 +892,86 @@ export class CabinView {
       windows,
       door: uploadInterior(gl, packed(interior.doorMesh)),
       crate: uploadInterior(gl, packed(interior.crateMesh)),
+      lazy: !!interior.lazy, tris: 0, of: interior,
     };
     this.interOf = interior;
+    this.inters.set(interior, this.inter);
+  }
+
+  /**
+   * Сетка комнаты на видеокарте; у ленивой планировки — собирается и
+   * грузится при первом требовании. null — пустая или такой нет.
+   */
+  roomPart(id) {
+    const R = this.inter;
+    let r = R.rooms[id];
+    if (r !== undefined || !R.lazy) return r || null;
+    const m = this.interOf.meshOf(id);
+    if (!m || (!m.tris && !m.packed)) { R.rooms[id] = null; return null; }
+    const pk = packed(m, this.org);
+    r = R.rooms[id] = { part: uploadInterior(this.gl, pk), lo: pk.lo, hi: pk.hi, tris: pk.count / 3, seen: 0 };
+    R.tris += r.tris;
+    return r;
+  }
+
+  /** Рама двери на видеокарте (у ленивой — по требованию). */
+  framePart(id) {
+    const R = this.inter;
+    let f = R.frames[id];
+    if (f !== undefined || !R.lazy) return f || null;
+    const m = this.interOf.frameOf(id);
+    if (!m || (!m.tris && !m.packed)) { R.frames[id] = null; return null; }
+    const pk = packed(m, this.org);
+    f = R.frames[id] = { part: uploadInterior(this.gl, pk), lo: pk.lo, hi: pk.hi };
+    return f;
+  }
+
+  /**
+   * Отпустить давно не виденные комнаты, если их на видеокарте больше
+   * бюджета (ROOM_BUDGET): буферы и упакованную сетку. Вернётся пилот —
+   * соберутся снова (сорок миллисекунд на комнату).
+   */
+  evictRooms() {
+    const R = this.inter;
+    if (!R || !R.lazy || R.tris <= ROOM_BUDGET) return;
+    const gl = this.gl;
+    const list = Object.entries(R.rooms).filter(([, r]) => r && r.seen < this.frameNo).sort((a, b) => a[1].seen - b[1].seen);
+    for (const [id, r] of list) {
+      if (R.tris <= ROOM_BUDGET * 0.75) break;
+      gl.deleteBuffer(r.part.buf); gl.deleteVertexArray(r.part.vao);
+      R.tris -= r.tris;
+      delete R.rooms[id];
+      if (this.interOf.dropMesh) this.interOf.dropMesh(id);
+    }
   }
 
   disposeInterior() {
-    if (!this.inter) return;
     const gl = this.gl;
-    const parts = [...Object.values(this.inter.rooms).map((r) => r.part),
-      ...Object.values(this.inter.frames).map((r) => r.part), ...this.inter.windows.map((r) => r.part),
-      this.inter.door, this.inter.crate];
-    for (const p of parts) { gl.deleteBuffer(p.buf); gl.deleteVertexArray(p.vao); }
+    for (const inter of this.inters.values()) {
+      const parts = [...Object.values(inter.rooms).filter(Boolean).map((r) => r.part),
+        ...Object.values(inter.frames).filter(Boolean).map((r) => r.part), ...inter.windows.map((r) => r.part),
+        inter.door, inter.crate];
+      for (const p of parts) { gl.deleteBuffer(p.buf); gl.deleteVertexArray(p.vao); }
+    }
+    this.inters.clear();
+    if (this.deckHull) { gl.deleteBuffer(this.deckHull.part.buf); gl.deleteVertexArray(this.deckHull.part.vao); }
+    this.deckHull = null;
     this.inter = null;
     this.interOf = null;
+  }
+
+  /**
+   * Корпус в карту теней для кадра без поста: тот, чьи помещения рисуем, в
+   * осях кабины. Стекло окон в него входит — его пропускает шейдер глубины.
+   */
+  deckHullPart(I) {
+    if (this.deckHull && this.deckHull.of === I) return this.deckHull.part;
+    if (this.deckHull) { this.gl.deleteBuffer(this.deckHull.part.buf); this.gl.deleteVertexArray(this.deckHull.part.vao); }
+    const O = this.org, M = I.hullM;
+    const verts = M.verts.map((v) => ({ x: v.x - O.x, y: v.y - O.y, z: v.z - O.z }));
+    const faces = M.faces.map((f) => ({ v: f.v, c: f.c || [128, 128, 128], n: f.n, mat: f.mat || 0 }));
+    this.deckHull = { of: I, part: upload(this.gl, cabinArrays({ verts, faces }, null)) };
+    return this.deckHull.part;
   }
 
   /** Залить в атлас перерисованные экраны. */
@@ -968,13 +1064,18 @@ export class CabinView {
    * @param sunPos   где звезда (мир)
    * @param size     [ширина, высота] кадра
    */
-  prepare(game, sunPos, size) {
+  prepare(game, sunPos, size, deck = false) {
     const gl = this.gl;
-    const cp = game.cockpit;
-    const displays = game.displays || null;
-    if (!cp) return 0;
+    // deck — кадр без поста пилота: мостик «Прометея», палуба чужого
+    // корабля другого типа. Рисуются только помещения.
+    this.deck = deck;
+    const cp = deck ? null : game.cockpit;
+    const displays = deck ? null : (game.displays || null);
+    if (!cp && !deck) return 0;
+    if (deck && !game.interior) return 0;
+    this.frameNo++;
     if (displays && this.atlasOf !== displays) this.makeAtlas(displays);
-    if (this.model !== cp || this.builtFor !== displays) this.build(cp, displays);
+    if (cp && (this.model !== cp || this.builtFor !== displays)) this.build(cp, displays);
     if (!this.atlas) {
       // Экранов нет (профиль без холстов): атлас в один тексель, чтобы
       // выборки в шейдере были определены.
@@ -986,19 +1087,38 @@ export class CabinView {
     if (displays) this.uploadScreens(displays);
     if (game.interior && this.interOf !== game.interior) this.buildInterior(game.interior);
     this.draws = 0;
+    const O = this.org;
 
     // Где глаз. Сидя — в начале координат кабины; на ногах — в голове
     // пилота (js/game/walker.js). Карта теней покрывает круг в 4.5 м и
     // стоит там, где на неё смотрят: сидя — над постом, на ногах — у
-    // головы (дальше рубки солнца всё равно нет).
+    // головы (дальше рубки солнца всё равно нет). Мостик «Прометея» —
+    // зал в 24 × 15 м за тремя окнами по семь метров: там круг — во весь
+    // мостик (interior.sunR), иначе солнце дальше четырёх метров от глаза
+    // светило бы без теней, сквозь переборки.
     const we = game.walkEye;
-    if (we) { this.eye[0] = we[0] - EYE.x; this.eye[1] = we[1] - EYE.y; this.eye[2] = we[2] - EYE.z; }
+    if (we) { this.eye[0] = we[0] - O.x; this.eye[1] = we[1] - O.y; this.eye[2] = we[2] - O.z; }
     else { this.eye[0] = 0; this.eye[1] = 0; this.eye[2] = 0; }
-    if (we) {
+    const I0 = game.interior;
+    const wide = deck && I0 && I0.sunBox && I0.sunR;
+    if (wide) {
+      const b = I0.sunBox;
+      this.lightC[0] = (b.lo[0] + b.hi[0]) / 2 - O.x;
+      this.lightC[1] = (b.lo[1] + b.hi[1]) / 2 - O.y;
+      this.lightC[2] = (b.lo[2] + b.hi[2]) / 2 - O.z;
+      this.lightR = I0.sunR;
+    } else if (we) {
       this.lightC[0] = this.eye[0]; this.lightC[1] = this.eye[1] - 0.9; this.lightC[2] = this.eye[2];
+      this.lightR = CABIN.lightR;
     } else {
       this.lightC[0] = CABIN.lightC[0]; this.lightC[1] = CABIN.lightC[1]; this.lightC[2] = CABIN.lightC[2];
+      this.lightR = CABIN.lightR;
     }
+    // Глубина карты: на 90 м к солнцу (корма, крылья, башня) и на радиус
+    // круга от него.
+    const front = Math.max(CABIN.lightFront, this.lightR);
+    this.lz[0] = (front - CABIN.lightBack) / 2;
+    this.lz[1] = (front + CABIN.lightBack) / 2;
 
     const L = this.light || (this.light = {
       sunL: new Float32Array(3), sunC: new Float32Array(3), sky: new Float32Array(3),
@@ -1006,13 +1126,15 @@ export class CabinView {
     });
     this.outside(game, sunPos, L);
 
-    // Детали: ручка за ручками, РУД за тягой.
-    const y = game.yoke || { pitch: 0, roll: 0, yaw: 0, throttle: 0 };
-    partMatrix(cp.stick.pivot, -y.pitch, -y.roll, y.yaw, this.mStick);
-    partMatrix(cp.throttle.pivot, y.throttle || 0, 0, 0, this.mThrottle);
-    const parts = [
-      [this.parts.shell, IDENT], [this.parts.stick, this.mStick], [this.parts.throttle, this.mThrottle],
-    ];
+    // Детали: ручка за ручками, РУД за тягой. Без поста — ни одной.
+    const parts = [];
+    if (cp) {
+      const y = game.yoke || { pitch: 0, roll: 0, yaw: 0, throttle: 0 };
+      partMatrix(cp.stick.pivot, -y.pitch, -y.roll, y.yaw, this.mStick);
+      partMatrix(cp.throttle.pivot, y.throttle || 0, 0, 0, this.mThrottle);
+      parts.push([this.parts.shell, IDENT], [this.parts.stick, this.mStick], [this.parts.throttle, this.mThrottle]);
+    }
+    const hullPart = cp ? this.parts.hull : (I0 && I0.hullM ? this.deckHullPart(I0) : null);
 
     // --- тени -------------------------------------------------------------
     const sunOn = L.sunC[0] + L.sunC[1] + L.sunC[2] > 0.003;
@@ -1043,9 +1165,9 @@ export class CabinView {
         gl.uniform3fv(pd.loc('uLR'), lb.r);
         gl.uniform3fv(pd.loc('uLU'), lb.u);
         gl.uniform3fv(pd.loc('uLF'), lb.f);
-        gl.uniform4f(pd.loc('uLC'), this.lightC[0], this.lightC[1], this.lightC[2], CABIN.lightR);
-        gl.uniform2f(pd.loc('uLZ'), LZ_MID, LZ_HALF);
-        gl.uniform3f(pd.loc('uEyeM'), EYE.x, EYE.y, EYE.z);
+        gl.uniform4f(pd.loc('uLC'), this.lightC[0], this.lightC[1], this.lightC[2], this.lightR);
+        gl.uniform2f(pd.loc('uLZ'), this.lz[0], this.lz[1]);
+        gl.uniform3f(pd.loc('uEyeM'), O.x, O.y, O.z);
         gl.uniform1f(pd.loc('uHullPass'), 0);
         for (const [m, M] of parts) {
           gl.uniformMatrix4fv(pd.loc('uModel'), false, M);
@@ -1053,11 +1175,11 @@ export class CabinView {
           gl.drawArrays(gl.TRIANGLES, 0, m.count);
           this.draws++;
         }
-        if (this.parts.hull) {
+        if (hullPart) {
           gl.uniform1f(pd.loc('uHullPass'), 1);
           gl.uniformMatrix4fv(pd.loc('uModel'), false, IDENT);
-          gl.bindVertexArray(this.parts.hull.vao);
-          gl.drawArrays(gl.TRIANGLES, 0, this.parts.hull.count);
+          gl.bindVertexArray(hullPart.vao);
+          gl.drawArrays(gl.TRIANGLES, 0, hullPart.count);
           this.draws++;
         }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1076,11 +1198,12 @@ export class CabinView {
    * Пост пилота и стекло фонаря — после корпуса изнутри, в том же буфере
    * глубины (логарифмической, коэффициент — logFC сцены для рубки).
    */
-  drawPod(game, cam, size, logFC) {
+  drawPod(game, cam, size, logFC, deck = false) {
     const gl = this.gl;
-    const cp = game.cockpit;
-    const displays = game.displays || null;
-    if (!cp || !this.parts) return 0;
+    const cp = deck ? null : game.cockpit;
+    const displays = deck ? null : (game.displays || null);
+    if (!deck && (!cp || !this.parts)) return 0;
+    if (deck && !this.inter) return 0;
     const L = this.light, lb = this.lightBasis;
     const parts = this.partList;
     const shadowOn = this.shadowOn;
@@ -1126,7 +1249,7 @@ export class CabinView {
     gl.uniform3fv(pg.loc('uSunL'), L.sunL);
     gl.uniform3fv(pg.loc('uSunC'), L.sunC);
     gl.uniform3f(pg.loc('uAmb'), CABIN.amb[0], CABIN.amb[1], CABIN.amb[2]);
-    gl.uniform3f(pg.loc('uEyeM'), EYE.x, EYE.y, EYE.z);
+    gl.uniform3f(pg.loc('uEyeM'), this.org.x, this.org.y, this.org.z);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this.atlas);
     gl.uniform1i(pg.loc('uScreens'), 5);
@@ -1134,9 +1257,11 @@ export class CabinView {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
     gl.uniform1f(pg.loc('uPane'), 0);
-    gl.bindVertexArray(this.parts.glass.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, this.parts.glass.count);
-    this.draws++;
+    if (cp) {
+      gl.bindVertexArray(this.parts.glass.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.parts.glass.count);
+      this.draws++;
+    }
     // Окна помещений — тем же стеклом, без переплёта: в видимых комнатах
     // и в кадре. Глубина пишется сетками комнат раньше, и стекло за стеной
     // отсекается само.
@@ -1174,7 +1299,7 @@ export class CabinView {
    * шага; дальше стены непрозрачны. Из видимых рисуются те, что в кадре.
    */
   drawInterior(game, pc) {
-    const I = game.interior, R = this.inter;
+    const I = this.interOf, R = this.inter;
     this.interDraws = 0;
     this.interTris = 0;
     if (!I || !R) return;
@@ -1186,9 +1311,18 @@ export class CabinView {
     const vis = this.visible(game);
     const M = this.mPart;
     gl.uniformMatrix4fv(pc.loc('uModel'), false, IDENT);
+    const O = this.org;
     for (const id of vis) {
-      const r = R.rooms[id];
+      // Ещё не собранная комната — сначала по коробке: собирать то, чего
+      // нет в кадре, незачем.
+      if (R.lazy && R.rooms[id] === undefined) {
+        const box = I.roomById[id];
+        if (!box || !boxInView(this.pv, [box.lo[0] - O.x - 0.6, box.lo[1] - O.y - 0.6, box.lo[2] - O.z - 0.6],
+          [box.hi[0] - O.x + 0.6, box.hi[1] - O.y + 0.6, box.hi[2] - O.z + 0.6])) continue;
+      }
+      const r = this.roomPart(id);
       if (!r || !boxInView(this.pv, r.lo, r.hi)) continue;
+      r.seen = this.frameNo;
       gl.bindVertexArray(r.part.vao);
       gl.drawArrays(gl.TRIANGLES, 0, r.part.count);
       this.draws++; this.interDraws++; this.interTris += r.part.count / 3;
@@ -1197,8 +1331,9 @@ export class CabinView {
     // когда та не видна (дверь закрыта), из комнаты b её рисуют отдельно —
     // иначе вокруг створки светится щель в толщину перегородки.
     for (const d of I.doors) {
-      const f = R.frames[d.id];
-      if (!f || vis.includes(d.rooms[0]) || !vis.includes(d.rooms[1]) || !boxInView(this.pv, f.lo, f.hi)) continue;
+      if (vis.includes(d.rooms[0]) || !vis.includes(d.rooms[1])) continue;
+      const f = this.framePart(d.id);
+      if (!f || !boxInView(this.pv, f.lo, f.hi)) continue;
       gl.bindVertexArray(f.part.vao);
       gl.drawArrays(gl.TRIANGLES, 0, f.part.count);
       this.draws++; this.interDraws++; this.interTris += f.part.count / 3;
@@ -1207,9 +1342,9 @@ export class CabinView {
     for (const d of I.doors) {
       if (!d.rooms.some((id) => vis.includes(id))) continue;
       const sl = d.slide * d.open;
-      const ox = d.origin[0] + d.tangent[0] * sl - EYE.x;
-      const oy = d.origin[1] + d.tangent[1] * sl - EYE.y;
-      const oz = d.origin[2] + d.tangent[2] * sl - EYE.z;
+      const ox = d.origin[0] + d.tangent[0] * sl - O.x;
+      const oy = d.origin[1] + d.tangent[1] * sl - O.y;
+      const oz = d.origin[2] + d.tangent[2] * sl - O.z;
       M[0] = d.ux[0]; M[1] = d.ux[1]; M[2] = d.ux[2]; M[3] = 0;
       M[4] = d.uy[0]; M[5] = d.uy[1]; M[6] = d.uy[2]; M[7] = 0;
       M[8] = d.uz[0]; M[9] = d.uz[1]; M[10] = d.uz[2]; M[11] = 0;
@@ -1222,13 +1357,13 @@ export class CabinView {
       this.draws++; this.interDraws++; this.interTris += R.door.count / 3;
     }
     // Груз: ящик на каждую тонну в трюме (interior.cargo — сколько).
-    if (vis.includes('hold')) {
+    if (vis.includes(I.holdRoom || 'hold')) {
       const k = I.crate.scale;
       const n = Math.min(I.slots.length, I.cargo || 0);
       for (let i = 0; i < n; i++) {
         const c = I.slots[i];
         const cy = Math.cos(c.yaw) * k, sy = Math.sin(c.yaw) * k;
-        const ox = c.x - EYE.x, oy = c.y - EYE.y, oz = c.z - EYE.z;
+        const ox = c.x - O.x, oy = c.y - O.y, oz = c.z - O.z;
         const lo = [ox - c.half, oy, oz - c.half], hi = [ox + c.half, oy + c.h, oz + c.half];
         if (!boxInView(this.pv, lo, hi)) continue;
         M[0] = cy; M[1] = 0; M[2] = -sy; M[3] = 0;
@@ -1242,6 +1377,7 @@ export class CabinView {
       }
     }
     gl.uniformMatrix4fv(pc.loc('uModel'), false, IDENT);
+    this.evictRooms();
   }
 
   /** Видимые комнаты: где глаз, и куда из неё видно. */
@@ -1250,7 +1386,7 @@ export class CabinView {
     const I = game.interior;
     if (!I) return [];
     const w = game.walk;
-    const here = w && w.on && w.room ? w.room.id : 'bridge';
+    const here = w && w.on && w.room ? w.room.id : ((I.seat && I.seat.room) || 'bridge');
     return I.visibleNow(here);
   }
 
@@ -1261,18 +1397,19 @@ export class CabinView {
   lampsFor(game) {
     const out = this._lamps || (this._lamps = []);
     out.length = 0;
-    const I = game.interior;
+    const I = this.interOf || game.interior;
     const vis = I ? this.visible(game) : ['bridge'];
     const e = this.eye;
+    const O = this.org;
     if (!this._bridgeBox || this._bridgeOf !== I) {
-      const E = [EYE.x, EYE.y, EYE.z];
+      const E = [O.x, O.y, O.z];
       this._bridgeBox = I
         ? { lo: I.sunBox.lo.map((v, i) => v - E[i]), hi: I.sunBox.hi.map((v, i) => v - E[i]) }
         : { lo: [-1e4, -1e4, -1e4], hi: [1e4, 1e4, 1e4] };
       this._bridgeOf = I;
     }
     const big = this._bridgeBox;
-    if (vis.includes('bridge')) {
+    if (!this.deck && this.model && vis.includes('bridge')) {
       for (const l of this.model.lights || []) {
         out.push({ pos: [l.pos.x, l.pos.y, l.pos.z], dir: [l.dir.x, l.dir.y, l.dir.z], cos: l.cos,
           color: l.color, range: l.range, lo: big.lo, hi: big.hi, d: 0 });
@@ -1284,7 +1421,7 @@ export class CabinView {
       for (const l of I.lamps) {
         if (!vis.includes(l.room)) continue;
         const room = I.roomById[l.room];
-        const pos = [l.pos[0] - EYE.x, l.pos[1] - EYE.y, l.pos[2] - EYE.z];
+        const pos = [l.pos[0] - O.x, l.pos[1] - O.y, l.pos[2] - O.z];
         const k = l.kind === 'reactor' ? glow : 1;
         // Свет шлюза — по его циклу (js/game/airlock.js): дежурный, жёлтый
         // мигающий на стравливании и наддуве, красный при открытом люке.
@@ -1294,8 +1431,8 @@ export class CabinView {
         out.push({
           pos, dir: l.dir, cos: l.cos, range: l.range,
           color: [lc[0] * k, lc[1] * k, lc[2] * k],
-          lo: [room.lo[0] - EYE.x - 0.15, room.lo[1] - EYE.y - 0.15, room.lo[2] - EYE.z - 0.15],
-          hi: [room.hi[0] - EYE.x + 0.15, room.hi[1] - EYE.y + 0.15, room.hi[2] - EYE.z + 0.15],
+          lo: [room.lo[0] - O.x - 0.15, room.lo[1] - O.y - 0.15, room.lo[2] - O.z - 0.15],
+          hi: [room.hi[0] - O.x + 0.15, room.hi[1] - O.y + 0.15, room.hi[2] - O.z + 0.15],
           d: Math.hypot(pos[0] - e[0], pos[1] - e[1], pos[2] - e[2]) / l.range,
         });
       }
@@ -1317,8 +1454,9 @@ export class CabinView {
    * @returns сколько вызовов отрисовки ушло
    */
   drawLocksOutside(game, cam, size, sunPos, logFC, ship = game.ship, air = game.interior && game.interior.air) {
-    const I = game.interior;
-    if (!air || !ship) return 0;
+    const I = (air && air.I) || game.interior;
+    if (!air || !ship || !I) return 0;
+    this.deck = !game.cockpit || !I.pod;
     const vis = [];
     for (const hx of air.hatches) if (hx.open > 0.01 && !vis.includes(hx.lock)) vis.push(hx.lock);
     if (!vis.length) return 0;
@@ -1342,9 +1480,10 @@ export class CabinView {
     const b = ship.basis;
     const dx = (cam.pos.x - ship.pos.x) * 1000, dy = (cam.pos.y - ship.pos.y) * 1000, dz = (cam.pos.z - ship.pos.z) * 1000;
     const e = this.eye;
-    e[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z - EYE.x;
-    e[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z - EYE.y;
-    e[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z - EYE.z;
+    const O = this.org;
+    e[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z - O.x;
+    e[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z - O.y;
+    e[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z - O.z;
     const before = this.draws;
     gl.disable(gl.BLEND);
     gl.enable(gl.DEPTH_TEST);
@@ -1408,9 +1547,9 @@ export class CabinView {
     gl.uniform3fv(pc.loc('uLR'), lb.r);
     gl.uniform3fv(pc.loc('uLU'), lb.u);
     gl.uniform3fv(pc.loc('uLF'), lb.f);
-    gl.uniform4f(pc.loc('uLC'), this.lightC[0], this.lightC[1], this.lightC[2], CABIN.lightR);
-    gl.uniform2f(pc.loc('uLZ'), LZ_MID, LZ_HALF);
-    gl.uniform1f(pc.loc('uDepthBias'), CABIN.depthBias / (2 * LZ_HALF));
+    gl.uniform4f(pc.loc('uLC'), this.lightC[0], this.lightC[1], this.lightC[2], this.lightR);
+    gl.uniform2f(pc.loc('uLZ'), this.lz[0], this.lz[1]);
+    gl.uniform1f(pc.loc('uDepthBias'), CABIN.depthBias / (2 * this.lz[1]));
     gl.uniform1f(pc.loc('uTexel'), this.shadowSize > 0 ? 1 / this.shadowSize : 0);
 
     // Лампы — поста пилота и видимых помещений (lampsFor).
@@ -1437,7 +1576,7 @@ export class CabinView {
 
     // Свет экранов: центр, нормаль, место в атласе и площадь.
     let k = 0;
-    if (displays) {
+    if (displays && cp) {
       for (const s of Object.values(cp.screens)) {
         const d = displays.byId[s.id];
         if (!d || k >= 8) continue;

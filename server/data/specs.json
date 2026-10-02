@@ -10,10 +10,27 @@
                 "stunMin": 0.35,
                 "stunMax": 1.4,
                 "tumbleDamp": 0.6,
+                "thrustK": 1,
                 "maxHull": 100,
                 "fuelMax": 12,
                 "fuelReserve": 1.2,
                 "hitRadius": 0.035
+            }
+        },
+        {
+            "code": "prometheus",
+            "name": "Prometheus",
+            "title": "БОЕВОЙ КРЕЙСЕР",
+            "price": 1500000,
+            "spec": {
+                "stunMin": 0.35,
+                "stunMax": 1.4,
+                "tumbleDamp": 0.35,
+                "thrustK": 14,
+                "maxHull": 600,
+                "fuelMax": 270,
+                "fuelReserve": 27,
+                "hitRadius": 0.1
             }
         }
     ],
@@ -272,6 +289,36 @@
                 }
             },
             "price": 58000,
+            "installed": false,
+            "tech": 5
+        },
+        {
+            "code": "quantum_p",
+            "name": "КВАНТОВЫЙ ПРИВОД КРЕЙСЕРА",
+            "slot": "drive",
+            "spec": {
+                "rampIn": 3,
+                "rampOut": 6,
+                "spool": 4,
+                "alignDeg": 3,
+                "fade": 0.5,
+                "exitAlt": 250,
+                "exitFrac": 0.05,
+                "exitStation": 40,
+                "exitPeer": 20,
+                "peerMatch": 2,
+                "exitMin": 2,
+                "clearPad": 10,
+                "minSpeed": 1.2,
+                "flight": {
+                    "quantumSpeed": 140000,
+                    "quantumFuel": 2
+                },
+                "hulls": [
+                    "prometheus"
+                ]
+            },
+            "price": 380000,
             "installed": false,
             "tech": 5
         },

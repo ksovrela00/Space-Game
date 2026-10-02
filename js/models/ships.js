@@ -8,7 +8,8 @@
 
 import { v3 } from '../core/vec3.js';
 import { loft, box, prismZ, makeMesh, mergeMeshes, transformMesh } from './geometry.js';
-import { detailHull } from './hulldetail.js';
+import { detailHull, BRIDGE } from './hulldetail.js';
+import { buildLegs, tripodShares, sizeLeg } from './gear.js';
 import {
   HULL_NAME, HULL_LENGTH, HULL_VERTS, HULL_FACES, HULL_EXHAUSTS, HULL_GEAR,
 } from './hull.data.js';
@@ -55,11 +56,35 @@ export function buildCobra() {
   mesh.length = HULL_LENGTH;
   mesh.name = HULL_NAME;
   mesh.rcs = rcsPorts(verts, HULL_HALF);
+  // Объём (из него масса) и глаз пилота — то, что у каждого корпуса своё
+  // и что игра берёт у текущего корпуса (js/game/hull.js).
+  mesh.volumeM3 = HULL_VOLUME_M3;
+  mesh.eye = v3(BRIDGE.eye.x / 1000, BRIDGE.eye.y / 1000, BRIDGE.eye.z / 1000);
   // Деталь человеческого размера: швы, мостик, окна, сопла, огни
   // (js/models/hulldetail.js). После маневровых: те ищутся по голому
   // корпусу, и накладкам в их поиске делать нечего.
   detailHull(mesh);
   return boundOf(mesh);
+}
+
+/**
+ * Габарит корпуса по его вершинам, км: крайние точки (lo, hi), полуразмеры
+ * по модулю от начала осей (half — то, что выпирает дальше всего, им
+ * меряют щель порта и момент инерции) и размеры (size — для карточки).
+ * Одна функция на все корпуса: константы «Челленджера» ниже считаются
+ * так же.
+ */
+export function extentOf(verts) {
+  const lo = v3(Infinity, Infinity, Infinity), hi = v3(-Infinity, -Infinity, -Infinity);
+  for (const v of verts) {
+    lo.x = Math.min(lo.x, v.x); lo.y = Math.min(lo.y, v.y); lo.z = Math.min(lo.z, v.z);
+    hi.x = Math.max(hi.x, v.x); hi.y = Math.max(hi.y, v.y); hi.z = Math.max(hi.z, v.z);
+  }
+  return {
+    lo, hi,
+    half: v3(Math.max(-lo.x, hi.x), Math.max(-lo.y, hi.y), Math.max(-lo.z, hi.z)),
+    size: v3(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z),
+  };
 }
 
 /** Процедурный клин в духе Cobra Mk III — исходный корпус игрока. */
@@ -101,33 +126,47 @@ export function buildWedge() {
   return boundOf(mesh);
 }
 
-const GEAR_METAL = [150, 154, 162];
-const GEAR_PAD = [96, 100, 108];
+/**
+ * Средняя плотность корабля, кг/м³ — то единственное число массы, которое
+ * не выводится ни из чего. Взята плотность авиалайнера на взлётном весе:
+ * у «Боинга-747» четыреста тонн на две с половиной тысячи кубометров
+ * фюзеляжа и крыла — около ста пятидесяти. Корпус «Челленджера» —
+ * 11 200 м³, значит в нём тысяча семьсот тонн. Живёт здесь, рядом с
+ * объёмом: по массе считается и струя движков (js/game/downwash.js), и
+ * стойки шасси.
+ */
+export const HULL_DENSITY = 150;
 
 /**
- * Стойка шасси: единичная, от точки крепления (y = 0) вниз к пяте
- * (y = -1). Рисуется по одной на каждую точку крепления с масштабом по
- * степени выпуска — стойка выдвигается телескопически.
+ * Шасси: три стойки — передняя и две основные (js/models/gear.js).
  *
- * Три стойки: передняя и две основные. Точки крепления и длина живут
- * здесь же, рядом с обводами корпуса.
+ * Точки крепления идут вместе с корпусом: конвертер ставит их по самому
+ * низкому месту днища, иначе стойка растёт из воздуха или из середины
+ * обшивки. Длина у КАЖДОЙ стойки своя — такая, чтобы все пяты оказались
+ * на одной высоте (ровно GEAR_CLEAR под центром масс). С общей длиной
+ * пяты висели на разной высоте, и корабль на ровной площадке стоял бы на
+ * двух стойках из трёх, а третья уходила бы в грунт.
+ *
+ * Толщина стоек и размер пят — от веса, который каждая несёт (статика
+ * треноги, js/models/gear.js).
  */
 export function buildGear() {
-  const strut = box(0.13, 0.5, 0.13, GEAR_METAL, v3(0, -0.5, 0));
-  const pad = box(0.34, 0.07, 0.30, GEAR_PAD, v3(0, -0.98, 0));
-  const mesh = mergeMeshes([strut, pad]);
-
-  // Точки крепления идут вместе с корпусом: конвертер ставит их по
-  // самому низкому месту днища, иначе стойка растёт из воздуха или из
-  // середины обшивки.
-  mesh.hardpoints = HULL_GEAR.map(pt);
-  // Длина у КАЖДОЙ стойки своя — такая, чтобы все пяты оказались на
-  // одной высоте (ровно GEAR_CLEAR под центром масс). С общей длиной
-  // пяты висели на разной высоте, и корабль на ровной площадке стоял бы
-  // на двух стойках из трёх, а третья уходила бы в грунт.
-  mesh.legLengths = mesh.hardpoints.map((h) => Math.max(0.001, GEAR_CLEAR + h.y));
-  mesh.legLength = Math.max(...mesh.legLengths);
-  return boundOf(mesh);
+  const hp = HULL_GEAR.map((p) => p.map((v) => v / 1000));      // м
+  const mass = HULL_VOLUME_M3 * HULL_DENSITY;
+  const share = tripodShares(hp.map((p) => [p[0], p[2]]));
+  return buildLegs(hp.map((p, i) => {
+    const s = sizeLeg(mass * share[i]);
+    const d = 2 * Math.sqrt(s.padArea / Math.PI);
+    return {
+      at: p,
+      len: Math.max(1, GEAR_CLEAR * 1000 + p[1]),
+      r: s.r,
+      pad: { kind: 'disc', w: d, l: d, h: d * 0.08 },
+      twin: 0,
+      // Подкос — к корме у носовой стойки, к оси у главных.
+      brace: p[2] > 0 ? [0, -2.2] : [-Math.sign(p[0]) * 1.8, 0.4],
+    };
+  }));
 }
 
 /**
@@ -310,8 +349,8 @@ export const GEAR_FEET = HULL_GEAR.map((p) => v3(p[0] * MM, -GEAR_CLEAR, p[2] * 
  * накрывает. У корпуса со скошенными крыльями законцовки лежат как раз в
  * углах — и торчали наружу, хотя по габаритам «всё влезало».
  */
-export const SHIELD_AXES = (() => {
-  const half = [HULL_SIZE.x / 2, HULL_SIZE.y / 2, HULL_SIZE.z / 2];
+export function shieldAxesOf(verts, size) {
+  const half = [size.x / 2, size.y / 2, size.z / 2];
   const avg = (half[0] + half[1] + half[2]) / 3;
   const k = 0.75;                       // насколько держимся габарита
   const shape = half.map((h) => avg + (h - avg) * k);
@@ -321,21 +360,22 @@ export const SHIELD_AXES = (() => {
   // долей по осям меньше единицы; корень из наибольшей суммы и есть
   // искомый множитель.
   let worst = 1;
-  for (let i = 0; i < HULL_VERTS.length; i += 3) {
-    const x = (HULL_VERTS[i] * MM) / shape[0];
-    const y = (HULL_VERTS[i + 1] * MM) / shape[1];
-    const z = (HULL_VERTS[i + 2] * MM) / shape[2];
-    worst = Math.max(worst, Math.hypot(x, y, z));
+  for (const v of verts) {
+    worst = Math.max(worst, Math.hypot(v.x / shape[0], v.y / shape[1], v.z / shape[2]));
   }
   // Небольшой зазор сверх этого: оболочка должна ОХВАТЫВАТЬ корпус, а не
   // лежать на нём — иначе она читается как обшивка, а не как щит.
   return shape.map((v) => v * worst * 1.08);
-})();
+}
+export const SHIELD_AXES = shieldAxesOf(
+  Array.from({ length: HULL_VERTS.length / 3 }, (_, i) => v3(HULL_VERTS[i * 3] * MM, HULL_VERTS[i * 3 + 1] * MM, HULL_VERTS[i * 3 + 2] * MM)),
+  HULL_SIZE);
 
-export const GUN_PORTS = [
-  v3(-HULL_SIZE.x * 0.30, -HULL_SIZE.y * 0.10, HULL_SIZE.z * 0.30),
-  v3(HULL_SIZE.x * 0.30, -HULL_SIZE.y * 0.10, HULL_SIZE.z * 0.30),
+export const gunPortsOf = (size) => [
+  v3(-size.x * 0.30, -size.y * 0.10, size.z * 0.30),
+  v3(size.x * 0.30, -size.y * 0.10, size.z * 0.30),
 ];
+export const GUN_PORTS = gunPortsOf(HULL_SIZE);
 
 // Небольшой транспорт — понадобится для NPC и как «чужой» силуэт.
 export function buildShuttle() {

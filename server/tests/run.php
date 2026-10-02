@@ -1367,6 +1367,103 @@ Api::call('player.save', ['ship' => ['id' => $shipA1, 'landed' => null]], $ta);
 ok((int) Players::shipRow($shipA1)['landed_body'] === $L,
     'сохранение за прежний корабль после пересадки не пишется');
 
+// --- Верфь корпусов: «Прометей» продают только в столицах, а пересаживаются
+// на купленный прямо в доке — оба корабля стоят в одном порту.
+section('верфь корпусов');
+{
+    $ry = Auth::register('pilot_y', 'secret', 'ПИЛОТ Й');
+    $tky = $ry['token'];
+    $pidY = (int) $ry['player_id'];
+    $sy = Api::call('player.state', [], $tky);
+    $yHome = (int) $sy['ship']['id'];
+    $types = array_column(Specs::forGame()['shipTypes'], null, 'code');
+    ok(isset($types['prometheus']) && (int) $types['prometheus']['price'] === 1500000
+        && abs($types['prometheus']['spec']['hitRadius'] - 0.1) < 1e-9,
+        'в каталоге два корпуса: «Прометей» за 1 500 000 кр, со своими числами корпуса');
+    $mass = array_column(Db::all('SELECT `code`, `mass_t` FROM `ship_type`'), 'mass_t', 'code');
+    ok((float) $mass['prometheus'] > 20 * (float) $mass['challenger'],
+        'масса корпуса — из выгрузки модели: ' . $mass['prometheus'] . ' т против ' . $mass['challenger']);
+
+    // Порты системы: где верфь есть и какого уровня.
+    $ports = [];
+    foreach (Db::all("SELECT `local_id` FROM `body` WHERE `system_id`=0 AND `kind`='station'") as $b) {
+        $ports[] = Stations::info(0, (int) $b['local_id']);
+    }
+    $low = null;
+    $top = null;
+    foreach ($ports as $p) {
+        if ($p['services']['outfit'] && $p['tech'] === 4 && $low === null) $low = $p;
+        if ($p['tech'] >= 5 && $top === null) $top = $p;
+    }
+    $dockAt = static function (int $shipId, int $localId): void {
+        Db::update('ship', ['system_id' => 0, 'docked_body' => $localId, 'landed_body' => null,
+            'anchor_body' => null], '`id`=?', [$shipId]);
+    };
+    if ($low !== null) {
+        $dockAt($yHome, $low['localId']);
+        $o = Api::call('shipyard.list', [], $tky);
+        $pr = array_column($o['hulls'], null, 'code')['prometheus'];
+        ok($o['open'] && !$pr['sold'] && array_column($o['hulls'], null, 'code')['challenger']['sold'],
+            'на верфи уровня 4 продают «Челленджер», а «Прометей» — нет');
+        denies('no_tech', fn() => Api::call('shipyard.buy', ['code' => 'prometheus'], $tky),
+            'крейсер на верфи уровня 4 не купить');
+    }
+    ok($top !== null, 'в родной системе есть столица: ' . ($top ? $top['name'] : '—'));
+    $dockAt($yHome, $top['localId']);
+    denies('no_funds', fn() => Api::call('shipyard.buy', ['code' => 'prometheus'], $tky),
+        'без полутора миллионов крейсер не купить');
+    Ledger::add($pidY, 'ПРОВЕРКА', 2000000, 'test');
+    $before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pidY]);
+    $st = Api::call('shipyard.buy', ['code' => 'prometheus'], $tky);
+    $newId = (int) $st['bought'];
+    $row = Players::shipRow($newId);
+    $after = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pidY]);
+    $line = Db::row('SELECT * FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1', [$pidY]);
+    ok($newId > 0 && (int) $row['owner_id'] === $pidY && (int) $row['docked_body'] === $top['localId']
+        && (int) $row['system_id'] === 0 && count($st['fleet']) === 2 && $st['ship']['id'] === $yHome
+        && $before - $after === 1500000 && (int) $line['amount'] === -1500000
+        && strpos($line['label'], 'Prometheus') !== false,
+        'купил: новый корабль в том же доке, пилот пока в кресле прежнего, в ленте −1 500 000 кр');
+    $mods = count(Loadout::modules($newId));
+    $stock = (int) Db::one('SELECT COUNT(*) FROM `equipment_type` WHERE `stock`=1');
+    ok((float) $row['fuel_t'] === 270.0 && (float) $row['hull'] === 600.0 && $mods === $stock && (float) $row['shield'] > 0,
+        'с заводскими модулями (' . $mods . '), полным баком 270 т, корпусом 600 и щитом');
+    $drive = array_values(array_filter(Loadout::modules($newId), fn($m) => $m['slot'] === 'drive'));
+    $fm = Fuel::model($newId);
+    ok(count($drive) === 1 && $drive[0]['code'] === 'quantum_p' && abs($fm['quantumSpeed'] - 140000) < 1e-6
+        && abs($fm['mass'] - (float) $mass['prometheus']) < 1e-6,
+        'с завода у крейсера свой квантовый привод: ' . $fm['quantumSpeed'] . ' км/с, расход — по его массе');
+    // На «Челленджер» крейсерский привод не ставится: ему нужен реактор крейсера.
+    denies('wrong_hull', fn() => Api::call('outfit.buy', ['code' => 'quantum_p'], $tky),
+        'крейсерский привод на «Челленджер» не поставить');
+    $offer = Api::call('outfit.list', [], $tky);
+    $qp = null;
+    foreach ($offer['slots'] as $sl) foreach ($sl['offers'] as $m) if ($m['code'] === 'quantum_p') $qp = $m;
+    ok($qp !== null && $qp['fits'] === false && $qp['sold'] === false && $qp['hulls'] === ['prometheus'],
+        'на верфи «Челленджера» он виден, но помечен: только для крейсера');
+
+    $st = Api::call('ship.command', ['id' => $newId], $tky);
+    ok($st['ship']['id'] === $newId && $st['ship']['type']['code'] === 'prometheus'
+        && $st['me']['aboard'] === $newId && $st['me']['seated'] === true
+        && $st['position']['dockedBody'] === $top['localId'],
+        'пересел в одном доке: командует «Прометеем», сидит в его кресле');
+    $st = Api::call('ship.command', ['id' => $yHome], $tky);
+    ok($st['ship']['id'] === $yHome && $st['ship']['type']['code'] === 'challenger',
+        'и обратно — в «Челленджер» в том же доке');
+    // Корабли в разных портах — пересесть нельзя: туда ещё надо долететь.
+    $other = null;
+    foreach ($ports as $p) if ($p['localId'] !== $top['localId']) { $other = $p; break; }
+    if ($other !== null) {
+        $dockAt($yHome, $other['localId']);
+        denies('not_aboard', fn() => Api::call('ship.command', ['id' => $newId], $tky),
+            'из другого порта на «Прометей» не пересесть');
+        $dockAt($yHome, $top['localId']);
+    }
+    $o = Api::call('shipyard.list', [], $tky);
+    ok(count($o['here']) === 2 && count(array_filter($o['here'], fn($x) => $x['active'])) === 1,
+        'в разделе «Корабли» оба своих корабля этого дока, активный один');
+}
+
 // Перенос со схемы 9: место корабля лежало в строке пилота. Живой пилот,
 // стоявший на грунте, обязан остаться на грунте, а не очутиться в порту.
 $old = ['pos_x' => 'DOUBLE NOT NULL DEFAULT 0', 'pos_y' => 'DOUBLE NOT NULL DEFAULT 0',

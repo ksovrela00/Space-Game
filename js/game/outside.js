@@ -178,9 +178,16 @@ export function groundPointToShip(T, g, out = [0, 0, 0]) {
 
 const UNDER = { cell: 0.5, half: 36 };
 
-/** Карта днища: самая низкая точка обшивки над клеткой (м, оси корабля). */
+/**
+ * Карта днища: самая низкая точка обшивки над клеткой (м, оси корабля).
+ * Размер карты — по самому корпусу: у «Челленджера» хватает 36 м в
+ * каждую сторону, у «Прометея» нос в 111 м от центра масс.
+ */
 export function hullUnderside(hull) {
-  const c = UNDER.cell, n = Math.round(UNDER.half * 2 / c);
+  let ext = 0;
+  for (const v of hull.verts) ext = Math.max(ext, Math.abs(v.x), Math.abs(v.z));
+  const half = Math.max(UNDER.half, Math.ceil(ext * 1000 + 1));
+  const c = UNDER.cell, n = Math.round(half * 2 / c);
   const minY = new Float32Array(n * n).fill(Infinity);
   const V = hull.verts.map((v) => [v.x * 1000, v.y * 1000, v.z * 1000]);
   for (const f of hull.faces) {
@@ -188,14 +195,14 @@ export function hullUnderside(hull) {
       const a = V[f.v[0]], b = V[f.v[k]], d = V[f.v[k + 1]];
       const area = (b[0] - a[0]) * (d[2] - a[2]) - (b[2] - a[2]) * (d[0] - a[0]);
       if (Math.abs(area) < 1e-9) continue;          // стенка стоймя: сверху её не видно
-      const i0 = Math.max(0, Math.floor((Math.min(a[0], b[0], d[0]) + UNDER.half) / c));
-      const i1 = Math.min(n - 1, Math.floor((Math.max(a[0], b[0], d[0]) + UNDER.half) / c));
-      const k0 = Math.max(0, Math.floor((Math.min(a[2], b[2], d[2]) + UNDER.half) / c));
-      const k1 = Math.min(n - 1, Math.floor((Math.max(a[2], b[2], d[2]) + UNDER.half) / c));
+      const i0 = Math.max(0, Math.floor((Math.min(a[0], b[0], d[0]) + half) / c));
+      const i1 = Math.min(n - 1, Math.floor((Math.max(a[0], b[0], d[0]) + half) / c));
+      const k0 = Math.max(0, Math.floor((Math.min(a[2], b[2], d[2]) + half) / c));
+      const k1 = Math.min(n - 1, Math.floor((Math.max(a[2], b[2], d[2]) + half) / c));
       for (let i = i0; i <= i1; i++) {
-        const x = -UNDER.half + (i + 0.5) * c;
+        const x = -half + (i + 0.5) * c;
         for (let j = k0; j <= k1; j++) {
-          const z = -UNDER.half + (j + 0.5) * c;
+          const z = -half + (j + 0.5) * c;
           const w1 = ((b[0] - x) * (d[2] - z) - (b[2] - z) * (d[0] - x)) / area;
           const w2 = ((d[0] - x) * (a[2] - z) - (d[2] - z) * (a[0] - x)) / area;
           const w3 = 1 - w1 - w2;
@@ -207,7 +214,7 @@ export function hullUnderside(hull) {
       }
     }
   }
-  return { n, minY };
+  return { n, minY, half };
 }
 
 /**
@@ -216,14 +223,14 @@ export function hullUnderside(hull) {
  * перекрыла бы выход из тоннеля.
  */
 export function undersideBoxes(map, p, r, out) {
-  const c = UNDER.cell, n = map.n;
-  const i0 = Math.max(0, Math.floor((p[0] - r + UNDER.half) / c)), i1 = Math.min(n - 1, Math.floor((p[0] + r + UNDER.half) / c));
-  const k0 = Math.max(0, Math.floor((p[2] - r + UNDER.half) / c)), k1 = Math.min(n - 1, Math.floor((p[2] + r + UNDER.half) / c));
+  const c = UNDER.cell, n = map.n, half = map.half;
+  const i0 = Math.max(0, Math.floor((p[0] - r + half) / c)), i1 = Math.min(n - 1, Math.floor((p[0] + r + half) / c));
+  const k0 = Math.max(0, Math.floor((p[2] - r + half) / c)), k1 = Math.min(n - 1, Math.floor((p[2] + r + half) / c));
   for (let i = i0; i <= i1; i++) {
     for (let k = k0; k <= k1; k++) {
       const y = map.minY[i * n + k];
       if (!(y < Infinity) || y < p[1] + 0.5) continue;
-      const x = -UNDER.half + i * c, z = -UNDER.half + k * c;
+      const x = -half + i * c, z = -half + k * c;
       out.push({ lo: [x, y, z], hi: [x + c, y + 3, z + c], hull: true });
     }
   }

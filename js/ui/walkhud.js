@@ -18,6 +18,7 @@
 //   * за бортом — где пилот, какая тут тяжесть и воздух, далеко ли корабль.
 
 import { CY, AMBER, GREEN, RED, INK, PEER } from './theme.js';
+import { v3 } from '../core/vec3.js';
 import { Q } from '../core/quality.js';
 import { L } from '../core/lang.js';
 import { fmtSpeed } from './hud.js';
@@ -29,6 +30,8 @@ const sc = (n) => n * Q.hudScale;
 /** Подписи ярусов — по полу помещения. */
 function deckName(room) {
   if (!room) return '';
+  // У «Прометея» палубы по номерам (js/models/interior.prom.js).
+  if (room.deck) return L(room.deck);
   if (room.id === 'bridge') return L('ЯРУС РУБКИ');
   if (room.id === 'lockS') return L('ПАЛУБА ГОНДОЛ');
   if (room.lo[1] < -7) return L('НИЖНЯЯ ПАЛУБА');
@@ -107,18 +110,33 @@ export function drawWalkHud(r, game, hint = {}) {
   ctx.fillStyle = 'rgba(216,242,255,0.9)';
   ctx.beginPath(); ctx.arc(cx, cy, sc(1.8), 0, Math.PI * 2); ctx.fill();
 
+  // Путь по кораблю: метка следующей точки (js/game/route.js).
+  drawRoute(ctx, r, game);
+
   // Где ты: название помещения и ярус — при входе, потом гаснет. За
   // бортом — тело под ногами, его тяжесть и воздух.
   const room = walk && walk.room;
   const t = game.walkRoomT || 0;
   const out = hint.out;
+  // Когда название погасло — остаётся строкой поменьше: на корабле в
+  // полторы сотни помещений «где я» нужно всегда, а не только на пороге.
+  if (room && !out && t <= 0 && game.interior && game.interior.rooms.length > 20) {
+    ctx.textAlign = 'center';
+    ctx.font = fnt(12);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    const line = deckName(room) + ' · ' + L(room.name) + (room.num ? ' ' + room.num : '');
+    ctx.strokeText(line, cx, sc(40));
+    ctx.fillStyle = 'rgba(216,242,255,0.75)';
+    ctx.fillText(line, cx, sc(40));
+  }
   if ((room || out) && t > 0) {
     ctx.globalAlpha = Math.min(1, t);
     ctx.textAlign = 'center';
     ctx.font = fnt(18, 'bold');
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-    const name = out ? out.name : L(room.name);
+    const name = out ? out.name : L(room.name) + (room.num ? ' ' + room.num : '');
     ctx.strokeText(name, cx, sc(64));
     ctx.fillStyle = INK;
     ctx.fillText(name, cx, sc(64));
@@ -175,6 +193,9 @@ export function drawWalkHud(r, game, hint = {}) {
 
   // Подсказки внизу: что можно сделать прямо сейчас.
   const tips = [];
+  if (hint.route) tips.push(hint.route);
+  if (hint.lift) tips.push(hint.lift);
+  if (hint.plan) tips.push([hint.plan, CY]);
   if (hint.hatch) tips.push(hint.hatch);
   if (hint.seat) tips.push([hint.seat, GREEN]);
   if (hint.mouse) tips.push([hint.mouse, AMBER]);
@@ -187,6 +208,79 @@ export function drawWalkHud(r, game, hint = {}) {
     ctx.fillStyle = c;
     ctx.fillText(s, cx, ty);
     ty -= sc(22);
+  }
+  ctx.restore();
+}
+
+const _rw = v3(), _rc = v3(), _rs = { x: 0, y: 0 };
+
+/**
+ * Метка пути (js/game/route.js): следующая точка — дверь, проём трапа,
+ * пульт лифта или сама цель — ромбом в кадре, с подписью и расстоянием до
+ * цели. За краем кадра или за спиной — стрелкой у края в её сторону.
+ */
+function drawRoute(ctx, r, game) {
+  const R = game.walkRoute, I = game.interior, V = game.frame;
+  if (!R || !I || !V || !V.basis || !game.walk || game.walk.out || (game.deckMap && game.deckMap.open)) return;
+  const p = R.next.point, b = V.basis;
+  const y = p[1] + 1.3;               // на уровне глаз
+  _rw.x = V.pos.x + (b.right.x * p[0] + b.up.x * y + b.fwd.x * p[2]) / 1000;
+  _rw.y = V.pos.y + (b.right.y * p[0] + b.up.y * y + b.fwd.y * p[2]) / 1000;
+  _rw.z = V.pos.z + (b.right.z * p[0] + b.up.z * y + b.fwd.z * p[2]) / 1000;
+  const cam = r.camera;
+  cam.toCamera(_rw, _rc);
+  const w = cam.w, h = cam.h, m = sc(40);
+  let sx = 0, sy = 0, on = false;
+  if (_rc.z > cam.near) {
+    cam.project(_rc, _rs);
+    sx = _rs.x; sy = _rs.y;
+    on = sx > m && sx < w - m && sy > m && sy < h - m;
+  }
+  const next = R.next;
+  const label = next.kind === 'lift' ? L('ЛИФТ: ') + L(next.lift.stops[next.stop].deck)
+    : next.kind === 'goal' ? L(I.roomById[next.to].name)
+      : L(I.roomById[next.to].name) + (I.roomById[next.to].num ? ' ' + I.roomById[next.to].num : '');
+  const dist = Math.round(R.dist) + L(' м');
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillStyle = GREEN;
+  if (on) {
+    const s = sc(9);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - s); ctx.lineTo(sx + s, sy); ctx.lineTo(sx, sy + s); ctx.lineTo(sx - s, sy);
+    ctx.closePath();
+    ctx.stroke(); ctx.fill();
+    ctx.font = fnt(13, 'bold');
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeText(label, sx, sy - s - sc(6));
+    ctx.fillText(label, sx, sy - s - sc(6));
+    ctx.font = fnt(11);
+    ctx.strokeText(dist, sx, sy + s + sc(14));
+    ctx.fillText(dist, sx, sy + s + sc(14));
+  } else {
+    // За кадром: направление на точку в плоскости экрана; за спиной — вниз.
+    let dx = _rc.x, dy = -_rc.y;
+    if (_rc.z <= cam.near && Math.hypot(dx, dy) < 1e-9) dy = 1;
+    const l = Math.hypot(dx, dy) || 1;
+    dx /= l; dy /= l;
+    const cx = w / 2, cy = h / 2;
+    const k = Math.min((w / 2 - m) / Math.max(1e-6, Math.abs(dx)), (h / 2 - m) / Math.max(1e-6, Math.abs(dy)));
+    const ax = cx + dx * k, ay = cy + dy * k;
+    const s = sc(13);
+    ctx.beginPath();
+    ctx.moveTo(ax + dx * s, ay + dy * s);
+    ctx.lineTo(ax - dy * s * 0.6 - dx * s * 0.4, ay + dx * s * 0.6 - dy * s * 0.4);
+    ctx.lineTo(ax + dy * s * 0.6 - dx * s * 0.4, ay - dx * s * 0.6 - dy * s * 0.4);
+    ctx.closePath();
+    ctx.stroke(); ctx.fill();
+    ctx.font = fnt(12, 'bold');
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    const tx = ax - dx * sc(34), ty = ay - dy * sc(26);
+    ctx.strokeText(label, tx, ty);
+    ctx.fillText(label, tx, ty);
   }
   ctx.restore();
 }

@@ -23,7 +23,7 @@ import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
   corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM,
 } from '../js/game/quantum.js';
-import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality } from '../js/game/docking.js';
+import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
   isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
@@ -58,7 +58,8 @@ import {
 import {
   CHASE, CHASE_UNDER, eyeHeight, chaseRates, makeChase, updateChase, placeChase,
 } from '../js/game/chase.js';
-import { HULL_VOLUME_M3, HULL_CLEAR as HULL_FLOOR } from '../js/models/ships.js';
+import { HULL_VOLUME_M3, HULL_CLEAR as HULL_FLOOR, GEAR_CLEAR } from '../js/models/ships.js';
+import { massT } from '../js/game/fuel.js';
 import { cityLocal } from '../js/game/city.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
@@ -93,7 +94,9 @@ import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '
 import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
 
-import { buildCobra, buildGear, HULL_HALF } from '../js/models/ships.js';
+import { buildCobra, buildGear, HULL_HALF, HULL_DENSITY } from '../js/models/ships.js';
+import { buildPrometheus, buildPrometheusGear } from '../js/models/prometheus.js';
+import { stageLift, legBoxes, LEG, tripodShares } from '../js/models/gear.js';
 import { LAMP, lampBeams, lampCone } from '../js/game/lamps.js';
 import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
 import { Camera } from '../js/render/camera.js';
@@ -104,7 +107,7 @@ import { layoutAtlas, makeDisplays } from '../js/ui/displays.js';
 import { NOMINAL } from '../js/ui/panels.js';
 import { cabinArrays, sunVisibility } from '../js/gl/cabin.js';
 import { hullFrameAt } from '../js/gl/hull.js';
-import { BRIDGE } from '../js/models/hulldetail.js';
+import { BRIDGE, MAT } from '../js/models/hulldetail.js';
 import { qualityFor, fullscreenAvailable } from '../js/core/quality.js';
 import {
   makeTouch, touchLayout, touchUpdate, touchApply, touchDrag, TOUCH,
@@ -118,8 +121,9 @@ import { lookAlong } from '../js/core/basis.js';
 import { box, prismZ, loft } from '../js/models/geometry.js';
 import { L, setLang, getLang, hasEn, LANGS } from '../js/core/lang.js';
 import { loadSpecsFromDisk } from './specs.mjs';
-import { applySpecs } from '../js/game/specs.js';
-import { modules, applyModuleSpecs, applyShipEquipment, flightModel, SCANNER_STEPS }
+import { applySpecs, useShipType } from '../js/game/specs.js';
+import { HULL } from '../js/game/hull.js';
+import { modules, applyModuleSpecs, applyShipEquipment, flightModel, SCANNER_STEPS, moduleSpec }
   from '../js/game/loadout.js';
 
 // Характеристики корабля и оружия приходят из бэкенда, и в игре их нет
@@ -926,6 +930,28 @@ ok(t3.status === 'docked' && t3.t > 30,
 
 const t4 = dockTest(400, (st) => ({ ...st.basis.fwd }));
 ok(t4.status === 'refused', `с 400 км докинг-компьютер отказывает: ${t4.reason || t4.status}`);
+
+// «Прометей» в ту же щель. Он доворачивает вдвое дольше, и с прежними
+// коэффициентами компьютер раскачивал его на входе на сотню метров и бил
+// о станцию: пересев на крейсер, вернуться в док к своему «Челленджеру»
+// было нельзя. Коэффициенты теперь — из полосы наведения корабля
+// (js/game/docking.js, steerBand), а центр масс идёт по середине полосы,
+// в которой проходит весь корпус (slotFit): у крейсера она на 10 м ниже
+// оси щели.
+{
+  useShipType('prometheus');
+  const fit = slotFit();
+  ok(Math.abs(fit.y * 1000 + 10) < 0.5 && fit.my * 1000 > 14 && fit.my * 1000 < 16,
+    `полоса центра масс крейсера: ${(fit.y * 1000).toFixed(1)} м от оси щели, запас ±${(fit.my * 1000).toFixed(1)} м по высоте`);
+  const runs = [
+    ['по оси, 20 км', dockTest(20, (st) => ({ ...st.basis.fwd }))],
+    ['сбоку, 40 км', dockTest(40, (st) => ({ ...st.basis.right }))],
+    ['с обратной стороны, 60 км', dockTest(60, (st) => ({ x: -st.basis.fwd.x, y: -st.basis.fwd.y, z: -st.basis.fwd.z }))],
+  ];
+  ok(runs.every(([, r]) => r.status === 'docked'),
+    'докинг-компьютер вводит «Прометей» в порт: ' + runs.map(([n, r]) => `${n} — ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с`).join('; '));
+  useShipType('challenger');
+}
 
 // Заход в створ у ОБОИХ типов станций.
 //
@@ -2473,6 +2499,215 @@ console.log('\n== корпус ==');
     `${(SLOT.hh * 2000).toFixed(0)} м`);
 }
 
+// --- 5f3. Стойки шасси: телескоп по нагрузке ----------------------------------
+console.log('\n== стойки шасси ==');
+{
+  // Стойка — ступени, которые едут, а не растягиваются: прежняя единичная
+  // стойка тянулась вместе с пятой, и под кораблём стояли «куриные ноги».
+  const checkLegs = (name, G, massKg) => {
+    const share = tripodShares(G.hardpoints.map((h) => [h.x, h.z]));
+    let worst = 0, gaps = 0, hidden = true, padOk = true, stroke = true;
+    G.legs.forEach((leg, i) => {
+      const L = G.legLengths[i];
+      const lowOf = (m) => Math.min(...m.verts.map((v) => v.y));
+      const highOf = (m) => Math.max(...m.verts.map((v) => v.y));
+      // Выпущена: низ пяты — ровно на длине стойки.
+      const foot = leg.parts.find((p) => p.k === 1);
+      worst = Math.max(worst, Math.abs(lowOf(foot.mesh) + L));
+      // Убрана: всё выше точки крепления — в корпусе.
+      for (const p of leg.parts) if (lowOf(p.mesh) + stageLift(leg, L, 0, 0, p.k) < -0.00005) hidden = false;
+      // На полном ходе вниз (полтора метра) ступени не расходятся: верх
+      // каждой ступени выше низа той, что снаружи.
+      for (const drop of [0, LAND.strut]) {
+        const sorted = leg.parts.slice().sort((a, b) => a.k - b.k);
+        for (let k = 1; k < sorted.length; k++) {
+          const outerLow = lowOf(sorted[k - 1].mesh) + stageLift(leg, L, drop, 1, sorted[k - 1].k);
+          const innerHigh = highOf(sorted[k].mesh) + stageLift(leg, L, drop, 1, sorted[k].k);
+          if (innerHigh <= outerLow) gaps++;
+        }
+      }
+      // Пята держит свою долю веса на 1 g при давлении не выше LEG.ground.
+      const area = leg.pad.kind === 'disc' ? Math.PI * (leg.pad.w * 500) ** 2 : leg.pad.w * leg.pad.l * 1e6;
+      if (massKg * share[i] * LEG.g / area > LEG.ground * 1.01) padOk = false;
+      // Коробки для пешехода: пята целиком.
+      const boxes = [];
+      legBoxes(leg, G.hardpoints[i], L * 1000, boxes, i);
+      const pb = boxes[1];
+      if (!(pb.hi[0] - pb.lo[0] >= leg.pad.w * 1000 - 1e-6 && Math.abs(pb.lo[1] - (G.hardpoints[i].y - L) * 1000) < 1e-6)) stroke = false;
+    });
+    ok(worst < 1e-7 && hidden && gaps === 0 && LEG.stroke === LAND.strut * 1000,
+      `${name}: пята выпущенной стойки ровно на её длине (расхождение ${(worst * 1e6).toFixed(2)} мм), ` +
+      `убранная целиком в корпусе, ступени не расходятся и на полном ходе вниз`);
+    ok(padOk && stroke && share.every((s) => s > 0.15),
+      `${name}: доли веса ${share.map((s) => s.toFixed(2)).join(' / ')}, гильзы ⌀` +
+      G.legs.map((l) => (l.r * 2000).toFixed(2)).join(' / ') + ' м, пяты держат ≤ ' +
+      `${(LEG.ground / 1e6).toFixed(1)} МПа на 1 g; пешеход упирается в пяту целиком`);
+    return share;
+  };
+  const cg = buildGear();
+  const cs = checkLegs('«Челленджер»', cg, HULL_VOLUME_M3 * HULL_DENSITY);
+  // Нос несёт больше всех — и стойка у него самая толстая: толщина идёт
+  // за нагрузкой, а не за длиной.
+  const thick = cg.legs.map((l) => l.r);
+  ok(cs[0] > cs[1] && thick[0] > thick[1] && Math.abs(thick[1] / thick[0] - Math.sqrt(cs[1] / cs[0])) < 1e-6,
+    `толщина стойки — корень из её нагрузки: нос ${(thick[0] * 2000).toFixed(2)} м при доле ${cs[0].toFixed(2)}, ` +
+    `главные ${(thick[1] * 2000).toFixed(2)} м при ${cs[1].toFixed(2)}`);
+  ok(Math.abs(SHIP_MASS - HULL_VOLUME_M3 * HULL_DENSITY) < 1e-6 && WASH.density === HULL_DENSITY,
+    `масса одна на струю и на стойки: ${HULL_DENSITY} кг/м³ × ${Math.round(HULL_VOLUME_M3)} м³`);
+}
+
+// --- 5f4. «Прометей»: корпус по канону ------------------------------------------
+console.log('\n== «Прометей» ==');
+{
+  const P = buildPrometheus();
+  const G = buildPrometheusGear(P);
+  const C = buildCobra();
+  const M = 1000;
+  const ext = (mesh) => {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const v of mesh.verts) {
+      const q = [v.x, v.y, v.z];
+      for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k]); hi[k] = Math.max(hi[k], q[k]); }
+    }
+    return { lo, hi, s: hi.map((h, k) => (h - lo[k]) * M) };
+  };
+  const E = ext(P), EC = ext(C);
+  // Канон: 195 × 80 × 65 м; задание — «в 2.5–3 раза больше Челленджера».
+  ok(Math.abs(E.s[2] - 195) < 0.05 && Math.abs(E.s[0] - 80) < 0.6 && Math.abs(E.s[1] - 65) < 1.5 && E.s[2] / EC.s[2] >= 2.5,
+    `габарит ${E.s[2].toFixed(1)} × ${E.s[0].toFixed(1)} × ${E.s[1].toFixed(1)} м (канон 195 × 80 × 65), ` +
+    `длиннее «Челленджера» в ${(E.s[2] / EC.s[2]).toFixed(2)} раза`);
+
+  // Грани: номера вершин, единичные нормали, плоские и выпуклые.
+  let bad = 0, nonPlanar = 0, concave = 0;
+  for (const part of [P, P.decal]) {
+    for (const f of part.faces) {
+      if (!f.v.every((i) => i >= 0 && i < part.verts.length)) bad++;
+      if (!(Math.abs(Math.hypot(f.n.x, f.n.y, f.n.z) - 1) < 1e-6)) bad++;
+      if (!(f.c.length === 3 && f.c.every((c) => c >= 0 && c <= 255))) bad++;
+      const Q = f.v.map((i) => part.verts[i]);
+      for (const q of Q) {
+        const d = ((q.x - Q[0].x) * f.n.x + (q.y - Q[0].y) * f.n.y + (q.z - Q[0].z) * f.n.z) * M;
+        if (Math.abs(d) > 0.011) { nonPlanar++; break; }
+      }
+      // Выпуклость: все повороты обхода — в одну сторону вокруг нормали.
+      let sg = 0;
+      for (let k = 0; k < Q.length; k++) {
+        const a = Q[k], b = Q[(k + 1) % Q.length], c = Q[(k + 2) % Q.length];
+        const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, wx = c.x - b.x, wy = c.y - b.y, wz = c.z - b.z;
+        const t = (uy * wz - uz * wy) * f.n.x + (uz * wx - ux * wz) * f.n.y + (ux * wy - uy * wx) * f.n.z;
+        if (Math.abs(t) < 1e-14) continue;
+        if (!sg) sg = Math.sign(t); else if (Math.sign(t) !== sg) { concave++; break; }
+      }
+    }
+  }
+  const tris = P.faces.reduce((s, f) => s + f.v.length - 2, 0) + P.decal.faces.reduce((s, f) => s + f.v.length - 2, 0);
+  ok(bad === 0 && nonPlanar === 0 && concave === 0 && tris < 20000,
+    `${P.faces.length} граней корпуса и ${P.decal.faces.length} накладок: все плоские и выпуклые (рисуются веером), ` +
+    `${tris} треугольников`);
+
+  // Нормали тел смотрят наружу: из середины открытой грани шаг по
+  // нормали — наружу, против — в корпус.
+  const In = P.prom.inside;
+  const mid = (part, f) => {
+    const Q = f.v.map((i) => part.verts[i]);
+    return [0, 1, 2].map((k) => Q.reduce((s, q) => s + [q.x, q.y, q.z][k], 0) / Q.length * M);
+  };
+  let open = 0, inward = 0;
+  for (const f of P.faces) {
+    if (!P.prom.solidFace(f)) continue;
+    const c = mid(P, f), e = 0.04;
+    const a = In(c[0] + f.n.x * e, c[1] + f.n.y * e, c[2] + f.n.z * e);
+    const b = In(c[0] - f.n.x * e, c[1] - f.n.y * e, c[2] - f.n.z * e);
+    if (a !== b) { open++; if (a) inward++; }
+  }
+  ok(open > 300 && inward === 0, `нормали тел — наружу: ${open} открытых граней, внутрь смотрят ${inward}`);
+
+  // Начало осей — центр масс (по решётке в метр, мельче, чем при сборке).
+  {
+    let n = 0, sy = 0, sz = 0;
+    for (let x = -40.5; x < 41; x += 1) for (let y = -26; y < 46; y += 1) for (let z = -86; z < 113; z += 1) {
+      if (!In(x, y, z)) continue;
+      n++; sy += y; sz += z;
+    }
+    ok(Math.abs(sy / n) < 0.6 && Math.abs(sz / n) < 0.6 && Math.abs(n - P.prom.volume) / n < 0.02,
+      `начало осей — в центре масс (${(sy / n).toFixed(2)}, ${(sz / n).toFixed(2)} м), объём ${n} м³ ` +
+      `(${(n / HULL_VOLUME_M3).toFixed(1)} «Челленджера»), масса ${(n * HULL_DENSITY / 1000).toFixed(0)} т`);
+  }
+
+  // Окна — на обшивке и на палубах: середина окна в трёх сантиметрах над
+  // гранью тела, а подоконник — над полом одной из палуб.
+  {
+    const floors = P.prom.decks.map((d) => d.floor);
+    let off = 0, buried = 0, notDeck = 0, wins = 0;
+    for (const f of P.decal.faces) {
+      if (f.mat !== MAT.window) continue;
+      wins++;
+      const c = mid(P.decal, f);
+      if (!In(c[0] - f.n.x * 0.06, c[1] - f.n.y * 0.06, c[2] - f.n.z * 0.06)) off++;
+      if (In(c[0] + f.n.x * 0.01, c[1] + f.n.y * 0.01, c[2] + f.n.z * 0.01)) buried++;
+      const sill = Math.min(...f.v.map((i) => P.decal.verts[i].y)) * M;
+      if (!floors.some((fl) => sill - fl > 0.95 && sill - fl < 1.1)) notDeck++;
+    }
+    ok(wins > 250 && off === 0 && buried === 0 && notDeck === 0,
+      `${wins} окон: все на обшивке, ни одно не утоплено в другое тело, подоконник каждого — над полом палубы ` +
+      `(${P.prom.decks.length} палуб, рубка на высоте ${(P.prom.decks[0].floor - P.prom.ground).toFixed(1)} м над грунтом)`);
+  }
+
+  // Шлюзы: дверь — на борту (снаружи пусто, внутри корпус).
+  {
+    const bad = P.prom.hatches.filter((h) => {
+      const y = (h.y0 + h.y1) / 2;
+      const s = h.side || 0;
+      if (h.kind === 'dock') return !(In(0, y, h.z - 0.5) && !In(0, y, h.z + 0.5));
+      return !(In(h.x - s * 0.5, y, h.z) && !In(h.x + s * 1.2, y, h.z));
+    });
+    const board = P.prom.hatches.filter((h) => h.kind === 'boarding');
+    const sill = board.length ? board[0].y0 - P.prom.ground : 0;
+    ok(bad.length === 0 && board.length === 2 && sill < 12,
+      `шлюзы: ${P.prom.hatches.length} дверей на обшивке (${P.prom.hatches.map((h) => h.id).join(', ')}); ` +
+      `бортовые носа — порог в ${sill.toFixed(1)} м над грунтом, трап в ${Math.ceil(sill / 0.2)} ступеней`);
+  }
+
+  // Шасси — тренога канона: одна в носу, две в корме; пяты на грунте,
+  // точки крепления — в колодцах, и пята в свой колодец убирается.
+  {
+    const hp = G.hardpoints;
+    const front = hp.filter((h) => h.z > 0), back = hp.filter((h) => h.z < 0);
+    const feet = hp.map((h, i) => (h.y - G.legLengths[i]) * M);
+    const level = feet.every((y) => Math.abs(y - P.prom.ground) < 1e-6);
+    const fits = G.legs.every((leg, i) => {
+      const w = P.prom.wells.find((q) => Math.abs((q.x0 + q.x1) / 2 - hp[i].x * M) < 0.5 && hp[i].z * M > q.z0 && hp[i].z * M < q.z1);
+      return w && leg.pad.w * M <= w.x1 - w.x0 && leg.pad.l * M <= w.z1 - w.z0
+        && In(hp[i].x * M, hp[i].y * M + 0.3, hp[i].z * M) && !In(hp[i].x * M, hp[i].y * M - 0.3, hp[i].z * M);
+    });
+    const sh = tripodShares(hp.map((h) => [h.x, h.z]));
+    ok(hp.length === 3 && front.length === 1 && back.length === 2 && Math.abs(back[0].x + back[1].x) < 1e-9 && level && fits,
+      `шасси — тренога: стойка в носу и две под гондолами, пяты на одной высоте, ` +
+      `каждая стойка — из своего колодца, и пята в него убирается; доли веса ${sh.map((s) => s.toFixed(2)).join(' / ')}`);
+  }
+
+  // Окна мостика — смотровое стекло без переплёта: из кресла в трёх
+  // метрах переплёт «окнами в рост человека» стал бы решёткой клетки.
+  {
+    const clear = P.faces.filter((f) => f.mat === MAT.clear);
+    const grid = P.faces.filter((f) => f.mat === MAT.glass);
+    ok(clear.length === 3 && grid.length === 0 && clear.every((f) => f.n.z > 0.99),
+      `мостик: три смотровых окна без переплёта, смотрят вперёд; стекла с переплётом у крейсера нет`);
+  }
+
+  // Огни по правилам авиации и сопла в корме.
+  {
+    const nav = P.navLights.filter((l) => l.kind === 'nav');
+    const red = nav.find((l) => l.color[0] > 0.9 && l.color[1] < 0.2);
+    const green = nav.find((l) => l.color[1] > 0.9 && l.color[0] < 0.2);
+    const outside = P.navLights.every((l) => !In(l.pos.x * M, l.pos.y * M, l.pos.z * M));
+    const ex = P.exhausts;
+    ok(red && green && red.pos.x < 0 && green.pos.x > 0 && outside
+      && ex.length === 2 && ex.every((e) => e.z < E.lo[2] + 0.002) && Math.abs(ex[0].x + ex[1].x) < 1e-9,
+      `огни: красный слева, зелёный справа, все ${P.navLights.length} — снаружи корпуса; два сопла в корме`);
+  }
+}
+
 // --- 5g2. Подъёмные движки (R/F) ---------------------------------------------
 console.log('\n== подъёмные движки ==');
 {
@@ -3655,6 +3890,118 @@ console.log('\n== масса в развороте ==');
     ok(sh.rcs.roll === 0 && sh.rcs.pitch === 0,
       'после удара сопла молчат: управления нет');
   }
+}
+
+// --- 14b. «Прометей» летает иначе ------------------------------------------------
+//
+// Модули у него те же, что у «Челленджера», а корабль другой: на корпусе в
+// k раз крупнее тот же двигатель разгоняет в k раз медленнее, маневровые
+// раскручивают дольше, приводы отвечают медленнее (js/game/ship.js,
+// hullScale). Проверяется ПОЛЁТ — тем же updateShip, что и в игре, — а не
+// только числа модели. И что у «Челленджера» не сдвинулось ни одно число.
+console.log('\n== «Прометей» летает иначе ==');
+{
+  const S = 1 / 60;
+  const DEG = 57.2957795;
+  const snap = () => ({ ...SHIP });
+  const before = snap();
+  // Как «Челленджер» считался до корпусов разных типов: один момент на
+  // все оси, плечи и инерция — его полуразмеры.
+  {
+    const h = HULL_HALF;
+    const arm = { pitch: Math.hypot(h.y, h.z), yaw: Math.hypot(h.x, h.z), roll: Math.hypot(h.x, h.y) };
+    const I = { pitch: h.y ** 2 + h.z ** 2, yaw: h.x ** 2 + h.z ** 2, roll: h.x ** 2 + h.y ** 2 };
+    const roll = Math.sqrt(before.tipAccel / 1000 / arm.roll);
+    const torque = roll / before.rotRamp * I.roll;
+    const same = Math.abs(before.rollAccel - roll / before.rotRamp) < 1e-12
+      && Math.abs(before.pitchAccel - torque / I.pitch) < 1e-12
+      && Math.abs(before.yawAccel - torque / I.yaw) < 1e-12;
+    ok(same && before.hullK === 1 && HULL.code === 'challenger'
+      && Math.abs(before.gearClear - GEAR_CLEAR) < 1e-12 && Math.abs(before.hullClear - HULL_FLOOR) < 1e-12,
+      '«Челленджер» летает ровно как раньше: k = 1, моменты и просветы — прежние до 1e-12');
+  }
+
+  const fly = () => {
+    // Разгон с места до предела хода — полной тягой, без форсажа.
+    const sh = makeShip();
+    sh.throttle = 1;
+    let t = 0;
+    while (sh.speed < SHIP.maxSpeed * 0.95 && t < 60) { updateShip(sh, S); t += S; }
+    // Разворот на 90° рысканием с полной ручкой и остановка.
+    const rot = (axis) => {
+      const s2 = makeShip();
+      s2.control[axis] = 1;
+      let tt = 0, ang = 0, t95 = 0;
+      const rate = SHIP[axis + 'Rate'];
+      while (ang < Math.PI / 2 && tt < 60) {
+        updateShip(s2, S); tt += S;
+        const w = Math.abs(s2.rot[axis]);
+        ang += w * S;
+        if (!t95 && w >= rate * 0.95) t95 = tt;
+      }
+      return { t90: tt, t95 };
+    };
+    return { accelT: t, yaw: rot('yaw'), pitch: rot('pitch'), roll: rot('roll') };
+  };
+  const C = fly();
+  useShipType('prometheus');
+  const P = snap();
+  const F = fly();
+  const k = HULL.k;
+  // Маршевые — сопла крейсера: тяга в thrustK раз больше, масса — в k³.
+  const tw = P.thrustK / k ** 3;
+  ok(HULL.code === 'prometheus' && k > 2.5 && k < 3.2 && P.thrustK > 1 && tw > 0.5 && tw < 0.75
+    && Math.abs(P.accel - before.accel * tw) < 1e-12 && Math.abs(P.brake - before.brake * tw) < 1e-12
+    && Math.abs(P.lateral - before.lateral) < 1e-12
+    && P.maxSpeed === before.maxSpeed && Math.abs(P.boostAccel - before.boostAccel) < 1e-9,
+    `большие двигатели на корабле в ${(k ** 3).toFixed(1)} раза тяжелее: тяга ×${P.thrustK}, разгон ` +
+    `${(P.accel * 1000).toFixed(0)} м/с² против ${(before.accel * 1000).toFixed(0)}; боковая власть маневровых на ` +
+    `тонну та же, предел хода тот же, форсаж — та же доля тяги`);
+  ok(F.accelT > C.accelT / tw * 0.9 && F.accelT < C.accelT / tw * 1.1,
+    `в полёте: до предела хода ${F.accelT.toFixed(1)} с против ${C.accelT.toFixed(1)} у «Челленджера»`);
+  ok(P.pitchRate < before.pitchRate * 0.65 && P.yawRate < before.yawRate * 0.75
+    && P.rollAccel < before.rollAccel && P.pitchAccel < before.pitchAccel && P.yawAccel < before.yawAccel
+    && F.yaw.t90 > C.yaw.t90 * 1.5 && F.pitch.t90 > C.pitch.t90 * 1.5 && F.roll.t90 > C.roll.t90,
+    `разворот на 90°: рыскание ${F.yaw.t90.toFixed(1)} с против ${C.yaw.t90.toFixed(1)}, ` +
+    `тангаж ${F.pitch.t90.toFixed(1)} против ${C.pitch.t90.toFixed(1)}, крен ${F.roll.t90.toFixed(1)} против ` +
+    `${C.roll.t90.toFixed(1)}; предел тангажа ${(P.pitchRate * DEG).toFixed(1)}°/с против ${(before.pitchRate * DEG).toFixed(1)}`);
+  ok(Math.abs(P.rcsLag - before.rcsLag * Math.sqrt(k)) < 1e-12 && Math.abs(P.gearTime - before.gearTime * Math.sqrt(k)) < 1e-12
+    && Math.abs(P.throttleRate - before.throttleRate / Math.sqrt(k)) < 1e-12,
+    `приводы медленнее как √k: задержка маневровых ${P.rcsLag.toFixed(2)} с против ${before.rcsLag}, ` +
+    `шасси ${P.gearTime.toFixed(1)} с против ${before.gearTime}`);
+  // Масса, топливо, струя — по его массе.
+  ok(Math.abs(massT() - HULL.mass / 1000) < 1e-9 && HULL.mass > 20 * SHIP_MASS
+    && Math.abs(P.fuelMax - 270) < 1e-9 && Math.abs(P.hitRadius - 0.1) < 1e-12,
+    `масса ${(HULL.mass / 1e6).toFixed(1)} тыс. т — на неё и считается топливо; бак ${P.fuelMax} т, ` +
+    `радиус попаданий ${P.hitRadius * 1000} м`);
+  // Стоит на своих пятах, глаз — в кресле командира на мостике.
+  ok(HULL.feet.length === 3 && HULL.feet.every((f) => Math.abs(f.y + P.gearClear) < 1e-12)
+    && P.gearClear > 0.025 && HULL.eye.y > 0.03 && HULL.eye.z < 0,
+    `на шасси центр масс в ${(P.gearClear * 1000).toFixed(1)} м над грунтом, глаз командира ` +
+    `на ${((HULL.eye.y + P.gearClear) * 1000).toFixed(1)} м`);
+  // В порт проходит — по своим верху и низу, в щель 176 × 96 м.
+  {
+    const top = HULL.hi.y * 1000, bot = HULL.lo.y * 1000;
+    ok(top < SLOT.hh * 1000 && -bot < SLOT.hh * 1000 && HULL.half.x < SLOT.hw * 0.6
+      && HULL.size.y * 1000 > 60,
+      `в щель порта ${(SLOT.hw * 2000).toFixed(0)}×${(SLOT.hh * 2000).toFixed(0)} м проходит: башня ${top.toFixed(1)} м над ` +
+      `центром масс, гондолы ${(-bot).toFixed(1)} под ним (в прежнюю щель высотой 60 м — нет)`);
+  }
+  // Квантовый привод крейсера — свой: 140 тысяч км/с, и только на крейсер.
+  {
+    const doc = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+    const m = doc.modules.find((x) => x.code === 'quantum_p');
+    const flat = m ? moduleSpec(m) : {};
+    ok(m && m.slot === 'drive' && flat.quantumSpeed === 140000 && !('hulls' in flat)
+      && JSON.stringify(m.spec.hulls) === '["prometheus"]' && m.installed === false,
+      `квантовый привод крейсера: ${flat.quantumSpeed} км/с против ${doc.modules.find((x) => x.code === 'quantum').spec.flight.quantumSpeed}, ` +
+      `ставится только на «Прометей» (на нём стоит с завода)`);
+  }
+  useShipType('challenger');
+  const back = snap();
+  ok(Object.keys(before).every((key) => JSON.stringify(before[key]) === JSON.stringify(back[key]))
+    && HULL.code === 'challenger',
+    'пересел обратно — «Челленджер» тот же до последнего числа');
 }
 
 // --- 15. Камни на грунте ------------------------------------------------------
@@ -8758,6 +9105,282 @@ console.log('\n== наземный город ==');
     }
   }
 }
+
+// --- помещения «Прометея» ---------------------------------------------------
+//
+// js/models/interior.prom.js: полторы сотни помещений на тринадцати
+// палубах, лифт на двенадцать остановок и трап в нос. Проверяется то же,
+// что у «Челленджера», и в полный рост: каждая комната со стенами внутри
+// обшивки, корпус в ней вырезан, каждое окно встало на своё место, и весь
+// корабль проходится ногами — робот обходит все комнаты по дверям, на
+// лифте и по трапу и возвращается к креслу командира.
+{
+  console.log('\n== помещения «Прометея» ==');
+  const { buildPrometheus } = await import('../js/models/prometheus.js');
+  const I = await import('../js/models/interior.js');
+  const { prometheusPlan } = await import('../js/models/interior.prom.js');
+  const Wk = await import('../js/game/walker.js');
+  const Lf = await import('../js/game/lift.js');
+  const hull = buildPrometheus();
+  const t0 = performance.now();
+  const P = prometheusPlan(hull);
+  const In = I.buildInterior(hull, P);
+  const ms = performance.now() - t0;
+  const decks = new Set(In.rooms.map((r) => r.deck));
+  ok(In.rooms.length > 140 && decks.size >= 13 && In.lazy && ms < 1500,
+    `${In.rooms.length} помещений на ${decks.size} палубах, ${In.doors.length} дверей, ${In.lamps.length} ламп — ` +
+    `без сеток за ${ms.toFixed(0)} мс (сетки комнат — по требованию)`);
+  {
+    const t1 = performance.now();
+    const m = In.meshOf('bridge');
+    const one = performance.now() - t1;
+    ok(m && m.tris > 20000 && one < 400 && In.meshOf('bridge') === m,
+      `сетка мостика собирается по требованию: ${Math.round(m.tris / 1000)} тыс. треугольников за ${one.toFixed(0)} мс, второй раз — та же`);
+  }
+
+  // --- внутри корпуса: тела kit (js/models/kit.js, inside) — точка внутри
+  // тела и не в пустоте ниши. Проём окна мостика — пустота корпуса.
+  const holeAt = (r, x, y) => P.windows.some((w) => w.room === r.id && w.carve === false
+    && Math.abs(x - w.c) < w.w / 2 + 0.05 && y > r.lo[1] + w.y - 0.05 && y < r.lo[1] + w.y + w.h + 0.05);
+  const span = (a, b) => { const n = Math.max(1, Math.ceil((b - a) / 0.7)); return Array.from({ length: n + 1 }, (_, i) => a + (b - a) * i / n); };
+  const outside = (r, L, H) => {
+    let bad = 0;
+    for (const x of span(L[0], H[0])) for (const y of span(L[1], H[1])) for (const z of span(L[2], H[2])) {
+      if (x !== L[0] && x !== H[0] && y !== L[1] && y !== H[1] && z !== L[2] && z !== H[2]) continue;
+      if (!hull.prom.inside(x, y, z) && !(r && holeAt(r, x, y))) bad++;
+    }
+    return bad;
+  };
+  const outRooms = In.rooms.filter((r) => outside(r, [r.lo[0] - 0.45, r.lo[1] - 0.15, r.lo[2] - 0.45],
+    [r.hi[0] + 0.45, r.hi[1] + 0.15, r.hi[2] + 0.45])).map((r) => r.id);
+  ok(outRooms.length === 0, 'все помещения со стенами и плиткой — внутри обшивки' + (outRooms.length ? ': торчат ' + outRooms.join(', ') : ''));
+  const outCarve = Object.entries(In.roomCarve).filter(([id, c]) => outside(In.roomById[id], c.lo, c.hi)).map(([id]) => id);
+  ok(outCarve.length === 0 && Object.keys(In.roomCarve).length === In.rooms.length,
+    'вырез корпуса — по коробке на комнату, и ни одна не выходит за обшивку' + (outCarve.length ? ': ' + outCarve.join(', ') : ''));
+  // Грани корпуса, что лежат в комнатах (торцы сопряжённых тел), — все в
+  // вырезе своей комнаты.
+  {
+    const MM = 1000;
+    let uncut = 0;
+    for (const f of hull.faces) {
+      const c = [0, 1, 2].map((a) => f.v.reduce((s, i) => s + [hull.verts[i].x, hull.verts[i].y, hull.verts[i].z][a] * MM, 0) / f.v.length);
+      for (const r of In.rooms) {
+        if (c[0] <= r.lo[0] || c[0] >= r.hi[0] || c[1] <= r.lo[1] || c[1] >= r.hi[1] || c[2] <= r.lo[2] || c[2] >= r.hi[2]) continue;
+        const b = In.roomCarve[r.id];
+        if (!(c[0] > b.lo[0] && c[0] < b.hi[0] && c[1] > b.lo[1] && c[1] < b.hi[1] && c[2] > b.lo[2] && c[2] < b.hi[2])) uncut++;
+      }
+    }
+    ok(uncut === 0, `внутренние грани корпуса в помещениях вырезаны (${uncut} мимо выреза)`);
+  }
+
+  // --- окна: все встали (за обшивкой открыто, откос не глубже 2.5 м), и
+  // лоб мостика — проёмы самого корпуса.
+  {
+    const fit = new Set(In.windows.map((w) => w.id));
+    const lost = P.windows.filter((w) => !fit.has(w.id)).map((w) => w.id);
+    const cabins = In.rooms.filter((r) => r.name === 'КАЮТА');
+    const portholes = cabins.filter((r) => In.windows.some((w) => w.room === r.id)).length;
+    ok(lost.length === 0 && In.windows.length > 100 && portholes === cabins.length && cabins.length === 22,
+      `${In.windows.length} окон, все на месте: у каждой из ${cabins.length} кают палубы 8 — иллюминатор` +
+      (lost.length ? '; не встали: ' + lost.join(', ') : ''));
+  }
+
+  // --- лифт: двенадцать остановок, поездка по разгону и скорости.
+  {
+    const L = In.lifts[0];
+    const dy = In.roomById.lift1.lo[1] - In.roomById.lift11.lo[1];
+    const T = Lf.rideTime(L, dy);
+    const T2 = Lf.rideTime(L, 4);
+    ok(L.stops.length === 12 && Math.abs(dy - 40) < 1e-9 && T > 8 && T < 10 && Math.abs(T2 - 2 * Math.sqrt(4 / L.accel)) < 1e-9,
+      `лифт: ${L.stops.length} остановок, от мостика до палубы 11 — ${dy.toFixed(0)} м за ${T.toFixed(1)} с; на палубу ниже — ${T2.toFixed(1)} с`);
+  }
+
+  // --- весь корабль ногами.
+  {
+    const STEP = 1 / 60;
+    const W0 = { grid: Wk.solidGrid(In.solids), extra: [] };
+    const free = (p) => [[0, 0], [0.07, 0], [-0.07, 0], [0, 0.07], [0, -0.07]].every(([dx, dz]) => !Wk.blocked(W0, [p[0] + dx, p[1], p[2] + dz]));
+    const adj = new Map(In.rooms.map((r) => [r.id, []]));
+    for (const d of In.doors) {
+      adj.get(d.rooms[0]).push({ to: d.rooms[1], door: d });
+      adj.get(d.rooms[1]).push({ to: d.rooms[0], door: d });
+    }
+    for (const o of P.openings) { adj.get(o.a).push({ to: o.b, open: o }); adj.get(o.b).push({ to: o.a, open: o }); }
+    const L = In.lifts[0];
+    for (const a of L.stops) for (const b of L.stops) if (a !== b) adj.get(a.room).push({ to: b.room, lift: b });
+    const spotOf = (r) => {
+      const cx = (r.lo[0] + r.hi[0]) / 2, cz = (r.lo[2] + r.hi[2]) / 2;
+      const pts = [];
+      for (let x = r.lo[0] + 0.4; x <= r.hi[0] - 0.4; x += 0.25) for (let z = r.lo[2] + 0.4; z <= r.hi[2] - 0.4; z += 0.25) pts.push([x, r.lo[1], z]);
+      pts.sort((a, b) => Math.hypot(a[0] - cx, a[2] - cz) - Math.hypot(b[0] - cx, b[2] - cz));
+      return pts.find(free) || null;
+    };
+    // Путь в комнате: A* по клеткам в 0.25 м, где телу свободно (с запасом
+    // в 7 см: мебель робот обходит, а не трётся о неё).
+    const pathIn = (r, from, to) => {
+      const s = 0.25, x0 = r.lo[0] + 0.3, z0 = r.lo[2] + 0.3;
+      const nx = Math.max(1, Math.floor((r.hi[0] - 0.3 - x0) / s) + 1), nz = Math.max(1, Math.floor((r.hi[2] - 0.3 - z0) / s) + 1);
+      const cell = (p) => [Math.max(0, Math.min(nx - 1, Math.round((p[0] - x0) / s))), Math.max(0, Math.min(nz - 1, Math.round((p[2] - z0) / s)))];
+      const okc = new Uint8Array(nx * nz);
+      for (let i = 0; i < nx; i++) for (let k = 0; k < nz; k++) okc[i * nz + k] = free([x0 + i * s, r.lo[1], z0 + k * s]) ? 1 : 0;
+      const [si, sk] = cell(from), [ti, tk] = cell(to);
+      okc[si * nz + sk] = 1; okc[ti * nz + tk] = 1;
+      const g = new Float64Array(nx * nz).fill(Infinity), prev = new Int32Array(nx * nz).fill(-1);
+      const open = [[0, si * nz + sk]];
+      g[si * nz + sk] = 0;
+      while (open.length) {
+        open.sort((a, b) => a[0] - b[0]);
+        const [, c] = open.shift();
+        if (c === ti * nz + tk) break;
+        const ci = Math.floor(c / nz), ck = c % nz;
+        for (const [di, dk] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          const i = ci + di, k = ck + dk;
+          if (i < 0 || k < 0 || i >= nx || k >= nz || !okc[i * nz + k]) continue;
+          if (di && dk && (!okc[ci * nz + k] || !okc[i * nz + ck])) continue;
+          const n = i * nz + k, ng = g[c] + Math.hypot(di, dk);
+          if (ng < g[n]) { g[n] = ng; prev[n] = c; open.push([ng + Math.hypot(ti - i, tk - k), n]); }
+        }
+      }
+      let c = ti * nz + tk;
+      if (prev[c] < 0 && c !== si * nz + sk) return null;
+      const out = [];
+      while (c >= 0 && c !== si * nz + sk) { out.push([x0 + Math.floor(c / nz) * s, z0 + (c % nz) * s]); c = prev[c]; }
+      out.reverse();
+      out.push([to[0], to[2]]);
+      return out;
+    };
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    for (let i = 0; i < 60; i++) Wk.updateWalker(p, In, {}, STEP);
+    let time = 0, fail = null, headBump = false, rides = 0;
+    const visited = new Set([p.room.id]), opened = new Set();
+    const walkTo = (tx, tz, why, maxT = 30) => {
+      let t = 0, stuck = 0, last = p.pos.slice();
+      while (t < maxT) {
+        const dx = tx - p.pos[0], dz = tz - p.pos[2];
+        if (Math.hypot(dx, dz) < 0.12) return true;
+        p.yaw = Math.atan2(dx, dz);
+        const vy = p.vel[1];
+        const ev = Wk.updateWalker(p, In, { fwd: Math.min(1, Math.hypot(dx, dz) * 2) }, STEP);
+        for (const id of ev.opened) opened.add(id);
+        if (p.room) visited.add(p.room.id);
+        if (vy > 0.5 && p.vel[1] === 0) headBump = true;
+        t += STEP; time += STEP;
+        stuck = Math.hypot(p.pos[0] - last[0], p.pos[2] - last[2]) < 0.001 ? stuck + 1 : 0;
+        last = p.pos.slice();
+        if (stuck > 90) break;
+      }
+      fail = `${why}: стоит в ${p.room && p.room.id}`;
+      return false;
+    };
+    const follow = (r, to, why) => {
+      const path = pathIn(r, p.pos, to);
+      if (!path) { fail = why + ': пути нет'; return false; }
+      for (const [x, z] of path) if (!walkTo(x, z, why)) return false;
+      return true;
+    };
+    const cross = (e) => {
+      const here = In.roomById[p.room.id];
+      if (e.door) {
+        const d = e.door, ax = d.ax, t = ax === 0 ? 2 : 0;
+        const sgn = Math.sign(d.pos[ax] - (here.lo[ax] + here.hi[ax]) / 2);
+        const a = [0, here.lo[1], 0], b = [0, 0, 0];
+        a[ax] = d.pos[ax] - sgn * 0.75; a[t] = d.pos[t];
+        b[ax] = d.pos[ax] + sgn * 0.75; b[t] = d.pos[t];
+        if (!follow(here, a, 'к двери ' + d.id) || !walkTo(b[0], b[2], 'сквозь дверь ' + d.id)) return false;
+      } else if (e.open) {
+        const to = In.roomById[e.to];
+        if (here.id === 'corF' && !follow(here, [0, here.lo[1], here.hi[2] - 0.6], 'к трапу')) return false;
+        if (here.id === 'hangar' && !follow(here, [0, here.lo[1], here.lo[2] + 0.6], 'к трапу')) return false;
+        const target = e.to === 'hangar' ? to.lo[2] + 1.0 : e.to === 'corF' ? to.hi[2] - 1.0 : (here.id === 'corF' ? to.lo[2] + 0.3 : to.hi[2] - 0.3);
+        if (!walkTo(0, target, 'по трапу', 60)) return false;
+      } else {
+        const st = L.stops.find((s) => s.room === here.id);
+        if (!follow(here, [0.6, here.lo[1], st.panel[2]], 'к пульту лифта')) return false;
+        const at = Lf.panelNear(p, In);
+        if (!at) { fail = 'пульт лифта не достать'; return false; }
+        at.to = L.stops.indexOf(e.lift);
+        Lf.startRide(p, In, at);
+        let ev = null, t = 0;
+        while (ev !== 'arrive' && t < 40) { Wk.updateWalker(p, In, {}, STEP); ev = Lf.stepRide(p, In, STEP); t += STEP; time += STEP; }
+        if (ev !== 'arrive') { fail = 'лифт не доехал'; return false; }
+        rides++;
+      }
+      if (!p.room || p.room.id !== e.to) { fail = `после перехода в ${e.to} стоит в ${p.room && p.room.id}`; return false; }
+      return true;
+    };
+    const route = (a, b) => {
+      const prev = new Map([[a, null]]);
+      const q = [a];
+      while (q.length) {
+        const c = q.shift();
+        if (c === b) break;
+        for (const e of adj.get(c)) if (!prev.has(e.to)) { prev.set(e.to, { from: c, e }); q.push(e.to); }
+      }
+      const out = [];
+      let c = b;
+      while (prev.get(c)) { out.push(prev.get(c).e); c = prev.get(c).from; }
+      return out.reverse();
+    };
+    const order = [];
+    {
+      const seen = new Set();
+      const dfs = (id) => {
+        seen.add(id); order.push(id);
+        for (const e of adj.get(id)) if (!seen.has(e.to) && !e.lift) dfs(e.to);
+        for (const e of adj.get(id)) if (!seen.has(e.to)) dfs(e.to);
+      };
+      dfs('bridge');
+    }
+    for (const id of order) {
+      if (fail) break;
+      for (const e of route(p.room.id, id)) if (!cross(e)) break;
+      const spot = !fail && spotOf(In.roomById[id]);
+      if (spot) follow(In.roomById[id], spot, 'в ' + id);
+    }
+    // И сквозь двери, мимо которых обход не прошёл (короткий путь шёл другой).
+    for (const d of In.doors) {
+      if (fail || opened.has(d.id)) continue;
+      for (const e of route(p.room.id, d.rooms[0])) if (!cross(e)) break;
+      const e = adj.get(d.rooms[0]).find((x) => x.door === d);
+      if (!fail && e) cross(e);
+    }
+    if (!fail) for (const e of route(p.room.id, 'bridge')) if (!cross(e)) break;
+    if (!fail) follow(In.roomById.bridge, In.seat.stand, 'к креслу');
+    ok(!fail && visited.size === In.rooms.length,
+      `весь «Прометей» ногами — ${visited.size} помещений из ${In.rooms.length}, ${rides} поездок на лифте, трап в нос и обратно, ` +
+      `${Math.round(time / 60)} мин ходьбы` + (fail ? ': застрял — ' + fail : ''));
+    ok(opened.size === In.doors.length && !headBump && Wk.nearSeat(p, In),
+      `по дороге открылись все ${opened.size} дверей из ${In.doors.length}, голова ничего не задела, вернулся к креслу командира`);
+  }
+
+  // --- лифт держит двери: в пути заперты и закрыты, кто бы ни стоял рядом.
+  {
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    p.phase = 'walk';
+    const car = In.roomById.lift1, L = In.lifts[0];
+    p.pos = [0.6, car.lo[1], L.stops[0].panel[2]];
+    p.room = car;
+    for (let i = 0; i < 40; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const door = In.doors.find((d) => d.id === L.stops[0].door);
+    const openAt = door.open;
+    const at = Lf.panelNear(p, In);
+    at.to = 10;
+    const r = Lf.startRide(p, In, at);
+    let closedBy = null, t = 0, ev = null;
+    while (ev !== 'arrive' && t < 30) {
+      Wk.updateWalker(p, In, {}, 1 / 60);
+      ev = Lf.stepRide(p, In, 1 / 60);
+      t += 1 / 60;
+      if (ev === 'start') closedBy = t;
+    }
+    ok(openAt === 1 && closedBy > 0.3 && ev === 'arrive' && p.room.id === 'lift11' && !door.lock
+      && Math.abs(t - closedBy - r.T) < 0.05,
+      `лифт: двери закрылись за ${closedBy.toFixed(2)} с, поездка ${r.T.toFixed(1)} с, пилот в кабине палубы 11, двери отперты`);
+  }
+}
+
 
 // --- сенсорный набор пилота на ногах ---------------------------------------
 //
