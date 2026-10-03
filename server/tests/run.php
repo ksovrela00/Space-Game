@@ -1447,9 +1447,24 @@ section('верфь корпусов');
         && $st['me']['aboard'] === $newId && $st['me']['seated'] === true
         && $st['position']['dockedBody'] === $top['localId'],
         'пересел в одном доке: командует «Прометеем», сидит в его кресле');
+    // Палуба корабля — по его длине (Players::deckM): ангар «Прометея» в
+    // ста метрах от центра масс, мостик — в тридцати над ним, и точка на
+    // борту не обрезается до шестидесяти метров «Челленджера».
+    Api::call('player.save', ['me' => ['aboard' => $newId, 'seated' => false,
+        'walk' => ['pos' => [0, 32.1, 100.5], 'yaw' => 0, 'pitch' => 0]]], $tky);
+    $st = Api::call('player.state', [], $tky);
+    ok($st['me']['seated'] === false && abs($st['me']['walk']['pos'][2] - 100.5) < 1e-9
+        && abs($st['me']['walk']['pos'][1] - 32.1) < 1e-9 && abs(Players::deckM($row) - 117.0) < 1e-6,
+        'на палубе «Прометея» точка в ста метрах от центра — на борту (палуба ' . Players::deckM($row) . ' м)');
     $st = Api::call('ship.command', ['id' => $yHome], $tky);
     ok($st['ship']['id'] === $yHome && $st['ship']['type']['code'] === 'challenger',
         'и обратно — в «Челленджер» в том же доке');
+    Api::call('player.save', ['me' => ['aboard' => $yHome, 'seated' => false,
+        'walk' => ['pos' => [0, 0, 100.5], 'yaw' => 0, 'pitch' => 0]]], $tky);
+    $st = Api::call('player.state', [], $tky);
+    ok(abs($st['me']['walk']['pos'][2] - Players::DECK_M) < 1e-9,
+        'а у «Челленджера» — прежние ' . Players::DECK_M . ' м: дальше точки на борту нет');
+    Api::call('player.save', ['me' => ['aboard' => $yHome, 'seated' => true]], $tky);
     // Корабли в разных портах — пересесть нельзя: туда ещё надо долететь.
     $other = null;
     foreach ($ports as $p) if ($p['localId'] !== $top['localId']) { $other = $p; break; }

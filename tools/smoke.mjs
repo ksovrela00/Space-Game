@@ -922,6 +922,122 @@ await step('шлюз: сели на мир с атмосферой, E — люк
   }
 });
 
+// Шлюзы среднего корпуса «Прометея» — палуба 11, порог в 19.5 м над
+// грунтом. Трап у них в 97 ступеней, 23 м по горизонтали. Раньше трапа не
+// было вовсе (шлюз «в пустоту»): на стоянке люк открывался, а проём
+// оставался перекрыт — ни трапа, ни выхода. Здесь весь путь ногами: пульт,
+// цикл, трап, грунт и обратно в шлюз, люк задраен.
+await step('«Прометей» на грунте: шлюз палубы 11 — люк, трап в 97 ступеней, на грунт и обратно', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { AIR } = await import('../js/game/airlock.js');
+  const S = await import('../js/game/surface.js');
+  const Sp = await import('../js/game/specs.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const w = game.walk;
+  try {
+    if (Sp.useShipType('prometheus') !== 'prometheus') throw new Error('на «Прометей» не пересесть');
+    game.syncHull();
+    // Помещения рисует проход кабины WebGL2; здесь Canvas 2D — модель
+    // кабины подставляется руками, как в шаге шлюза «Челленджера».
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    // Корпус в 230 м: место ровнее, чем «Челленджеру».
+    let d = null;
+    for (let i = 0; i < 6000 && !d; i++) {
+      const u = -0.5 + (i / 5999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const q = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      if (!S.waterAt(b, q) && S.slopeAt(b, q) < 0.02 && S.groundRadius(b, q) - b.radius > 0.05) d = q;
+    }
+    if (!d) throw new Error('на океаническом мире не нашлось ровной суши');
+    S.worldPoint(b, d, S.groundRadius(b, d) + 0.04, sh.pos);
+    const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const f = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+    const fl = Math.hypot(f.x, f.y, f.z);
+    lookAlong(sh.basis, { x: f.x / fl, y: f.y / fl, z: f.z / fl }, up);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    sh.gear.out = true; sh.gear.t = 1;
+    frames(2);
+    if (!game.landHere() || game.state.mode !== 'landed') throw new Error('не сели: ' + game.state.mode);
+    frames(2);
+
+    key('KeyY'); frames(60);
+    const I = game.interior, air = I.air;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    const hx = air.hatches.find((x) => x.id === 'lockL86'), h = hx.h;
+    const r = I.roomById[h.lock];
+    const zc = (h.z[0] + h.z[1]) / 2;
+    if (!(hx.design.n > 90)) throw new Error('трап палубы 11 — ' + hx.design.n + ' ступеней, до грунта их не хватит');
+    // У пульта, лицом к люку.
+    const atPanel = () => {
+      w.pos = [h.panel[0] - h.side * 0.3, r.lo[1], h.panel[2] - 0.6]; w.room = r;
+      w.yaw = h.side * Math.PI / 2; w.pitch = 0;
+      frames(3);
+      if (game.walkHatch !== hx) throw new Error('у пульта шлюза палубы 11 люк не под рукой: ' + (game.walkHatch && game.walkHatch.id));
+    };
+    atPanel();
+    key('KeyE');
+    const cycle = Math.abs(1 - air.pOut) / AIR.rate + AIR.hatchTime + AIR.stairTime;
+    frames(Math.ceil(cycle * 60) + 30);
+    if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) {
+      throw new Error(`люк палубы 11 не открылся за ${cycle.toFixed(1)} с: панель ${hx.open}, трап ${hx.stair}, выход ${hx.exitOk}`);
+    }
+    // Из середины шлюза — в проём и по трапу вниз (30 м марша шагом).
+    w.pos = [(r.lo[0] + r.hi[0]) / 2, r.lo[1], zc]; w.room = r; w.yaw = h.side * Math.PI / 2;
+    frames(2);
+    holdDown('KeyW'); frames(60 * 22); release('KeyW'); frames(10);
+    if (!w.out) throw new Error('за порог не вышли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
+    const away = Math.hypot(w.pos[0], w.pos[2]);
+    if (!(away > 22) || !w.ground) throw new Error('по трапу на грунт не сошли: ' + away.toFixed(1) + ' м от порога');
+    // Обратно: развернуться и вверх по трапу — в шлюз.
+    w.yaw += Math.PI;
+    holdDown('KeyW');
+    for (let i = 0; i < 60 * 30 && w.out; i++) frames(1);
+    frames(40); release('KeyW'); frames(5);
+    if (w.out || !w.room || w.room.id !== h.lock) {
+      throw new Error('с трапа в шлюз палубы 11 не вернулись: ' + (w.out ? 'за бортом' : w.room && w.room.id));
+    }
+    atPanel();
+    key('KeyE');
+    frames(Math.ceil((AIR.stairTime / 1.3 + AIR.hatchTime + (1 - air.pOut) / AIR.rate) * 60) + 40);
+    if (!(hx.stair === 0 && hx.open === 0 && air.locks[h.lock].state === 'sealed')) {
+      throw new Error(`шлюз палубы 11 не задраился: трап ${hx.stair}, люк ${hx.open}, ${air.locks[h.lock].state}`);
+    }
+  } finally {
+    const I = game.interior;
+    if (w.on && I) {
+      w.out = null;
+      w.pos = I.seat.stand.slice(); w.room = I.roomById[I.seat.room];
+      frames(2); key('KeyE'); frames(50);
+    }
+    if (I && I.air) {
+      for (const x of I.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const L of Object.values(I.air.locks)) { L.p = 1; L.state = 'sealed'; L.vent = false; }
+      for (const q of Object.values(I.air.rooms)) { q.p = 1; q.leak = false; }
+    }
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Sp.useShipType('challenger');
+    game.syncHull();
+    game.cockpit = saved;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(2);
+  }
+});
+
 // Шлюз на склоне. Корабль садится на три стойки и стоит на склоне с креном
 // и тангажом до 20°, а человек за бортом стоит по отвесу: проём для него
 // наклонён. Раньше твёрдое корабля ложилось в оси грунта охватывающими

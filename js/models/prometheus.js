@@ -286,7 +286,10 @@ export function buildPrometheus() {
   for (const s of [1, -1]) {
     const x = 18.5 * s;
     const fr = sideFrame(x, s);
-    // Шлюз: рамка вокруг двери 2.6 × 2.8 м, порог на палубе ангара. Он
+    // Шлюз: рамка вокруг двери 2.6 × 2.8 м, порог на палубе ангара. Панель
+    // двери — накладкой с материалом обшивки (MAT.plate): открылся люк — её
+    // вырезает та же коробка, что и обшивку (js/gl/shaders.js, hullCarved,
+    // режет только обшивку), иначе в проёме висела бы закрытая дверь. Он
     // у самого ангара: дверь шлюза — в борту ангара (js/models/interior.prom.js).
     const zc = 158.1, y0 = -3.0, y1 = -0.2, w = 2.6;
     const fx = (dx) => x + s * dx;
@@ -294,7 +297,7 @@ export function buildPrometheus() {
     kit.box(Math.min(fx(0), fx(0.18)), Math.max(fx(0), fx(0.18)), y0 - 0.25, y1 + 0.25, zc + w / 2, zc + w / 2 + 0.25, { c: COL.edge, solid: false, mat: MAT.plain });
     kit.box(Math.min(fx(0), fx(0.18)), Math.max(fx(0), fx(0.18)), y1, y1 + 0.25, zc - w / 2, zc + w / 2, { c: COL.edge, solid: false, mat: MAT.plain });
     kit.box(Math.min(fx(0), fx(0.18)), Math.max(fx(0), fx(0.18)), y0 - 0.25, y0, zc - w / 2, zc + w / 2, { c: COL.edge, solid: false, mat: MAT.plain });
-    kit.decalRect(fr, uz(s, zc - w / 2), y0, uz(s, zc + w / 2), y1, COL.hatch, MAT.plain, 0, 0.02);
+    kit.decalRect(fr, uz(s, zc - w / 2), y0, uz(s, zc + w / 2), y1, COL.hatch, MAT.plate, 0, 0.02);
     // Огонь над шлюзом.
     lights.push({ p: [fx(0.3), y1 + 0.6, zc], kind: 'nav', color: [1.0, 0.75, 0.3] });
     hatches.push({ id: s > 0 ? 'bowR' : 'bowL', kind: 'boarding', side: s, z: zc, w, y0, y1, x, deck: 13 });
@@ -592,7 +595,7 @@ export function buildPrometheus() {
       kit.box(xa, xb, y0 - 0.22, y1 + 0.22, zc + w / 2, zc + w / 2 + 0.22, { c: COL.edge, solid: false, mat: MAT.plain });
       kit.box(xa, xb, y1, y1 + 0.22, zc - w / 2, zc + w / 2, { c: COL.edge, solid: false, mat: MAT.plain });
       kit.box(xa, xb, y0 - 0.22, y0, zc - w / 2, zc + w / 2, { c: COL.edge, solid: false, mat: MAT.plain });
-      kit.decalRect(sideFrame(x, s), uz(s, zc - w / 2), y0, uz(s, zc + w / 2), y1, COL.hatch, MAT.plain, 0, 0.02);
+      kit.decalRect(sideFrame(x, s), uz(s, zc - w / 2), y0, uz(s, zc + w / 2), y1, COL.hatch, MAT.plate, 0, 0.02);
       hatches.push({ id: (s > 0 ? 'lockR' : 'lockL') + zc, kind: 'eva', side: s, z: zc, w, y0, y1, x, deck: 11 });
     }
     // Решётки нижнего пояса.

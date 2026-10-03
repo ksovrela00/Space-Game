@@ -167,14 +167,14 @@ const PROM_WALK = (pos, yaw, pitch = 0, then = '') => `
 // месте океанического мира, люк hatch открыт и трап выдвинут сразу —
 // цикл в программном рендере занял бы минуты. then — что дальше: вид,
 // пилот на ногах и где он.
-const LOCK_SCENE = (hatch, then, pre = '') => `
+const LOCK_SCENE = (hatch, then, pre = '', alt = 0.02) => `
   liftoff();
   return Promise.resolve().then(() => { ${pre} }).then(() => standWhere(atmoWorld(),
     (t, F, b, d) => {
       if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
       const g = F.growth(b, t, d.x, d.y, d.z);
       return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
-    }, 0.02, 30, 60, 0))
+    }, ${alt}, 30, 60, 0))
     .then(() => {
       window.__hold = null;
       GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
@@ -909,7 +909,16 @@ const SCENES = {
       GAME.state.view = 'chase';
       window.__hold = () => { GAME.camOrbit.yaw = 1.2; GAME.camOrbit.pitch = 0.05; };
       window.__hold();
-      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`),
+      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`, 0.04),
+  },
+  promlock11: {
+    url: '&surface=clipmap',
+    title: '«Прометей» на стоянке: шлюз среднего корпуса (палуба 11) открыт, трап в 97 ступеней на грунте',
+    run: LOCK_SCENE('lockL86', `
+      GAME.state.view = 'chase';
+      window.__hold = () => { GAME.camOrbit.yaw = 2.45; GAME.camOrbit.pitch = 0.03; };
+      window.__hold();
+      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`, 0.04),
   },
   promlockdoor: {
     url: '&surface=clipmap',
@@ -923,7 +932,7 @@ const SCENES = {
       w.pos = [r.hi[0] - 1.0, r.lo[1], (r.lo[2] + r.hi[2]) / 2];
       w.yaw = -Math.PI / 2;
       w.pitch = -0.15;
-      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`),
+      frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`, 0.04),
   },
   lockdoor: {
     url: '&surface=clipmap',

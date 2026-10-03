@@ -1,4 +1,26 @@
-// Тень своего корабля: карта глубины от солнца.
+// Тени кораблей и станций: карты глубины от солнца.
+//
+// КОГО. Карт четыре — слоями одной текстуры (TEXTURE_2D_ARRAY): свой
+// корабль, два ближайших чужих (в трёх километрах от глаза) и ближайшая
+// станция (в двадцати). Каждая — по своему телу, со своим полуразмером:
+// у «Челленджера» это семьдесят метров (четыре сантиметра на точку), у
+// «Прометея» — сто двадцать, у станции — полтора километра. Каждая точка
+// сцены, освещённая солнцем, спрашивает все: заслонил ли её кто-нибудь.
+// Поэтому башня «Прометея» кладёт тень на его же палубу, сосед на стоянке
+// — на грунт рядом с тобой и на твой корпус, а станция — на корабль в
+// своём доке и у створа.
+//
+// КОГДА. Всегда, когда солнце видно: в пустоте тоже. Раньше карта была
+// одна, только своего корабля и только у грунта (тень на земле), и в
+// космосе корпус и станция были освещены «насквозь»: ни башня, ни крылья,
+// ни кольцо станции не отбрасывали ничего. Солнце за планетой — тени
+// нет вовсе: прямого света нет (js/gl/cabin.js, sunVisibility).
+//
+// СТЕКЛО. Смотровое стекло без переплёта (MAT.clear, окна мостика
+// «Прометея») свет пропускает: в проход глубины оно не пишется.
+//
+// Ниже — как это было устроено для своего корабля; для остальных слоёв
+// всё то же.
 //
 // Раньше тень была отдельным предметом: силуэт корпуса проецировался на
 // плоскость, натягивался на сетку 7×7 высот рельефа и рисовался тёмным
@@ -24,9 +46,14 @@
 // картой.
 
 import { Q } from '../core/quality.js';
+import { MAT } from '../models/hulldetail.js';
 
 export const SHIP_SHADOW = {
   size: Q.shipShadow || 2048,   // сторона карты, точек
+  layers: 4,                    // карт: свой, два чужих, станция
+  peers: 2,                     // чужих кораблей с тенью
+  peerRange: 3,                 // км — от глаза до чужого корабля с тенью
+  stationRange: 6,              // км — до станции с тенью: дальше её тень на корабле — редкость
   maxAlt: 3,                    // км — выше тень на грунте уже не разглядеть
   pad: 0.004,                   // км — запас к радиусу корпуса (трап и стойки лежат внутри него)
   unit: 7,                      // блок текстур: 0–2 — грунт, 4–6 — кабина
@@ -99,18 +126,26 @@ export function hullRadius(mesh) {
  * Проход глубины. Атрибут места стоит на том же номере, что у общей
  * программы сеток: корпус, стойки и трапы рисуются своими же буферами.
  */
-export const depthVs = (posLoc) => `#version 300 es
+export const depthVs = (posLoc, matLoc = -1) => `#version 300 es
 layout(location = ${posLoc}) in vec3 aPos;
+${matLoc >= 0 ? `layout(location = ${matLoc}) in float aMat;` : 'const float aMat = 0.0;'}
 uniform mat4 uModelView;   // модель -> оси карты, км от корабля
 uniform float uInvH;       // 1 / полуразмер карты
+out float vMat;
 void main() {
+  vMat = aMat;
   vec4 v = uModelView * vec4(aPos, 1.0);
   gl_Position = vec4(v.xyz * uInvH, 1.0);
 }`;
 
+// Материал обшивки (js/models/hulldetail.js): смотровое стекло без
+// переплёта солнце пропускает целиком.
 export const DEPTH_FS = `#version 300 es
 precision highp float;
-void main() {}`;
+in float vMat;
+void main() {
+  if (int(vMat + 0.5) == ${MAT.clear}) discard;
+}`;
 
 const f = (x) => { const s = String(x); return s.includes('.') ? s : s + '.0'; };
 
@@ -123,23 +158,66 @@ const f = (x) => { const s = String(x); return s.includes('.') ? s : s + '.0'; }
  */
 export const SHIP_SHADOW_GLSL = `
 uniform float uShipShadowOn;
-uniform highp sampler2DShadow uShipShadow;
-uniform mat4 uShipShadowMat;    // оси камеры (км) -> карта
-uniform vec2 uShipShadowK;      // точка карты: в долях карты и в км
-float shipShadowAt(vec3 p, vec3 n) {
-  vec3 s = (uShipShadowMat * vec4(p + n * (uShipShadowK.y * ${f(SHIP_SHADOW.offset)}), 1.0)).xyz;
+uniform int uShipShadowN;                         // сколько карт в этом кадре
+uniform highp sampler2DArrayShadow uShipShadow;
+uniform mat4 uShipShadowMat[${SHIP_SHADOW.layers}];   // оси камеры (км) -> карта
+uniform vec2 uShipShadowK[${SHIP_SHADOW.layers}];     // точка карты: в долях карты и в км
+float shadowLayer(int i, vec3 p, vec3 n) {
+  vec2 K = uShipShadowK[i];
+  vec3 s = (uShipShadowMat[i] * vec4(p + n * (K.y * ${f(SHIP_SHADOW.offset)}), 1.0)).xyz;
   if (s.x <= 0.0 || s.y <= 0.0 || s.x >= 1.0 || s.y >= 1.0 || s.z <= 0.0) return 1.0;
-  // Дальше куба — «за кораблём»: глубина упирается в его заднюю стенку.
-  float r = min(s.z, 1.0) - uShipShadowK.x * ${f(SHIP_SHADOW.bias)};
-  float t = uShipShadowK.x * 0.75;
-  return 0.25 * (texture(uShipShadow, vec3(s.xy + vec2(-t, -t), r))
-               + texture(uShipShadow, vec3(s.xy + vec2( t, -t), r))
-               + texture(uShipShadow, vec3(s.xy + vec2(-t,  t), r))
-               + texture(uShipShadow, vec3(s.xy + vec2( t,  t), r)));
+  // Дальше куба — «за телом»: глубина упирается в его заднюю стенку.
+  float r = min(s.z, 1.0) - K.x * ${f(SHIP_SHADOW.bias)};
+  float t = K.x * 0.75;
+  float L = float(i);
+  return 0.25 * (texture(uShipShadow, vec4(s.xy + vec2(-t, -t), L, r))
+               + texture(uShipShadow, vec4(s.xy + vec2( t, -t), L, r))
+               + texture(uShipShadow, vec4(s.xy + vec2(-t,  t), L, r))
+               + texture(uShipShadow, vec4(s.xy + vec2( t,  t), L, r)));
+}
+// Тень — от того, кто заслонил сильнее: свой корабль, сосед или станция.
+float shipShadowAt(vec3 p, vec3 n) {
+  float sh = 1.0;
+  for (int i = 0; i < ${SHIP_SHADOW.layers}; i++) {
+    if (i >= uShipShadowN) break;
+    sh = min(sh, shadowLayer(i, p, n));
+  }
+  return sh;
 }
 `;
 
 // --- карта ----------------------------------------------------------------------
+
+/**
+ * Карты теней слоями одной текстуры глубины и по кадровому буферу на
+ * слой. Не собралось — теней нет, сцена остаётся рабочей.
+ */
+export function makeShadowArray(gl, size, layers = SHIP_SHADOW.layers) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+  gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.DEPTH_COMPONENT24, size, size, layers, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+  const fbos = [];
+  let ok = true;
+  for (let i = 0; i < layers; i++) {
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, tex, 0, i);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    ok = ok && gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    fbos.push(fbo);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+  if (!ok) { gl.deleteTexture(tex); for (const f of fbos) gl.deleteFramebuffer(f); return null; }
+  return { tex, fbos, fbo: fbos[0], size, layers };
+}
 
 /**
  * Текстура глубины со сравнением и её кадровый буфер. Не собрался буфер

@@ -36,7 +36,7 @@ import { TileSet } from './tiles.js';
 import { loadGround, grainOrigin, grainPerUnit, GROUND, GRAIN_MAX_SPAN } from './ground.js';
 import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtree.js';
 import {
-  SHIP_SHADOW, shadowFrame, shadowMatrix, hullRadius, depthVs, DEPTH_FS, makeShadowTarget,
+  SHIP_SHADOW, shadowFrame, shadowMatrix, hullRadius, depthVs, DEPTH_FS, makeShadowArray,
 } from './shipshadow.js';
 import { cityLocal } from '../game/city.js';
 
@@ -72,7 +72,7 @@ import { warpPower } from '../game/warp.js';
 import { FLOW } from '../game/flow.js';
 import { Q } from '../core/quality.js';
 import { buildCockpit, EYE } from '../models/cockpit.js';
-import { CabinView } from './cabin.js';
+import { CabinView, sunVisibility } from './cabin.js';
 import { SuitView } from './spacesuit.js';
 import { seatPlace } from '../models/spacesuit.js';
 import { CARVE_MAX } from './hull.js';
@@ -362,13 +362,18 @@ export class GlScene {
     this.shipShadowOn = 0;
     this.shipShadowPasses = 0;
     try {
-      this.pShipDepth = buildProgram(gl, 'ship-shadow', depthVs(this.meshLocs.aPos), DEPTH_FS);
-      this.shipShadow = makeShadowTarget(gl, SHIP_SHADOW.size);
+      this.pShipDepth = buildProgram(gl, 'ship-shadow', depthVs(this.meshLocs.aPos, this.meshLocs.aMat), DEPTH_FS);
+      this.shipShadow = makeShadowArray(gl, SHIP_SHADOW.size, SHIP_SHADOW.layers);
     } catch (e) {
       console.error('Тень корабля не собралась, рисуем без неё:\n' + e.message);
     }
     this.shipShadowMat = new Float32Array(16);
     this.shipShadowFrame = null;
+    // Слои карт этого кадра: кто отбрасывает тень (свой, чужие, станция)
+    // и оси его карты (updateShipShadow).
+    this.shadowLayers = [];
+    this.shadowN = 0;
+    this.shadowWho = [];
     // Сэмплер карты у программ сеток — один раз и навсегда на своём
     // блоке, и карта на нём лежит всегда: выборка со сравнением из
     // чужой текстуры — неопределённое поведение.
@@ -379,7 +384,7 @@ export class GlScene {
       gl.uniform1f(p.loc('uShipShadowOn'), 0);
     }
     gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
-    gl.bindTexture(gl.TEXTURE_2D, this.shipShadow ? this.shipShadow.tex : null);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.shipShadow ? this.shipShadow.tex : null);
     gl.activeTexture(gl.TEXTURE0);
     this.stars = this.buildStars();
     // Поток частиц прыжка. Строится один раз на запуск и от звёзд не
@@ -1039,7 +1044,9 @@ export class GlScene {
     this.useGround(prog);
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projBridge);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
-    this.useShipShadow(prog, false);   // изнутри — у кабины свои тени
+    // Изнутри — у кабины свои тени. Но за окнами мостика «Прометея» —
+    // его же палуба и нос, и тень башни на них — эта, корабельная.
+    this.useShipShadow(prog, !!(game.interior && !game.interior.pod));
     // Фары светят вперёд, на мир, а не на свою обшивку.
     this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), logFC);
@@ -2443,72 +2450,127 @@ export class GlScene {
   }
 
   /**
-   * Карта тени своего корабля (js/gl/shipshadow.js): корпус, стойки,
-   * створки и трапы — глубиной со стороны солнца. Только у тела (не выше
-   * SHIP_SHADOW.maxAlt над грунтом), днём и в полёте или на стоянке: в
-   * порту и в пустоте тени ложиться не на что.
+   * Карты теней (js/gl/shipshadow.js): кто отбрасывает тень в этом кадре
+   * и его глубина со стороны солнца — по слою на тело.
+   *
+   *   слой 0 — свой корабль: корпус, стойки, створки и трапы;
+   *   дальше — ближайшие чужие корабли (не дальше SHIP_SHADOW.peerRange
+   *     от глаза, не больше SHIP_SHADOW.peers);
+   *   последний — ближайшая станция (не дальше stationRange).
+   *
+   * Всегда, когда солнце видно, — и в пустоте: тень там ложится на
+   * корпуса и станции. Солнце за телом (ночь, затмение) — карт нет вовсе.
    */
   updateShipShadow(game, sunPos) {
     this.shipShadowOn = 0;
-    const S = this.shipShadow, ship = game.ship, zone = game.zone;
-    if (!S || !ship || ship.away || !game.shipMesh || !zone || !zone.body) return;
-    const mode = game.state.mode;
-    if (mode !== 'flight' && mode !== 'landed') return;
-    if (!(zone.alt <= SHIP_SHADOW.maxAlt)) return;
-    const sx = sunPos.x - ship.pos.x, sy = sunPos.y - ship.pos.y, sz = sunPos.z - ship.pos.z;
-    const b = zone.body;
-    const ux = ship.pos.x - b.pos.x, uy = ship.pos.y - b.pos.y, uz = ship.pos.z - b.pos.z;
-    if (sx * ux + sy * uy + sz * uz <= 0) return;          // солнце за горизонтом
-    if (this._shadowMesh !== game.shipMesh) {
-      this._shadowMesh = game.shipMesh;
-      this._shadowR = hullRadius(game.shipMesh) + SHIP_SHADOW.pad;
+    this.shadowN = 0;
+    this.shadowWho.length = 0;
+    const S = this.shipShadow, ship = game.ship, world = game.world;
+    if (!S || !ship || !world) return;
+    if (game.warp && game.warp.phase === 'tunnel') return;
+    const cam = this.camera;
+    // Прямого света нет — нет и теней: солнце за планетой у глаза.
+    if (sunVisibility(world, cam.pos) < 0.02) return;
+    const casters = this._casters || (this._casters = []);
+    casters.length = 0;
+    const radius = (mesh) => {
+      const R = this._radii || (this._radii = new Map());
+      let r = R.get(mesh);
+      if (r === undefined) { r = hullRadius(mesh) + SHIP_SHADOW.pad; R.set(mesh, r); }
+      return r;
+    };
+    if (!ship.away && game.shipMesh) casters.push({ kind: 'own', pos: ship.pos, basis: ship.basis, r: radius(game.shipMesh) });
+    // Чужие — ближайшие к глазу.
+    const near = [];
+    for (const p of game.peers || []) {
+      if (!p.pos || !p.basis) continue;
+      const d = Math.hypot(p.pos.x - cam.pos.x, p.pos.y - cam.pos.y, p.pos.z - cam.pos.z);
+      if (d < SHIP_SHADOW.peerRange) near.push([d, p]);
     }
-    const sun = this._sunTo || (this._sunTo = { x: 0, y: 0, z: 0 });
-    sun.x = sx; sun.y = sy; sun.z = sz;
-    const F = this.shipShadowFrame = shadowFrame(ship.pos, sun, this._shadowR, this.shipShadowFrame || undefined);
-    // «Камера» прохода глубины — солнце: оси карты и центр в корабле.
-    const eye = this._depthEye || (this._depthEye = { pos: { x: 0, y: 0, z: 0 }, basis: makeBasis() });
-    eye.pos.x = F.c.x; eye.pos.y = F.c.y; eye.pos.z = F.c.z;
-    const eb = eye.basis;
-    eb.right.x = F.r[0]; eb.right.y = F.r[1]; eb.right.z = F.r[2];
-    eb.up.x = F.u[0]; eb.up.y = F.u[1]; eb.up.z = F.u[2];
-    eb.fwd.x = F.f[0]; eb.fwd.y = F.f[1]; eb.fwd.z = F.f[2];
+    near.sort((a, b) => a[0] - b[0]);
+    for (let i = 0; i < near.length && i < SHIP_SHADOW.peers; i++) {
+      const p = near[i][1], H = this.hullFor(game, p);
+      casters.push({ kind: 'peer', ship: p, pos: p.pos, basis: p.basis, mesh: H.mesh, r: radius(H.mesh) });
+    }
+    // Станция — ближайшая.
+    let st = null, sd = SHIP_SHADOW.stationRange;
+    for (const s of world.stations || []) {
+      const d = Math.hypot(s.pos.x - cam.pos.x, s.pos.y - cam.pos.y, s.pos.z - cam.pos.z);
+      if (d < sd) { sd = d; st = s; }
+    }
+    if (st && game.stationMesh) {
+      const mesh = game.stationMesh(st.type);
+      casters.push({ kind: 'station', pos: st.pos, basis: st.basis, mesh, r: radius(mesh) });
+    }
 
     const gl = this.gl, pd = this.pShipDepth;
     pd.use();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, S.fbo);
-    gl.viewport(0, 0, S.size, S.size);
     gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.depthMask(true);
     gl.clearDepth(1);
-    gl.clear(gl.DEPTH_BUFFER_BIT);
-    gl.uniform1f(pd.loc('uInvH'), 1 / F.h);
-    this.depthEye = eye;
-    this.drawObject(pd, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
-    this.drawGear(pd, game, sunPos);
-    this.drawHatches(pd, game, sunPos);
-    this.depthEye = null;
+    // Проходу глубины материал не нужен у сеток без него (станции, стойки):
+    // постоянное значение — «не стекло».
+    if (this.meshLocs.aMat >= 0) gl.vertexAttrib1f(this.meshLocs.aMat, 0);
+    const n = Math.min(casters.length, S.layers);
+    for (let i = 0; i < n; i++) {
+      const c = casters[i];
+      const sun = this._sunTo || (this._sunTo = { x: 0, y: 0, z: 0 });
+      sun.x = sunPos.x - c.pos.x; sun.y = sunPos.y - c.pos.y; sun.z = sunPos.z - c.pos.z;
+      const L = this.shadowLayers[i] || (this.shadowLayers[i] = { F: undefined, mat: new Float32Array(16) });
+      const F = L.F = shadowFrame(c.pos, sun, c.r, L.F);
+      // «Камера» прохода глубины — солнце: оси карты и центр в теле.
+      const eye = this._depthEye || (this._depthEye = { pos: { x: 0, y: 0, z: 0 }, basis: makeBasis() });
+      eye.pos.x = F.c.x; eye.pos.y = F.c.y; eye.pos.z = F.c.z;
+      const eb = eye.basis;
+      eb.right.x = F.r[0]; eb.right.y = F.r[1]; eb.right.z = F.r[2];
+      eb.up.x = F.u[0]; eb.up.y = F.u[1]; eb.up.z = F.u[2];
+      eb.fwd.x = F.f[0]; eb.fwd.y = F.f[1]; eb.fwd.z = F.f[2];
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fbos[i]);
+      gl.viewport(0, 0, S.size, S.size);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.uniform1f(pd.loc('uInvH'), 1 / F.h);
+      this.depthEye = eye;
+      if (c.kind === 'own') {
+        this.drawObject(pd, this.glMeshFor(game.shipMesh), ship.pos, ship.basis, 1, sunPos);
+        this.drawGear(pd, game, sunPos);
+        this.drawHatches(pd, game, sunPos);
+      } else if (c.kind === 'peer') {
+        this.drawObject(pd, this.glMeshFor(c.mesh), c.pos, c.basis, 1, sunPos);
+        this.drawGearOf(pd, game, c.ship, sunPos);
+        if (c.ship.air && c.ship.air.I) this.drawHatchesOf(pd, c.ship, c.ship.air, sunPos);
+      } else {
+        this.drawObject(pd, this.glMeshFor(c.mesh), c.pos, c.basis, 1, sunPos);
+      }
+      this.depthEye = null;
+      this.shadowWho.push(c.kind);
+      this.shipShadowPasses++;
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.shipShadowOn = 1;
-    this.shipShadowPasses++;
+    this.shadowN = n;
+    this.shipShadowOn = n > 0 ? 1 : 0;
+    this.shipShadowFrame = n > 0 ? this.shadowLayers[0].F : null;
   }
 
-  /** Тень корабля — в программу сеток на этот проход (on = false — без неё). */
+  /** Тени — в программу сеток на этот проход (on = false — без них). */
   useShipShadow(prog, on) {
     const gl = this.gl;
-    const yes = on && this.shipShadowOn ? 1 : 0;
-    gl.uniform1f(prog.loc('uShipShadowOn'), yes);
-    if (!yes) return;
-    shadowMatrix(this.shipShadowFrame, this.camera, this.shipShadowMat);
-    gl.uniformMatrix4fv(prog.loc('uShipShadowMat'), false, this.shipShadowMat);
-    gl.uniform2f(prog.loc('uShipShadowK'), 1 / this.shipShadow.size, 2 * this.shipShadowFrame.h / this.shipShadow.size);
-    // Карта лежит на своём блоке всегда, но проход кабины и запекание
+    const n = on && this.shipShadowOn ? this.shadowN : 0;
+    gl.uniform1f(prog.loc('uShipShadowOn'), n > 0 ? 1 : 0);
+    gl.uniform1i(prog.loc('uShipShadowN'), n);
+    if (!n) return;
+    for (let i = 0; i < n; i++) {
+      const L = this.shadowLayers[i];
+      shadowMatrix(L.F, this.camera, L.mat);
+      gl.uniformMatrix4fv(prog.loc(`uShipShadowMat[${i}]`), false, L.mat);
+      gl.uniform2f(prog.loc(`uShipShadowK[${i}]`), 1 / this.shipShadow.size, 2 * L.F.h / this.shipShadow.size);
+    }
+    // Карты лежат на своём блоке всегда, но проход кабины и запекание
     // работают с текстурами сами — привязываем заново, это дёшево.
     gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
-    gl.bindTexture(gl.TEXTURE_2D, this.shipShadow.tex);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.shipShadow.tex);
     gl.activeTexture(gl.TEXTURE0);
   }
 

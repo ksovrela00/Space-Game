@@ -3134,8 +3134,11 @@ console.log('\n== мок GL: путь отрисовки ==');
     };
     game.peers = [near];
     const withPeer = frame();
-    ok(withPeer === base + 1,
-      `чужой корабль в километре рисуется: ${base} вызовов без него, ${withPeer} с ним`);
+    // И отбрасывает тень: в километре — свой слой карты теней, это ещё
+    // один вызов прохода глубины (js/gl/shipshadow.js).
+    const shade = scene.shadowWho.includes('peer') ? 1 : 0;
+    ok(withPeer === base + 1 + shade && shade === 1,
+      `чужой корабль в километре рисуется и отбрасывает тень: ${base} вызовов без него, ${withPeer} с ним (${shade} — в карту теней)`);
 
     // Далёкий не рисуется: на таком расстоянии корпус не занимает и
     // пикселя, и весь смысл в метке HUD, а не в невидимом меше.
@@ -4177,16 +4180,22 @@ console.log('\n== мок GL: путь отрисовки ==');
         return { passes: scene.shipShadowPasses - p0, on: state.uni.uShipShadowOn, stencils: state.stencils - st0 };
       };
       const day = frame(overhead);
+      const dayWho = scene.shadowWho.slice();
       const night = frame(below);
       put(SHIP_SHADOW.maxAlt * 2);
       game.zone = landingContext(world, ship);
       const high = frame(overhead);
+      const highWho = scene.shadowWho.slice();
       world.star.pos = saveStar;
       game.zone = null;
-      ok(day.passes === 1 && day.on === 1 && state.ints.uShipShadow === SHIP_SHADOW.unit && scene.shipShadow
-        && night.passes === 0 && !night.on && high.passes === 0 && !high.on,
-        `тень корабля: днём у грунта — проход глубины в карту ${SHIP_SHADOW.size}², сетки читают её с блока ` +
-        `${state.ints.uShipShadow}; ночью и с ${SHIP_SHADOW.maxAlt * 2} км — без карты`);
+      // Тень своего корабля — всегда, когда солнце видно: у грунта она
+      // ложится на грунт, выше — на сам корпус (башня, крылья, стойки).
+      // Ночью (солнце за телом) прямого света нет — и карт нет.
+      ok(day.passes >= 1 && dayWho[0] === 'own' && day.on === 1 && state.ints.uShipShadow === SHIP_SHADOW.unit
+        && scene.shipShadow && scene.shipShadow.layers === SHIP_SHADOW.layers
+        && night.passes === 0 && !night.on && high.passes >= 1 && highWho[0] === 'own' && high.on === 1,
+        `тень корабля: днём — проход глубины в слой 0 карт ${SHIP_SHADOW.size}² × ${SHIP_SHADOW.layers}, сетки читают их с блока ` +
+        `${state.ints.uShipShadow}; и в ${SHIP_SHADOW.maxAlt * 2} км над грунтом — тоже (на корпус); ночью — без карт`);
     }
 
     // Сходимость подгрузки с холодного кэша: сколько кадров проходит,

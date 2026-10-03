@@ -9185,6 +9185,36 @@ console.log('\n== наземный город ==');
       (lost.length ? '; не встали: ' + lost.join(', ') : ''));
   }
 
+  // --- люки: в проёме открытого люка не остаётся ничего, что вырез не
+  // режет. Режет он только обшивку (js/gl/shaders.js, hullCarved: vMat > 0,
+  // и не стекло); панель двери-накладка с MAT.plain оставалась висеть в
+  // проёме — открытый люк изнутри был чёрным квадратом.
+  {
+    const { MAT } = await import('../js/models/hulldetail.js');
+    const { buildCobra } = await import('../js/models/ships.js');
+    const A = await import('../js/game/airlock.js');
+    const blockers = [];
+    const ch = buildCobra();
+    for (const [name, H, Ix] of [['«Прометей»', hull, In], ['«Челленджер»', ch, I.buildInterior(ch)]]) {
+      const air = A.makeAir(Ix, 0.01);
+      for (const hx of air.hatches) {
+        const c = A.hatchCut(hx);
+        for (const part of [H, H.decal].filter(Boolean)) {
+          for (const f of part.faces) {
+            const p = [0, 0, 0];
+            for (const i of f.v) { p[0] += part.verts[i].x * 1000; p[1] += part.verts[i].y * 1000; p[2] += part.verts[i].z * 1000; }
+            for (let a = 0; a < 3; a++) p[a] /= f.v.length;
+            const inCut = p[0] > c.lo[0] - 0.03 && p[0] < c.hi[0] + 0.03 && p[1] > c.lo[1] && p[1] < c.hi[1]
+              && p[2] > c.lo[2] && p[2] < c.hi[2];
+            if (inCut && (!(f.mat > 0) || f.mat === MAT.glass)) blockers.push(name + ' ' + hx.id);
+          }
+        }
+      }
+    }
+    ok(blockers.length === 0, 'в проёме открытого люка нет граней, которые вырез обшивки не режет' +
+      (blockers.length ? ': ' + [...new Set(blockers)].join(', ') : ''));
+  }
+
   // --- лифт: двенадцать остановок, поездка по разгону и скорости.
   {
     const L = In.lifts[0];
