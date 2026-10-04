@@ -3477,30 +3477,47 @@ console.log('\n== мок GL: путь отрисовки ==');
       `рубка: ${inCockpit} вызовов от первого лица (${sunOn ? 'тень, ' : ''}корпус изнутри, пост, ручка, РУД, стекло), ` +
       `${inChase} от третьего`);
 
-    // Свой корабль — «Прометей» (js/game/hull.js). Поста «Челленджера» на
-    // его мостике нет: из рубки рисуется только сам корпус изнутри, сквозь
-    // окна мостика — мир. И без выреза помещений «Челленджера»: их коробки
-    // прорезали бы обшивку крейсера там, где комнат нет.
+    // Свой корабль — «Прометей» (js/game/hull.js). На его мостике — свой
+    // пост (js/models/cockpit.prom.js): кресло, стойки и консоль с
+    // экранами, ручка и РУД, — тем же проходом, что пост «Челленджера»
+    // (тень, корпус изнутри, пост, ручка, РУД, стекло). Его же модель, а не
+    // чужая, и его экраны в атласе. Без игры (game.cockpit пуст) — один
+    // корпус изнутри: пост «Челленджера» на мостике крейсера чужой. И без
+    // выреза помещений «Челленджера»: их коробки прорезали бы обшивку
+    // крейсера там, где комнат нет.
     {
       const { useShipType } = await import('../js/game/specs.js');
       const { HULL } = await import('../js/game/hull.js');
+      const { podOf } = await import('../js/models/hulls.js');
       const keep = { mesh: game.shipMesh, gear: game.gearMesh, cockpit: game.cockpit, displays: game.displays };
       useShipType('prometheus');
-      game.shipMesh = HULL.mesh; game.gearMesh = HULL.gear; game.cockpit = null; game.displays = null;
+      const pod = podOf('prometheus');
+      game.shipMesh = HULL.mesh; game.gearMesh = HULL.gear; game.cockpit = pod;
+      game.displays = makeDisplays(pod, { canvas: (w, h) => ({ width: w, height: h, getContext: () => null }) });
+      for (const d of game.displays.list) d.dirty = true;
       const nanP = state.nan;
       const maxWas = state.intsMax;
       state.intsMax = {};
       game.state.view = 'cockpit';
+      const subsP = state.texSubs || 0;
       scene.render(game);
-      const onBridge = scene.cabinDraws, gearP = scene.gearDraws;
+      const onBridge = scene.cabinDraws, model = scene.cabin.model;
+      const upP = (state.texSubs || 0) - subsP;
+      const sunP = scene.cabin.sunVis > 0.001;
       const carveP = state.intsMax.uCarveN ?? 0;
       state.intsMax = maxWas;
       game.state.view = 'chase';
       scene.render(game);
       const chaseP = scene.cabinDraws;
-      ok(HULL.code === 'prometheus' && onBridge === 1 + gearP && chaseP === 0 && carveP === 0 && state.nan === nanP,
-        `свой «Прометей»: с мостика ${onBridge} вызов${onBridge === 1 ? '' : 'а'} — корпус изнутри` +
-        `${gearP ? ' и стойки' : ''}, без поста «Челленджера» и без выреза его помещений; от третьего лица — ${chaseP}`);
+      game.state.view = 'cockpit';
+      game.cockpit = null; game.displays = null;
+      scene.render(game);
+      const bare = scene.cabinDraws, gearP = scene.gearDraws;
+      ok(HULL.code === 'prometheus' && model === pod && pod.code === 'prometheus' && onBridge === (sunP ? 8 : 5) &&
+         upP === Object.keys(pod.screens).length && chaseP === 0 && carveP === 0 && bare === 1 + gearP && state.nan === nanP,
+        `свой «Прометей»: с мостика ${onBridge} вызовов — ${sunP ? 'тень, ' : ''}корпус изнутри, свой пост, ручка, РУД, ` +
+        `стекло; в атлас ушли ${upP} его экранов; от третьего лица — ${chaseP}; без модели поста — ${bare} ` +
+        `(корпус изнутри${gearP ? ' и стойки' : ''}), без поста «Челленджера» и выреза его помещений`);
       useShipType('challenger');
       Object.assign(game, { shipMesh: keep.mesh, gearMesh: keep.gear, cockpit: keep.cockpit, displays: keep.displays });
       game.state.view = 'cockpit';

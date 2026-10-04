@@ -505,14 +505,16 @@ function roomFaces(room) {
   // Крупность отделки — у комнаты (tile, plain): большим залам «Прометея»
   // хватает плитки покрупнее и гладких стен почаще (см. ROOM_FINISH).
   const fin = { tile: room.tile || INT.tile, plain: room.plain || 0 };
+  // Пол и подволок могут быть глаже стен (flatPlain — доля гладкой плитки).
+  const flat = { ...fin, plain: room.flatPlain !== undefined ? room.flatPlain : fin.plain };
   const wall = (side, ax, at, n, u, uAx) => ({ side, ax, at, n, u, uAx, v: [y0, y1], holes: [], doors: [], ...fin });
   return [
     wall('x-', 0, x0, [1, 0, 0], [z0, z1], 2),
     wall('x+', 0, x1, [-1, 0, 0], [z0, z1], 2),
     wall('z-', 2, z0, [0, 0, 1], [x0, x1], 0),
     wall('z+', 2, z1, [0, 0, -1], [x0, x1], 0),
-    { side: 'y-', ax: 1, at: y0, n: [0, 1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...fin },
-    { side: 'y+', ax: 1, at: y1, n: [0, -1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...fin },
+    { side: 'y-', ax: 1, at: y0, n: [0, 1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...flat },
+    { side: 'y+', ax: 1, at: y1, n: [0, -1, 0], u: [x0, x1], v: [z0, z1], holes: [], ...flat },
   ];
 }
 

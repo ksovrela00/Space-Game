@@ -56,7 +56,7 @@
       'hull', 'tiles', 'tileworker', 'wash'
     ],
     'models/': [
-      'airstair', 'city', 'city.parts', 'cockpit', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
+      'airstair', 'bridge.prom', 'city', 'city.parts', 'cockpit', 'cockpit.prom', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
       'interior', 'interior.parts', 'interior.prom', 'kit',
       'nature.parts', 'prometheus', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations'
     ],

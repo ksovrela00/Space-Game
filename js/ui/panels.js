@@ -245,7 +245,9 @@ function flightScreen(ctx, W, H, game) {
  */
 function scopeScreen(ctx, W, H, game) {
   chrome(ctx, W, H, 'scope', [L('ДАЛЬН'), '', '', '', L('ЦЕЛЬ')]);
-  const cx = 255, cy = 190, rx = 212, ry = 86;
+  // Диск — по ширине холста: на широком локаторе (660 × 330 у «Прометея»)
+  // эллипс шире, высота та же. При 510 — прежние 255 и 212.
+  const cx = W / 2, cy = 190, rx = W / 2 - 43, ry = 86;
   const range = game.scannerRange || 1;
 
   ctx.fillStyle = 'rgba(79,179,224,0.07)';
@@ -706,10 +708,11 @@ const DRAW = {
  * Нарисовать экран на его холсте. Масштаб от номинала ставится здесь
  * одним преобразованием — сами экраны верстаются в своих пикселях.
  */
-export function drawScreen(id, ctx, w, h, game) {
+export function drawScreen(id, ctx, w, h, game, nom = null) {
   const fn = DRAW[id];
   if (!fn || !game || !game.ship) return false;
-  const [NW, NH] = NOMINAL[id] || NOMINAL.mfd;
+  // Номинал — у экрана, если он свой (широкий локатор), иначе по виду.
+  const [NW, NH] = nom || NOMINAL[id] || NOMINAL.mfd;
   ctx.save();
   ctx.setTransform(w / NW, 0, 0, h / NH, 0, 0);
   ctx.lineCap = 'butt';

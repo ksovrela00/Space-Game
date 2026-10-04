@@ -45,7 +45,7 @@ import { ENTRY } from '../game/entry.js';
 import { L } from '../core/lang.js';
 import { SHIELD_AXES } from '../models/ships.js';
 import { stageLift } from '../models/gear.js';
-import { hullOf, ROOMS_TYPE } from '../models/hulls.js';
+import { hullOf, podOf, ROOMS_TYPE } from '../models/hulls.js';
 import { HULL } from '../game/hull.js';
 import { lampBeams, lampCone, LAMP } from '../game/lamps.js';
 import { washState, makeWash, engineLoad } from '../game/downwash.js';
@@ -71,7 +71,7 @@ import { bodyBasis } from '../game/world.js';
 import { warpPower } from '../game/warp.js';
 import { FLOW } from '../game/flow.js';
 import { Q } from '../core/quality.js';
-import { buildCockpit, EYE } from '../models/cockpit.js';
+import { buildCockpit } from '../models/cockpit.js';
 import { CabinView, sunVisibility } from './cabin.js';
 import { SuitView } from './spacesuit.js';
 import { seatPlace } from '../models/spacesuit.js';
@@ -1045,8 +1045,9 @@ export class GlScene {
     gl.uniformMatrix4fv(prog.loc('uProj'), false, this.projBridge);
     gl.uniform1f(prog.loc('uAmbient'), AMBIENT);
     // Изнутри — у кабины свои тени. Но за окнами мостика «Прометея» —
-    // его же палуба и нос, и тень башни на них — эта, корабельная.
-    this.useShipShadow(prog, !!(game.interior && !game.interior.pod));
+    // его же палуба и нос, и тень башни на них — эта, корабельная. Мостик
+    // с окнами узнаётся по кругу солнца во весь мостик (interior.sunR).
+    this.useShipShadow(prog, !!(game.interior && game.interior.sunR));
     // Фары светят вперёд, на мир, а не на свою обшивку.
     this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), logFC);
@@ -1094,13 +1095,20 @@ export class GlScene {
     const walking = !!(game.walk && game.walk.on);
     if (!st || st.view !== 'cockpit' || (st.mode === 'docked' && !walking)) return;
     if (!game.ship || !this.cabin) return;
-    // Корпус без поста пилота (мостик «Прометея»): из рубки — сам корпус
-    // изнутри и помещения мостика (пульты, кресла), сквозь окна — мир;
-    // приборы — поверх кадра, как в виде из-за спины (js/ui/hud.js). Пост
-    // «Челленджера» здесь чужой. Пока помещения не собраны — один корпус.
-    const deck = game.interior && !game.interior.pod;
-    if ((!HULL.cockpit && !walking) || (walking && deck)) {
-      if (deck) {
+    // Пост — того корабля, на палубе которого глаз (js/models/hulls.js,
+    // podOf): на своём — свой, с экранами; на чужом — пост его типа без
+    // софта (его приборы — не наши). Проверки без модели в игре получают
+    // пост «Челленджера» по первому требованию.
+    const I = game.interior;
+    const foreign = inForeign(game);
+    let pod = foreign ? (I ? podOf(I.code) : null) : game.cockpit;
+    if (!pod && !foreign && HULL.canopy) pod = this.cockpit || (this.cockpit = buildCockpit());
+    // Без поста — помещения и корпус изнутри, приборы поверх кадра, как в
+    // виде из-за спины (js/ui/hud.js); пока помещений нет — один корпус.
+    // План без поста в рубке (pod: false) — тоже одни помещения.
+    const deck = !!(I && !I.pod);
+    if (!pod || (walking && deck)) {
+      if (I) {
         const gl = this.gl;
         const size = [this.canvas.width, this.canvas.height];
         const pre = this.cabin.prepare(game, sunPos, size, true);
@@ -1124,10 +1132,9 @@ export class GlScene {
       this.cabinDraws = 1 + this.gearDraws;
       return;
     }
-    // Модель — из игры (там по ней раскладываются экраны); нет её —
-    // своя, собранная по первому требованию.
-    if (!game.cockpit && !this.cockpit) this.cockpit = buildCockpit();
-    const g = game.cockpit ? game : { ...game, cockpit: this.cockpit, displays: null };
+    // Модель — из игры (там по ней раскладываются экраны); чужой пост или
+    // собранный здесь — без экранов.
+    const g = !foreign && pod === game.cockpit ? game : { ...game, cockpit: pod, displays: null };
     const gl = this.gl;
     const size = [this.canvas.width, this.canvas.height];
     // 1. Экраны в атлас и карта теней — до кадра: у них свой буфер.
@@ -2228,12 +2235,14 @@ export class GlScene {
       }
       const room = p.st === 'seat' ? 'bridge' : ((I.roomAt([x, y + 0.5, z]) || {}).id || 'bridge');
       if (!vis.includes(room)) continue;
-      // Оси модели -> оси кабины: поворот по курсу и сдвиг от глаза пилота.
+      // Оси модели -> оси кабины: поворот по курсу и сдвиг от начала осей
+      // кабины (глаз в кресле этого корабля: у «Прометея» — не там, где у
+      // «Челленджера», cab.org).
       const c = Math.cos(yaw), s = Math.sin(yaw);
       M[0] = c; M[1] = 0; M[2] = -s; M[3] = 0;
       M[4] = 0; M[5] = 1; M[6] = 0; M[7] = 0;
       M[8] = s; M[9] = 0; M[10] = c; M[11] = 0;
-      M[12] = x - EYE.x; M[13] = y - EYE.y; M[14] = z - EYE.z; M[15] = 1;
+      M[12] = x - cab.org.x; M[13] = y - cab.org.y; M[14] = z - cab.org.z; M[15] = 1;
       gl.uniformMatrix4fv(prog.loc('uModel'), false, M);
       sv.pose(prog, p, t);
       sv.draw();

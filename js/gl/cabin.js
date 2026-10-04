@@ -1100,7 +1100,9 @@ export class CabinView {
     if (we) { this.eye[0] = we[0] - O.x; this.eye[1] = we[1] - O.y; this.eye[2] = we[2] - O.z; }
     else { this.eye[0] = 0; this.eye[1] = 0; this.eye[2] = 0; }
     const I0 = game.interior;
-    const wide = deck && I0 && I0.sunBox && I0.sunR;
+    // Круг во весь мостик — и с постом командира: тени окон и рёбер
+    // подволока ложатся и на помост, и на посты экипажа.
+    const wide = I0 && I0.sunBox && I0.sunR;
     if (wide) {
       const b = I0.sunBox;
       this.lightC[0] = (b.lo[0] + b.hi[0]) / 2 - O.x;
@@ -1134,7 +1136,9 @@ export class CabinView {
       partMatrix(cp.throttle.pivot, y.throttle || 0, 0, 0, this.mThrottle);
       parts.push([this.parts.shell, IDENT], [this.parts.stick, this.mStick], [this.parts.throttle, this.mThrottle]);
     }
-    const hullPart = cp ? this.parts.hull : (I0 && I0.hullM ? this.deckHullPart(I0) : null);
+    // Корпус в карту теней: у поста «Челленджера» — свой (в осях глаза), у
+    // поста без него (кресло «Прометея») и без поста — от помещений.
+    const hullPart = (cp && this.parts.hull) || (I0 && I0.hullM ? this.deckHullPart(I0) : null);
 
     // --- тени -------------------------------------------------------------
     const sunOn = L.sunC[0] + L.sunC[1] + L.sunC[2] > 0.003;
@@ -1409,7 +1413,10 @@ export class CabinView {
       this._bridgeOf = I;
     }
     const big = this._bridgeBox;
-    if (!this.deck && this.model && vis.includes('bridge')) {
+    // Лампы поста — когда пост того же корабля, что помещения: пост
+    // «Челленджера» не светит на мостике «Прометея».
+    const podHere = !I || !this.model || !this.model.code || this.model.code === I.code;
+    if (!this.deck && this.model && podHere && vis.includes('bridge')) {
       for (const l of this.model.lights || []) {
         out.push({ pos: [l.pos.x, l.pos.y, l.pos.z], dir: [l.dir.x, l.dir.y, l.dir.z], cos: l.cos,
           color: l.color, range: l.range, lo: big.lo, hi: big.hi, d: 0 });

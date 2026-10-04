@@ -7,6 +7,11 @@
 // щелчок — проложить путь (js/game/route.js): дальше в кадре метка
 // следующей точки — дверь, трап или пульт лифта.
 //
+// МЫШЬ. Пока план открыт, захват мыши снят и курсор виден (js/main.js,
+// css/style.css): помещение под курсором подсвечено, и внизу написано, куда
+// ляжет путь, — до щелчка. Щелчок по помещению — путь туда; по палубе в
+// списке — её план; колесо листает палубы; «✕» в углу — закрыть.
+//
 // По умолчанию выбрано кресло пилота (у «Прометея» — кресло командира на
 // мостике): M и Enter — и путь к креслу проложен из любого места корабля.
 
@@ -19,8 +24,11 @@ const fnt = (size, weight = '') => (weight ? weight + ' ' : '') + (size * Q.hudS
 const sc = (n) => n * Q.hudScale;
 
 export function makeDeckMap() {
-  return { open: false, deck: 0, sel: null, rects: [] };
+  return { open: false, deck: 0, sel: null, hover: null, at: null, moved: false, rects: [] };
 }
+
+/** Что под курсором: кнопка «закрыть» плана (deckMapClick, deckMapHover). */
+export const DECKMAP_CLOSE = '#close';
 
 /** Имя помещения для приборов: перевод и номер (каюты палубы 8). */
 export const roomName = (r) => (r ? L(r.name) + (r.num ? ' ' + r.num : '') : '');
@@ -35,6 +43,33 @@ export function openDeckMap(M, I, room, goal) {
   // Цель на другой палубе — план открывается на палубе пилота, но выбор
   // остаётся за целью: Enter ведёт туда же.
   M.open = true;
+  M.hover = null;
+  // Где был курсор, когда план открылся: пока мышь не сдвинулась, это
+  // место, где он стоял до захвата, а не там, где его видно.
+  M.at = null;
+  M.moved = false;
+}
+
+/**
+ * Курсор над планом: помещение, палуба в списке или «закрыть» под ним
+ * (M.hover). До первого сдвига мыши — ничего: см. openDeckMap.
+ */
+export function deckMapHover(M, x, y) {
+  if (!M.at) M.at = [x, y];
+  if (!M.moved && M.at[0] === x && M.at[1] === y) { M.hover = null; return null; }
+  M.moved = true;
+  const r = hitRect(M, x, y);
+  M.hover = r ? (r.close ? DECKMAP_CLOSE : r.deck !== undefined ? 'deck:' + r.deck : r.id) : null;
+  return M.hover;
+}
+
+/** Прямоугольник плана под точкой: «закрыть» первым — он поверх поля. */
+function hitRect(M, x, y) {
+  let best = null;
+  for (const r of M.rects) {
+    if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1 && (!best || r.close)) best = r;
+  }
+  return best;
 }
 
 /**
@@ -57,24 +92,28 @@ export function deckMapKeys(M, I, input) {
     const i = list.findIndex((r) => r.id === M.sel);
     M.sel = list[(Math.max(0, i) + dr + list.length) % list.length].id;
   }
+  // Колесо — палубы: вниз — палуба ниже (в списке они сверху вниз).
+  // Помещение мышью выбирают курсором, а не колесом.
   const wheel = input.takeWheel();
   if (wheel) {
+    M.deck = Math.max(0, Math.min(decks.length - 1, M.deck + Math.sign(wheel)));
     const list = decks[M.deck].rooms;
-    const i = list.findIndex((r) => r.id === M.sel);
-    M.sel = list[(Math.max(0, i) + Math.sign(wheel) + list.length) % list.length].id;
+    if (!list.some((r) => r.id === M.sel)) M.sel = list[0].id;
   }
   return null;
 }
 
-/** Щелчок по плану: помещение под курсором (или палуба в списке справа). */
+/**
+ * Щелчок по плану. @returns id помещения под курсором (путь туда),
+ * DECKMAP_CLOSE — «закрыть», null — мимо или палуба в списке (тогда она
+ * открыта на плане).
+ */
 export function deckMapClick(M, x, y) {
-  for (const r of M.rects) {
-    if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) {
-      if (r.deck !== undefined) { M.deck = r.deck; return null; }
-      return r.id;
-    }
-  }
-  return null;
+  const r = hitRect(M, x, y);
+  if (!r) return null;
+  if (r.close) return DECKMAP_CLOSE;
+  if (r.deck !== undefined) { M.deck = r.deck; return null; }
+  return r.id;
 }
 
 /**
@@ -123,6 +162,7 @@ export function drawDeckMap(ctx, w, h, game, I) {
   for (const r of D.rooms) {
     const a = sx(r.lo[0]), b = sx(r.hi[0]), c = sy(r.hi[2]), d = sy(r.lo[2]);
     const sel = r.id === M.sel, isGoal = r.id === goal, isHere = here && r.id === here.id;
+    const hov = r.id === M.hover;
     let fill = 'rgba(40,70,92,0.55)';
     if (r.kind === 'lift') fill = 'rgba(40,120,110,0.75)';
     else if (r.kind === 'lock') fill = 'rgba(120,96,40,0.6)';
@@ -131,8 +171,13 @@ export function drawDeckMap(ctx, w, h, game, I) {
     if (isHere) fill = 'rgba(79,179,224,0.45)';
     ctx.fillStyle = fill;
     ctx.fillRect(a, c, b - a, d - c);
-    ctx.lineWidth = sel || isGoal ? 2 : 1;
-    ctx.strokeStyle = sel ? AMBER : isGoal ? GREEN : CY_DIM;
+    // Под курсором — светлее и в белой рамке: щелчок проложит путь сюда.
+    if (hov) {
+      ctx.fillStyle = 'rgba(216,242,255,0.18)';
+      ctx.fillRect(a, c, b - a, d - c);
+    }
+    ctx.lineWidth = sel || isGoal || hov ? 2 : 1;
+    ctx.strokeStyle = hov ? INK : sel ? AMBER : isGoal ? GREEN : CY_DIM;
     ctx.strokeRect(a, c, b - a, d - c);
     M.rects.push({ id: r.id, x0: a, x1: b, y0: c, y1: d });
     // Ступени трапа — штрихами поперёк марша.
@@ -229,21 +274,47 @@ export function drawDeckMap(ctx, w, h, game, I) {
   decks.forEach((d, i) => {
     const y = ly0 + i * row;
     const cur = i === M.deck;
-    ctx.fillStyle = cur ? 'rgba(79,179,224,0.25)' : 'rgba(79,179,224,0.06)';
+    const hov = M.hover === 'deck:' + i;
+    ctx.fillStyle = cur ? 'rgba(79,179,224,0.25)' : hov ? 'rgba(79,179,224,0.16)' : 'rgba(79,179,224,0.06)';
     ctx.fillRect(lx, y, listW, row - 3);
+    if (hov) {
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(lx + 0.5, y + 0.5, listW - 1, row - 4);
+    }
     M.rects.push({ deck: i, x0: lx, x1: lx + listW, y0: y, y1: y + row - 3 });
     ctx.fillStyle = cur ? INK : CY;
     const mine = here && d.rooms.includes(here);
     ctx.fillText((mine ? '● ' : '  ') + L(d.deck) + (goalDeck && goalDeck === d.deck ? '  ◆' : ''), lx + sc(8), y + row * 0.65);
   });
 
-  // Выбор и подсказки.
-  const selRoom = I.roomById[M.sel];
+  // «Закрыть» — в правом верхнем углу, над списком палуб.
+  {
+    const bw = sc(118), bh = sc(30), bx = w - pad - bw, by = sc(20);
+    const hov = M.hover === DECKMAP_CLOSE;
+    ctx.fillStyle = hov ? 'rgba(255,204,102,0.28)' : 'rgba(79,179,224,0.12)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = hov ? AMBER : CY_DIM;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+    ctx.font = fnt(13, 'bold');
+    ctx.textAlign = 'center';
+    ctx.fillStyle = hov ? AMBER : INK;
+    ctx.fillText('✕ ' + L('ЗАКРЫТЬ'), bx + bw / 2, by + bh * 0.66);
+    M.rects.push({ close: true, x0: bx, x1: bx + bw, y0: by, y1: by + bh });
+  }
+
+  // Выбор и подсказки. Под курсором помещение — пишется оно: щелчок
+  // проложит путь туда; иначе — выбранное клавишами.
+  const hoverRoom = M.hover && I.roomById[M.hover];
+  const selRoom = hoverRoom || I.roomById[M.sel];
+  const selId = hoverRoom ? M.hover : M.sel;
   ctx.textAlign = 'left';
   ctx.font = fnt(15, 'bold');
-  ctx.fillStyle = AMBER;
+  ctx.fillStyle = hoverRoom ? INK : AMBER;
   const seatRoom = (I.seat && I.seat.room) || 'bridge';
-  const selName = selRoom ? roomName(selRoom) + (M.sel === seatRoom ? L(' · КРЕСЛО ПИЛОТА') : '') + ' · ' + L(deckOf(selRoom)) : '';
+  const selName = selRoom ? (hoverRoom ? L('ЩЕЛЧОК — ПУТЬ: ') : '') + roomName(selRoom) +
+    (selId === seatRoom ? L(' · КРЕСЛО ПИЛОТА') : '') + ' · ' + L(deckOf(selRoom)) : '';
   ctx.fillText(selName, pad, h - sc(58));
   if (R && goal) {
     ctx.font = fnt(13);
@@ -253,7 +324,7 @@ export function drawDeckMap(ctx, w, h, game, I) {
   ctx.font = fnt(12);
   ctx.fillStyle = CY;
   ctx.fillText(Q.touchUi ? L('НАЖМИТЕ НА ПОМЕЩЕНИЕ — ПРОЛОЖИТЬ ПУТЬ · НА ПАЛУБУ СПРАВА — ЕЁ ПЛАН')
-    : L('←→ ПАЛУБА · ↑↓ ПОМЕЩЕНИЕ · ENTER ИЛИ ЩЕЛЧОК — ПРОЛОЖИТЬ ПУТЬ · M — ЗАКРЫТЬ'), pad, h - sc(16));
+    : L('ЩЕЛЧОК ПО ПОМЕЩЕНИЮ — ПУТЬ · КОЛЕСО ИЛИ ←→ — ПАЛУБА · ↑↓ И ENTER — С КЛАВИАТУРЫ · M — ЗАКРЫТЬ'), pad, h - sc(16));
   ctx.restore();
 }
 

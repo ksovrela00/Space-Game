@@ -1007,8 +1007,13 @@ const SCENES = {
     run: PROM_WALK([1.6, 46, 61.0], -0.08, -0.06),
   },
   promwalkback: {
-    title: 'мостик «Прометея»: от окон назад — планшет-карта, экраны, дверь в лифтовой холл',
-    run: PROM_WALK([2.5, 46, 69.0], 'Math.PI + 0.15', -0.12),
+    title: 'мостик «Прометея»: от окон назад — помост командира, штурманский стол, экраны, дверь в лифтовой холл',
+    // Между постами штурмана и связи, у самого стекла: там проход.
+    run: PROM_WALK([4.8, 46, 69.4], 'Math.PI + 0.35', -0.14),
+  },
+  promchair: {
+    title: 'мостик «Прометея»: пост командира сбоку — кресло на помосте, стойки экранов, консоль с локатором',
+    run: PROM_WALK([-3.0, 46, 67.4], 1.86, -0.22),
   },
   promwalkcabin: {
     title: 'каюта палубы 8: иллюминатор там же, где его рисует корпус',
@@ -1028,6 +1033,21 @@ const SCENES = {
       return import('./js/ui/deckmap.js').then((D) => {
         GAME.setWalkGoal('bridge');
         D.openDeckMap(GAME.deckMap, GAME.interior, GAME.walk.room, GAME.walkGoal);
+        frames(3);
+      });`),
+  },
+  promplanmouse: {
+    title: 'план палубы 8 мышью: курсор над соседней каютой — она подсвечена, внизу «щелчок — путь»',
+    // Курсора на снимке нет (его рисует система), но видно, что под ним:
+    // рамка помещения и строка внизу. Сдвиг мыши — событием окна, как от
+    // настоящей мыши (js/core/input.js слушает окно).
+    run: PROM_WALK([-5.0, 18, 85.0], '-Math.PI / 2 + 0.3', -0.02, `
+      return import('./js/ui/deckmap.js').then((D) => {
+        D.openDeckMap(GAME.deckMap, GAME.interior, GAME.walk.room, null);
+        frames(2);
+        const I = GAME.interior;
+        const r = GAME.deckMap.rects.find((q) => q.id && q.id !== GAME.walk.room.id && I.roomById[q.id].num);
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: (r.x0 + r.x1) / 2, clientY: (r.y0 + r.y1) / 2 }));
         frames(3);
       });`),
   },
@@ -1782,31 +1802,4 @@ try {
     console.log('поверхность:', info);
   }
   // Кабина: собрались ли её шейдеры (мок GL в tools/gl.mjs их не
-  // компилирует — ошибку GLSL видно только здесь), рисуются ли экраны.
-  if (process.env.CABINDBG) {
-    const info = await run(cdp, `return JSON.stringify(GAME.renderStats && GAME.renderStats.cabin);`);
-    console.log('кабина:', info);
-  }
-  if (process.env.CITYDBG) {
-    const info = await run(cdp, `
-      const c = GAME.world.cities[0];
-      const p = GAME.ship.pos;
-      return JSON.stringify({
-        cities: GAME.world.cities.length,
-        radius: c && c.radius,
-        stats: GAME.renderStats && GAME.renderStats.city,
-        dist: c ? Math.hypot(c.pos.x - p.x, c.pos.y - p.y, c.pos.z - p.z) : null,
-      });
-    `);
-    console.log('город:', info);
-  }
-  writeFileSync(out, Buffer.from(shot.data, 'base64'));
-  console.log(`снимок: ${out}  (${W}×${H}, сцена «${scene.title}»)`);
-  cdp.close();
-} catch (e) {
-  console.error('ОШИБКА: ' + e.message);
-  process.exitCode = 1;
-} finally {
-  proc.kill();
-  try { rmSync(profile, { recursive: true, force: true }); } catch (e) { /* и ладно */ }
-}
+  // компилирует — ошибку GLSL видн�

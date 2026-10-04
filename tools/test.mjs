@@ -5472,6 +5472,190 @@ console.log('\n== телефон: профиль, джойстик, полный
 }
 
 
+// --- 17.4. Пост командира «Прометея» ------------------------------------------
+//
+// Кресло на помосте, две стойки экранов и консоль с локатором
+// (js/models/cockpit.prom.js) и мостик вокруг (js/models/bridge.prom.js).
+// Сверяется то же, что у поста «Челленджера»: экраны целиком в кадре,
+// ничем не заслонены и не зеркальны, атлас без наложений, — и то, ради
+// чего раскладка своя: окно перед креслом и нос в нём свободны.
+console.log('\n== пост командира «Прометея» ==');
+{
+  const { buildPromCockpit, PROM_SCREENS, PCP } = await import('../js/models/cockpit.prom.js');
+  const { prometheusPlan } = await import('../js/models/interior.prom.js');
+  const { buildInterior } = await import('../js/models/interior.js');
+  const { dirAt, CP: CP_CH } = await import('../js/models/cockpit.js');
+  const Wk = await import('../js/game/walker.js');
+  const hull = buildPrometheus();
+  const cp = buildPromCockpit(hull);
+  const In = buildInterior(hull, prometheusPlan(hull));
+  const W = 1600, H = 900;
+  const focal = (H / 2) / Math.tan(34 * Math.PI / 180);
+  const px = (p) => ({ x: W / 2 + focal * p.x / p.z, y: H / 2 - focal * p.y / p.z });
+  const trisOf = (verts, faces) => {
+    const out = [];
+    for (const f of faces) for (let t = 1; t + 1 < f.v.length; t++) out.push([verts[f.v[0]], verts[f.v[t]], verts[f.v[t + 1]], f]);
+    return out;
+  };
+  // Луч из глаза (начало осей поста): ближайшее пересечение.
+  const hit = (tris, d) => {
+    let best = Infinity, face = null;
+    for (const [a, b, c, f] of tris) {
+      const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z, e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
+      const px_ = d.y * e2z - d.z * e2y, py_ = d.z * e2x - d.x * e2z, pz_ = d.x * e2y - d.y * e2x;
+      const det = e1x * px_ + e1y * py_ + e1z * pz_;
+      if (Math.abs(det) < 1e-12) continue;
+      const inv = 1 / det, tx = -a.x, ty = -a.y, tz = -a.z;
+      const u = (tx * px_ + ty * py_ + tz * pz_) * inv;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (d.x * qx + d.y * qy + d.z * qz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 1e-6 && t < best) { best = t; face = f; }
+    }
+    return { t: best, face };
+  };
+  const shell = trisOf(cp.shell.verts, cp.shell.faces);
+
+  // Глаз поста — глаз кресла мостика и начало осей кабины.
+  const se = In.seat.eye, be = hull.prom.bridge.eye;
+  const gap = Math.max(Math.abs(cp.eye.x - se[0]), Math.abs(cp.eye.y - se[1]), Math.abs(cp.eye.z - se[2]),
+    Math.abs(se[0] - In.origin[0]), Math.abs(se[1] - In.origin[1]), Math.abs(se[2] - In.origin[2]),
+    Math.abs(se[1] - be[1]), Math.abs(se[2] - be[2]));
+  ok(gap < 1e-9 && In.pod === true,
+    `глаз поста — глаз кресла мостика и начало осей кабины (расхождение ${gap.toExponential(1)} м); в рубке — пост`);
+
+  // Пост стоит на палубе мостика и целиком в нём: помост — на полу,
+  // ни одна вершина не вылезает за стены, пол и подволок.
+  {
+    const R = In.roomById.bridge;
+    let out = 0;
+    for (const v of cp.shell.verts) {
+      const p = [v.x + se[0], v.y + se[1], v.z + se[2]];
+      if (p.some((c, i) => c < R.lo[i] - 0.01 || c > R.hi[i] + 0.01)) out++;
+    }
+    const w = cp.bound.hi.x - cp.bound.lo.x, d = cp.bound.hi.z - cp.bound.lo.z;
+    ok(out === 0 && Math.abs(cp.bound.lo.y + se[1] - R.lo[1]) < 1e-9 && w > 3 && w < 4 && d > 3 && d < 3.6,
+      `пост на палубе мостика и внутри него: помост ${w.toFixed(2)} × ${d.toFixed(2)} м, вершин снаружи — ${out}`);
+  }
+
+  // Экраны: все, целиком в кадре, не заслонены, не зеркальны; мониторы
+  // глазу — того же углового размера, что у «Челленджера» (софт один, и
+  // кегль его — под этот размер: 23 см на 85 см, 15.4°), локатор —
+  // широкий. Мерить надо угол, а не точки кадра: сбоку прямолинейная
+  // проекция растягивает монитор в 1/cos² азимута, на 37° — в полтора раза.
+  {
+    const scr = cp.screens;
+    const ids = PROM_SCREENS.map((s) => s.id);
+    ok(ids.every((id) => scr[id]) && Object.keys(scr).length === ids.length &&
+       ids.slice().sort().join() === SCREENS.map((s) => s.id).sort().join(),
+    `экранов у поста ${Object.keys(scr).length} — те же, что у «Челленджера»: ${ids.join(', ')}`);
+    const bad = [], hidden = [], mirror = [], widths = {};
+    for (const s of Object.values(scr)) {
+      const pts = s.corners.map((q) => ({ x: s.pos.x + (q.x - s.pos.x) * 0.96, y: s.pos.y + (q.y - s.pos.y) * 0.96, z: s.pos.z + (q.z - s.pos.z) * 0.96 }));
+      if (pts.map(px).some((p) => p.x < 0 || p.x > W || p.y < 0 || p.y > H)) bad.push(s.id);
+      for (const q of pts.concat([s.pos])) {
+        const L = Math.hypot(q.x, q.y, q.z), d = { x: q.x / L, y: q.y / L, z: q.z / L };
+        if (hit(shell.filter((t) => t[3].screen !== s.id), d).t < L - 0.004) { hidden.push(s.id); break; }
+      }
+      const c = px(s.pos);
+      const r = px({ x: s.pos.x + s.right.x * s.w * 0.4, y: s.pos.y + s.right.y * s.w * 0.4, z: s.pos.z + s.right.z * s.w * 0.4 });
+      const u = px({ x: s.pos.x + s.up.x * s.h * 0.4, y: s.pos.y + s.up.y * s.h * 0.4, z: s.pos.z + s.up.z * s.h * 0.4 });
+      if (!(r.x > c.x + 1) || !(u.y < c.y - 1)) mirror.push(s.id);
+      const a = s.corners[0], b = s.corners[1];
+      const la = Math.hypot(a.x, a.y, a.z), lb = Math.hypot(b.x, b.y, b.z);
+      widths[s.id] = Math.acos((a.x * b.x + a.y * b.y + a.z * b.z) / (la * lb)) * 180 / Math.PI;
+    }
+    ok(bad.length === 0 && hidden.length === 0, 'все экраны поста целиком в кадре и ничем не заслонены' +
+      (bad.length ? '; за кадром: ' + bad.join(', ') : '') + (hidden.length ? '; заслонены: ' + hidden.join(', ') : ''));
+    ok(mirror.length === 0, 'ни один экран поста не зеркальный и не перевёрнутый' + (mirror.length ? ': ' + mirror.join(', ') : ''));
+    const mfd = PROM_SCREENS.filter((s) => s.kind === 'mfd').map((s) => widths[s.id]);
+    const wide = scr.scope.w / scr.scope.h;
+    const ch = 2 * Math.atan(CP_CH.mfd.w / 2 / CP_CH.mfd.d) * 180 / Math.PI;
+    ok(Math.abs(Math.min(...mfd) - ch) < 1.5 && Math.abs(Math.max(...mfd) - ch) < 1.5 && Math.abs(wide - 2) < 1e-9 &&
+       widths.scope > 1.4 * Math.max(...mfd),
+      `мониторы глазу ${Math.min(...mfd).toFixed(1)}–${Math.max(...mfd).toFixed(1)}° в ширину (у «Челленджера» ${ch.toFixed(1)}°), ` +
+      `локатор широкий: 2:1, ${widths.scope.toFixed(1)}°`);
+  }
+
+  // Окно перед креслом свободно: ни стойки, ни консоль не заходят в
+  // середину кадра выше кромки консоли (−16°) — и нос, кончик которого
+  // на 13° под горизонтом, виден между постами рулевого и штурмана.
+  {
+    let blocked = 0, rays = 0;
+    for (let az = -20; az <= 20; az += 2) {
+      for (let el = -14; el <= 30; el += 2) {
+        rays++;
+        if (hit(shell, dirAt(az, el)).t < 50) blocked++;
+      }
+    }
+    const R = In.roomById.bridge, O = In.origin;
+    const m = In.meshOf('bridge');
+    const room = [];
+    for (let i = 0; i < m.tris; i++) {
+      const v = [0, 1, 2].map((k) => ({ x: m.pos[(i * 3 + k) * 3] - O[0], y: m.pos[(i * 3 + k) * 3 + 1] - O[1], z: m.pos[(i * 3 + k) * 3 + 2] - O[2] }));
+      room.push([v[0], v[1], v[2], null]);
+    }
+    const wall = R.hi[2] - O[2];
+    let nose = 0, noseRays = 0;
+    for (let az = -8; az <= 8; az += 2) {
+      for (const el of [-13, -12, -10]) {
+        noseRays++;
+        const d = dirAt(az, el);
+        if (hit(room, d).t < wall / d.z - 0.01 || hit(shell, d).t < 50) nose++;
+      }
+    }
+    ok(blocked === 0 && nose === 0,
+      `из кресла окно свободно: из ${rays} лучей в середину кадра (±20°, от −14° вверх) в пост упёрлось ${blocked}; ` +
+      `к носу (±8°, −13…−10°) сквозь посты мостика — ${noseRays - nose} из ${noseRays}`);
+  }
+
+  // Атлас поста: всё помещается, пропорции холстов — номинал софта (у
+  // локатора — свой, 660 × 330).
+  {
+    const d = makeDisplays(cp, { density: 2000, atlasW: 2048, canvas: () => null });
+    let overlap = 0;
+    for (const a of d.list) {
+      for (const b of d.list) {
+        if (a !== b && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) overlap++;
+      }
+    }
+    const inside = d.list.every((x) => x.x >= 0 && x.y >= 0 && x.x + x.w <= d.w && x.y + x.h <= d.h);
+    const aspect = d.list.map((x) => {
+      const [nw, nh] = x.nom || NOMINAL[x.id] || NOMINAL.mfd;
+      return Math.abs((x.w / x.h) / (nw / nh) - 1);
+    });
+    const dm = makeDisplays(cp, { density: 1200, atlasW: 1024, canvas: () => null });
+    ok(overlap === 0 && inside && (d.h & (d.h - 1)) === 0 && Math.max(...aspect) < 0.03 && d.byId.scope.nom[0] === 660 &&
+       dm.w === 1024 && dm.h <= 1024,
+    `атлас поста ${d.w}×${d.h}: ${d.list.length} холстов без наложений, пропорции — номинал софта ` +
+    `(худшее ${(Math.max(...aspect) * 100).toFixed(1)}%), на телефоне ${dm.w}×${dm.h}`);
+  }
+
+  // Лампы поста — внутри него; ручка и РУД — на пультах подлокотников.
+  {
+    const b = cp.bound;
+    const inside = (p) => p.x >= b.lo.x && p.x <= b.hi.x && p.y >= b.lo.y && p.y <= b.hi.y && p.z >= b.lo.z && p.z <= b.hi.z;
+    const A = PCP.arm;
+    const onPad = (p, s) => Math.abs(p.x - s * A.x) < 0.01 && Math.abs(p.y - A.y) < 0.01 && p.z > A.z1 - 0.15 && p.z < A.z1;
+    ok(cp.lights.length >= 3 && cp.lights.every((l) => inside(l.pos) && l.range > 0) &&
+       onPad(cp.stick.pivot, 1) && onPad(cp.throttle.pivot, -1),
+    `ламп у поста ${cp.lights.length}, все внутри; ручка — на правом подлокотнике, РУД — на левом`);
+  }
+
+  // Встав, командир стоит за креслом на помосте и может сесть обратно.
+  {
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    for (let i = 0; i < 90; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    const top = In.roomById.bridge.lo[1] + PCP.dais.h;
+    ok(Math.abs(p.pos[1] - top) < 0.01 && Wk.nearSeat(p, In) && p.room && p.room.id === 'bridge',
+      `встав, командир на помосте (ноги на ${(p.pos[1] - In.roomById.bridge.lo[1]).toFixed(2)} м над палубой) за креслом — и сесть можно`);
+  }
+}
+
+
 // --- 17.5. Свежий код на каждой перезагрузке ---------------------------------
 console.log('\n== свежий код: адреса модулей ==');
 {
@@ -9229,7 +9413,12 @@ console.log('\n== наземный город ==');
   {
     const STEP = 1 / 60;
     const W0 = { grid: Wk.solidGrid(In.solids), extra: [] };
-    const free = (p) => [[0, 0], [0.07, 0], [-0.07, 0], [0, 0.07], [0, -0.07]].every(([dx, dz]) => !Wk.blocked(W0, [p[0] + dx, p[1], p[2] + dz]));
+    // Клетка свободна, если телу есть место от высоты шага до макушки: что
+    // ниже шага (помост командира в 30 см, пороги), нога перешагивает сама
+    // (WALK.step) — для робота это не стена, как и для пешехода.
+    const lift = Wk.WALK.step - 0.02;
+    const free = (p) => [[0, 0], [0.07, 0], [-0.07, 0], [0, 0.07], [0, -0.07]]
+      .every(([dx, dz]) => !Wk.blocked(W0, [p[0] + dx, p[1] + lift, p[2] + dz], Wk.WALK.height - lift));
     const adj = new Map(In.rooms.map((r) => [r.id, []]));
     for (const d of In.doors) {
       adj.get(d.rooms[0]).push({ to: d.rooms[1], door: d });

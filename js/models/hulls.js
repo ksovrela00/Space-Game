@@ -11,17 +11,28 @@
 
 import { buildCobra, buildGear } from './ships.js';
 import { buildPrometheus, buildPrometheusGear } from './prometheus.js';
+import { buildCockpit } from './cockpit.js';
+import { buildPromCockpit } from './cockpit.prom.js';
 
-// cockpit — есть ли пост пилота с экранами (js/models/cockpit.js), rooms —
-// есть ли помещения, шлюзы и трапы (js/models/interior.js; план
-// «Прометея» — js/models/interior.prom.js). Пост с экранами — только у
-// «Челленджера»: на «Прометее» летают из кресла командира на мостике.
+// cockpit — есть ли пост пилота с экранами (podOf), canopy — фонарь
+// истребителя с переплётом (его стойки штрихами рисует худ на запасном
+// пути Canvas 2D, где поста нет), rooms — есть ли помещения, шлюзы и
+// трапы (js/models/interior.js; план «Прометея» — js/models/interior.prom.js).
+// Посты у типов разные: у «Челленджера» — доска под фонарём
+// (js/models/cockpit.js), у «Прометея» — кресло командира на мостике
+// (js/models/cockpit.prom.js).
 const BUILD = {
-  challenger: () => ({ code: 'challenger', mesh: buildCobra(), gear: buildGear(), cockpit: true, rooms: true }),
+  challenger: () => ({ code: 'challenger', mesh: buildCobra(), gear: buildGear(), cockpit: true, canopy: true, rooms: true }),
   prometheus: () => {
     const mesh = buildPrometheus();
-    return { code: 'prometheus', mesh, gear: buildPrometheusGear(mesh), cockpit: false, rooms: true };
+    return { code: 'prometheus', mesh, gear: buildPrometheusGear(mesh), cockpit: true, canopy: false, rooms: true };
   },
+};
+
+// Пост пилота типа: модель по его корпусу.
+const POD = {
+  challenger: (mesh) => buildCockpit(mesh),
+  prometheus: (mesh) => buildPromCockpit(mesh),
 };
 
 /**
@@ -37,7 +48,7 @@ const built = new Map();
 
 /** Положить уже собранный корпус (свой, при старте игры). */
 export function registerHull(code, mesh, gear) {
-  built.set(code, { code, mesh, gear, cockpit: code === 'challenger', rooms: true });
+  built.set(code, { code, mesh, gear, cockpit: !!POD[code], canopy: code === 'challenger', rooms: true });
 }
 
 /** Корпус и стойки типа code; неизвестный тип — null. */
@@ -48,6 +59,21 @@ export function hullOf(code) {
     built.set(code, h);
   }
   return h || null;
+}
+
+const pods = new Map();
+
+/**
+ * Пост пилота типа code — модель (js/models/cockpit*.js), собирается один
+ * раз: её рисует кабина и на своём корабле, и на палубе чужого того же
+ * типа. Нет поста — null.
+ */
+export function podOf(code) {
+  if (pods.has(code)) return pods.get(code);
+  const H = hullOf(code);
+  const p = H && H.cockpit && POD[code] ? POD[code](H.mesh) : null;
+  pods.set(code, p);
+  return p;
 }
 
 /** Известен ли такой тип корпуса. */

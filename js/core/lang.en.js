@@ -949,12 +949,14 @@ export const EN = {
   'ВЫ НА МЕСТЕ: ': 'YOU HAVE ARRIVED: ',
   'M — ПЛАН ПАЛУБЫ И ПУТЬ': 'M — DECK PLAN AND ROUTE',
   'на ногах: M': 'on foot: M',
-  'план палубы: где вы; помещение — Enter или щелчок, и путь к нему отмечен в кадре':
-    'deck plan: where you are; pick a room — Enter or click, and the route is marked in view',
+  'план палубы: где вы; помещение — щелчок мышью или Enter, и путь к нему отмечен в кадре':
+    'deck plan: where you are; pick a room — mouse click or Enter, and the route is marked in view',
   'в лифте: колесо / ↑↓, E': 'in the elevator: wheel / ↑↓, E',
   'выбрать палубу и ехать (по пути палуба уже выбрана)': 'choose a deck and ride (on a route the deck is preselected)',
-  '←→ ПАЛУБА · ↑↓ ПОМЕЩЕНИЕ · ENTER ИЛИ ЩЕЛЧОК — ПРОЛОЖИТЬ ПУТЬ · M — ЗАКРЫТЬ':
-    '←→ DECK · ↑↓ ROOM · ENTER OR CLICK — SET ROUTE · M — CLOSE',
+  'ЩЕЛЧОК ПО ПОМЕЩЕНИЮ — ПУТЬ · КОЛЕСО ИЛИ ←→ — ПАЛУБА · ↑↓ И ENTER — С КЛАВИАТУРЫ · M — ЗАКРЫТЬ':
+    'CLICK A ROOM — ROUTE · WHEEL OR ←→ — DECK · ↑↓ AND ENTER — KEYBOARD · M — CLOSE',
+  'ЩЕЛЧОК — ПУТЬ: ': 'CLICK — ROUTE: ',
+  'ЗАКРЫТЬ': 'CLOSE',
   'НАЖМИТЕ НА ПОМЕЩЕНИЕ — ПРОЛОЖИТЬ ПУТЬ · НА ПАЛУБУ СПРАВА — ЕЁ ПЛАН':
     'TAP A ROOM — SET ROUTE · TAP A DECK ON THE RIGHT — ITS PLAN',
   'КОРАБЛЬ: ВАРП-ПРЫЖОК': 'SHIP: WARP JUMP',

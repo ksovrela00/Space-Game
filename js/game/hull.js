@@ -44,7 +44,8 @@ export function setHull(code) {
   HULL.code = H.code;
   HULL.mesh = mesh;
   HULL.gear = gear;
-  HULL.cockpit = !!H.cockpit;         // пост пилота с экранами (js/models/cockpit.js)
+  HULL.cockpit = !!H.cockpit;         // пост пилота с экранами (js/models/hulls.js, podOf)
+  HULL.canopy = !!H.canopy;           // фонарь истребителя (стойки на запасном пути Canvas 2D)
   HULL.rooms = !!H.rooms;             // помещения, шлюзы, трапы (js/models/interior.js)
   HULL.lo = e.lo;                     // км, крайние точки в осях корпуса
   HULL.hi = e.hi;

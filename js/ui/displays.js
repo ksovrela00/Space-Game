@@ -73,10 +73,13 @@ export function makeDisplays(cockpit, opts = {}) {
   const atlas = layoutAtlas(sizes, atlasW);
   const list = atlas.items.map((it) => {
     const canvas = make(it.w, it.h);
+    // Номинал софта — у экрана, если он не как у всех своего вида
+    // (широкий локатор «Прометея», js/models/cockpit.prom.js).
+    const nom = cockpit.screens[it.id].nom || null;
     const ctx = canvas && canvas.getContext ? canvas.getContext('2d') : null;
     return {
       ...it,
-      canvas, ctx,
+      canvas, ctx, nom,
       rate: (SCREEN_RATE[it.id] || 10) * (opts.rateK || 1),
       next: 0,
       dirty: false,
@@ -101,7 +104,7 @@ export function updateDisplays(d, game, now) {
     // Отстали (первый кадр, пауза) — план начинается заново от «сейчас».
     s.next += 1 / s.rate;
     if (s.next < now) s.next = now + 1 / s.rate;
-    if (drawScreen(s.id, s.ctx, s.w, s.h, game)) { s.dirty = true; n++; }
+    if (drawScreen(s.id, s.ctx, s.w, s.h, game, s.nom)) { s.dirty = true; n++; }
   }
   d.draws += n;
   return n;

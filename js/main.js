@@ -11,7 +11,7 @@ import { Starfield } from './render/starfield.js';
 import { drawBody } from './render/planetview.js';
 import { GlScene } from './gl/scene.js';
 import { stageLift, legBoxes } from './models/gear.js';
-import { hullOf, ROOMS_TYPE } from './models/hulls.js';
+import { hullOf, podOf, ROOMS_TYPE } from './models/hulls.js';
 import { HULL } from './game/hull.js';
 import { stationMesh } from './models/stations.js';
 import { makeSystem, updateWorld, nearestBody } from './game/world.js';
@@ -39,7 +39,7 @@ import { entryState, airDensity, ENTRY } from './game/entry.js';
 import { makeDust, updateDust } from './game/dust.js';
 import { makeChase, updateChase, placeChase, rotAround } from './game/chase.js';
 import { makeFlow, updateFlow } from './game/flow.js';
-import { makeYoke, updateYoke, buildCockpit, EYE } from './models/cockpit.js';
+import { makeYoke, updateYoke, EYE } from './models/cockpit.js';
 import { makeDisplays, updateDisplays } from './ui/displays.js';
 import {
   Q, DEVICE, toggleFullscreen, fullscreenAvailable, isFullscreen as isFull,
@@ -76,7 +76,7 @@ import {
 } from './game/airlock.js';
 import { panelNear, startRide, stepRide, cancelRide } from './game/lift.js';
 import { routeTo, deckOf } from './game/route.js';
-import { makeDeckMap, openDeckMap, deckMapKeys, deckMapClick, drawDeckMap, roomName } from './ui/deckmap.js';
+import { makeDeckMap, openDeckMap, deckMapKeys, deckMapClick, deckMapHover, drawDeckMap, roomName, DECKMAP_CLOSE } from './ui/deckmap.js';
 import {
   vesselPoint, vesselDir, worldToVessel, nearVessels, bodyLocal, bodyLocalDir, bodyWorld, bodyWorldDir,
   personPlace,
@@ -176,13 +176,27 @@ let gearMesh = HULL.gear;
 // рисовать её нечем, и приборы там остаются по углам экрана, а стойки
 // фонаря — штрихами поверх кадра (js/ui/hud.js). Поэтому game.cockpit
 // значит ровно «в кадре есть настоящая кабина».
-const cockpitModel = scene ? buildCockpit(shipMesh) : null;
-// Экраны кабины — холсты с софтом мониторов (js/ui/displays.js). Их
-// картинка уходит текстурой на мониторы в кабине, поэтому они есть
-// только там же, где сама кабина.
-const cockpitScreens = cockpitModel
-  ? makeDisplays(cockpitModel, { density: Q.cabinDensity, atlasW: Q.cabinAtlas, rateK: Q.cabinRate })
-  : null;
+//
+// Пост у каждого типа свой (js/models/hulls.js, podOf): доска под
+// фонарём у «Челленджера», кресло командира со стойками экранов у
+// «Прометея». Экраны кабины — холсты с софтом мониторов
+// (js/ui/displays.js): их картинка уходит текстурой на мониторы поста,
+// поэтому и они — у поста своего типа и только там, где кабина есть.
+const screensOf = new Map();
+function cockpitOf(code) {
+  if (!scene) return null;
+  const model = podOf(code);
+  if (!model) return null;
+  let screens = screensOf.get(code);
+  if (!screens) {
+    screens = makeDisplays(model, { density: Q.cabinDensity, atlasW: Q.cabinAtlas, rateK: Q.cabinRate });
+    screensOf.set(code, screens);
+  }
+  return { model, screens };
+}
+const ownPod = cockpitOf(HULL.code);
+const cockpitModel = ownPod ? ownPod.model : null;
+const cockpitScreens = ownPod ? ownPod.screens : null;
 
 const game = {
   world, ship, shipMesh, stationMesh, gearMesh,
@@ -772,8 +786,9 @@ function syncHull() {
   game.shipMesh = shipMesh;
   game.gearMesh = gearMesh;
   ship.mesh = shipMesh;
-  game.cockpit = HULL.cockpit ? cockpitModel : null;
-  game.displays = HULL.cockpit ? cockpitScreens : null;
+  const pod = cockpitOf(HULL.code);
+  game.cockpit = pod ? pod.model : null;
+  game.displays = pod ? pod.screens : null;
   // Стоял на палубе своего корабля, а корпус сменился (пересадка) — в
   // кресло нового: палубы у него может не быть вовсе.
   if (game.walk.on && aboardVessel().own) seatPilot();
@@ -959,9 +974,13 @@ function walkKeys() {
     const I0 = game.interior;
     if (!I0 || w.out) { DM.open = false; return; }
     let act = deckMapKeys(DM, I0, input);
+    // Мышь: подсветка под курсором и щелчок — помещение (путь туда),
+    // палуба в списке (её план) или «закрыть».
+    deckMapHover(DM, input.mouse.x, input.mouse.y);
     if (input.mouse.clicked) {
       const id = deckMapClick(DM, input.mouse.x, input.mouse.y);
-      if (id) { DM.sel = id; act = 'route'; }
+      if (id === DECKMAP_CLOSE) act = 'close';
+      else if (id) { DM.sel = id; act = 'route'; }
     }
     if (act === 'route') setWalkGoal(DM.sel);
     if (act) {
@@ -2358,7 +2377,7 @@ function meNet() {
   if (game.pendingMe) return null;
   if (!w.on) {
     if (ship.id === null || ship.away) return null;
-    const e = I && I.code === HULL.code ? I.seat.eye : (HULL.cockpit ? [EYE.x, EYE.y, EYE.z] : [HULL.eye.x * 1000, HULL.eye.y * 1000, HULL.eye.z * 1000]);
+    const e = I && I.code === HULL.code ? I.seat.eye : (HULL.canopy ? [EYE.x, EYE.y, EYE.z] : [HULL.eye.x * 1000, HULL.eye.y * 1000, HULL.eye.z * 1000]);
     return { st: 'seat', s: ship.id, x: r3(e[0]), y: r3(e[1]), z: r3(e[2]), yaw: 0, pitch: 0, v: 0, air: 0 };
   }
   const v = r3(Math.hypot(w.vel[0], w.vel[2]));
@@ -3496,11 +3515,13 @@ function setupCamera() {
     // снаружи корпуса, — и своего носа из кабины не было видно. В этой же
     // точке начало координат кабины (js/models/cockpit.js).
     const b = ship.basis;
-    // Глаз — у текущего корпуса: в кокпите «Челленджера» или в кресле
-    // командира на мостике «Прометея» (js/game/hull.js).
-    const ex = HULL.cockpit ? EYE.x / 1000 : HULL.eye.x;
-    const ey = HULL.cockpit ? EYE.y / 1000 : HULL.eye.y;
-    const ez = HULL.cockpit ? EYE.z / 1000 : HULL.eye.z;
+    // Глаз — у поста текущего корпуса: в кокпите «Челленджера» или в
+    // кресле командира на мостике «Прометея» (js/models/hulls.js, podOf).
+    // Без поста (Canvas 2D) — глаз корпуса (js/game/hull.js).
+    const pe = game.cockpit ? game.cockpit.eye : (HULL.canopy ? EYE : null);
+    const ex = pe ? pe.x / 1000 : HULL.eye.x;
+    const ey = pe ? pe.y / 1000 : HULL.eye.y;
+    const ez = pe ? pe.z / 1000 : HULL.eye.z;
     cam.pos.x = ship.pos.x + b.right.x * ex + b.up.x * ey + b.fwd.x * ez;
     cam.pos.y = ship.pos.y + b.right.y * ex + b.up.y * ey + b.fwd.y * ez;
     cam.pos.z = ship.pos.z + b.right.z * ex + b.up.z * ey + b.fwd.z * ez;
@@ -3585,7 +3606,8 @@ let cursorClass = '';
 function render() {
   setupCamera();
 
-  const wantCursor = game.menu.open ? 'menu' : game.state.mode === ST.MAP ? 'map' : '';
+  // План палубы — мышью, как меню: стрелка (js/ui/deckmap.js).
+  const wantCursor = game.menu.open || game.deckMap.open ? 'menu' : game.state.mode === ST.MAP ? 'map' : '';
   if (wantCursor !== cursorClass) {
     screenCanvas.classList.remove('map', 'menu');
     if (wantCursor) screenCanvas.classList.add(wantCursor);

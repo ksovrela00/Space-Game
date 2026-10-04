@@ -198,7 +198,7 @@ function wallX(z) {
  * что нужно шейдеру кабины: материал, гладкость (сглаженные нормали по
  * общим вершинам), текстурные координаты экрана и его имя.
  */
-class Kit {
+export class Kit {
   constructor() { this.verts = []; this.faces = []; }
   pt(p) { this.verts.push(v3(p.x, p.y, p.z)); return this.verts.length - 1; }
   face(idx, c, mat, o = {}) {
@@ -283,7 +283,7 @@ class Kit {
 }
 
 /** Сечение бруса: видимая ширина w, толщина d, фаска c. */
-const beamSection = (w, d, c = 0.012) => [
+export const beamSection = (w, d, c = 0.012) => [
   [-w / 2, d * 0.45], [-w / 2, -d * 0.55 + c], [-w / 2 + c, -d * 0.55],
   [w / 2 - c, -d * 0.55], [w / 2, -d * 0.55 + c], [w / 2, d * 0.45],
 ];
@@ -671,7 +671,7 @@ function seat(k) {
 // --- подвижное -------------------------------------------------------------------
 
 /** Ручка управления: чехол, шток и рукоятка с гашеткой. От оси качания. */
-function buildStick() {
+export function buildStick() {
   const k = new Kit();
   const O = v3(0, 0, 0);
   k.tube(O, v3(0, 0.05, 0), 0.036, 0.018, 10, C.rubber, CMAT.rubber);            // чехол
@@ -688,7 +688,7 @@ function buildStick() {
 }
 
 /** РУД: ползун в прорези, рычаг и рукоятка. От оси качания. */
-function buildThrottle() {
+export function buildThrottle() {
   const k = new Kit();
   k.box(v3(0, 0.004, 0.0), X, Y, Z, 0.012, 0.012, 0.03, C.metal, CMAT.metal);
   k.tube(v3(0, 0.0, 0), v3(0, 0.12, 0.012), 0.009, 0.008, 8, C.metal, CMAT.metal);
@@ -763,6 +763,7 @@ export function buildCockpit(hull = buildCobra()) {
 
   const shell = k.mesh();
   return {
+    code: 'challenger',
     shell,
     glass: g.mesh(),
     hull: H,

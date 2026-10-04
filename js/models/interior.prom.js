@@ -47,6 +47,8 @@
 
 import { INT, K, F, C, prop, lamp, buildFlat, makePlan, wallPoint, partBounds } from './interior.js';
 import { CMAT } from './cockpit.js';
+import { PCP } from './cockpit.prom.js';
+import { furnishBridge } from './bridge.prom.js';
 
 const H = INT.wallH;            // 3.32 м — высота стены пака
 // Полы палуб (оси сборки), как в PROM.decks.
@@ -67,6 +69,7 @@ export function prometheusPlan(hull) {
   const Z = (z) => z - sh.z;
 
   const rooms = [], doors = [], windows = [], openings = [];
+  const R0 = (id) => rooms.find((r) => r.id === id);
   const fits = {};             // обстановка комнаты: вид (KINDS) или своя
   /** Комната: коробка в осях сборки; fit — вид обстановки. */
   const room = (id, name, n, x0, x1, z0, z1, fit, extra = {}) => {
@@ -365,6 +368,10 @@ export function prometheusPlan(hull) {
     if (w * d > 150) { r.tile = 2.25; r.plain = 0.55; }
     if (w * d > 500) { r.tile = 3.0; r.plain = 0.75; }
   }
+  // Пол и подволок мостика — гладкие: плитка пака с разметкой «осторожно»
+  // и люками читается полом цеха, а у мостика свой рисунок — помост,
+  // рёбра подволока и посты (js/models/bridge.prom.js).
+  R0('bridge').flatPlain = 1;
 
   const stairs = [
     { id: 'F', x: 0, zTop: Z(STAIR_TOP), yTop: Y(FL[11]), yBot: Y(FL[13]), dir: 1, room: 'stairF', to: 'hangar' },
@@ -435,7 +442,12 @@ export function prometheusPlan(hull) {
     code: 'prometheus',
     lazy: true,
     roomCarve: true,
-    INT: { ...INT, deck: { bridge: Y(FL[1]), d11: Y(FL[11]), d13: Y(FL[13]) } },
+    // Палуба кресла (bridge) — верх помоста командира: от неё сидящего
+    // садят в кресло (js/models/spacesuit.js, seatPlace).
+    INT: { ...INT, deck: { bridge: Y(FL[1] + PCP.dais.h), d11: Y(FL[11]), d13: Y(FL[13]) } },
+    // В рубке — пост командира (js/models/cockpit.prom.js): его рисует
+    // проход кабины, как пост пилота «Челленджера».
+    pod: true,
     rooms, stairs, doors, hatches, windows, openings, lifts, windowCarve,
     landings: (ctx) => {
       // Пол шахты трапа под маршем — на палубе 13.
@@ -447,10 +459,11 @@ export function prometheusPlan(hull) {
     // остальных палуб солнца в помещении нет, как у «Челленджера»).
     sunBox: { lo: [-12.2, Y(FL[1] - 0.2), Z(39.8)], hi: [12.2, Y(51.5), Z(71.2)] },
     // Кресло командира — на оси мостика, в 4.5 м от лобовых окон (глаз —
-    // тот же, что у мостика корпуса, js/models/prometheus.js). Встав, он
-    // оказывается за креслом; сесть — стоя за креслом.
+    // тот же, что у мостика корпуса, js/models/prometheus.js), на помосте
+    // в 30 см. Встав, он оказывается за креслом, на помосте; сесть — стоя
+    // за креслом.
     seat: {
-      eye: seatEye, stand: [0, Y(FL[1]), Z(65.3)],
+      eye: seatEye, stand: [0, Y(FL[1] + PCP.dais.h), Z(65.3)],
       zone: { lo: [-1.4, Y(FL[1]) - 0.5, Z(64.1)], hi: [1.4, Y(FL[1]) + 2.6, Z(66.25)] },
       room: 'bridge',
     },
@@ -671,30 +684,11 @@ function ownRooms(ctx, M, R, Y, Z) {
   const y1 = R.bridge.lo[1], y11 = R.hall11.lo[1], y13 = R.hangar.lo[1];
   const PI = Math.PI;
 
-  // --- мостик: кресло командира на оси, рулевой справа, штурман слева
-  // (канон), посты по бортам под окнами и между ними, планшет-карта
-  // позади кресла.
+  // --- мостик: посты экипажа, штурманский стол, подволок и свет
+  // (js/models/bridge.prom.js). Пост командира рисует проход кабины, а
+  // его твёрдое ставит тот же модуль.
   let b = M.bridge;
-  const Br = R.bridge;
-  prop(ctx, b, 'deskChair', 0, y1, Z(66.85), 0, F * 1.15);
-  for (const sx of [-1, 1]) {
-    prop(ctx, b, 'computerSmall', sx * 3.4, y1, Z(69.7), PI, K * 1.1);
-    prop(ctx, b, 'deskChair', sx * 3.4, y1, Z(68.6), 0, F);
-    for (const z of [56.9, 59.5, 62.1, 64.7]) prop(ctx, b, 'desk', sx * (Br.hi[0] - 0.42), y1, Z(z), -sx * PI / 2, F);
-    for (const z of [58.2, 60.8, 63.4]) prop(ctx, b, 'computerSmall', sx * (Br.hi[0] - 0.3), y1, Z(z), -sx * PI / 2, K);
-    prop(ctx, b, 'deskChair', sx * (Br.hi[0] - 1.2), y1, Z(59.5), sx * PI / 2, F);
-    prop(ctx, b, 'deskChair', sx * (Br.hi[0] - 1.2), y1, Z(64.7), sx * PI / 2, F);
-    // Большие экраны на задней стене, по бокам от двери.
-    prop(ctx, b, 'tv', sx * 6.0, y1 + 1.5, Br.lo[2] + 0.14, 0, F * 2.2, { solid: false });
-  }
-  // Планшет — стол с картой, светящейся сверху; обход — по бортам от него.
-  prop(ctx, b, 'table', 0, y1, Z(59.0), PI / 2, [F * 2.6, F * 2.9, F * 1.6]);
-  b.box([-1.15, y1 + 0.955, Z(57.6)], [1.15, y1 + 0.965, Z(60.4)], [70, 150, 235], CMAT.lamp, 0.9);
-  ctx.lamps.push({ pos: [0, y1 + 1.4, Z(59.0)], dir: [0, 1, 0], cos: -2, color: [0.25, 0.5, 0.9], range: 2.6,
-    room: 'bridge', kind: 'ceiling' });
-  for (const x of [-6.5, 0, 6.5]) {
-    for (const z of [58.0, 63.0, 67.8]) lamp(ctx, b, Br, x, Z(z), { w: 1.4, range: 6.0 });
-  }
+  furnishBridge(ctx, b, R.bridge, (x, y, z) => [x, Y(y), Z(z)], ctx.P.seat.eye);
 
   // --- холл мостика.
   b = M.hall1;

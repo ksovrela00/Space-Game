@@ -130,8 +130,8 @@ const el = (id) => ({
   style: {},
   classList: {
     _s: new Set(),
-    add(c) { this._s.add(c); },
-    remove(c) { this._s.delete(c); },
+    add(...cs) { for (const c of cs) this._s.add(c); },
+    remove(...cs) { for (const c of cs) this._s.delete(c); },
     contains(c) { return this._s.has(c); },
     toggle(c, on) { if (on === undefined ? this._s.has(c) : !on) this._s.delete(c); else this._s.add(c); },
   },
@@ -769,6 +769,81 @@ await step('пилот на ногах: Y — встать, ходьба, гол
     sh.speed = keep.speed; sh.throttle = keep.throttle;
     Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
     Object.assign(sh.basis.fwd, keep.basis.fwd);
+  }
+});
+
+// План палубы мышью (M на ногах). Пока план открыт, курсор виден (класс
+// menu на кадре, css/style.css), помещение под курсором подсвечено и
+// подписано внизу, щелчок по нему прокладывает путь и закрывает план,
+// колесо листает палубы, «✕» закрывает без пути. Раньше у кадра был
+// cursor: none и на плане: мышь была свободна, но курсора не было видно,
+// и план был только клавиатурный.
+await step('план палубы мышью: курсор виден, подсветка под курсором, щелчок — путь, колесо — палуба, ✕ — закрыть', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { Q } = await import('../js/core/quality.js');
+  const { WALK } = await import('../js/game/walker.js');
+  const { DECKMAP_CLOSE } = await import('../js/ui/deckmap.js');
+  const { decksOf } = await import('../js/game/route.js');
+  const saved = game.cockpit, wasTouch = Q.touchUi;
+  const sh = game.ship, thr = sh.throttle;
+  const click = (x, y) => {
+    mouse('mousedown', { button: 0, clientX: x, clientY: y });
+    mouse('mouseup', { button: 0, clientX: x, clientY: y });
+  };
+  try {
+    Q.touchUi = false;
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    sh.throttle = 0;
+    key('KeyY'); frames(Math.ceil(WALK.rise * 60) + 4);
+    if (game.walk.phase !== 'walk') throw new Error('не встали: ' + game.walk.phase);
+    const DM = game.deckMap, I = game.interior;
+    key('KeyM'); frames(2);
+    if (!DM.open) throw new Error('M не открыл план');
+    if (!nodes.screen.classList.contains('menu')) throw new Error('на плане курсора не видно');
+    // Курсор — на помещение не здесь и не выбранное.
+    const here = game.walk.room.id;
+    const r = DM.rects.find((q) => q.id && q.id !== here && q.id !== DM.sel && q.x1 - q.x0 > 20 && q.y1 - q.y0 > 20);
+    if (!r) throw new Error('на плане нет помещения под курсор');
+    const cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2;
+    mouse('mousemove', { clientX: cx, clientY: cy });
+    frames(1);
+    if (DM.hover !== r.id) throw new Error('под курсором не подсвечено: ' + DM.hover + ' вместо ' + r.id);
+    texts = []; frames(1);
+    const seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('ЩЕЛЧОК — ПУТЬ: ') >= 0)) throw new Error('внизу не сказано, куда ляжет путь');
+    if (!seen.some((s) => s.indexOf('ЗАКРЫТЬ') >= 0)) throw new Error('на плане нет кнопки «закрыть»');
+    click(cx, cy); frames(2);
+    if (DM.open || game.walkGoal !== r.id || !game.walkRoute) {
+      throw new Error(`щелчок не проложил путь: план ${DM.open ? 'открыт' : 'закрыт'}, цель ${game.walkGoal}`);
+    }
+    if (nodes.screen.classList.contains('menu')) throw new Error('курсор остался после плана');
+
+    // Ещё раз: колесо — палуба ниже, «✕» — закрыть, путь прежний.
+    key('KeyM'); frames(2);
+    const d0 = DM.deck, n = decksOf(I).length;
+    mouse('wheel', { deltaY: d0 < n - 1 ? 120 : -120 });
+    frames(1);
+    if (DM.deck !== d0 + (d0 < n - 1 ? 1 : -1)) throw new Error(`колесо не сменило палубу: ${d0} -> ${DM.deck} из ${n}`);
+    const c = DM.rects.find((q) => q.close);
+    if (!c) throw new Error('нет кнопки «закрыть»');
+    mouse('mousemove', { clientX: (c.x0 + c.x1) / 2, clientY: (c.y0 + c.y1) / 2 });
+    frames(1);
+    if (DM.hover !== DECKMAP_CLOSE) throw new Error('кнопка «закрыть» не подсвечена под курсором');
+    click((c.x0 + c.x1) / 2, (c.y0 + c.y1) / 2); frames(2);
+    if (DM.open || game.walkGoal !== r.id) throw new Error('«✕» не закрыл план или сбил путь');
+  } finally {
+    if (game.deckMap.open) { key('KeyM'); frames(2); }
+    game.walkGoal = null; game.walkRoute = null;
+    if (game.walk.on) {
+      game.walk.pos = game.interior.seat.stand.slice();
+      game.walk.room = game.interior.roomById[game.interior.seat.room || 'bridge'];
+      frames(2); key('KeyE'); frames(50);
+    }
+    game.cockpit = saved;
+    Q.touchUi = wasTouch;
+    sh.throttle = thr;
+    frames(2);
   }
 });
 

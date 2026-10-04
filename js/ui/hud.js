@@ -174,8 +174,8 @@ export function drawHud(r, game) {
   // Стойки фонаря штрихами нужны только там, где кабины нет в кадре, —
   // на запасном пути Canvas-2D. С настоящей кабиной они бы двоились. И
   // только у корпуса с фонарём: на мостике «Прометея» рамы — сами окна
-  // мостика (js/game/hull.js).
-  if (state.view === 'cockpit' && !game.cockpit && HULL.cockpit) drawCockpitFrame(ctx, w, h);
+  // мостика (js/game/hull.js, canopy).
+  if (state.view === 'cockpit' && !game.cockpit && HULL.canopy) drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam, ship);
   drawVelocityMarker(ctx, cam, ship);
   drawWarpAim(ctx, cam, game);
