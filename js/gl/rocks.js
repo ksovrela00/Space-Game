@@ -22,6 +22,8 @@ import { faceDir } from './quadtree.js';
 import { cubeLookup } from './bake.js';
 import { terrainOf, plateAt } from './terrain.js';
 import { buildIndexedMesh } from './mesh.js';
+import { GROUND } from './ground.js';
+import { ROCK_SHAPES } from '../models/rocks.parts.js';
 import { Q } from '../core/quality.js';
 
 export const ROCKS = {
@@ -123,46 +125,42 @@ export function scatterRocks(body, dir, radius, out = []) {
         dir: d,
         size: ROCKS.sizeMin + (ROCKS.sizeMax - ROCKS.sizeMin) * t,
         spin: h[1] * Math.PI * 2,
-        shape: (gi + gj * 3) & 3,
+        // Форма, сплющивание и тон — из второго хеша той же ячейки: шесть
+        // сканов, повёрнутых и чуть сжатых по-своему, на глаз не
+        // повторяются. Детерминированно — у всех игроков тот же камень.
+        ...rockLook(gi, gj, look.face),
       });
     }
   }
   return out;
 }
 
-// Четыре формы камня: неправильные восьмигранники. Строятся один раз и
-// потом только масштабируются — своя сетка на каждый камень стоила бы
-// дорого, а разглядеть разницу всё равно нельзя.
-const SHAPES = (() => {
-  const base = [
-    [0, 1, 0], [0, -1, 0],
-    [1, 0.15, 0], [-1, 0.15, 0], [0, 0.15, 1], [0, 0.15, -1],
-    [0.7, 0.45, 0.7], [-0.7, 0.45, -0.7],
-  ];
-  const faces = [
-    [0, 2, 6], [0, 6, 4], [0, 4, 3], [0, 3, 7], [0, 7, 5], [0, 5, 2],
-    [1, 6, 2], [1, 4, 6], [1, 3, 4], [1, 7, 3], [1, 5, 7], [1, 2, 5],
-  ];
-  const out = [];
-  for (let s = 0; s < 4; s++) {
-    const verts = base.map((p, i) => {
-      const h = hash4(s * 131 + i, 17, 3);
-      // Камень слегка приплюснут — лежит, а не воткнут, — но именно
-      // слегка: блин высотой в треть своей ширины с двадцати метров
-      // читается как пятно на грунте, а не как предмет.
-      return [
-        p[0] * (0.7 + h[0] * 0.6),
-        p[1] * (0.75 + h[1] * 0.45),
-        p[2] * (0.7 + h[2] * 0.6),
-      ];
-    });
-    out.push({ verts, faces });
-  }
-  return out;
-})();
+// Формы камня — фотосканы валунов Poly Haven (CC0), упрощённые до 320
+// треугольников (tools/rocks.mjs): низ на нуле, полуширина — единица,
+// гладкие нормали и UV по граням куба. Раньше здесь стояли процедурные
+// восьмигранники — и с двадцати метров россыпь читалась серыми
+// пирамидами: у пирамиды нет силуэта камня, и мерой высоты она не
+// служит. Скан — служит: скол, округлый бок, уступ.
+export const SHAPES = ROCK_SHAPES;
 
-// Вершин на камень: сам камень и его тень (восьмиугольник веером).
-const vertsPerRock = SHAPES[0].faces.length * 3 + 8 * 3;
+// Вершин тени на камень: восьмиугольник веером.
+const SHADOW_VERTS = 8 * 3;
+
+// Сколько сидит в грунте: доля высоты. Достаточно, чтобы камень не
+// выглядел положенным сверху (и закрыть открытый низ скана — валун
+// снимали лежащим), и мало, чтобы не съесть его.
+const SINK = 0.15;
+
+/** Форма, сплющивание и тон камня в ячейке — детерминированно. */
+function rockLook(gi, gj, face) {
+  const h = hash4(gi * 7 + 3, gj * 13 + 5, face * 31 + 977);
+  return {
+    shape: Math.min(SHAPES.length - 1, Math.floor(h[0] * SHAPES.length)),
+    squash: [0.85 + h[1] * 0.3, 0.8 + h[2] * 0.35, 0.85 + h[3] * 0.3],
+    tone: 0.62 + ((h[1] * 7.31) % 1) * 0.2,
+    uvAt: [h[2] * 13.7 % 1, h[3] * 7.9 % 1],
+  };
+}
 
 /**
  * Порционный сборщик поля: геометрия в локальных осях тела и в ЕДИНИЧНОМ
@@ -186,13 +184,22 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
   }
   const [ox, oy, oz] = origin;
   const n = rocks.length;
-  const total = n * vertsPerRock;
+  // Вершин и индексов у форм разное число: считаем по камням поля.
+  let total = 0, totalIdx = 0;
+  for (const r of rocks) {
+    const s = SHAPES[r.shape] || SHAPES[0];
+    total += s.pos.length / 3 + SHADOW_VERTS;
+    totalIdx += s.idx.length + SHADOW_VERTS;
+  }
   const positions = new Float32Array(total * 3);
   const normals = new Float32Array(total * 3);
   const colors = new Float32Array(total * 4);
-  const indices = new Uint32Array(total);
+  // Координата фактуры камня (GROUND.rock): в кусках снятой поверхности.
+  const uv = new Float32Array(total * 2);
+  const indices = new Uint32Array(totalIdx);
   const rgb = [0, 0, 0];
   let o = 0;
+  let oi = 0;
   let at = 0;
   let result = null;
 
@@ -200,7 +207,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
   // Считается тем же способом, что и тень корабля, только грубее —
   // камню хватает восьмиугольника.
   const SHADOW_SIDES = 8;
-  const shadow = (r, d, h, tx, ty, tz, bx, by, bz, sz, rgb) => {
+  const shadow = (r, d, h, tx, ty, tz, bx, by, bz, sz, tall, rgb) => {
     if (!sun) return;
     // Высота солнца над горизонтом в этой точке.
     const e = sun.x * d.x + sun.y * d.y + sun.z * d.z;
@@ -210,7 +217,6 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     const al = Math.hypot(ax, ay, az) || 1;
     ax /= al; ay /= al; az /= al;
     // Длина тени = высота камня / тангенс высоты солнца.
-    const tall = sz * (1 - 0.15);
     const len = Math.min(tall * Math.sqrt(Math.max(0, 1 - e * e)) / e, sz * ROCKS.shadowMax);
     // В касательных осях камня: куда именно вытягивать.
     const au = ax * tx + ay * ty + az * tz;
@@ -230,7 +236,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
       // (см. MESH_FS). Тень освещена тем же солнцем, что и грунт вокруг,
       // иначе на закате она оставалась бы светлее самой земли.
       colors[o * 4 + 3] = 0;
-      indices[o] = o;
+      indices[oi++] = o;
       o++;
     };
     // Эллипс: поперёк — ширина камня, вдоль — она же плюс длина тени.
@@ -257,9 +263,9 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     const h = 1 + terrain.displace(d.x, d.y, d.z, detail);
     terrain.color(d.x, d.y, d.z, rgb, detail);
     // Камень темнее грунта: это скол породы, а не пыль, которой засыпано
-    // всё вокруг. Разброс по камням и по граням — чтобы россыпь не
-    // выглядела набором одинаковых серых пятен.
-    const k = 0.68 + (r.shape & 1) * 0.12;
+    // всё вокруг. Разброс по камням — чтобы россыпь не выглядела набором
+    // одинаковых пятен; внутри камня цвет ведёт фактура (GROUND.rock).
+    const k = r.tone || 0.7;
 
     // Касательные оси в точке камня.
     const helper = Math.abs(d.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
@@ -274,51 +280,49 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     const cs = Math.cos(r.spin), sn = Math.sin(r.spin);
     const sz = r.size / R;                     // размер в единичном радиусе
 
-    const shape = SHAPES[r.shape];
-    // Камень сидит в грунте на седьмую часть высоты: достаточно, чтобы
-    // он не выглядел положенным сверху, и мало, чтобы не съесть его.
-    const sink = 0.15;
-    const place = (p) => {
-      const px = (p[0] * cs - p[2] * sn) * sz;
-      const pz = (p[0] * sn + p[2] * cs) * sz;
-      const py = (p[1] - sink) * sz;
-      return [
-        d.x * (h + py) + tx * px + bx * pz,
-        d.y * (h + py) + ty * px + by * pz,
-        d.z * (h + py) + tz * px + bz * pz,
-      ];
-    };
-    for (const f of shape.faces) {
-      const a = place(shape.verts[f[0]]);
-      const b = place(shape.verts[f[1]]);
-      const c = place(shape.verts[f[2]]);
-      // Плоское затенение: нормаль на грань, как у всех моделей здесь.
-      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-      const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
-      let nx = uy * vz - uz * vy;
-      let ny = uz * vx - ux * vz;
-      let nz = ux * vy - uy * vx;
+    const shape = SHAPES[r.shape] || SHAPES[0];
+    const [qx, qy, qz] = r.squash || [1, 1, 1];
+    const sink = SINK * shape.height;
+    // Фактура: координата формы (в полуширинах) -> метры -> куски
+    // снятой поверхности; у каждого камня своё начало, иначе одинаковые
+    // формы несли бы один и тот же рисунок.
+    const uk = r.size / GROUND.rock.sizeKm;
+    const [u0, v0] = r.uvAt || [0, 0];
+    const top = (shape.height - sink) * qy;
+    const base = o;
+    const P = shape.pos, N = shape.nrm, U = shape.uv;
+    for (let i = 0; i < P.length / 3; i++) {
+      const lx = P[i * 3] * qx, ly = (P[i * 3 + 1] - sink) * qy, lz = P[i * 3 + 2] * qz;
+      const px = (lx * cs - lz * sn) * sz;
+      const pz = (lx * sn + lz * cs) * sz;
+      const py = ly * sz;
+      positions[o * 3] = d.x * (h + py) + tx * px + bx * pz - ox;
+      positions[o * 3 + 1] = d.y * (h + py) + ty * px + by * pz - oy;
+      positions[o * 3 + 2] = d.z * (h + py) + tz * px + bz * pz - oz;
+      // Нормаль при сжатии по осям — обратным масштабом, иначе свет
+      // ложился бы по несжатой форме.
+      const mx = N[i * 3] / qx, my = N[i * 3 + 1] / qy, mz = N[i * 3 + 2] / qz;
+      const nxl = mx * cs - mz * sn, nzl = mx * sn + mz * cs;
+      let nx = d.x * my + tx * nxl + bx * nzl;
+      let ny = d.y * my + ty * nxl + by * nzl;
+      let nz = d.z * my + tz * nxl + bz * nzl;
       const nl = Math.hypot(nx, ny, nz) || 1;
-      nx /= nl; ny /= nl; nz /= nl;
-      // Грань чуть светлее или темнее соседней: у скола нет двух
-      // одинаковых площадок, и без этого камень выходит литым.
-      const jit = 0.86 + ((nx * 13.7 + nz * 7.3) % 1 + 1) % 1 * 0.28;
-      const cr = rgb[0] * k * jit, cg = rgb[1] * k * jit, cb = rgb[2] * (k + 0.03) * jit;
-      for (const p of [a, b, c]) {
-        positions[o * 3] = p[0] - ox;
-        positions[o * 3 + 1] = p[1] - oy;
-        positions[o * 3 + 2] = p[2] - oz;
-        normals[o * 3] = nx; normals[o * 3 + 1] = ny; normals[o * 3 + 2] = nz;
-        colors[o * 4] = cr; colors[o * 4 + 1] = cg; colors[o * 4 + 2] = cb;
-        // Альфа — доля СВЕЧЕНИЯ (MESH_FS), а не непрозрачность. Стояла
-        // единица, и камень не знал, где солнце: грань к свету и грань в
-        // тени красились одинаково, и россыпь читалась пятнами краски.
-        colors[o * 4 + 3] = 0;
-        indices[o] = o;
-        o++;
-      }
+      normals[o * 3] = nx / nl; normals[o * 3 + 1] = ny / nl; normals[o * 3 + 2] = nz / nl;
+      // У самого грунта камень темнее: туда не достаёт рассеянный свет
+      // неба — его закрывает земля вокруг.
+      const foot = 0.6 + 0.4 * Math.min(1, Math.max(0, ly / Math.max(top * 0.35, 1e-6)));
+      colors[o * 4] = rgb[0] * k * foot;
+      colors[o * 4 + 1] = rgb[1] * k * foot;
+      colors[o * 4 + 2] = rgb[2] * (k + 0.03) * foot;
+      // Альфа — доля СВЕЧЕНИЯ (MESH_FS), а не непрозрачность: камень не
+      // светится сам и знает, где солнце.
+      colors[o * 4 + 3] = 0;
+      uv[o * 2] = U[i * 2] * uk + u0;
+      uv[o * 2 + 1] = U[i * 2 + 1] * uk + v0;
+      o++;
     }
-    shadow(r, d, h, tx, ty, tz, bx, by, bz, sz, rgb);
+    for (const j of shape.idx) indices[oi++] = base + j;
+    shadow(r, d, h, tx, ty, tz, bx, by, bz, sz, top * sz, rgb);
   };
 
   return {
@@ -328,7 +332,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
       const end = Math.min(n, at + count);
       for (; at < end; at++) one(rocks[at]);
       if (at < n) return false;
-      result = { positions, normals, colors, indices, faces: o / 3, count: n, origin };
+      result = { positions, normals, colors, uv, indices, faces: oi / 3, verts: o, count: n, origin };
       return true;
     },
     get result() { return result; },

@@ -17,6 +17,8 @@
 | зерно грунта (гравий, трещины) | [Rocks Ground 05](https://polyhaven.com/a/rocks_ground_05) | CC0 | Rob Tuytel (Poly Haven) |
 | пятна цвета на грунте (валуны, проплешины) | [Rocky Terrain 02](https://polyhaven.com/a/rocky_terrain_02) | CC0 | Amal Kumar (Poly Haven) |
 | краска кабины (царапины, потёртости, блеск) | [Blue Metal Plate](https://polyhaven.com/a/blue_metal_plate) | CC0 | Rob Tuytel (Poly Haven) |
+| камни на грунте: формы валунов (фотосканы) | [Boulder 01](https://polyhaven.com/a/boulder_01), [Namaqualand Boulder 02](https://polyhaven.com/a/namaqualand_boulder_02), [03](https://polyhaven.com/a/namaqualand_boulder_03), [04](https://polyhaven.com/a/namaqualand_boulder_04), [05](https://polyhaven.com/a/namaqualand_boulder_05), [06](https://polyhaven.com/a/namaqualand_boulder_06) | CC0 | Rico Cilliers, Greg Zaal, Jenelle van Heerden, Dario Barresi (Poly Haven) |
+| фактура камня (рельеф и тон поверхности валуна) | [Rock Boulder Dry](https://polyhaven.com/a/rock_boulder_dry) | CC0 | Dimitrios Savva, Rico Cilliers (Poly Haven) |
 | звуки | [см. assets/sound/CREDITS.md](assets/sound/CREDITS.md) | CC0 | rubberduck, Kenney, TinyWorlds |
 
 ## Корпус

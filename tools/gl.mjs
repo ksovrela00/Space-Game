@@ -919,6 +919,64 @@ console.log('\n== растительность ==');
     ok(glowF === 0 && glowR === 0 && rg.colors.length > 0,
       'растения и камни освещены солнцем: ни одна вершина не светится сама');
 
+    // КАМНИ — фотосканы, а не пирамиды. ЖАЛОБА: «камни больше похожи на
+    // серые пирамиды». Формы — упрощённые сканы Poly Haven (tools/rocks.mjs):
+    // по 320 треугольников, низ на нуле, полуширина — единица, гладкие
+    // нормали, автор и лицензия при каждой.
+    {
+      const { SHAPES } = await import('../js/gl/rocks.js');
+      const { GROUND } = await import('../js/gl/ground.js');
+      let bad = [];
+      for (const s of SHAPES) {
+        const n = s.pos.length / 3;
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, z0 = Infinity, z1 = -Infinity, badN = 0;
+        for (let i = 0; i < n; i++) {
+          x0 = Math.min(x0, s.pos[i * 3]); x1 = Math.max(x1, s.pos[i * 3]);
+          y0 = Math.min(y0, s.pos[i * 3 + 1]);
+          z0 = Math.min(z0, s.pos[i * 3 + 2]); z1 = Math.max(z1, s.pos[i * 3 + 2]);
+          if (Math.abs(Math.hypot(s.nrm[i * 3], s.nrm[i * 3 + 1], s.nrm[i * 3 + 2]) - 1) > 2e-3) badN++;
+        }
+        const half = Math.max(x1 - x0, z1 - z0) / 2;
+        const tris = s.idx.length / 3;
+        if (!(tris >= 200 && tris <= 320 && Math.abs(y0) < 1e-3 && Math.abs(half - 1) < 2e-3 && badN === 0
+          && s.uv.length === n * 2 && s.idx.every((j) => j >= 0 && j < n) && s.license === 'CC0' && s.author)) {
+          bad.push(s.slug);
+        }
+      }
+      ok(SHAPES.length >= 5 && bad.length === 0,
+        'камни — фотосканы, а не пирамиды: ' + SHAPES.length + ' форм по ' + SHAPES[0].idx.length / 3
+        + ' треугольников, низ на нуле, полуширина единица, CC0 с автором'
+        + (bad.length ? ' — мимо: ' + bad.join(', ') : ''));
+
+      // В поле камень сидит в грунте низом и стоит над ним верхом. Солнца
+      // здесь нет — нет и теней, и вершины камней идут подряд. UV — в
+      // кусках снятой поверхности (1.8 м).
+      const rocks = scatterRocks(sea, spot, 0.2);
+      const geo2 = buildRockGeometry(sea, rocks, null, null, { x: spot.x, y: spot.y, z: spot.z });
+      const tf2 = makeTerrain(sea);
+      const o = geo2.origin;
+      let sunk = 0, stands = 0, uvMax = 0, k = 0;
+      for (const r of rocks) {
+        const sh = SHAPES[r.shape];
+        const nv = sh.pos.length / 3;
+        let lo = Infinity, hi = -Infinity;
+        const g = 1 + tf2.displace(r.dir.x, r.dir.y, r.dir.z);
+        for (let i = 0; i < nv; i++, k++) {
+          const x = geo2.positions[k * 3] + o[0], y = geo2.positions[k * 3 + 1] + o[1], z = geo2.positions[k * 3 + 2] + o[2];
+          const rr = Math.hypot(x, y, z);
+          lo = Math.min(lo, (rr - g) * sea.radius * 1000);
+          hi = Math.max(hi, (rr - g) * sea.radius * 1000);
+          uvMax = Math.max(uvMax, Math.abs(geo2.uv[k * 2]), Math.abs(geo2.uv[k * 2 + 1]));
+        }
+        if (lo < -0.02) sunk++;
+        if (hi > r.size * 1000 * 0.3) stands++;
+      }
+      ok(rocks.length > 20 && sunk === rocks.length && stands === rocks.length && uvMax > 0.5 && uvMax < 50
+        && existsSync(new URL('../' + GROUND.rock.file, import.meta.url)),
+        'в поле ' + rocks.length + ' камней: каждый низом в грунте и верхом над ним; фактура '
+        + GROUND.rock.file + ' укладывается кусками по ' + (GROUND.rock.sizeKm * 1000).toFixed(1) + ' м');
+    }
+
     // Изгиб под струёй (js/gl/wash.js): у каждой вершины растения — доля
     // высоты от комля и высота растения; у теней — нули, тень не гнётся.
     const nv = geo.positions.length / 3;
@@ -2209,8 +2267,8 @@ console.log('\n== фотография грунта ==');
       texParameteri() {}, generateMipmap() {}, pixelStorei() {},
     };
     const g = loadGround(glFake, (src, on, fail) => fail());
-    ok(g.grain && g.tint && g.failed === 2 && made.length === 2,
-      'без картинок текстуры остаются нейтральными, а не пустыми');
+    ok(g.grain && g.tint && g.rock && g.failed === 3 && made.length === 3,
+      'без картинок текстуры остаются нейтральными, а не пустыми (грунт, пятна, фактура камня)');
   }
 
   // Текст шейдера: без вызова весь слой — мёртвый код, и ни одна

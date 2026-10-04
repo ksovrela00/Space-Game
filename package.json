@@ -19,6 +19,7 @@
     "city": "node tools/city.mjs",
     "nature": "node tools/nature.mjs",
     "ground": "node tools/ground.mjs",
+    "rocks": "node tools/rocks.mjs",
     "cabin": "node tools/cabin.mjs",
     "interior": "node tools/interior.mjs",
     "cityplan": "node tools/cityplan.mjs",

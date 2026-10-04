@@ -65,6 +65,7 @@ import {
 } from './ui/screens.js';
 import { showDocked, stationKeys, makeStation, syncFromServer, forgetPort } from './ui/station.js';
 import { nextZoom, zoomFov, lookScale } from './game/zoom.js';
+import { makeStick, moveStick, centerStick, stickControls, STICK } from './game/mousefly.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
   standAt, deckWorld,
@@ -216,6 +217,11 @@ const game = {
   dockAssist: null,
   help: false,           // открыта справка (H) — слой, а не режим
   zoom: 1,               // приближение по нажатию колеса: 1, 2, 4, 8 (js/game/zoom.js)
+  // Управление мышью (Ctrl+Пробел, js/game/mousefly.js): виртуальная ручка.
+  stick: makeStick(),
+  spaceCombo: false,     // пробел этого нажатия ушёл на Ctrl+Пробел — не форсаж
+  ctrlCombo: false,      // и Ctrl тоже — не убавляет тягу, пока его не отпустят
+  ctrlThrottle: null,    // тяга до нажатия Ctrl: Ctrl ради сочетания её не трогает
   // Действия с местом, которые оборвала связь: их повторяет возврат связи
   // (holdForLink). dock — порт, где игра стоит, а сервер этого не знает.
   due: { dock: null, undock: false, place: false },
@@ -544,6 +550,9 @@ game.launch = () => {
   audioCue(game.audio, 'launch');
   say(game.state, L('ВЫЛЕТ РАЗРЕШЁН. УДАЧНОГО ПОЛЁТА.'), '#78e08f');
   input.releaseAll();
+  // Вылет — пробелом или кнопкой: это и есть действие, которого ждёт
+  // браузер, чтобы отдать мышь ручке.
+  grabStickMouse();
 };
 
 // --- посадка на поверхность ---------------------------------------------------
@@ -639,6 +648,69 @@ const CONFIRM_S = 3;
 /** Открыт ли слой, под которым ручки корабля отпущены. */
 const layerOpen = () => game.menu.open || game.map.open || game.help;
 
+// --- управление мышью (Ctrl+Пробел) -------------------------------------------
+//
+// Мышь ведёт виртуальную ручку (js/game/mousefly.js): её отклонение —
+// скорость поворота носа, как в Star Citizen. Мышь при этом захвачена
+// окном (pointer lock) и за его край не уходит; Esc её отпускает, щелчок
+// по кадру возвращает — как при ходьбе. Где курсор нужен — карта, меню,
+// справка, порт, — мышь свободна, а ручка в нуле.
+
+const STICK_KEY = 'solar_mouse_flight';
+const _stickMove = { x: 0, y: 0 };
+const _stickOut = { pitch: 0, yaw: 0 };
+try { game.stick.on = localStorage.getItem(STICK_KEY) === '1'; } catch (e) { /* без хранилища — клавишами */ }
+
+/** Нужна ли сейчас мышь ручке: пилот в кресле, в полёте или на грунте, без слоёв. */
+const stickWanted = () => game.stick.on && !Q.touchUi && !game.walk.on && !layerOpen()
+  && !game.deckMap.open && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED);
+
+/**
+ * Захватить мышь, если ручке она нужна. Только по действию игрока —
+ * клавише или щелчку: без него браузер мышь не отдаёт.
+ */
+function grabStickMouse() {
+  if (stickWanted() && !input.locked) input.lock(screenCanvas);
+}
+
+function toggleMouseFlight() {
+  const s = game.stick;
+  s.on = !s.on;
+  centerStick(s);
+  try { localStorage.setItem(STICK_KEY, s.on ? '1' : '0'); } catch (e) { /* только на этот раз */ }
+  if (s.on) grabStickMouse();
+  else if (!game.walk.on) input.unlock();
+  say(game.state, s.on ? L('УПРАВЛЕНИЕ МЫШЬЮ · CTRL+ПРОБЕЛ — КЛАВИШИ')
+    : L('УПРАВЛЕНИЕ КЛАВИШАМИ · CTRL+ПРОБЕЛ — МЫШЬ'), '#9fd9ff', 3);
+}
+
+/**
+ * Кадр ручки: захват мыши, ход ручки. Ручка в нуле всякий раз, когда
+ * мышь ей не принадлежит: иначе корабль продолжал бы разворот, начатый
+ * до того, как открыли карту или нажали Esc.
+ */
+function mouseFlightFrame() {
+  const s = game.stick;
+  if (!stickWanted()) {
+    // Мышь отпускаем, только если держала её ручка: на ногах она у головы.
+    if (s.on && input.locked && !game.walk.on) input.unlock();
+    centerStick(s);
+    s.locked = false;
+    return;
+  }
+  if (!input.locked) {
+    centerStick(s);
+    s.locked = false;
+    if (input.mouse.clicked) grabStickMouse();
+    return;
+  }
+  s.locked = true;
+  // Правая кнопка — осмотр: движение мыши уходит камере (updateCamOrbit).
+  if (input.mouse.right) return;
+  input.takeLook(_stickMove);
+  moveStick(s, _stickMove.x, _stickMove.y);
+}
+
 /** Открыть карту: на том, куда летишь, — вид на всю систему. */
 game.openMap = () => {
   game.help = false;
@@ -654,6 +726,8 @@ game.openMap = () => {
 function closeMap() {
   game.map.open = false;
   if (game.state.mode === ST.DOCKED) showDocked(game);
+  // Закрыли клавишей — это и есть действие, которого ждёт браузер.
+  grabStickMouse();
 }
 
 function openHelp() {
@@ -668,8 +742,9 @@ game.closeOverlay = () => {
   hideOverlay();
   if (game.state.mode === ST.DOCKED) showDocked(game);
   // Справку закрыли на ногах — мышь обратно взгляду (нажатие закрытия и
-  // есть действие игрока, которого требует браузер).
+  // есть действие игрока, которого требует браузер). В кресле — ручке.
   if (game.walk.on && !Q.touchUi) input.lock(screenCanvas);
+  else grabStickMouse();
 };
 
 /** Закрыть карту и справку без экрана порта: крушение, стыковка, тоннель. */
@@ -993,6 +1068,8 @@ function seated() {
   input.releaseAll();
   st.view = game.walk.prevView || 'cockpit';
   game.walkEye = null;
+  // Под управлением мышью мышь из кресла — сразу ручке.
+  grabStickMouse();
   game.frame = ownVessel;
   // Сел — путь снят и план закрыт.
   game.walkGoal = null;
@@ -2762,6 +2839,12 @@ async function killedInAction(by) {
 function handleKeys(dt) {
   if (!booted) return;
   const st = game.state;
+  // Сочетание Ctrl+Пробел держит пробел и Ctrl, пока их не отпустят.
+  if (!input.isDown('Space')) game.spaceCombo = false;
+  if (!input.isDown('ControlLeft', 'ControlRight')) game.ctrlCombo = false;
+  // Тяга в миг нажатия Ctrl — до того, как он успел её убавить.
+  if (input.pressed('ControlLeft', 'ControlRight')) game.ctrlThrottle = ship.throttle;
+  else if (!input.isDown('ControlLeft', 'ControlRight')) game.ctrlThrottle = null;
 
   if (input.pressed('Backquote')) dbg.on = !dbg.on;
 
@@ -2811,6 +2894,18 @@ function handleKeys(dt) {
     game.menu.open = false;
     if (game.help) hideOverlay();
     closeLayers();
+    return;
+  }
+
+  // Ctrl+Пробел — управление мышью ⇄ клавишами. Пробел этого нажатия —
+  // не форсаж и не взлёт, пока его не отпустят, а Ctrl, зажатый ради
+  // сочетания, тягу не трогает: она возвращается к той, что была до него.
+  if (input.pressed('Space') && input.isDown('ControlLeft', 'ControlRight') && !layerOpen()
+      && (st.mode === ST.FLIGHT || st.mode === ST.LANDED)) {
+    game.spaceCombo = true;
+    game.ctrlCombo = true;
+    if (game.ctrlThrottle !== null) ship.throttle = game.ctrlThrottle;
+    toggleMouseFlight();
     return;
   }
 
@@ -2865,11 +2960,12 @@ function handleKeys(dt) {
     // Одна клавиша на два действия, и разводятся они временем:
     // коротко нажал — зафиксировал корабль, подержал три секунды —
     // оторвался. Взлёт случайным нажатием не делается.
-    const held = input.isDown('Space', 'Enter');
+    // Пробел, ушедший на Ctrl+Пробел, — не фиксация и не взлёт.
+    const held = input.isDown('Space', 'Enter') && !game.spaceCombo;
     // Нажатие считаем и по факту удержания, и по событию: очень короткое
     // нажатие успевает начаться и кончиться внутри одного кадра, и по
     // одному isDown его не видно вовсе.
-    const tapped = input.pressed('Space', 'Enter');
+    const tapped = input.pressed('Space', 'Enter') && !game.spaceCombo;
     if (held) {
       game.landHold += dt;
       if (game.landHold >= LAND.holdOff) game.takeoff();
@@ -3060,8 +3156,12 @@ function handleKeys(dt) {
   // касается: на калибровке ручка как раз и нужна, чтобы навестись, а в
   // прыжке она всё равно ничего не делает.
   if (ship.docking || ship.landing) {
-    if (input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyQ', 'KeyE',
-      'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
+    // Под управлением мышью нос ведёт ручка, а W/S/A/D молчат: вмешательство
+    // — это ручка за мёртвой зоной, а не нажатая буква.
+    const nose = game.stick.on
+      ? game.stick.locked && Math.hypot(game.stick.x, game.stick.y) > STICK.dead
+      : input.isDown('KeyW', 'KeyS', 'KeyA', 'KeyD');
+    if (nose || input.isDown('KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') ||
       input.isDown('KeyR', 'KeyF', 'Space') || input.pressed('KeyX', 'KeyZ', 'KeyT')) {
       if (ship.docking) stopDockingComputer(ship);
       if (ship.landing) stopLanding(ship);
@@ -3259,7 +3359,19 @@ function step(dt) {
   } else if (!game.walk.on) {
     // Пилот на ногах ручек не держит: органы управления в нуле
     // (clearControls выше), корабль держит тягу и курс сам.
-    readControls(ship);
+    readControls(ship, game.stick.on);
+    // Пробел, ушедший на Ctrl+Пробел, — не форсаж, а Ctrl — не убавка тяги.
+    if (game.spaceCombo) ship.control.boost = 0;
+    if (game.ctrlCombo) ship.control.thr = Math.max(0, ship.control.thr);
+    // Управление мышью: нос ведёт ручка (js/game/mousefly.js), W/S/A/D
+    // при этом носа не трогают (readControls); крен, тяга и всё
+    // остальное — клавишами, как прежде. Под слоями и без захваченной
+    // мыши ручка в нуле (mouseFlightFrame).
+    if (game.stick.on && game.stick.locked && input.enabled) {
+      const k = stickControls(game.stick, _stickOut);
+      ship.control.pitch = clamp(ship.control.pitch + k.pitch, -1, 1);
+      ship.control.yaw = clamp(ship.control.yaw + k.yaw, -1, 1);
+    }
   }
 
   // Центровка варпа идёт параллельно полёту, как и калибровка квантового:
@@ -3452,6 +3564,12 @@ function updateCamOrbit(dt) {
   if (game.walk.on) return;
   const o = game.camOrbit;
   input.takeDrag(_drag);
+  // Под управлением мышью она захвачена, и сдвиг приходит не как
+  // перетаскивание, а как взгляд: с правой кнопкой он — камере.
+  if (game.stick.on && input.locked && input.mouse.right) {
+    input.takeLook(_stickMove);
+    _drag.x += _stickMove.x; _drag.y += _stickMove.y;
+  }
   // Осматриваться можно и стоя на грунте: посадка больше не экран
   // поверх игры, а такое же состояние в кадре, как полёт.
   const canLook = game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED;
@@ -3932,6 +4050,7 @@ function frame(now) {
   }
 
   handleKeys(dt);
+  mouseFlightFrame();
   if (game.walk.on) walkFrame(dt);
   else if (game.interior) {
     // В кресле — а по палубе ходят пассажиры: двери перед ними те же.

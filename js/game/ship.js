@@ -277,18 +277,23 @@ export function makeShip() {
 }
 
 // Ручное управление -> control. Автопилот пишет в те же поля.
-export function readControls(ship) {
+//
+// mouse — нос ведёт мышь (Ctrl+Пробел, js/game/mousefly.js): тогда W/S/A/D
+// носа не трогают вовсе. Складываясь с ручкой, они мешали бы ей — рука на
+// клавишах тяги и крена то и дело задевает соседние.
+export function readControls(ship, mouse = false) {
   const c = ship.control;
   // Клавиши и сенсорный джойстик складываются: у клавиши только три
   // положения, у джойстика — все промежуточные, и терять их нельзя.
   // Складываются, а не выбирается один источник: на планшете с
   // клавиатурой работать должны оба, и ни один не должен «выигрывать».
   const pad = input.pad;
-  c.pitch = clamp(input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown']) + pad.pitch, -1, 1);
+  c.pitch = clamp((mouse ? input.axis(['ArrowUp'], ['ArrowDown'])
+    : input.axis(['KeyW', 'ArrowUp'], ['KeyS', 'ArrowDown'])) + pad.pitch, -1, 1);
   // Буквы — схема WASD: A/D рыскают, Q/E кренят.
   // Стрелки — классическая схема Elite: тангаж и крен.
   c.roll = clamp(input.axis(['KeyQ', 'ArrowLeft'], ['KeyE', 'ArrowRight']) + pad.roll, -1, 1);
-  c.yaw = clamp(input.axis(['KeyA'], ['KeyD']) + pad.yaw, -1, 1);
+  c.yaw = clamp((mouse ? 0 : input.axis(['KeyA'], ['KeyD'])) + pad.yaw, -1, 1);
   c.thr = clamp(input.axis(['ControlLeft', 'ControlRight'], ['ShiftLeft', 'ShiftRight']) + pad.thr, -1, 1);
   // Вертикальный ход — отдельный канал, доступный всегда: с ним можно
   // и садиться брюхом вниз, не опуская нос, и просто держать высоту над

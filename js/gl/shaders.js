@@ -364,10 +364,27 @@ ${LOG_DEPTH_FRAG}
   float seaAA = max(fwidth(vColor.a), 2e-6);
   float seaFw = max(length(dFdx(vViewPos)), length(dFdy(vViewPos))) * 1000.0;
 
+  // Камень (js/gl/rocks.js): фактура снятой поверхности валуна —
+  // рельеф и тон (GROUND.rock), по UV граней куба. Касательные оси — по
+  // производным положения и UV в самом пикселе (кокасательный базис,
+  // Шюлер): хранить их в вершинах незачем, а у сетки в триста
+  // треугольников мелкого рельефа нет — его и возвращает фактура.
+  if (uSurfMode > 1.5) {
+    vec4 s = texture(uSurfTex, vUv);
+    vec3 dp1 = dFdx(vViewPos), dp2 = dFdy(vViewPos);
+    vec2 du1 = dFdx(vUv), du2 = dFdy(vUv);
+    vec3 a1 = cross(dp2, n), a2 = cross(n, dp1);
+    vec3 T = a1 * du1.x + a2 * du2.x;
+    vec3 B = a1 * du1.y + a2 * du2.y;
+    float tb = max(dot(T, T), dot(B, B));
+    // У тени камня (тот же меш) UV нет — производные нулевые, рельеф не
+    // трогается.
+    if (tb > 0.0) n = normalize(n + (T * (s.x * 2.0 - 1.0) + B * (s.y * 2.0 - 1.0)) * inversesqrt(tb));
+    albedo *= s.z * 2.0;
+  } else if (uSurfMode > 0.5) {
   // Готовая поверхность из текстуры: нормаль берётся целиком из неё,
   // поэтому освещение не зависит от того, какой уровень сетки под
   // текстурой — переключения LOD в картинке не видны вовсе.
-  if (uSurfMode > 0.5) {
     vec4 s = texture(uSurfTex, vUv);
     vec3 nl = s.xyz * 2.0 - 1.0;
     if (dot(nl, nl) > 0.01) n = normalize(uNormalMat * nl);

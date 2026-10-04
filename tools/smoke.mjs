@@ -450,6 +450,103 @@ await step('ручное управление: тяга, рыскание, кр�
   if (!(game.ship.speed > 0)) throw new Error('скорость нулевая');
 });
 
+// Управление мышью (Ctrl+Пробел, js/game/mousefly.js): нос ведёт
+// виртуальная ручка, W/S/A/D его не трогают. Сочетание не трогает ни тягу
+// (Ctrl — её убавка), ни форсаж (пробел).
+await step('управление мышью: Ctrl+Пробел, ручка ведёт нос, тяга и форсаж не тронуты', async () => {
+  const { input } = await import('../js/core/input.js');
+  const sh = game.ship;
+  if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+  const keep = { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } };
+  // Прогон идёт сенсорным профилем, а на сенсорном экране мыши у ручки
+  // нет — её честно не берут. Мышь — только на настольном.
+  const wasTouch = Q.touchUi;
+  Q.touchUi = false;
+  try {
+    sh.throttle = 0.5;
+    frames(2);
+    const thr0 = sh.throttle;
+    holdDown('ControlLeft'); frames(3);
+    holdDown('Space'); frames(12);
+    release('Space'); frames(3);
+    release('ControlLeft'); frames(2);
+    if (!game.stick.on) throw new Error('Ctrl+Пробел не включил управление мышью');
+    if (Math.abs(sh.throttle - thr0) > 1e-9) throw new Error('Ctrl сочетания тронул тягу: ' + thr0 + ' -> ' + sh.throttle);
+    if (sh.boosting || sh.boostPunch > 0) throw new Error('пробел сочетания включил форсаж');
+
+    // В прогоне захвата мыши нет — ставим его, как в шаге ходьбы.
+    input.locked = true;
+    frames(1);
+    if (!game.stick.locked) {
+      throw new Error('ручка не взяла мышь: вкл ' + game.stick.on + ', захват ' + input.locked + ', режим '
+        + game.state.mode + ', ноги ' + game.walk.on + ', карта ' + game.map.open + ', меню ' + game.menu.open
+        + ', справка ' + game.help + ', план ' + game.deckMap.open);
+    }
+    // Пустой космос и нулевое вращение — чтобы мерить только ручку.
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    sh.rot.pitch = sh.rot.yaw = sh.rot.roll = 0;
+    const f0 = { ...sh.basis.fwd }, u0 = { ...sh.basis.up }, r0 = { ...sh.basis.right };
+    // Мышь вправо и вверх — нос вправо и вверх.
+    for (const fn of winListeners.mousemove || []) fn({ movementX: 150, movementY: -150 });
+    frames(40);
+    const f1 = sh.basis.fwd;
+    const toRight = (f1.x - f0.x) * r0.x + (f1.y - f0.y) * r0.y + (f1.z - f0.z) * r0.z;
+    const toUp = (f1.x - f0.x) * u0.x + (f1.y - f0.y) * u0.y + (f1.z - f0.z) * u0.z;
+    if (!(toRight > 0.01 && toUp > 0.01)) {
+      throw new Error('ручка не повела нос вправо и вверх: ' + toRight.toFixed(4) + ' / ' + toUp.toFixed(4)
+        + ', ручка ' + game.stick.x.toFixed(2) + ' ' + game.stick.y.toFixed(2));
+    }
+    texts = []; frames(1);
+    const seen = texts.map((t) => t.s); texts = null;
+    if (seen.some((s) => /ЩЕЛЧОК ПО КАДРУ/.test(s))) throw new Error('с захваченной мышью приборы просят щелчок');
+
+    // W/S/A/D в этом режиме нос не трогают. Меряется РАЗНИЦА: тот же
+    // отрезок без клавиш и с ними, — вращение, оставшееся от ручки,
+    // гаснет одинаково в обоих.
+    game.stick.x = 0; game.stick.y = 0;
+    const span = (keys) => {
+      for (const k of keys) holdDown(k);
+      const g0 = { ...sh.basis.fwd };
+      frames(20);
+      const g1 = sh.basis.fwd;
+      for (const k of keys) release(k);
+      return { x: g1.x - g0.x, y: g1.y - g0.y, z: g1.z - g0.z };
+    };
+    frames(300);                                // вращение от ручки затухает (~2 с)
+    const still = span([]);
+    const pressed = span(['KeyD', 'KeyW']);
+    const extra = Math.hypot(pressed.x - still.x, pressed.y - still.y, pressed.z - still.z);
+    if (extra > 1e-4) throw new Error('W/D повернули нос под управлением мышью: ' + extra.toFixed(6));
+
+    // Правая кнопка — осмотр: сдвиг мыши уходит камере, ручка стоит.
+    const sx = game.stick.x, yaw0 = game.camOrbit.yaw;
+    mouse('mousedown', { button: 2 });
+    for (const fn of winListeners.mousemove || []) fn({ movementX: 120, movementY: 0 });
+    frames(2);
+    mouse('mouseup', { button: 2 });
+    if (game.stick.x !== sx || !(Math.abs(game.camOrbit.yaw - yaw0) > 0.05)) {
+      throw new Error('с правой кнопкой мышь ушла не камере: ручка ' + sx + ' -> ' + game.stick.x);
+    }
+
+    // Мышь отпущена (Esc) — ручка в нуле, нос не крутится дальше, и
+    // приборы говорят, как её вернуть.
+    input.locked = false;
+    texts = []; frames(1);
+    const hint = texts.map((t) => t.s); texts = null;
+    if (game.stick.x !== 0 || game.stick.y !== 0 || game.stick.locked) throw new Error('без захвата ручка не в нуле');
+    if (!hint.some((s) => /ЩЕЛЧОК ПО КАДРУ/.test(s))) throw new Error('приборы не говорят, как вернуть мышь');
+
+    // И обратно — клавишами.
+    holdDown('ControlLeft'); frames(1); holdDown('Space'); frames(2); release('Space'); release('ControlLeft'); frames(2);
+    if (game.stick.on) throw new Error('второе Ctrl+Пробел не вернуло клавиши');
+  } finally {
+    input.locked = false;
+    if (game.stick.on) { holdDown('ControlLeft'); frames(1); holdDown('Space'); frames(1); release('Space'); release('ControlLeft'); frames(1); }
+    Q.touchUi = wasTouch;
+    Object.assign(sh.basis.right, keep.right); Object.assign(sh.basis.up, keep.up); Object.assign(sh.basis.fwd, keep.fwd);
+  }
+});
+
 await step('задний ход по длинному Ctrl', () => {
   key('KeyX'); frames(5);                 // с нуля
   holdDown('ControlLeft'); frames(120); release('ControlLeft'); frames(10);

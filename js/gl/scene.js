@@ -439,6 +439,11 @@ export class GlScene {
     // изгиб к камере или от неё по одному снимку не разглядеть, а по
     // разнице двух снимков — сразу.
     this.washKnob = q.get('wash') !== '0';
+    // `?water=0` — море без своего шейдера (js/gl/water.js; под водой тогда
+    // виден песок дна — это замер, а не вид), `?rocks=0` — без камней. Обе — чтобы мерить цену: разница «карты» в отладке
+    // (`~`) с ними и без них и есть то, что стоят вода и камни.
+    this.waterKnob = q.get('water') !== '0';
+    this.rocksKnob = q.get('rocks') !== '0';
     this.patch = new SurfacePatch(gl, this.meshLocs);
     // Камни у самой поверхности: предметы известного размера, по которым
     // глаз и меряет высоту (см. js/gl/rocks.js).
@@ -1623,7 +1628,8 @@ export class GlScene {
     toLocal(fr, body.pos, sunPos, this._rsun || (this._rsun = { x: 0, y: 0, z: 0 }));
     const sl = Math.hypot(this._rsun.x, this._rsun.y, this._rsun.z) || 1;
     this._rsun.x /= sl; this._rsun.y /= sl; this._rsun.z /= sl;
-    this.rocks.update(body, dir, info.alt, this._rsun, this.surfaceCell(body));
+    if (this.rocksKnob) this.rocks.update(body, dir, info.alt, this._rsun, this.surfaceCell(body));
+    else this.rocks.clear();
     this.rockBody = this.rocks.mesh ? body : null;
     // Солнце и точка под камерой те же, что у камней, — растительность
     // берёт их готовыми, чтобы не считать второй раз за кадр.
@@ -2051,8 +2057,14 @@ export class GlScene {
       bodyBasis(this.rockBody, this.basisTmp);
       const o = this.rocks.origin;
       gl.uniform3f(prog.loc('uLocalShift'), o[0], o[1], o[2]);
+      // Фактура камня (GROUND.rock) — в слот поверхности, режим 2.
+      gl.uniform1f(prog.loc('uSurfMode'), 2);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.ground.rock);
       this.drawObject(prog, this.rocks.mesh, this.localOrigin(this.rockBody, o), this.basisTmp,
         this.rockBody.radius, sunPos);
+      gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+      gl.uniform1f(prog.loc('uSurfMode'), 0);
       gl.uniform3f(prog.loc('uLocalShift'), 0, 0, 0);
     }
 
@@ -2375,7 +2387,7 @@ export class GlScene {
    */
   setWater(prog, body) {
     const gl = this.gl;
-    const on = !!body && body.kind !== 'star' && !!terrainOf(body).kindCfg.liquid;
+    const on = this.waterKnob && !!body && body.kind !== 'star' && !!terrainOf(body).kindCfg.liquid;
     gl.uniform1f(prog.loc('uWater'), on ? 1 : 0);
     if (!on) return;
     const w = waterFrame(waveSet(body), this.camera.basis, this.camera.pos,

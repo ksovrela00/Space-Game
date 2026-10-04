@@ -46,6 +46,11 @@ export const GROUND = {
   // и вдали она честно усредняется в ничто (верхние мип-уровни).
   grain: { file: 'assets/texture/grain.png', sizeKm: 0.003, px: 256, low: 16 },
   tint: { file: 'assets/texture/tint.png', sizeKm: 0.09, px: 128 },
+  // Фактура камня (js/gl/rocks.js, tools/rocks.mjs): поверхность валуна,
+  // 1.8 м. Тот же вид, что у зерна, — нормаль и тон, без цвета. Крупные
+  // пятна вычитаются мельче, чем у грунта (low 4 — всё больше 45 см):
+  // камень смотрят с пары метров, и его рисунок должен остаться.
+  rock: { file: 'assets/texture/rock.png', sizeKm: 0.0018, px: 256, low: 4 },
 };
 
 /**
@@ -245,8 +250,8 @@ const defaultLoad = (src, on, fail) => {
  * отдельной ручки «докуда показывать зерно» нет и не нужно.
  */
 export function loadGround(gl, load = defaultLoad) {
-  const out = { grain: makeTexture(gl), tint: makeTexture(gl), ready: 0, failed: 0 };
-  for (const key of ['grain', 'tint']) {
+  const out = { grain: makeTexture(gl), tint: makeTexture(gl), rock: makeTexture(gl), ready: 0, failed: 0 };
+  for (const key of ['grain', 'tint', 'rock']) {
     load(GROUND[key].file, (img) => {
       gl.bindTexture(gl.TEXTURE_2D, out[key]);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);

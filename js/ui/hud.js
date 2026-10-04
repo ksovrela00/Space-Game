@@ -17,6 +17,7 @@ import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK, NPC_COLOR } from './theme.js'
 import { npcFade, npcGear, hullName } from '../game/npc.js';
 import { Q } from '../core/quality.js';
 import { L, numLocale } from '../core/lang.js';
+import { STICK } from '../game/mousefly.js';
 // Палитра живёт отдельно (js/ui/theme.js): её делят угловые панели
 // (здесь) и мониторы приборной доски кабины (js/ui/panels.js).
 const TAU = Math.PI * 2;
@@ -178,6 +179,7 @@ export function drawHud(r, game) {
   // мостика (js/game/hull.js, canopy).
   if (state.view === 'cockpit' && !game.cockpit && HULL.canopy) drawCockpitFrame(ctx, w, h);
   drawReticle(ctx, cam, ship);
+  if (game.stick && game.stick.on) drawStick(ctx, w, h, game.stick);
   drawVelocityMarker(ctx, cam, ship);
   drawWarpAim(ctx, cam, game);
   // После удара корабль какое-то время летит сам по себе — об этом надо
@@ -978,6 +980,48 @@ function drawLandedPrompt(ctx, cam, game) {
     ctx.fillStyle = 'rgba(159,217,230,0.8)';
     ctx.fillText(L('ПРОБЕЛ — ЗАФИКСИРОВАТЬ · УДЕРЖАТЬ — ВЗЛЁТ'), mid, y + 40);
   }
+  ctx.restore();
+}
+
+/**
+ * Ручка управления мышью (Ctrl+Пробел, js/game/mousefly.js): кольцо
+ * полного хода, мёртвая зона и где ручка сейчас. Без неё пилот не видит,
+ * что нос поворачивает потому, что мышь сдвинута, — и ищет причину в
+ * корабле. Мышь не захвачена (Esc) — вместо ручки подсказка, как её
+ * вернуть.
+ */
+function drawStick(ctx, w, h, s) {
+  const cx = w / 2, cy = h / 2, R = STICK.ring;
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(120,220,255,0.22)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TAU);
+  ctx.stroke();
+  if (!s.locked) {
+    ctx.font = fnt(12);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = AMBER;
+    ctx.fillText(L('ЩЕЛЧОК ПО КАДРУ — МЫШЬ НА РУЧКУ'), cx, cy + R + 18);
+    ctx.restore();
+    return;
+  }
+  ctx.strokeStyle = 'rgba(120,220,255,0.35)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(2, R * STICK.dead), 0, TAU);
+  ctx.stroke();
+  const x = cx + s.x * R, y = cy + s.y * R;
+  if (Math.hypot(s.x, s.y) > STICK.dead) {
+    ctx.strokeStyle = 'rgba(120,220,255,0.45)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(160,235,255,0.9)';
+  ctx.beginPath();
+  ctx.arc(x, y, 5, 0, TAU);
+  ctx.stroke();
   ctx.restore();
 }
 

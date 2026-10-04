@@ -38,7 +38,7 @@ import { captureBody, carryShip, gravityField, groundDrift, CAPTURE_G } from '..
 import { ENTRY, airDensity, entryHeat, heatColor, entryState } from '../js/game/entry.js';
 import { feetGround, feetClearance } from '../js/game/landing.js';
 import { GEAR_FEET } from '../js/models/ships.js';
-import { scatterRocks, buildRockGeometry, ROCKS } from '../js/gl/rocks.js';
+import { scatterRocks, buildRockGeometry, ROCKS, SHAPES } from '../js/gl/rocks.js';
 import { CITY, CITY_KINDS, cityPlan, cityBlocked, nearestPad, partBox } from '../js/models/city.js';
 import {
   makeCity, cityCrash, cityPadUnder, canHostCity, citySite, cityRecord, applyCities,
@@ -4094,7 +4094,7 @@ console.log('\n== камни на грунте ==');
       const c = rocks[0].dir;
       const loc = buildRockGeometry(moon, rocks.slice(0, 40), null, null, c);
       let worst = 0, big = 0;
-      for (let i = 0; i < geo.faces * 9; i++) {   // заполнено столько: тени без солнца нет
+      for (let i = 0; i < geo.verts * 3; i++) {   // заполнено столько: тени без солнца нет
         worst = Math.max(worst, Math.abs(loc.positions[i] + loc.origin[i % 3] - geo.positions[i]));
         big = Math.max(big, Math.abs(loc.positions[i]));
       }
@@ -4103,7 +4103,7 @@ console.log('\n== камни на грунте ==');
         `шаг float32 прежних чисел), а вершины в ${(big * moon.radius * 1000).toFixed(0)} м от начала, не в радиусе тела`);
     }
     let worstUnder = 0, best = 0;
-    for (let i = 0; i < geo.faces * 3; i++) {
+    for (let i = 0; i < geo.verts; i++) {
       const x = geo.positions[i * 3], y = geo.positions[i * 3 + 1], z = geo.positions[i * 3 + 2];
       const rr = Math.hypot(x, y, z);
       const d = normalize(v3(x / rr, y / rr, z / rr));
@@ -4140,11 +4140,11 @@ console.log('\n== камни на грунте ==');
     const reach = (deg) => {
       const sun = sunAt(deg);
       const geo = buildRockGeometry(moon, one, sun);
-      // Тень — последние 24 вершины камня; меряем, насколько она уходит
-      // от него и в какую сторону.
+      // Тень — последние 24 вершины камня (после вершин его формы);
+      // меряем, насколько она уходит от него и в какую сторону.
       let far = 0, along = 0, offGround = 0;
-      const base = 12 * 3;
-      for (let i = base; i < geo.faces * 3; i++) {
+      const base = SHAPES[one[0].shape].pos.length / 3;
+      for (let i = base; i < geo.verts; i++) {
         const x = geo.positions[i * 3], y = geo.positions[i * 3 + 1], z = geo.positions[i * 3 + 2];
         const rr = Math.hypot(x, y, z);
         const d2 = normalize(v3(x / rr, y / rr, z / rr));
@@ -4157,7 +4157,7 @@ console.log('\n== камни на грунте ==');
         const toSun = dot(d2, sun) - dot(one[0].dir, sun);
         along = Math.min(along, toSun);
       }
-      return { far, along, offGround, verts: geo.faces * 3 - base };
+      return { far, along, offGround, verts: geo.verts - base };
     };
 
     const low = reach(20), high = reach(70);
@@ -4169,7 +4169,7 @@ console.log('\n== камни на грунте ==');
 
     // У самого горизонта тени нет: она растянулась бы в бесконечность.
     const flat = buildRockGeometry(moon, one, sunAt(3));
-    ok(flat.faces * 3 === 12 * 3,
+    ok(flat.verts === SHAPES[one[0].shape].pos.length / 3,
       'у самого горизонта тень не строится: она ушла бы за край поля');
   }
 
@@ -6693,6 +6693,25 @@ console.log("\n== пилот: кроны, трюм, задания ==");
 // половины угла, а не сам угол: тогда середина кадра растёт ровно во
 // столько раз, сколько написано.
 {
+  console.log('\n== управление мышью ==');
+  {
+    const M = await import('../js/game/mousefly.js');
+    const s = M.makeStick();
+    const at = (x, y) => { s.x = x; s.y = y; return M.stickControls(s, { pitch: 0, yaw: 0 }); };
+    const dead = at(M.STICK.dead * 0.9, 0);
+    const full = at(1, 0);
+    const half = at(0.5, 0);
+    const up = at(0, -0.6);
+    const diag = at(0.5, -0.5);
+    M.centerStick(s);
+    M.moveStick(s, M.STICK.px * 3, 0);
+    ok(dead.yaw === 0 && dead.pitch === 0 && Math.abs(full.yaw - 1) < 1e-12 && half.yaw > 0 && half.yaw < 0.5
+      && up.pitch > 0 && up.yaw === 0 && Math.abs(diag.yaw + diag.pitch * -1) < 1e-12 && diag.yaw > 0
+      && Math.abs(Math.hypot(s.x, s.y) - 1) < 1e-12,
+      'ручка мыши: мёртвая зона в центре, полный ход — единица, середина мягче линейной, мышь вверх задирает нос, '
+      + 'наискосок без ступенек, за кольцо не выходит');
+  }
+
   console.log('\n== приближение колесом ==');
   const { ZOOMS, nextZoom, zoomFov, lookScale } = await import('../js/game/zoom.js');
   const seq = [1];
