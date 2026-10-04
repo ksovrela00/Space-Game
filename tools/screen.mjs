@@ -1802,4 +1802,31 @@ try {
     console.log('поверхность:', info);
   }
   // Кабина: собрались ли её шейдеры (мок GL в tools/gl.mjs их не
-  // компилирует — ошибку GLSL видн�
+  // компилирует — ошибку GLSL видно только здесь), рисуются ли экраны.
+  if (process.env.CABINDBG) {
+    const info = await run(cdp, `return JSON.stringify(GAME.renderStats && GAME.renderStats.cabin);`);
+    console.log('кабина:', info);
+  }
+  if (process.env.CITYDBG) {
+    const info = await run(cdp, `
+      const c = GAME.world.cities[0];
+      const p = GAME.ship.pos;
+      return JSON.stringify({
+        cities: GAME.world.cities.length,
+        radius: c && c.radius,
+        stats: GAME.renderStats && GAME.renderStats.city,
+        dist: c ? Math.hypot(c.pos.x - p.x, c.pos.y - p.y, c.pos.z - p.z) : null,
+      });
+    `);
+    console.log('город:', info);
+  }
+  writeFileSync(out, Buffer.from(shot.data, 'base64'));
+  console.log(`снимок: ${out}  (${W}×${H}, сцена «${scene.title}»)`);
+  cdp.close();
+} catch (e) {
+  console.error('ОШИБКА: ' + e.message);
+  process.exitCode = 1;
+} finally {
+  proc.kill();
+  try { rmSync(profile, { recursive: true, force: true }); } catch (e) { /* и ладно */ }
+}
