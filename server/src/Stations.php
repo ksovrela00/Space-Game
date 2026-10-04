@@ -118,6 +118,30 @@ final class Stations
     }
 
     /**
+     * Выйти из порта.
+     *
+     * Действие, а не поле сохранения — по той же причине, что и стыковка:
+     * сохранение идёт фоном и опаздывает, и опоздавшее «в доке» после
+     * вылета вернуло бы корабль в порт. Повторный вызов ничего не делает:
+     * игра переспрашивает после обрыва связи.
+     */
+    public static function undock(int $playerId): array
+    {
+        return Db::tx(function () use ($playerId) {
+            $p = Players::byId($playerId);
+            $ship = Players::ship($playerId);
+            $shipId = (int) $ship['id'];
+            if ((int) $p['aboard_ship'] !== $shipId) {
+                throw ApiError::denied('not_aboard', 'из порта выводит корабль тот, кто на его борту');
+            }
+            if ($ship['docked_body'] !== null) {
+                Db::update('ship', ['docked_body' => null], '`id`=?', [$shipId]);
+            }
+            return ['undocked' => true];
+        });
+    }
+
+    /**
      * Ремонт корпуса.
      *
      * До сих пор стыковка чинила корабль даром — то есть у корпуса не было

@@ -78,6 +78,8 @@ import { seatPlace } from '../models/spacesuit.js';
 import { CARVE_MAX } from './hull.js';
 import { hatchCut, hatchPanelAt, stairPose } from '../game/airlock.js';
 import { buildStairMesh, buildHatchMesh } from '../models/airstair.js';
+import { waveSet, waterFrame, makeWaterFrame } from './water.js';
+import { seesOutside, seesHull } from '../models/interior.js';
 
 // Пилот за бортом: на трапе или на грунте (js/game/walker.js, out).
 // Дальше этого людей не рисуем, км: человек в двух метрах ростом с
@@ -793,6 +795,9 @@ export class GlScene {
     const cam = this.camera;
     const world = game.world;
     const sunPos = world.star.pos;
+    // Мировое время — общее у всех игроков (его ведёт сервер): по нему
+    // бегут волны моря, и у всех они одни и те же (js/gl/water.js).
+    this.worldTime = world.time;
 
     this.resize();
     this.updateDetailBudget();
@@ -822,8 +827,12 @@ export class GlScene {
     if (this.pending) pumpBuilds(gl, this.meshLocs, BUILD_MS);
     this.updatePatches(game);
     this.updateSky(world);
+    // Видно ли из глаза то, что за бортом. Из глухой комнаты — нет, и
+    // тогда мира снаружи в кадре нет вовсе (см. outsideSeen).
+    this.outside = this.outsideSeen(game);
     // Карта тени корабля — тоже до настройки кадра: свой буфер и вьюпорт.
-    this.updateShipShadow(game, sunPos);
+    // Изнутри глухой комнаты тень корабля падать не на что.
+    if (this.outside) this.updateShipShadow(game, sunPos);
 
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 1);
@@ -862,11 +871,13 @@ export class GlScene {
     }
 
     this.updateJump(game);
-    this.drawStars();
-    this.drawOpaque(game, world, sunPos);
-    this.drawLocksOut(game, sunPos);
-    this.drawTransparent(game, world, sunPos);
-    this.drawMotes(game);
+    if (this.outside) {
+      this.drawStars();
+      this.drawOpaque(game, world, sunPos);
+      this.drawLocksOut(game, sunPos);
+      this.drawTransparent(game, world, sunPos);
+      this.drawMotes(game);
+    }
     this.drawCockpit(game, sunPos);
     this.drawTunnel();
     this.drawWarpTunnel(game, 0);
@@ -1034,6 +1045,12 @@ export class GlScene {
     const prog = this.pMesh;
     const ship = frameOf(game);
     if (!game.shipMesh || !ship) return;
+    // Из глухой комнаты корпус не виден: стены свои, обшивка в комнатах
+    // вырезана. Кроме шлюза — закрытый люк изнутри и есть панель корпуса.
+    if (!this.outside && this.inVis && game.interior && !seesHull(game.interior, this.inVis)) {
+      this.gearDraws = 0;
+      return;
+    }
     perspective(cam.fov, cam.w / Math.max(1, cam.h), NEAR_BRIDGE, FAR_BRIDGE,
       this.projBridge || (this.projBridge = new Float32Array(16)));
     prog.use();
@@ -1047,11 +1064,18 @@ export class GlScene {
     // Изнутри — у кабины свои тени. Но за окнами мостика «Прометея» —
     // его же палуба и нос, и тень башни на них — эта, корабельная. Мостик
     // с окнами узнаётся по кругу солнца во весь мостик (interior.sunR).
-    this.useShipShadow(prog, !!(game.interior && game.interior.sunR));
+    // Карты нет, когда мира снаружи не видно: её тогда не строили.
+    this.useShipShadow(prog, !!(this.outside && game.interior && game.interior.sunR));
     // Фары светят вперёд, на мир, а не на свою обшивку.
     this.noLamps(prog);
     gl.uniform1f(prog.loc('uLogFC'), logFC);
     this.setDetail(prog, null, 0);
+    // Воздуха и моря на обшивке нет. Обычно их снял проход поверхности,
+    // но из глухой комнаты его не было — тогда снимаем здесь.
+    if (!this.outside) {
+      this.setAir(prog, null);
+      this.setWater(prog, null);
+    }
     // Воздух — тот, что выставлен сцене: на метрах от глаза дымки нет, и
     // трогать его незачем.
     gl.uniform1f(prog.loc('uSkyK'), this.skyAt(game, sunPos));
@@ -1939,6 +1963,7 @@ export class GlScene {
     // поэтому ни трафарет, ни деталь на пиксель тут не нужны.
     if (this.tileBody) {
       this.setAir(prog, this.tileBody === airBody ? airBody : null);
+      this.setWater(prog, this.tileBody);
       this.drawTiles(prog, sunPos);
     }
 
@@ -1952,6 +1977,7 @@ export class GlScene {
       gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
       bodyBasis(this.patchBody, this.basisTmp);
       this.setAir(prog, this.patchBody === airBody ? airBody : null);
+      this.setWater(prog, this.patchBody);
       // Грань и угол у всех уровней набора общие: центр один на всех.
       const pc = this.patch.cur;
       this.setGrain(prog, this.patchBody, pc && pc.grainFace,
@@ -1981,6 +2007,7 @@ export class GlScene {
       const mesh = requestPlanetMesh(gl, this.meshLocs, body, level);
       bodyBasis(body, this.basisTmp);
       this.setAir(prog, body === airBody ? airBody : null);
+      this.setWater(prog, body);
       if (masked) {
         gl.enable(gl.STENCIL_TEST);
         gl.stencilFunc(gl.EQUAL, 0, 0xff);
@@ -1999,6 +2026,7 @@ export class GlScene {
     }
     gl.disable(gl.STENCIL_TEST);
     this.setDetail(prog, null, 0);      // дальше — рукотворные объекты
+    this.setWater(prog, null);          // и моря у них нет
     // Дымки на них нет: корабли, камни и растительность стоят в сотнях
     // метров от камеры, и воздуха между ними и глазом нет ни на глаз,
     // ни в числах.
@@ -2338,6 +2366,49 @@ export class GlScene {
    * камни, а для грунта — любое тело, кроме того, в чью атмосферу
    * вошла камера).
    */
+  /**
+   * Море тела (js/gl/water.js): включить его грунту и раздать волны.
+   * Фазы считаются здесь, в double, от КАМЕРЫ и по общему времени мира;
+   * в шейдер уходит только смещение фрагмента от камеры — во float32 это
+   * точно, а точка на теле в тысячах километров — нет. Тело без жидкого
+   * моря (и всё, что не грунт) — uWater = 0.
+   */
+  setWater(prog, body) {
+    const gl = this.gl;
+    const on = !!body && body.kind !== 'star' && !!terrainOf(body).kindCfg.liquid;
+    gl.uniform1f(prog.loc('uWater'), on ? 1 : 0);
+    if (!on) return;
+    const w = waterFrame(waveSet(body), this.camera.basis, this.camera.pos,
+      bodyBasis(body, this._seaBasis || (this._seaBasis = makeBasis())), body.pos,
+      this.worldTime || 0, this._seaFrame || (this._seaFrame = makeWaterFrame()));
+    gl.uniform1f(prog.loc('uSeaR'), body.radius);
+    // Небо, которое отражает море, когда камера вне воздуха (с орбиты):
+    // цвет атмосферы тела. Изнутри воздуха его считает сам луч.
+    const a = body.atmo || [150, 190, 235];
+    gl.uniform3f(prog.loc('uSeaSky'), a[0] / 255, a[1] / 255, a[2] / 255);
+    gl.uniform3fv(prog.loc('uWaveDir[0]'), w.dir);
+    gl.uniform4fv(prog.loc('uWave[0]'), w.wave);
+    gl.uniform1f(prog.loc('uShoreT'), w.shore);
+  }
+
+  /**
+   * Видно ли из глаза то, что за бортом (js/models/interior.js,
+   * seesOutside). Сидя в кресле — всегда: рубка с фонарём или окнами. На
+   * ногах — если из видимых комнат есть окно, рубка или открытый люк.
+   * Видимые комнаты — те же, что рисует кабина: своя и соседние через
+   * открытые двери (visibleNow); дверь открывается, когда к ней
+   * подходят, — мир появляется в кадре раньше, чем в проёме.
+   */
+  outsideSeen(game) {
+    this.inVis = null;
+    const w = game.walk;
+    if (!w || !w.on || w.out || w.phase !== 'walk' || !game.state || game.state.view !== 'cockpit') return true;
+    const I = game.interior;
+    if (!I || !this.cabin || !w.room) return true;
+    this.inVis = this.cabin.visible(game);
+    return seesOutside(I, this.inVis, airOf(game, frameOf(game)));
+  }
+
   setAir(prog, body) {
     const gl = this.gl;
     if (!body || !body.atmo) {
@@ -2711,7 +2782,9 @@ export class GlScene {
       // Толщина с полом по расстоянию: болт в километре иначе тоньше
       // пикселя, и очередь читается как редкое мигание.
       const d = Math.hypot(hx, hy, hz);
-      const w = Math.max(0.0025, d * 0.0016);
+      // След прыжка (quantumFx, wide) — втрое толще: он в десятках
+      // километров, и в пиксель шириной его не разглядеть.
+      const w = Math.max(0.0025, d * 0.0016) * (b.wide || 1);
 
       // Поперечное направление: перпендикуляр и к болту, и к взгляду.
       let sx = b.dy * hz - b.dz * hy;

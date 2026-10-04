@@ -6,19 +6,11 @@
 // моей пушки» — вопросы к серверу, а не к вкладке браузера. Раньше было
 // наоборот, и база была слепком клиентских констант.
 //
-// Два источника, и это не дубль, а два разных случая:
-//
-//   СЕРВЕР (`catalog.specs`) — обычный путь. Числа из базы, то есть
-//   поправленные в базе долетают до корабля сами.
-//
-//   СЛЕПОК (server/data/specs.json) — автономный режим (?offline=1) и
-//   запасной путь, когда сервера нет. Файл собран из того же источника
-//   (php server/cli/specs.php), и что он не отстал, проверяет
-//   server/tests/run.php.
-//
-// Запасной путь нужен именно запасным, а не молчаливым: если игра
-// собиралась играть в онлайне, а числа взяла из файла, это надо сказать
-// вслух — см. возвращаемое `source`.
+// Источник один — сервер. Запасного пути нет: без сервера игра не
+// запускается вовсе (js/boot.js), и числа «из файла на всякий случай»
+// означали бы корабль, летящий не по тем правилам, по которым его судит
+// сервер. Слепок server/data/specs.json остался, но только как
+// подставка для проверок в Node (tools/specs.mjs) — игра его не читает.
 
 import * as api from '../net/api.js';
 import { L } from '../core/lang.js';
@@ -32,14 +24,6 @@ import { setHull } from './hull.js';
 /** Последний полученный набор — из него берут корпуса и цены. */
 let doc = null;
 
-/**
- * Откуда пришли числа: 'server' или 'snapshot'.
- *
- * Спрашивают проверки и загрузчик: «взяли из файла вместо сервера» — это
- * не отказ, но и не норма, и знать об этом надо.
- */
-let source = null;
-
 export const specsDoc = () => doc;
 
 /**
@@ -50,13 +34,6 @@ export function typeSpec(code) {
   const t = doc && code ? doc.shipTypes.find((x) => x.code === code) : null;
   return t ? t.spec : null;
 }
-export const specsSource = () => source;
-
-/** Где лежит слепок: рядом с игрой, как и сервер (см. js/net/api.js). */
-export const snapshotUrl = () => {
-  const path = location.pathname.replace(/\/[^/]*$/, '/');
-  return location.origin + path + 'server/data/specs.json';
-};
 
 /**
  * Разложить полученное по игре.
@@ -108,8 +85,8 @@ function refit(type) {
 /**
  * Принять снаряжение КОНКРЕТНОГО корабля (`ship.equipment` из состояния).
  *
- * До входа корабль собран по заводской комплектации из каталога — иначе в
- * автономном режиме он остался бы без двигателя. Сервер говорит, что
+ * До ответа корабль собран по заводской комплектации из каталога — иначе
+ * он остался бы без двигателя. Сервер говорит, что
  * стоит на этом корабле на самом деле, и модель пересобирается.
  */
 export function useShipEquipment(list) {
@@ -136,33 +113,12 @@ export function useShipType(code) {
   return type.code;
 }
 
-async function snapshot() {
-  const res = await fetch(snapshotUrl(), { cache: 'no-cache' });
-  if (!res.ok) throw new Error(L('слепок характеристик не читается: ') + res.status);
-  return res.json();
-}
-
 /**
- * Получить характеристики.
- *
- * @param offline играем без сервера — сразу слепок, сервер не трогаем
- * @returns {Promise<{source: 'server'|'snapshot', error: ?Error}>}
+ * Получить характеристики у сервера. Не ответил — ошибка наверх: без
+ * чисел корабля игры нет (js/boot.js ждёт и пробует снова).
  */
-export async function loadSpecs({ offline = false } = {}) {
-  let error = null;
-  if (!offline) {
-    try {
-      applySpecs(await api.specs());
-      source = 'server';
-      return { source, error: null };
-    } catch (e) {
-      // Сервера нет или он молчит. Это не повод не запуститься: числа
-      // те же самые лежат рядом файлом. Но и молчать об этом нельзя —
-      // ошибку отдаём наверх.
-      error = e;
-    }
-  }
-  applySpecs(await snapshot());
-  source = 'snapshot';
-  return { source, error };
+export async function loadSpecs() {
+  const data = await api.specs();
+  applySpecs(data);
+  return data;
 }

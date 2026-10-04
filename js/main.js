@@ -56,14 +56,15 @@ import {
 import { makeState, say, updateMessages, ST } from './game/state.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, audioLine } from './game/audio.js';
 import { drawHud, makeDockAssist, fmtDist } from './ui/hud.js';
-import { PEER } from './ui/theme.js';
+import { PEER, NPC_COLOR } from './ui/theme.js';
+import { setNpcRange } from './game/npc.js';
 import { SCANNER_STEPS } from './game/loadout.js';
-import { devMode, soloMode } from './core/mode.js';
 import { useShipType, useShipEquipment } from './game/specs.js';
 import {
   showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
-import { showDocked, stationKeys, makeStation, syncFromServer } from './ui/station.js';
+import { showDocked, stationKeys, makeStation, syncFromServer, forgetPort } from './ui/station.js';
+import { nextZoom, zoomFov, lookScale } from './game/zoom.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
   standAt, deckWorld,
@@ -93,9 +94,10 @@ import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
 import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
 import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from './game/player.js';
 import {
-  session, start as sessionStart, queueSave, flushOnExit,
+  session, start as sessionStart, queueSave, flushOnExit, linkError,
   dock as serverDock, refresh as serverRefresh, repair as serverRepair, isOnline,
-  rescue as serverRescue, command as serverCommand, flush as flushSave,
+  rescue as serverRescue, command as serverCommand, flushNow as flushSaveNow, retryLink,
+  undock as serverUndock, movePilot as serverMove,
 } from './net/session.js';
 import { net, connect as netConnect, shoot, reportHit, reportImpact, askHatch }
   from './net/socket.js';
@@ -106,6 +108,7 @@ import {
 } from './game/peers.js';
 import {
   makeGuns, updateGuns, fireGuns, addForeignBolt, aimDir, shieldFlash, hasShieldFlash,
+  quantumFx, wreckFx,
 } from './game/weapons.js';
 import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
 import { shipAnchor, anchorOk, anchorPose } from './game/anchor.js';
@@ -117,13 +120,6 @@ import { growth } from './gl/flora.js';
 import { L, initLang, setLang, getLang } from './core/lang.js';
 
 const STEP = 1 / 60;
-// v2 — после того, как в систему добавили три планеты. Сохранение хранит
-// цель, порт и точку стоянки ИДЕНТИФИКАТОРАМИ тел, а те раздаются по
-// порядку создания: новое тело в середине списка сдвигает все номера за
-// собой. Старое сохранение открылось бы без ошибки и посадило бы корабль
-// не туда — например, «на грунт» внутри газового гиганта. Ключ сменён,
-// чтобы такой сейв просто не нашёлся; цена — один перезапуск от порта.
-const SAVE_KEY = 'solar_trader_save_v2';
 
 // Высоты для телепорта к цели (клавиша K) — от «вся планета в кадре» до
 // «прямо над грунтом». Инструмент для проверки картинки: пройти весь
@@ -160,7 +156,7 @@ if (!scene) renderer = new Renderer(screenCanvas, { camera });
 
 let world = makeSystem(sys);
 const ship = resetFuelBook(makeShip());
-// Номер корабля на сервере (без сервера — null) и система, где он стоит.
+// Номер корабля на сервере (пока сервер его не назвал — null) и система, где он стоит.
 // away — корабль в ДРУГОЙ системе: пилот улетел пассажиром, а свой
 // корабль остался там, где стоял (keep — где именно).
 ship.id = null;
@@ -218,6 +214,11 @@ const game = {
   info: null,
   nearest: null,
   dockAssist: null,
+  help: false,           // открыта справка (H) — слой, а не режим
+  zoom: 1,               // приближение по нажатию колеса: 1, 2, 4, 8 (js/game/zoom.js)
+  // Действия с местом, которые оборвала связь: их повторяет возврат связи
+  // (holdForLink). dock — порт, где игра стоит, а сервер этого не знает.
+  due: { dock: null, undock: false, place: false },
   aimed: null,           // цель под прицелом: её выберет Tab
   zone: null,            // обстановка у поверхности (высота, нормаль, грунт)
   entry: null,           // вход в атмосферу: нагрев, цвет и ось факела
@@ -247,7 +248,6 @@ const game = {
   hurt: 0,                // сколько ещё мигать после попадания В НАС, с
   landHold: 0,           // сколько уже держат клавишу взлёта на грунте
   teleAlt: 2,            // номер текущей высоты телепорта (клавиша K)
-  restartArmed: 0,       // сколько ещё ждём подтверждения рестарта, с
   rescueArmed: 0,        // сколько ещё ждём подтверждения буксира, с
   station: makeStation(), // экран порта: раздел, прайс, верфь (js/ui/station.js)
   // Что уже сказано о баке: предупреждаем на КАЖДОМ пороге один раз, а
@@ -299,22 +299,21 @@ const _carried = v3();
  *
  * Хозяин мира — сервер: где стоит город и как он зовётся, решает он, а
  * не клиент (js/game/city.js, applyCities). Клиент при этом собирает
- * систему сам и СРАЗУ — ответа он не ждёт: офлайн игра обязана работать
- * целиком, а генератор один и тот же, так что чаще всего ответ ничего
- * не меняет.
+ * систему сам и СРАЗУ — ответа он не ждёт: генератор один и тот же, так
+ * что чаще всего ответ ничего не меняет.
  *
  * Прицел сбрасывается только если набор городов ДЕЙСТВИТЕЛЬНО другой:
  * иначе ответ, пришедший через секунду после входа, сбивал бы уже
  * выбранную цель.
  */
 function syncCities(target, forWorld) {
-  if (netMode !== 'online') return;
+  if (!isOnline()) return;
   const was = forWorld.cities.map((c) => c.id).join(',');
   apiSystem(target.id).then((r) => {
     if (world !== forWorld || !r || !Array.isArray(r.cities)) return;
     applyCities(world, r.cities);
     if (world.cities.map((c) => c.id).join(',') !== was) game.nav = makeNav(world);
-  }).catch(() => { /* сети нет — остаётся то, что клиент собрал сам */ });
+  }).catch(() => { /* не ответил — остаётся то, что клиент собрал сам */ });
 }
 
 /**
@@ -398,6 +397,7 @@ function enterSystem(target) {
  *   сбор, и повторять его при каждой загрузке игры нельзя.
  */
 function dockAt(station, restoring = false) {
+  closeLayers();
   game.entry = null;
   ship.dockedAt = station;
   game.lastStation = station;
@@ -408,15 +408,8 @@ function dockAt(station, restoring = false) {
   ship.gear.out = false;
   ship.speed = 0;
   ship.throttle = 0;
-  // БЕСПЛАТНЫЙ РЕМОНТ остался только в автономной игре. С сервером у
-  // корпуса появилась цена (station.repair), и чинить его даром за сам
-  // факт стыковки значило бы обесценить и удары, и деньги разом. С баком
-  // то же самое: с сервером заправка стоит денег (station.refuel), без
-  // него порт заправляет даром — торговать там не с кем.
-  if (!isOnline()) {
-    ship.hull = SHIP.maxHull;
-    ship.fuel = SHIP.fuelCap;
-  }
+  // Ремонт и бак в порту — за деньги и только у сервера (station.repair,
+  // station.refuel): даром за сам факт стыковки они не даются.
   game.fuelSaid = 'ok';
   game.state.mode = ST.DOCKED;
   audioCue(game.audio, 'dock');
@@ -425,26 +418,99 @@ function dockAt(station, restoring = false) {
   showDocked(game);
   save();
 
-  if (!restoring && isOnline()) {
-    // Сбор за место берёт сервер, и он же считает стыковки. Ответ придёт
-    // фоном: ждать его, держа игрока в порту перед пустым экраном, незачем.
-    serverDock(sys.id, station.id).then((r) => {
-      if (!r) return;
-      game.port = r.station;
-      // Состояние целиком: деньги после сбора, а если стыковка оказалась
-      // в новой системе — и бак после варпа, который сервер списал тут же.
-      syncFromServer(game);
-      if (r.fee > 0) {
-        say(game.state, L('СТЫКОВОЧНЫЙ СБОР · ') + r.fee + L(' кр'), '#ffcc66', 3);
-      }
-      showDocked(game);
-    });
-  }
+  // Сбор за место берёт сервер, и он же считает стыковки. Ответ придёт
+  // фоном: ждать его, держа игрока в порту перед пустым экраном, незачем.
+  if (!restoring) dockOnServer(station);
+}
+
+// --- место на сервере: стыковка, вылет, переходы пилота -------------------------
+//
+// Место корабля в порту и место пилота (на чьём борту, в кресле ли, на
+// грунте ли) меняет только СЕРВЕР, и только действием в момент перехода.
+// Раньше они ехали в фоновом сохранении — а оно опаздывает: собранное до
+// пересадки, оно приходило после неё и ставило пилота обратно на борт
+// прежнего корабля. Новый улетал без него, а порт потом отказывал «не на
+// борту», рынок и заправка — «не в порту».
+//
+// Действия идут СТРОГО ПО ОЧЕРЕДИ (inOrder): запросы HTTP параллельны,
+// порядок прихода не обещан, и вылет, обогнавший стыковку, оставил бы
+// корабль в доке у сервера, пока у игрока он летит.
+let placeChain = Promise.resolve();
+function inOrder(fn) {
+  const p = placeChain.then(fn);
+  placeChain = p.catch(() => {});
+  return p;
+}
+
+/**
+ * Встать в порт на сервере. Отказ — сказать словами и выйти из дока:
+ * порт, которого нет у сервера, — это рынок и заправка, отвечающие на
+ * каждое нажатие «не в порту». Обрыв — повторить с возвратом связи.
+ */
+function dockOnServer(station) {
+  return inOrder(async () => {
+    game.due.dock = null;
+    if (ship.dockedAt !== station) return;          // уже улетел
+    const r = await serverDock(sys.id, station.id);
+    if (r.lost) { game.due.dock = station; return; }
+    if (ship.dockedAt !== station) return;
+    if (r.refused) {
+      say(game.state, L('ПОРТ ОТКАЗАЛ: ') + r.refused, '#ff7a66', 5);
+      game.launch();
+      return;
+    }
+    game.port = r.data.station;
+    // Состояние целиком: деньги после сбора, а если стыковка оказалась
+    // в новой системе — и бак после варпа, который сервер списал тут же.
+    syncFromServer(game);
+    if (r.data.fee > 0) {
+      say(game.state, L('СТЫКОВОЧНЫЙ СБОР · ') + r.data.fee + L(' кр'), '#ffcc66', 3);
+    }
+    showDocked(game);
+  });
+}
+
+/** Выйти из порта на сервере (повторный вызов безвреден). */
+function undockOnServer() {
+  return inOrder(async () => {
+    game.due.undock = false;
+    if (ship.dockedAt) return;                      // уже снова в порту
+    const r = await serverUndock();
+    if (r.lost) game.due.undock = true;
+    else if (r.refused) say(game.state, L('ВЫЛЕТ: ') + r.refused, '#ff7a66', 4);
+  });
+}
+
+/**
+ * Переход пилота — на сервер, сразу: встал, сел, сошёл на грунт, поднялся
+ * на борт. Место — каким оно стало в этот миг (meRecord). Не принят —
+ * сервер говорит, где пилот на самом деле, и игра забирает его состояние.
+ */
+function placePilot() {
+  const rec = meRecord();
+  return inOrder(async () => {
+    game.due.place = false;
+    const r = await serverMove(rec);
+    if (r.lost) { game.due.place = true; return; }
+    if (r.refused) { say(game.state, L('ПЕРЕХОД: ') + r.refused, '#ff7a66', 4); return; }
+    if (r.data.moved) return;
+    say(game.state, L('ПЕРЕХОД НЕ ПРИНЯТ: ') + (r.data.why || r.data.denied), '#ff7a66', 4);
+    // Место корабля — свежее, а не восьмисекундной давности: из него
+    // сервер и поставит пилота.
+    await save(true);
+    await game.respawn();
+  });
+}
+
+/** Связь вернулась: довести то, что она оборвала. */
+function finishDue() {
+  if (game.due.dock && ship.dockedAt === game.due.dock) dockOnServer(game.due.dock);
+  if (game.due.undock && !ship.dockedAt) undockOnServer();
+  if (game.due.place) placePilot();
 }
 
 /** Ремонт в порту: кнопка на экране стыковки. */
 game.repair = async () => {
-  if (!isOnline()) return;
   try {
     const r = await serverRepair();
     ship.hull = r.hull;
@@ -458,6 +524,7 @@ game.repair = async () => {
 
 game.launch = () => {
   const st = ship.dockedAt || game.lastStation;
+  const wasDocked = !!ship.dockedAt;
   hideOverlay();
   game.state.mode = ST.FLIGHT;
   if (st) {
@@ -472,6 +539,7 @@ game.launch = () => {
       st.pos.z + st.basis.fwd.z * (st.shape.D + 1.5)), b);
   }
   ship.dockedAt = null;
+  if (wasDocked) undockOnServer();
   audioReset(game.audio, ship);
   audioCue(game.audio, 'launch');
   say(game.state, L('ВЫЛЕТ РАЗРЕШЁН. УДАЧНОГО ПОЛЁТА.'), '#78e08f');
@@ -494,6 +562,13 @@ game.landHere = () => {
   game.zone = landingContext(world, ship);
   return true;
 };
+
+/**
+ * Встать в порт сразу, без захода. Не игровое действие: им прогон
+ * (tools/smoke.mjs) проверяет, что делает игра с ответом сервера на
+ * стыковку, не гоняя докинг-компьютер две минуты.
+ */
+game.dockHere = (station) => dockAt(station);
 
 function landAt(zone, belly = false) {
   settle(ship, zone);
@@ -535,97 +610,73 @@ game.takeoff = () => {
   input.releaseAll();
 };
 
-game.respawn = () => {
-  hideOverlay();
-  ship.hull = SHIP.maxHull;
-  // Страховка возвращает корабль с резервом в баке, не больше: так же
-  // поступает сервер (Combat::respawn), иначе разбиться было бы дешевле,
-  // чем заправиться.
-  ship.fuel = Math.max(ship.fuel, fuelReserve());
-  const st = game.lastStation || (world.home && world.home.station);
-  if (st) dockAt(st);
-  else { game.state.mode = ST.FLIGHT; }
-};
-
-// Сколько секунд ждём второго нажатия. Рестарт необратим и стирает
-// сохранение, поэтому одной клавишей он не делается: первое нажатие
-// только предупреждает.
-const RESTART_CONFIRM = 3;
-
 /**
- * Начать заново: то же состояние, что у первого запуска — корабль в
- * порту родной станции, корпус цел, счётчики обнулены, часы мира на
- * нуле. Сохранение переписывается сразу, иначе старое вернулось бы при
- * следующей загрузке страницы.
- *
- * Корабль именно ПЕРЕСОБИРАЕТСЯ по полям, а не создаётся заново: на него
- * держат ссылки и сцена, и приборы, и звук.
+ * «Продолжить» после крушения. Корабль уже вернула в порт страховка
+ * сервера (Combat::respawn): забираем его состояние, а не чиним
+ * корабль сами.
  */
-game.restart = () => {
-  seatPilot();
-  stopDockingComputer(ship);
-  stopLanding(ship);
-  ship.landedAt = null;
-  ship.landedPose = null;
-  ship.dockedAt = null;
-  ship.landing = null;
-  ship.hull = SHIP.maxHull;
-  ship.gear.out = false;
-  ship.gear.t = 0;
-  ship.lift = 0;
-  ship.stun = 0;
-  ship.zeroHold = 0;
-  ship.boost = 1;
-  ship.boosting = false;
-  ship.fuel = SHIP.fuelCap;
-  resetFuelBook(ship);
-  placeShip(ship, v3(), makeBasis());
-  // Корабль — снова здесь и свой: новая игра начинается в его кресле.
-  ship.away = false;
-  ship.keep = null;
-  ship.sysId = homeSystem().id;
-
-  // Начать заново — значит и вернуться домой: в чужой системе нет ни
-  // родного порта, ни того, с чего игра начинается.
-  stopWarp(game.warp);
-  game.warpTarget = null;
-  if (sys.seed !== homeSystem().seed) enterSystem(homeSystem());
-  world.time = 0;
-  updateWorld(world, 0);
-  stopQuantum(game.quantum);
-  game.stats = { docks: 0, crashes: 0, flownKm: 0, landings: 0 };
-  game.player = makePlayer();
-  game.menu.open = false;
-  game.zone = null;
-  game.capture = null;
-  game.landInfo = null;
-  game.dockAssist = null;
-  game.statusLine = null;
-  game.crashReason = '';
-  game.camOrbit.yaw = 0;
-  game.camOrbit.pitch = 0;
-  game.restartArmed = 0;
-  game.state.messages.length = 0;
-
-  const home = world.home.station;
-  const away = world.stations.find((x) => x !== home);
-  if (away) selectTarget(away);
-  try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* приватный режим */ }
-  dockAt(home);                 // ставит режим, экран порта и пишет сейв
-  say(game.state, L('НОВАЯ ИГРА'), '#78e08f', 3);
+game.respawn = async () => {
+  hideOverlay();
+  const st = await serverRefresh();
+  if (!st) { game.resync = true; return; }
+  applyState(serverToSave(st));
+  applyServer(game.player, st);
+  if (game.state.mode === ST.DOCKED) showDocked(game);
 };
 
-// Куда возвращаться, закрывая карту или справку.
-const restMode = () => (ship.dockedAt ? ST.DOCKED : (ship.landedAt ? ST.LANDED : ST.FLIGHT));
+// Сколько секунд ждём второго нажатия у необратимых клавиш (буксир).
+const CONFIRM_S = 3;
+
+// --- карта и справка: слои поверх живого мира -------------------------------
+//
+// Карта (M) и справка (H) — СЛОИ, а не режимы игры. Режимами они были, и
+// пока карта или справка открыты, ход не считался вовсе: корабль вставал
+// посреди полёта, хотя мир, соседи и NPC ехали дальше, а у грунта тело
+// уезжало из-под стоянки. В сети остановить мир нельзя, поэтому под ними
+// идёт всё как шло: корабль летит, автоматика работает, порт везёт с
+// собой. Ручки на это время отпущены — как и под меню пилота (I).
+
+/** Открыт ли слой, под которым ручки корабля отпущены. */
+const layerOpen = () => game.menu.open || game.map.open || game.help;
+
+/** Открыть карту: на том, куда летишь, — вид на всю систему. */
+game.openMap = () => {
+  game.help = false;
+  game.map.open = true;
+  // Карта открывается на том, куда летишь: выбранной оказывается
+  // текущая цель, а вид охватывает всю систему. Искать себя на
+  // плане каждый раз заново — работа, которой быть не должно.
+  resetMap(game.map, world);
+  game.map.sel = currentTarget(game.nav);
+  hideOverlay();
+};
+
+function closeMap() {
+  game.map.open = false;
+  if (game.state.mode === ST.DOCKED) showDocked(game);
+}
+
+function openHelp() {
+  game.map.open = false;
+  game.help = true;
+  input.unlock();
+  showHelp(game);
+}
 
 game.closeOverlay = () => {
+  game.help = false;
   hideOverlay();
-  game.state.mode = restMode();
-  if (ship.dockedAt) showDocked(game);
+  if (game.state.mode === ST.DOCKED) showDocked(game);
   // Справку закрыли на ногах — мышь обратно взгляду (нажатие закрытия и
   // есть действие игрока, которого требует браузер).
   if (game.walk.on && !Q.touchUi) input.lock(screenCanvas);
 };
+
+/** Закрыть карту и справку без экрана порта: крушение, стыковка, тоннель. */
+function closeLayers() {
+  game.map.open = false;
+  game.help = false;
+}
 
 // --- пилот на ногах -------------------------------------------------------------
 //
@@ -659,7 +710,7 @@ const ownVessel = {
 game.ownVessel = ownVessel;
 game.frame = ownVessel;
 
-/** Кто я в сети: номер игрока (или null без сервера). */
+/** Кто я в сети: номер игрока (или null, пока сервер его не назвал). */
 function myId() {
   if (net.you && typeof net.you.id === 'number') return net.you.id;
   const p = session.player && session.player.player;
@@ -854,6 +905,7 @@ game.rise = () => {
   say(st, st.mode === ST.FLIGHT
     ? L('ПИЛОТ ВСТАЛ · КОРАБЛЬ ДЕРЖИТ КУРС И ТЯГУ')
     : L('ПИЛОТ ВСТАЛ С КРЕСЛА'), '#9fd9ff', 3);
+  placePilot();
   save();
   return true;
 };
@@ -905,16 +957,20 @@ async function commandShip(id) {
   if (!isOnline()) { say(game.state, L('НЕТ СВЯЗИ С СЕРВЕРОМ'), '#ff7a66', 3); return false; }
   say(game.state, L('ПРИНИМАЮ КОМАНДОВАНИЕ…'), '#9fd9ff', 2);
   try {
-    // Где стоял прежний корабль — в базу до пересадки: дальше его место
-    // пишет уже не эта игра (он засыпает там, где стоит).
-    save(true);
-    const state = await serverCommand(id);
+    // Где стоял прежний корабль — в базу до пересадки, и ДОЖДАТЬСЯ ответа:
+    // дальше его место пишет уже не эта игра (он засыпает там, где стоит),
+    // а сохранение, обогнанное пересадкой, сервер за него не примет.
+    await save(true);
+    // И после переходов пилота, ещё идущих к серверу: командуют с борта.
+    const state = await inOrder(() => serverCommand(id));
     seatPilot();
     applyState(serverToSave(state));
     applyServer(game.player, state);
     syncFromServer(game, state);
     save();
     say(game.state, L('КОМАНДОВАНИЕ ПРИНЯТО: ') + (SHIP.typeName || ''), '#78e08f', 3);
+    // Ответы порта — про прежний корабль: его модули, его трюм, его кресло.
+    forgetPort(game);
     if (game.state.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
     return true;
   } catch (e) {
@@ -944,6 +1000,7 @@ function seated() {
   game.deckMap.open = false;
   if (st.mode === ST.DOCKED && ship.dockedAt) showDocked(game);
   say(st, L('ПИЛОТ В КРЕСЛЕ'), '#78e08f', 2);
+  placePilot();
   save();
 }
 
@@ -1034,9 +1091,7 @@ function walkKeys() {
     }
   }
   if (input.pressed('KeyH')) {
-    st.mode = ST.HELP;
-    input.unlock();
-    showHelp(game);
+    openHelp();
     return;
   }
   // Список пилотов — и на ногах: кто где, на чьём борту.
@@ -1069,7 +1124,7 @@ function walkFrame(dt) {
   const V = aboardVessel();
   othersAboard(V, w.others || (w.others = []));
   // Под справкой, меню и картой ноги стоят: ввод сейчас не их.
-  if (st.mode === ST.HELP || st.mode === ST.MAP || game.menu.open || game.deckMap.open) {
+  if (game.help || game.map.open || game.menu.open || game.deckMap.open) {
     game.walkEye = w.out ? null : walkerEye(w, I, _eyeM);
     return;
   }
@@ -1097,8 +1152,9 @@ function walkFrame(dt) {
     side: clamp(input.axis(['KeyA'], ['KeyD']) + pad.yaw, -1, 1),
     run: input.isDown('ShiftLeft', 'ShiftRight'),
     jump: input.pressed('Space'),
-    lookX: lx * WALK.look + turn,
-    lookY: -ly * WALK.look,
+    // Под приближением голова медленнее во столько же раз (js/game/zoom.js).
+    lookX: (lx * WALK.look + turn) * lookScale(game.zoom),
+    lookY: -ly * WALK.look * lookScale(game.zoom),
   };
   const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
@@ -1329,6 +1385,12 @@ function airSounds(ev, air, V) {
  */
 function useHatch(hx, V = ownVessel) {
   const st = game.state, air = ownAir();
+  // У NPC люков не открывают: внутрь пускать некому, а сервер такие
+  // просьбы и не слушает.
+  if (V.npc) {
+    say(st, L('ЛЮК ЗАПЕРТ · ') + (V.name || ''), '#ffcc66', 2.5);
+    return;
+  }
   if (!V.own) {
     if (!isOnline() || !askHatch(V.id, hx.id, !hx.want)) {
       say(st, L('НЕТ СВЯЗИ: ЛЮК ЧУЖОГО КОРАБЛЯ НЕ ОТКРЫТЬ'), '#ff7a66', 3);
@@ -1531,6 +1593,7 @@ function crossThreshold() {
     w.air = null;
     game.frame = ownVessel;
     game.walkRoomT = 3;
+    placePilot();
     save();
     return;
   }
@@ -1550,6 +1613,7 @@ function crossThreshold() {
     w.room = I.roomAt(p);
     game.walkRoomT = 2.6;
     if (!V.own) say(game.state, L('НА БОРТУ: КОРАБЛЬ ') + (V.name || L('ПИЛОТА')), '#9fd9ff', 3);
+    placePilot();
     save();
     return;
   }
@@ -1762,6 +1826,8 @@ function outHint() {
 }
 
 function crash(reason) {
+  closeLayers();
+  game.zoom = 1;
   seatPilot();
   game.entry = null;
   game.crashReason = reason;
@@ -1989,9 +2055,6 @@ function savePayload() {
     warpTo: game.warpTarget ? game.warpTarget.id : null,
     hull: ship.hull,
     shield: ship.shield,
-    // Бак — для автономной игры: сервер это поле не читает вовсе, топливо
-    // у него своё (server/src/Players.php, save), как и корпус.
-    fuel: ship.fuel,
     // Цель хранится идентификатором, а не номером в списке: список
     // теперь меняется на ходу (у ближнего тела появляются маркеры), и
     // номер после загрузки указывал бы в произвольное место.
@@ -2010,28 +2073,22 @@ function savePayload() {
 }
 
 /**
- * Сохранить: в браузер сразу, на сервер — фоном.
- * @param now не ждать очереди (js/net/session.js): пересадка в другой корабль
+ * Сохранить — на сервер, фоном. Местной копии нет: правда одна, и она
+ * на сервере; без него игра не идёт вовсе (js/boot.js).
+ *
+ * Место пилота и порт сохранение НЕ меняет — только позу там, где пилот
+ * уже есть (см. «место на сервере» выше): оно опаздывает.
+ * @param now не ждать очереди и дождаться ответа (пересадка в другой корабль)
  */
 function save(now = false) {
   const data = savePayload();
-  // Местное сохранение остаётся ВСЕГДА, даже когда есть сервер: это кэш,
-  // с которого игра поднимется, если сети не окажется в следующий раз.
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-  } catch (e) { /* приватный режим — просто не сохраняем */ }
   // Свой корабль в другой системе — его место серверу не пишем: где он
   // стоит, сервер знает лучше нас (мы его давно не видели).
   const out = ship.away ? Object.assign({}, data, { ship: null }) : data;
-  // А на сервер оно уходит фоном и не чаще, чем нужно (js/net/session.js).
-  if (now) { session.dirty = out; flushSave(); } else queueSave(out);
-}
-
-function load() {
-  let s = null;
-  try { s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { s = null; }
-  if (!s) return false;
-  return applyState(s);
+  // Уходит фоном и не чаще, чем нужно (js/net/session.js).
+  if (now) { session.dirty = out; return flushSaveNow(); }
+  queueSave(out);
+  return null;
 }
 
 /** Место корабля в сохранении старого вида (полями верхнего уровня). */
@@ -2045,11 +2102,8 @@ function legacyShip(s) {
 /**
  * Разложить сохранение по игре.
  *
- * Вынесено из load() потому, что источников сохранения стало два —
- * localStorage и сервер, — а раскладывать его обязан ОДИН код. Иначе
- * «загрузился из браузера» и «загрузился с сервера» неизбежно начнут
- * отличаться мелочами вроде потерянной цели или вида камеры, и ловить
- * это придётся руками в браузере.
+ * Источник один — состояние сервера (serverToSave): при входе, после
+ * гибели, буксира, пересадки. Раскладывает его этот один код.
  */
 function applyState(s) {
   if (!s) return false;
@@ -2557,7 +2611,12 @@ function applyNetEvent(ev) {
     if (t && ev.absorbed > 0 && !hasShieldFlash(game.guns, ev.id, false)) {
       shieldFlash(game.guns, ev.id, false, ship.pos, t.pos, t.basis);
     }
-    if (ev.dead) say(game.state, L('ЦЕЛЬ УНИЧТОЖЕНА'), '#78e08f', 4);
+    if (ev.dead) {
+      say(game.state, L('ЦЕЛЬ УНИЧТОЖЕНА'), '#78e08f', 4);
+      // Следом придёт boom о том же корабле — второй строкой о нём
+      // говорить незачем.
+      game.lastKill = ev.id;
+    }
     return;
   }
   if (ev.t === 'impact') {
@@ -2570,7 +2629,25 @@ function applyNetEvent(ev) {
     hatchRequest(ev);
     return;
   }
+  if (ev.t === 'scan') {
+    // NPC подлетел на километр и разглядывает нас (server/src/Npc.php,
+    // inspect): сказать об этом — половина того, ради чего он подлетел.
+    say(game.state, L('ВАС СКАНИРУЕТ · ') + (ev.name || 'NPC'), '#e3d6a0', 4);
+    return;
+  }
   if (ev.t === 'boom') {
+    // Видели корабль — видим и гибель: огонь по его габариту.
+    const V = game.peers.find((p) => p.id === ev.id);
+    if (V) wreckFx(game.guns, V.pos, V.radius);
+    if (ev.npc) {
+      // NPC погиб — его больше нет нигде (server/src/Traffic.php), и
+      // ждать, пока он истечёт по PEER_TTL, незачем.
+      dropPeer(peerStore, ev.id);
+      if (ev.id !== game.lastKill) {
+        say(game.state, L('КОРАБЛЬ УНИЧТОЖЕН · ') + (V ? V.name : ''), '#ffcc66', 3);
+      }
+      return;
+    }
     // Корабль, на борту которого мы едем, уничтожен: страховка увела его в
     // порт вместе с пассажирами (Combat::respawnShip) — забираем место.
     const w = game.walk;
@@ -2601,24 +2678,13 @@ function applyNetEvent(ev) {
 /**
  * Аварийный буксир: корабль с пустым баком — в порт.
  *
- * С сервером буксир — его решение (Fuel::rescue): он переставляет пилота
- * в порт, берёт тариф и доливает бак до резерва, а игра забирает
- * состояние, как после гибели. Без сервера тот же выход из тупика —
- * даром: платить некому.
+ * Буксир — решение сервера (Fuel::rescue): он переставляет пилота в
+ * порт, берёт тариф и доливает бак до резерва, а игра забирает
+ * состояние, как после гибели.
  */
 game.rescue = async () => {
   game.rescueArmed = 0;
   if (ship.dockedAt) return;
-  const st = game.lastStation || (world.home && world.home.station);
-  if (!isOnline()) {
-    if (!st) return;
-    stopQuantum(game.quantum);
-    ship.fuel = Math.max(ship.fuel, fuelReserve());
-    ship.landedAt = null;
-    say(game.state, L('БУКСИР ДОТЯНУЛ ДО ПОРТА'), '#ffcc66', 5);
-    dockAt(st, true);
-    return;
-  }
   try {
     const r = await serverRescue();
     const state = session.player;
@@ -2643,10 +2709,8 @@ function rescueKey() {
   if (!input.pressed('KeyU') || ship.dockedAt) return;
   if (game.warp.phase === 'tunnel') return;
   if (game.rescueArmed > 0) { game.rescue(); return; }
-  game.rescueArmed = RESTART_CONFIRM;
-  say(game.state, isOnline()
-    ? L('U ЕЩЁ РАЗ — АВАРИЙНЫЙ БУКСИР ДО ПОРТА · ДО 600 КР')
-    : L('U ЕЩЁ РАЗ — АВАРИЙНЫЙ БУКСИР ДО ПОРТА'), '#ffcc66', RESTART_CONFIRM);
+  game.rescueArmed = CONFIRM_S;
+  say(game.state, L('U ЕЩЁ РАЗ — АВАРИЙНЫЙ БУКСИР ДО ПОРТА · ДО 600 КР'), '#ffcc66', CONFIRM_S);
 }
 
 /**
@@ -2683,7 +2747,9 @@ async function killedInAction(by) {
   audioCue(game.audio, 'crash');
   say(game.state, L('КОРАБЛЬ УНИЧТОЖЕН · ') + by, '#ff7a66', 6);
   const st = await serverRefresh();
-  if (!st) { crash(L('Корабль уничтожен в бою.')); return; }
+  // Связь пропала — игра встанет и дождётся её (linkHeld), а состояние
+  // заберёт, как только сервер ответит.
+  if (!st) { game.resync = true; return; }
   applyState(serverToSave(st));
   applyServer(game.player, st);
   save();
@@ -2699,6 +2765,15 @@ function handleKeys(dt) {
 
   if (input.pressed('Backquote')) dbg.on = !dbg.on;
 
+  // Нажатие колеса — приближение ×2 → ×4 → ×8 → обычный вид: в полёте,
+  // на грунте и пешком. В меню, на карте, в справке и на плане палубы
+  // колесо своё, и вид под ними не трогается.
+  if (input.pressed('MouseMiddle') && !layerOpen() && !game.deckMap.open
+      && (game.walk.on || st.mode === ST.FLIGHT || st.mode === ST.LANDED)) {
+    game.zoom = nextZoom(game.zoom);
+    say(st, game.zoom > 1 ? L('ПРИБЛИЖЕНИЕ ×') + game.zoom : L('ОБЫЧНЫЙ ВИД'), '#9fd9ff', 1.5);
+  }
+
   // Список пилотов — вне разбора режимов и без захвата управления: его
   // смотрят на ходу, решая, куда лететь, а не вместо полёта.
   if (input.pressed('KeyP')) game.showPilots = !game.showPilots;
@@ -2706,19 +2781,10 @@ function handleKeys(dt) {
   // Звук. Клавиши намеренно вне разбора режимов ниже: выключать гул
   // надо и на карте, и в порту, а не только в полёте.
   if (input.pressed('KeyN')) {
-    if (input.isDown('ShiftLeft', 'ShiftRight')) {
-      // Начать заново — только с подтверждения: сохранение стирается.
-      if (game.restartArmed > 0) game.restart();
-      else {
-        game.restartArmed = RESTART_CONFIRM;
-        say(st, L('SHIFT+N ЕЩЁ РАЗ — НАЧАТЬ ЗАНОВО'), '#ff7a66', RESTART_CONFIRM);
-      }
-    } else {
-      game.audio.on = !game.audio.on;
-      sound.setMuted(!game.audio.on);
-      say(st, game.audio.on ? L('ЗВУК ВКЛЮЧЁН') : L('ЗВУК ВЫКЛЮЧЕН'));
-      save();
-    }
+    game.audio.on = !game.audio.on;
+    sound.setMuted(!game.audio.on);
+    say(st, game.audio.on ? L('ЗВУК ВКЛЮЧЁН') : L('ЗВУК ВЫКЛЮЧЕН'));
+    save();
   }
   if (input.pressed('Minus', 'Equal', 'NumpadSubtract', 'NumpadAdd')) {
     const up = input.pressed('Equal', 'NumpadAdd');
@@ -2731,7 +2797,7 @@ function handleKeys(dt) {
   // На ногах ручки корабля остались в рубке: разбирается только своё —
   // сесть, справка, мышь. Ходьбу читает walkFrame. Это раньше тоннеля:
   // по кораблю ходят и в варпе.
-  if (game.walk.on && st.mode !== ST.HELP) { walkKeys(); return; }
+  if (game.walk.on && !game.help) { walkKeys(); return; }
 
   // В тоннеле не работает ничего, кроме звука: карта чужой системы —
   // это карта того, чего сейчас нет (половину прыжка мир вообще не
@@ -2741,14 +2807,29 @@ function handleKeys(dt) {
     // Привод уходит в прыжок сам, когда корабль доцентровался, — и может
     // сделать это при открытом меню. Оставить его открытым нельзя:
     // клавиши в тоннеле не разбираются вовсе, и закрыть меню было бы
-    // нечем до самого прибытия.
+    // нечем до самого прибытия. Карта и справка — так же.
     game.menu.open = false;
+    if (game.help) hideOverlay();
+    closeLayers();
     return;
   }
 
   // Меню пилота забирает ввод целиком: полётные клавиши на это время
   // не разбираются, иначе выбор раздела уводил бы корабль с курса.
   if (game.menu.open) { menuInput(game.menu, input); return; }
+  // Справка: закрыть её — и только. Ручки отпущены, корабль летит.
+  if (game.help) {
+    if (input.pressed('KeyH')) game.closeOverlay();
+    return;
+  }
+  // Карта — единственный слой, где работают мышь и колесо, поэтому её
+  // ввод разбирается целиком в js/ui/map.js, а не здесь.
+  if (game.map.open) {
+    if (input.pressed('KeyM')) closeMap();
+    else if (input.pressed('KeyH')) openHelp();
+    else mapInput(game, input);
+    return;
+  }
   if (input.pressed('KeyI')) {
     // Только в полёте. В порту и на грунте своё меню появится отдельно.
     if (st.mode === ST.FLIGHT) game.menu.open = true;
@@ -2756,32 +2837,15 @@ function handleKeys(dt) {
   }
 
   if (input.pressed('KeyH')) {
-    if (st.mode === ST.HELP) game.closeOverlay();
-    else if (st.mode === ST.FLIGHT || st.mode === ST.MAP || st.mode === ST.LANDED) {
-      st.mode = ST.HELP;
-      showHelp(game);
-    }
+    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) openHelp();
     return;
   }
 
   if (input.pressed('KeyM')) {
-    if (st.mode === ST.MAP) st.mode = restMode();
-    else if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) {
-      st.mode = ST.MAP;
-      // Карта открывается на том, куда летишь: выбранной оказывается
-      // текущая цель, а вид охватывает всю систему. Искать себя на
-      // плане каждый раз заново — работа, которой быть не должно.
-      resetMap(game.map, world);
-      game.map.sel = currentTarget(game.nav);
-    }
-    if (st.mode === ST.DOCKED) showDocked(game);
-    else hideOverlay();
+    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) game.openMap();
+    else if (st.mode === ST.DOCKED) showDocked(game);
     return;
   }
-
-  // Карта — единственный режим, где работают мышь и колесо, поэтому её
-  // ввод разбирается целиком в js/ui/map.js, а не здесь.
-  if (st.mode === ST.MAP) { mapInput(game, input); return; }
 
   // Y — встать с кресла: в полёте, на грунте и в порту.
   if (input.pressed('KeyY') && (st.mode === ST.FLIGHT || st.mode === ST.LANDED || st.mode === ST.DOCKED)) {
@@ -3352,7 +3416,7 @@ function prepareHud() {
   // самое, по которому корабль рисуется в кадре: иначе отметка на
   // сканере и квадрат в кадре разъедутся на четверть секунды.
   for (const p of game.peers) {
-    game.scanBlips.push({ pos: p.pos, color: PEER, peer: true });
+    game.scanBlips.push({ pos: p.pos, color: p.npc ? NPC_COLOR : PEER, peer: true });
   }
   game.scannerRange = SCANNER_STEPS.find((r) => r > nearestDist * 1.25) || SCANNER_STEPS[SCANNER_STEPS.length - 1];
 
@@ -3405,8 +3469,9 @@ function updateCamOrbit(dt) {
   const yawMax = cockpit ? 1.92 : Math.PI;
   const pitchMax = cockpit ? 0.95 : 1.2;
   if (look) {
-    o.yaw = clamp(o.yaw + _drag.x * LOOK, -yawMax, yawMax);
-    o.pitch = clamp(o.pitch + _drag.y * LOOK, -pitchMax, pitchMax);
+    const k = LOOK * lookScale(game.zoom);
+    o.yaw = clamp(o.yaw + _drag.x * k, -yawMax, yawMax);
+    o.pitch = clamp(o.pitch + _drag.y * k, -pitchMax, pitchMax);
   } else {
     const k = Math.min(1, dt * 6);
     o.yaw += (0 - o.yaw) * k;
@@ -3456,7 +3521,7 @@ function updateFov(dt) {
 
   // Не сумма, а что сильнее: в прыжке форсаж всё равно недоступен, и
   // складывать их значит получить угол, которого не задумывал никто.
-  const want = Math.max(jump, boost, warp);
+  const want = zoomFov(Math.max(jump, boost, warp), game.zoom);
   // Вверх поле зрения идёт резче, чем возвращается: рывок — событие, а
   // возврат — послевкусие.
   fovNow += (want - fovNow) * Math.min(1, dt * (want > fovNow ? 10 : 5));
@@ -3609,7 +3674,7 @@ function render() {
   setupCamera();
 
   // План палубы — мышью, как меню: стрелка (js/ui/deckmap.js).
-  const wantCursor = game.menu.open || game.deckMap.open ? 'menu' : game.state.mode === ST.MAP ? 'map' : '';
+  const wantCursor = game.menu.open || game.deckMap.open ? 'menu' : game.map.open ? 'map' : '';
   if (wantCursor !== cursorClass) {
     screenCanvas.classList.remove('map', 'menu');
     if (wantCursor) screenCanvas.classList.add(wantCursor);
@@ -3629,6 +3694,8 @@ function render() {
   st.frameMs = scene ? scene.frameMs : 0;
   st.gpuMs = scene && scene.gpuTimer && scene.gpuTimer.available ? scene.gpuTimer.ms : 0;
   st.fw = scene ? scene.fwScale : 1;
+  // Мира за бортом в кадре нет: пилот в глухой комнате (js/gl/scene.js).
+  st.inside = !!scene && scene.outside === false;
   st.pending = scene ? scene.pending || 0 : 0;
   st.detail = scene ? !!scene.detailOn : false;
   st.patches = scene && scene.patch ? scene.patch.levels : 0;
@@ -3698,8 +3765,9 @@ function render() {
 
   // Приборы — отдельным прозрачным слоем, одинаково для обоих рендеров.
   hud.begin();
-  if (game.state.mode === ST.MAP) drawMap(hud, game);
-  else if (game.walk.on && game.state.mode !== ST.HELP) {
+  if (game.map.open) drawMap(hud, game);
+  else if (game.help) { /* справка — экраном поверх, приборы под ней не нужны */ }
+  else if (game.walk.on) {
     // План палубы — вместо приборов ходьбы, а не поверх: их подсказки и
     // строки просвечивали сквозь подложку плана и мешали его читать.
     if (game.deckMap.open && game.interior) drawDeckMap(hud.ctx, hud.camera.w, hud.camera.h, game, game.interior);
@@ -3708,15 +3776,14 @@ function render() {
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
   // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в
   // справке: там свои экраны целиком.
-  if (game.state.mode === ST.MAP || game.state.mode === ST.FLIGHT
-      || game.state.mode === ST.LANDED) {
+  if (game.map.open || (!game.help && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED))) {
     drawPilots(hud, game);
   }
   // Меню рисуется ПОВЕРХ приборов, а не вместо них: кадр под ним живой.
   if (game.menu.open) drawMenu(hud, game);
   // Сенсорные органы поверх приборов, но только в полёте и на грунте:
   // в меню и на карте они мешают, а делать нечего.
-  if (Q.touchUi && !game.menu.open
+  if (Q.touchUi && !layerOpen()
       && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED
         || (game.walk.on && game.state.mode === ST.DOCKED))) {
     touchDraw(hud.ctx, game.touch, touchArea, game);
@@ -3727,8 +3794,91 @@ function render() {
 
 // --- цикл --------------------------------------------------------------------
 
-// Режим связи с прошлого кадра: по смене показываем сообщение.
-let netMode = 'none';
+// --- связь с сервером ----------------------------------------------------------
+//
+// Без сервера игра не идёт: ни автономного режима, ни игры «как-нибудь»
+// без него. Пропала связь посреди полёта — игра СТОИТ под надписью и ждёт;
+// вернулась — едет дальше с того же места.
+//
+// Сервер — это и API, и хаб (сокет). API либо отвечает, либо нет: вызов,
+// упавший по сети, сразу переводит сессию в 'lost' (js/net/session.js).
+// Хаб же может моргнуть — переподключение занимает секунды
+// (js/net/socket.js), — и его обрыв короче LINK_GRACE игру не
+// останавливает. До первой связи с хабом игра не начинается вовсе.
+const LINK_GRACE = 5;
+let hubDownSince = null;
+let hubEver = false;
+let wasHeld = null;
+
+/**
+ * Почему игра стоит: null — связь есть; 'login' — вход истёк; 'api' —
+ * API не отвечает; 'hub' — хаб пропал; 'connect' — хаба ещё не было;
+ * 'replaced' — тот же пилот вошёл в другом окне.
+ */
+function linkHeld(t) {
+  if (session.mode === 'none') return 'login';
+  if (session.mode !== 'online') return 'api';
+  if (net.state === 'live') { hubDownSince = null; hubEver = true; return null; }
+  if (net.errorCode === 'replaced') return 'replaced';
+  if (hubDownSince === null) hubDownSince = t;
+  if (!hubEver) return 'connect';
+  return t - hubDownSince > LINK_GRACE ? 'hub' : null;
+}
+
+const LINK_TEXT = {
+  api: ['НЕТ СВЯЗИ С СЕРВЕРОМ', 'Игра стоит и ждёт сервер. Пробуем снова каждые три секунды — ответит, и полёт продолжится с того же места.'],
+  hub: ['НЕТ СВЯЗИ С СЕРВЕРОМ', 'Не отвечает сокет-сервер (npm run ws). Игра стоит, пока он не вернётся.'],
+  connect: ['ПОДКЛЮЧЕНИЕ К СЕРВЕРУ…', 'Связь с сокет-сервером ещё не установлена. Не поднят — npm run ws.'],
+  replaced: ['ИГРА ОТКРЫТА В ДРУГОМ ОКНЕ', 'Один пилот — одно окно. Здесь игра остановлена: закройте лишнее окно и обновите эту страницу.'],
+};
+
+/** Показать или убрать надпись «нет связи» (разметка — index.html, #link). */
+function showLink(why) {
+  const el = document.getElementById('link');
+  if (!el) return;
+  if (!why) { el.classList.add('hidden'); return; }
+  const [title, body] = LINK_TEXT[why] || LINK_TEXT.api;
+  const t = document.getElementById('linkTitle');
+  const b = document.getElementById('linkBody');
+  if (t) t.textContent = L(title);
+  if (b) b.textContent = L(body) + (why === 'api' && session.error ? ' (' + session.error + ')' : '');
+  el.classList.remove('hidden');
+}
+
+/**
+ * Кадр без связи: игра стоит, картинка — последняя. true — кадр съеден.
+ * Вернулась связь — время, накопленное за паузу, выбрасывается, а то, что
+ * успело случиться на сервере (нас сбили, пока связи не было), забирается.
+ */
+function holdForLink(t) {
+  retryLink();
+  const why = linkHeld(t);
+  if (why === 'login') {
+    location.replace('login.html');
+    return true;
+  }
+  if (why !== wasHeld) showLink(why);
+  if (why) {
+    if (!wasHeld) input.releaseAll();
+    wasHeld = why;
+    input.endFrame();
+    render();
+    return true;
+  }
+  if (wasHeld) {
+    wasHeld = null;
+    acc = 0;
+    if (game.resync) {
+      game.resync = false;
+      game.respawn();
+    } else {
+      finishDue();
+      if (game.state.mode === ST.DOCKED) showDocked(game);
+    }
+  }
+  return false;
+}
+
 // Снимки чужих кораблей и номер последнего принятого: сглаживание считает
 // временем снимка время его прихода, и принять один список дважды значит
 // сказать, что корабль полтика простоял (js/game/peers.js).
@@ -3753,14 +3903,21 @@ function frame(now) {
   if (dt > 0.25) dt = 0.25;      // после переключения таба не «телепортируемся»
   tickDebug(dbg, dt);
 
+  // Нет связи с сервером — игра стоит, пока она не вернётся (linkHeld).
+  if (holdForLink(now / 1000)) {
+    requestAnimationFrame(frame);
+    return;
+  }
+
   // Касания разбираются ДО управления: джойстик и кнопки должны попасть
   // в тот же кадр, что и клавиши, иначе палец отстаёт от клавиатуры на
   // кадр (на 60 Гц это заметно на посадке).
-  // Управление кораблём глохнет, пока открыто меню: нажатия (pressed)
-  // читаются всегда — ими меню и живёт, — а вот удержания (isDown) и
-  // сенсорные оси гасятся этим флагом.
-  input.enabled = !game.menu.open;
-  if (Q.touchUi && !game.menu.open) {
+  // Управление кораблём глохнет, пока открыто меню, карта или справка:
+  // нажатия (pressed) читаются всегда — ими слои и живут, — а вот
+  // удержания (isDown) и сенсорные оси гасятся этим флагом. Корабль под
+  // слоем летит, как летел.
+  input.enabled = !layerOpen();
+  if (Q.touchUi && !layerOpen()) {
     // Буксир предлагается на резерве и с пустым баком — там, где прыжков
     // уже нет (js/ui/touch.js, кнопка 'tow').
     const fl = fuelLevel(ship);
@@ -3808,7 +3965,12 @@ function frame(now) {
     const w = game.walk;
     const ride = w.on && !w.out && w.vessel && !w.vessel.own ? w.vessel.id : null;
     for (const L of net.left) {
-      if (L.ship !== null && L.ship !== ride) dropPeer(peerStore, L.ship);
+      if (L.ship !== null && L.ship !== ride) {
+        // Ушёл прыжком (NPC) — вспышка там, где его видели в последний раз.
+        const V = L.q ? game.peers.find((p) => p.id === L.ship) : null;
+        if (V) quantumFx(game.guns, V.pos, V.basis.fwd, false);
+        dropPeer(peerStore, L.ship);
+      }
       if (L.id !== null) dropPerson(peopleStore, L.id);
     }
     net.left.length = 0;
@@ -3818,6 +3980,7 @@ function frame(now) {
       // игра его не повела), — он не чужой, и рисовать его дважды нельзя.
       ingestPeers(peerStore, ship.id === null ? net.peers : net.peers.filter((p) => p.id !== ship.id), tNow);
       ingestPeople(peopleStore, net.people, tNow);
+      setNpcRange(net.npc);
       if (ride !== null) {
         const e = net.peers.find((p) => p.id === ride);
         if (e) aboardPin = e;
@@ -3828,6 +3991,15 @@ function frame(now) {
       ingestPeers(peerStore, [aboardPin], tNow);
     }
     game.peers = peerPoses(peerStore, tNow, game.peers, world);
+    // NPC, только что вышедшие из прыжка (js/game/peers.js, arrivals), —
+    // вспышка выхода там, где они показались.
+    if (peerStore.arrivals.length) {
+      for (const id of peerStore.arrivals) {
+        const V = game.peers.find((p) => p.id === id);
+        if (V) quantumFx(game.guns, V.pos, V.basis.fwd, true);
+      }
+      peerStore.arrivals.length = 0;
+    }
     for (const V of game.peers) {
       vesselAir(V);
       // Шасси чужого корабля выходит с той же скоростью, что у своего;
@@ -3877,29 +4049,8 @@ function frame(now) {
     }
   }
 
-  // Связь пропала или вернулась — игрок обязан это увидеть, а не
-  // догадываться по тому, что счёт перестал меняться.
-  if (session.mode !== netMode) {
-    if (netMode === 'online' && session.mode === 'offline') {
-      say(game.state, L('СВЯЗЬ С СЕРВЕРОМ ПОТЕРЯНА · АВТОНОМНО'), '#ffcc66', 5);
-    } else if (netMode === 'offline' && session.mode === 'online') {
-      say(game.state, L('СВЯЗЬ ВОССТАНОВЛЕНА'), '#78e08f', 3);
-    } else if (session.mode === 'none' && netMode !== 'none') {
-      // Связи нет — города остаются те, что собрал клиент. Спорить не с
-      // кем, а мир без них был бы беднее того, в котором игрок только
-      // что летал.
-      say(game.state, L('ВХОД ПРОСРОЧЕН · СОХРАНЕНИЕ ТОЛЬКО МЕСТНОЕ'), '#ff7a66', 6);
-    }
-    const wasMode = netMode;
-    netMode = session.mode;
-    // Связь появилась уже после входа в систему (обычный случай:
-    // система собирается раньше, чем проходит вход) — спрашиваем города
-    // сейчас.
-    if (netMode === 'online' && wasMode !== 'online') syncCities(sys, world);
-  }
 
   updateMessages(game.state, dt);
-  if (game.restartArmed > 0) game.restartArmed = Math.max(0, game.restartArmed - dt);
   if (game.rescueArmed > 0) game.rescueArmed = Math.max(0, game.rescueArmed - dt);
   updateCamOrbit(dt);
   // Пыль идёт по времени игрока, как и звук: это картинка, а не физика
@@ -3944,27 +4095,6 @@ function frame(now) {
 }
 
 // --- запуск ------------------------------------------------------------------
-
-// Быстрый тест стыковки: ?dev=1 ставит корабль в 20 км от порта станции,
-// носом к створу.
-function devSpawn() {
-  const st = world.home.station;
-  const b = makeBasis();
-  b.fwd = { x: -st.basis.fwd.x, y: -st.basis.fwd.y, z: -st.basis.fwd.z };
-  b.right = { ...st.basis.right };
-  b.up = normalize(v3(
-    b.fwd.y * b.right.z - b.fwd.z * b.right.y,
-    b.fwd.z * b.right.x - b.fwd.x * b.right.z,
-    b.fwd.x * b.right.y - b.fwd.y * b.right.x));
-  placeShip(ship, v3(
-    st.pos.x + st.basis.fwd.x * 20,
-    st.pos.y + st.basis.fwd.y * 20,
-    st.pos.z + st.basis.fwd.z * 20), b);
-  ship.dockedAt = null;
-  game.lastStation = st;
-  game.state.mode = ST.FLIGHT;
-  selectTarget(st);
-}
 
 // Активные касания: их держит браузер, но не отдаёт списком — только
 // событиями. Собираем сами, в точках CSS, и разбираем раз в кадр
@@ -4087,76 +4217,55 @@ async function boot() {
 
   ship.mesh = shipMesh;
 
-  const dev = devMode();
-  // Автономный режим: игра без сервера, на одном localStorage. Нужен и
-  // для разработки, и как честный ответ на «сервер не поднят». Правило
-  // лежит в js/core/mode.js — по нему же загрузчик решает, идти ли за
-  // характеристиками на сервер, и разойтись им нельзя.
-  const solo = soloMode();
-
-  // Вход спрашивается ДО всего: состояние с сервера главнее местного, и
-  // применять сначала кэш, а потом поверх серверное — значит на секунду
-  // показать игроку чужое положение корабля.
+  // Вход и состояние — у сервера, и только у него. Загрузчик (js/boot.js)
+  // их уже дождался; проверки зовут игру напрямую, и тогда спрашиваем
+  // здесь. Без входа — на страницу входа, без связи — обратно на
+  // загрузчик: он ждёт сервер, а игра без сервера не идёт.
   let restored = false;
   // Ответ на сохранение несёт то, сколько сервер списал за варп: этим
   // гасится долг, который игра записала себе у звезды (js/game/fuel.js).
   session.onSaved = (r) => { if (r && r.warpFuel > 0) warpSettled(ship, r.warpFuel); };
-  if (!solo) {
+  if (session.mode !== 'online') {
     const mode = await sessionStart();
-    if (mode === 'none') {
-      // Входа нет — играть нечем: без него сервер не отдаст ни корабля,
-      // ни денег. Уходим на страницу входа, не запуская игру.
-      location.replace('login.html');
+    if (mode !== 'online') {
+      location.replace(mode === 'none' ? 'login.html' : 'index.html');
       return;
     }
-    if (mode === 'online') {
-      clockFromServer(worldClock, session.player.world ? session.player.world.time : null,
-        performance.now() / 1000);
-      worldAim = clockTarget(worldClock, performance.now() / 1000);
-      restored = applyState(serverToSave(session.player));
-      applyServer(game.player, session.player);
-      // Местный кэш сразу приводим к серверному состоянию: если в
-      // следующий раз сети не будет, игра поднимется отсюда.
-      save();
-      // Сокет поднимаем только при живом сервере: без входа он всё равно
-      // не пустит, а стучаться в закрытый порт незачем.
-      netConnect(() => ({
-        // Система, где САМ пилот.
-        sys: sys.id,
-        // Корабль, который игра ведёт: свой и только если он здесь. Пассажир
-        // чужого корабля, оставивший свой в другой системе, не ведёт ничего.
-        ship: ship.away || ship.id === null ? null : {
-          id: ship.id,
-          x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
-          v: ship.speed,
-          // Осанка корабля, а не только след: без неё чужой корабль нечем
-          // развернуть, и на месте он смотрел бы в никуда.
-          fwd: ship.basis.fwd, up: ship.basis.up,
-          // Работа сопел — измерение, из которого топливо считает сервер, и
-          // то, сколько игра уже списала сама: по нему сверяется ответ.
-          work: ship.work, burned: ship.burned,
-          mode: game.state.mode === ST.DOCKED ? 'docked'
-            : game.state.mode === ST.LANDED ? 'landed'
-              : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
-          gear: ship.gear.out || ship.gear.t > 0.5,
-          hatches: ship.hatchesWant || openHatches(ownAir()),
-          lift: Math.abs(ship.lift || 0),
-          local: shipLocal(),
-        },
-        // Сам пилот: в кресле, на палубе, на грунте (js/game/peers.js).
-        me: meNet(),
-      }));
-    } else {
-      // Вход есть, а связи нет. Играем с местного кэша и продолжаем
-      // попытки — накопленное уйдёт, как только сервер ответит.
-      restored = load();
-      say(game.state, L('СЕРВЕР НЕ ОТВЕЧАЕТ · АВТОНОМНЫЙ РЕЖИМ'), '#ffcc66', 6);
-    }
-  } else if (!dev) {
-    restored = load();
   }
-  if (dev) devSpawn();
-  else if (!restored) {
+  clockFromServer(worldClock, session.player.world ? session.player.world.time : null,
+    performance.now() / 1000);
+  worldAim = clockTarget(worldClock, performance.now() / 1000);
+  restored = applyState(serverToSave(session.player));
+  applyServer(game.player, session.player);
+  netConnect(() => ({
+    // Система, где САМ пилот.
+    sys: sys.id,
+    // Корабль, который игра ведёт: свой и только если он здесь. Пассажир
+    // чужого корабля, оставивший свой в другой системе, не ведёт ничего.
+    ship: ship.away || ship.id === null ? null : {
+      id: ship.id,
+      x: ship.pos.x, y: ship.pos.y, z: ship.pos.z,
+      v: ship.speed,
+      // Осанка корабля, а не только след: без неё чужой корабль нечем
+      // развернуть, и на месте он смотрел бы в никуда.
+      fwd: ship.basis.fwd, up: ship.basis.up,
+      // Работа сопел — измерение, из которого топливо считает сервер, и
+      // то, сколько игра уже списала сама: по нему сверяется ответ.
+      work: ship.work, burned: ship.burned,
+      mode: game.state.mode === ST.DOCKED ? 'docked'
+        : game.state.mode === ST.LANDED ? 'landed'
+          : game.warp.phase === 'tunnel' ? 'warp' : 'flight',
+      gear: ship.gear.out || ship.gear.t > 0.5,
+      hatches: ship.hatchesWant || openHatches(ownAir()),
+      lift: Math.abs(ship.lift || 0),
+      local: shipLocal(),
+    },
+    // Сам пилот: в кресле, на палубе, на грунте (js/game/peers.js).
+    me: meNet(),
+  }));
+  // Города системы — с сервера: он хозяин мира (syncCities).
+  syncCities(sys, world);
+  if (!restored) {
     const home = world.home.station;
     ship.dockedAt = home;
     game.lastStation = home;

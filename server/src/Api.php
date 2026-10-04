@@ -27,6 +27,7 @@ final class Api
             'galaxy.stations' => [[self::class, 'galaxyStations'], false],
             'station.info' => [[self::class, 'stationInfo'], false],
             'station.dock' => [[self::class, 'stationDock'], true],
+            'station.undock' => [[self::class, 'stationUndock'], true],
             'station.repair' => [[self::class, 'stationRepair'], true],
             'station.refuel' => [[self::class, 'stationRefuel'], true],
             'ship.rescue' => [[self::class, 'shipRescue'], true],
@@ -49,6 +50,9 @@ final class Api
             'catalog.specs' => [[self::class, 'specs'], false],
             'player.state' => [[self::class, 'playerState'], true],
             'player.save' => [[self::class, 'playerSave'], true],
+            // Переход пилота: встал, сел, сошёл на грунт, поднялся на борт.
+            // Место пилота меняет только он, а не сохранение (Players::move).
+            'pilot.move' => [[self::class, 'pilotMove'], true],
             'ship.impact' => [[self::class, 'shipImpact'], true],
             'market.prices' => [[self::class, 'marketPrices'], true],
             'market.buy' => [[self::class, 'marketBuy'], true],
@@ -187,6 +191,11 @@ final class Api
         return Stations::dock($playerId, self::int($in, 'system'), self::int($in, 'station'));
     }
 
+    public static function stationUndock(array $in, ?int $playerId): array
+    {
+        return Stations::undock($playerId);
+    }
+
     public static function stationRepair(array $in, ?int $playerId): array
     {
         return Stations::repair($playerId);
@@ -277,6 +286,14 @@ final class Api
     public static function playerSave(array $in, ?int $playerId): array
     {
         return Players::save($playerId, is_array($in['save'] ?? null) ? $in['save'] : $in);
+    }
+
+    public static function pilotMove(array $in, ?int $playerId): array
+    {
+        if (!is_array($in['me'] ?? null)) {
+            throw ApiError::bad('нужно место пилота (me)');
+        }
+        return Players::move($playerId, $in['me']);
     }
 
     /**

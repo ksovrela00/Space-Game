@@ -431,11 +431,9 @@ export function drawMenu(r, game) {
   ctx.font = `${Math.round(fs * 1.1)}px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = INK;
-  // В шапке видно, ЧЬИ это дела и живы ли они. Без пометки о связи игрок
-  // не отличит «баланс такой» от «баланс был такой полчаса назад».
-  const who = session.mode === 'online' ? L('МЕНЮ ПИЛОТА · ') + session.name.toUpperCase()
-    : session.mode === 'offline' ? L('МЕНЮ ПИЛОТА · АВТОНОМНО')
-      : L('МЕНЮ ПИЛОТА');
+  // В шапке видно, ЧЬИ это дела. Живы ли они, вопроса нет: без связи
+  // игра стоит под надписью «нет связи» (js/main.js), меню под ней тоже.
+  const who = session.name ? L('МЕНЮ ПИЛОТА · ') + session.name.toUpperCase() : L('МЕНЮ ПИЛОТА');
   ctx.fillText(who, x + fs, y + headH * 0.68);
   ctx.textAlign = 'right';
   ctx.fillStyle = game.player.balance < 0 ? RED : AMBER;

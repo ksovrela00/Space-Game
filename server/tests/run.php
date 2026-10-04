@@ -276,8 +276,10 @@ $home = $state['position'];
 // Корпуса в сохранении нет и быть не может: игра сохраняет только то,
 // что знает одна она, — где корабль, куда повёрнут, сколько налетал.
 $hullWas = $state['ship']['hull'];
+// Из порта выходят действием (station.undock), а не сохранением.
+Api::call('station.undock', [], $token);
 Api::call('player.save', ['system' => 0, 'pos' => ['x' => 1000, 'y' => 20, 'z' => -3],
-    'basis' => ['fwd' => [0, 0, 1]], 'docked' => null,
+    'basis' => ['fwd' => [0, 0, 1]],
     'stats' => ['flownKm' => 123.5, 'docks' => 2]], $token);
 $after = Api::call('player.state', [], $token);
 ok(abs($after['position']['pos']['x'] - 1000) < 1e-9 && $after['position']['dockedBody'] === null
@@ -313,8 +315,11 @@ ok($after['position']['anchorBody'] === null && $after['position']['anchorPose']
 
 denies('bad_request', fn() => Api::call('player.save', ['system' => 999], $token),
     'система не из каталога отвергается');
-denies('bad_request', fn() => Api::call('player.save', ['system' => 0, 'docked' => 9999], $token),
-    'порт не из этой системы отвергается');
+// В порт сохранением не встают: это действие с ценой (station.dock), а
+// сохранение идёт фоном и опаздывает.
+Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+ok(Api::call('player.state', [], $token)['position']['dockedBody'] === null,
+    'сохранение в порт не ставит: встают в него только стыковкой');
 
 // КОРПУС ИЗ СОХРАНЕНИЯ НЕ ПИШЕТСЯ ВОВСЕ — ни в какую сторону.
 //
@@ -379,7 +384,7 @@ section('торговля');
 // Возвращаем пилота в порт. Корпус при этом чиним НЕ сохранением: из
 // него он больше не растёт, и это правило проверяется выше. В игре целый
 // корпус получают за деньги в порту, а проверке нужна лишь позиция.
-Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
 Db::update('ship', ['hull' => 100], '`owner_id`=?', [$pid]);
 $prices = Api::call('market.prices', [], $token);
 ok(count($prices['goods']) > 3, 'прайс порта: позиций ' . count($prices['goods'])
@@ -448,10 +453,10 @@ denies('no_cargo', fn() => Api::call('market.sell', ['code' => $good['code'], 't
     'продать то, чего нет в трюме, нельзя');
 
 // Не в порту — не торгуем.
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
 denies('not_docked', fn() => Api::call('market.buy', ['code' => $good['code'], 'tons' => 1], $token),
     'из космоса торговать нельзя');
-Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
 
 // --- деньги сходятся ---------------------------------------------------------
 
@@ -491,16 +496,16 @@ denies('wrong_station', fn() => Api::call('missions.complete', ['id' => $m['id']
     'сдать подряд в порту отправления нельзя');
 
 // Перелетаем в порт назначения и сдаём.
-Api::call('player.save', [
-    'system' => $m['target']['systemId'], 'docked' => $m['target']['localId'],
-], $token);
+Api::call('station.undock', [], $token);
+Api::call('station.dock', ['system' => $m['target']['systemId'], 'station' => $m['target']['localId']], $token);
 $done = Api::call('missions.complete', ['id' => $m['id']], $token);
 $state = Api::call('player.state', [], $token);
 ok($done['reward'] === $m['reward'] && abs($state['holdUsedT']) < 1e-9,
     'подряд сдан: награда ' . $done['reward'] . ' кр, трюм пуст');
 
 // Просрочка: срок обязан истекать и без участия игрока.
-Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
+Api::call('station.undock', [], $token);
+Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
 $board = Api::call('missions.board', [], $token)['board'];
 $m2 = null;
 foreach ($board as $cand) {
@@ -548,7 +553,11 @@ ok((int) Db::one('SELECT COUNT(*) FROM `station` WHERE `has_outfit`=1 AND `tech`
     'верфь стоит только на развитых портах');
 
 // СТЫКОВКА СО СБОРОМ. Первый постоянный расход в игре.
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
+$undocked = Players::ship($pid);
+ok($undocked['docked_body'] === null, 'вылет из порта — действием: корабль больше не в доке');
+$again = Api::call('station.undock', [], $token);
+ok($again['undocked'] === true, 'повторный вылет ничего не ломает: игра переспрашивает после обрыва');
 $port = Api::call('station.info', ['system' => 0, 'station' => $home['dockedBody']])['station'];
 $before = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
 $dock = Api::call('station.dock', ['system' => 0, 'station' => $home['dockedBody']], $token);
@@ -583,13 +592,13 @@ $poor = Db::row("SELECT b.`system_id`, b.`local_id`, st.`name`
                  FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
                  WHERE st.`has_repair`=0 LIMIT 1");
 if ($poor) {
-    Api::call('player.save', ['system' => (int) $poor['system_id'],
-        'docked' => (int) $poor['local_id']], $token);
-    Db::update('ship', ['hull' => 40], '`owner_id`=?', [$pid]);
+    // Позиция — прямо в базу: проверке нужен порт, а не перелёт до него.
+    Db::update('ship', ['system_id' => (int) $poor['system_id'], 'docked_body' => (int) $poor['local_id'],
+        'hull' => 40], '`owner_id`=?', [$pid]);
     denies('no_service', fn() => Api::call('station.repair', [], $token),
         'на порту без мастерской («' . $poor['name'] . '») не чинят');
-    Api::call('player.save', ['system' => 0, 'docked' => $home['dockedBody']], $token);
-    Db::update('ship', ['hull' => 100], '`owner_id`=?', [$pid]);
+    Db::update('ship', ['system_id' => 0, 'docked_body' => $home['dockedBody'], 'hull' => 100],
+        '`owner_id`=?', [$pid]);
 } else {
     ok(false, 'не нашлось порта без мастерской — проверять отказ не на чем');
 }
@@ -722,15 +731,15 @@ Db::run('DELETE FROM `equipment_type` WHERE `code`=?', ['quantum_x']);
 
 section('характеристики корабля');
 
-// 1. Слепок для автономного режима не отстал от источника. Отстанет —
-//    игра без сервера полетит по другим числам, чем с сервером, и
+// 1. Слепок для проверок в Node не отстал от источника. Отстанет —
+//    проверки будут гонять игру по другим числам, чем сервер, и
 //    заметить это будет нечем.
 ok(!Specs::snapshotStale(),
     'слепок server/data/specs.json собран из нынешнего specs.php'
     . (Specs::snapshotStale() ? ' — соберите: php server/cli/specs.php' : ''));
 
 // 2. Слепок и ответ сервера — одно и то же, включая форму. Игра разбирает
-//    их ОДНИМ кодом, и разойдись они, автономный режим сломался бы молча.
+//    их ОДНИМ кодом, и разойдись они, проверки в Node врали бы молча.
 $fromFile = json_decode(Specs::snapshot(), true);
 $fromApi = $specs;
 ok(array_keys($fromFile) === array_keys($fromApi)
@@ -972,9 +981,10 @@ ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 
 
 // ВАРП списывает база: сменилась система в сохранении — прыжок был.
 Db::update('ship', ['fuel_t' => 12], '`id`=?', [$shipId]);
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
+Api::call('player.save', ['system' => 0], $token);
 $ly = Galaxy::distance(0, 1);
-$jump = Api::call('player.save', ['system' => 1, 'docked' => null, 'last' => null], $token);
+$jump = Api::call('player.save', ['system' => 1, 'last' => null], $token);
 $left = (float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]);
 ok(abs($left - (12 - $ly * $fm['warpFuel'])) < 0.002 && abs($jump['fuel'] - $left) < 1e-9,
     'варп в соседнюю систему (' . round($ly, 1) . ' св. г.) стоил '
@@ -1026,7 +1036,7 @@ ok(abs((float) Db::one('SELECT `fuel_t` FROM `ship` WHERE `id`=?', [$shipId]) - 
     'и бак при отказе не тронут');
 Ledger::add($pid, 'ПРОВЕРКА: ВЕРНУТЬ СЧЁТ', $rich - 50, 'test');
 
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
 denies('not_docked', fn() => Api::call('station.refuel', [], $token), 'в полёте не заправляют');
 
 // БУКСИР: из пустоты — в последний порт, бак до резерва.
@@ -1041,7 +1051,7 @@ ok((int) $p['docked_body'] === (int) $home['dockedBody'] && abs($tow['fuel'] - 1
 denies('docked', fn() => Api::call('ship.rescue', [], $token), 'из порта буксир не вызывают');
 
 // Без денег буксир всё равно приходит — и забирает только то, что есть.
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
 $rich = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pid]);
 Ledger::add($pid, 'ПРОВЕРКА: ОПУСТОШИТЬ СЧЁТ', -($rich - 100), 'test');
 $tow = Api::call('ship.rescue', [], $token);
@@ -1049,7 +1059,7 @@ ok($tow['fee'] === 100 && $tow['balance'] === 0, 'без денег буксир
 Ledger::add($pid, 'ПРОВЕРКА: ВЕРНУТЬ СЧЁТ', $rich - 100, 'test');
 
 // Сверх резерва буксир не доливает: иначе он был бы дешёвой заправкой.
-Api::call('player.save', ['system' => 0, 'docked' => null], $token);
+Api::call('station.undock', [], $token);
 Db::update('ship', ['fuel_t' => 7], '`id`=?', [$shipId]);
 $tow = Api::call('ship.rescue', [], $token);
 ok(abs($tow['fuel'] - 7) < 1e-9, 'топлива больше резерва буксир не трогает: 7 т');
@@ -1196,7 +1206,7 @@ if ($noYard) {
     denies('no_outfit', fn() => Api::call('outfit.sell', ['code' => 'lamp'], $token),
         'и ничего не принимают');
 }
-Api::call('player.save', ['system' => (int) ($noYard['system_id'] ?? 0), 'docked' => null], $token);
+Api::call('station.undock', [], $token);
 denies('not_docked', fn() => Api::call('outfit.list', [], $token), 'в полёте верфи нет');
 
 // Вернуть заводской двигатель: следующие наборы считают по нему.
@@ -1241,8 +1251,9 @@ $poseAt = static function (float $dx) use ($R): array {
 $outAt = static fn(float $dx, float $dz = 0) => ['body' => $L, 'o' => ['x' => $dx, 'y' => $R, 'z' => $dz],
     'f' => ['x' => 0, 'y' => 0, 'z' => 1], 'pitch' => 0.1];
 
+Api::call('station.undock', [], $ta);
 Api::call('player.save', [
-    'ship' => ['id' => $shipA1, 'system' => 0, 'docked' => null, 'gear' => true, 'hatches' => ['nL', 'bad name!'],
+    'ship' => ['id' => $shipA1, 'system' => 0, 'gear' => true, 'hatches' => ['nL', 'bad name!'],
         'landed' => ['id' => $L, 'pose' => $poseAt(0), 'secured' => true]],
     'me' => ['aboard' => $shipA1, 'seated' => true]], $ta);
 $st = Api::call('player.state', [], $ta);
@@ -1250,48 +1261,64 @@ ok($st['position']['landedBody'] === $L && $st['position']['dockedBody'] === nul
     && $st['position']['hatches'] === ['nL'],
     'место корабля пишет тот, кто им командует: стоянка и открытый люк (мусорное имя люка отброшено)');
 
-// На ногах по палубе: точка ног в осях корабля и взгляд.
-Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false,
+// Встать с кресла — переход, и делает его сервер (pilot.move), а не
+// сохранение: сохранение «встал» место пилота не меняет.
+$r = Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false,
     'walk' => ['pos' => [1.5, -2.3, 10], 'yaw' => 0.5, 'pitch' => -0.2]]], $ta);
 $st = Api::call('player.state', [], $ta);
-ok($st['me']['seated'] === false && abs($st['me']['walk']['pos'][2] - 10) < 1e-9
+ok(!empty($r['meStale']) && $st['me']['seated'] === true,
+    'сохранение «встал» пилота с кресла не поднимает: это переход, а не поза');
+$r = Api::call('pilot.move', ['me' => ['aboard' => $shipA1, 'seated' => false,
+    'walk' => ['pos' => [1.5, -2.3, 10], 'yaw' => 0.5, 'pitch' => -0.2]]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok($r['moved'] === true && $st['me']['seated'] === false && abs($st['me']['walk']['pos'][2] - 10) < 1e-9
     && abs($st['me']['walk']['yaw'] - 0.5) < 1e-9,
-    'пилот на ногах в своём корабле: при входе в игру он там же, а не в кресле');
+    'пилот встал (pilot.move) и на ногах в своём корабле: при входе в игру он там же, а не в кресле');
+// Шаги по палубе — поза, и её пишет сохранение.
+$r = Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false,
+    'walk' => ['pos' => [1.5, -2.3, 12], 'yaw' => 0.5, 'pitch' => -0.2]]], $ta);
+$st = Api::call('player.state', [], $ta);
+ok(empty($r['meStale']) && abs($st['me']['walk']['pos'][2] - 12) < 1e-9,
+    'шаги по палубе пишет сохранение: место то же, поза новая');
 
 // Сошёл на грунт у корабля.
-$r = Api::call('player.save', ['me' => ['out' => $outAt(0.03, 0.02)]], $ta);
+$r = Api::call('pilot.move', ['me' => ['out' => $outAt(0.03, 0.02)]], $ta);
 $st = Api::call('player.state', [], $ta);
-ok(!isset($r['meDenied']) && $st['me']['aboard'] === null && $st['me']['out']['body'] === $L
+ok($r['moved'] === true && $st['me']['aboard'] === null && $st['me']['out']['body'] === $L
     && abs($st['me']['out']['o']['x'] - 0.03) < 1e-9 && $st['position']['landedBody'] === $L,
     'пилот за бортом — в осях тела; корабль стоит, где стоял');
 
 // Сойти с корабля в километрах от него нельзя: это уже не трап.
-Api::call('player.save', ['me' => ['aboard' => $shipA1, 'seated' => false]], $ta);
-$r = Api::call('player.save', ['me' => ['out' => $outAt(30)]], $ta);
-ok(($r['meDenied'] ?? '') === 'too_far' && $r['me']['aboard'] === $shipA1,
-    'сойти с борта в 30 км от корабля нельзя: пилот остался на борту');
-Api::call('player.save', ['me' => ['out' => $outAt(0.03)]], $ta);
+Api::call('pilot.move', ['me' => ['aboard' => $shipA1, 'seated' => false]], $ta);
+$r = Api::call('pilot.move', ['me' => ['out' => $outAt(30)]], $ta);
+ok($r['moved'] === false && $r['denied'] === 'too_far' && $r['me']['aboard'] === $shipA1,
+    'сойти с борта в 30 км от корабля нельзя: пилот остался на борту, и ответ говорит, где он');
+Api::call('pilot.move', ['me' => ['out' => $outAt(0.03)]], $ta);
 
 // Второй пилот садится рядом — в восьмидесяти метрах.
-Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 0, 'docked' => null, 'gear' => true,
+Api::call('station.undock', [], $tb);
+Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 0, 'gear' => true,
     'landed' => ['id' => $L, 'pose' => $poseAt(0.08), 'secured' => true]],
     'me' => ['aboard' => $shipB, 'seated' => true]], $tb);
 
-// По грунту ходят куда угодно — но на чужой борт попадают только рядом.
-Api::call('player.save', ['me' => ['out' => $outAt(40)]], $ta);
-$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false]], $ta);
-ok(($r['meDenied'] ?? '') === 'too_far' && $r['me']['out'] !== null,
+// По грунту ходят куда угодно (шаги — поза, их пишет сохранение) — но
+// на чужой борт попадают только рядом.
+$r = Api::call('player.save', ['me' => ['out' => $outAt(40)]], $ta);
+ok(empty($r['meStale']) && abs(Api::call('player.state', [], $ta)['me']['out']['o']['x'] - 40) < 1e-9,
+    'шаги по грунту пишет сохранение: тело то же, точка новая');
+$r = Api::call('pilot.move', ['me' => ['aboard' => $shipB, 'seated' => false]], $ta);
+ok($r['denied'] === 'too_far' && $r['me']['out'] !== null,
     'на чужой борт за 40 км не попасть: сервер оставил пилота на грунте');
 Api::call('player.save', ['me' => ['out' => $outAt(0.07)]], $ta);
 // Соседа нет в игре — его корабля нет в мире, и зайти некуда.
-$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
-ok(($r['meDenied'] ?? '') === 'owner_away' && $r['me']['out'] !== null,
+$r = Api::call('pilot.move', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
+ok($r['denied'] === 'owner_away' && $r['me']['out'] !== null,
     'к соседу, которого нет в игре, и у трапа на борт не попасть');
 // Сосед в игре — так его отмечает хаб (Hub::hello).
 Db::update('player', ['online' => 1], '`id`=?', [$rb['player_id']]);
-$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
+$r = Api::call('pilot.move', ['me' => ['aboard' => $shipB, 'seated' => true]], $ta);
 $st = Api::call('player.state', [], $ta);
-ok(!isset($r['meDenied']) && $st['me']['aboard'] === $shipB && $st['me']['seated'] === false
+ok($r['moved'] === true && $st['me']['aboard'] === $shipB && $st['me']['seated'] === false
     && $st['aboard']['id'] === $shipB && $st['aboard']['ownerName'] === 'ПИЛОТ Б'
     && $st['aboard']['landedBody'] === $L,
     'поднялся на борт соседа; в чужое кресло не садятся — пассажир на ногах');
@@ -1304,7 +1331,7 @@ ok(!empty($r['shipIgnored']) && (int) $rowB['landed_body'] === $L,
 
 // Хозяин улетает в другую систему — пассажир с ним, свой корабль на месте.
 $fuelB0 = (float) $rowB['fuel_t'];
-Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 3, 'landed' => null, 'docked' => null,
+Api::call('player.save', ['ship' => ['id' => $shipB, 'system' => 3, 'landed' => null,
     'pos' => ['x' => 5e6, 'y' => 0, 'z' => 0]], 'me' => ['aboard' => $shipB, 'seated' => true]], $tb);
 $st = Api::call('player.state', [], $ta);
 $fuelB1 = (float) Players::shipRow($shipB)['fuel_t'];
@@ -1325,7 +1352,8 @@ ok(Api::call('market.prices', [], $tb)['prices'] !== [], 'а хозяин, ст�
 
 // Корабль погиб — страховка возвращает его в порт; хозяин в кресле,
 // пассажир на борту.
-Api::call('player.save', ['ship' => ['id' => $shipB, 'docked' => null], 'me' => ['aboard' => $shipB, 'seated' => false,
+Api::call('station.undock', [], $tb);
+Api::call('pilot.move', ['me' => ['aboard' => $shipB, 'seated' => false,
     'walk' => ['pos' => [0, 0, 5], 'yaw' => 0, 'pitch' => 0]]], $tb);
 Combat::respawnShip($shipB);
 $pa = Players::byId($ra['player_id']);
@@ -1335,16 +1363,17 @@ ok($rowB['docked_body'] !== null && (int) $pb['aboard_ship'] === $shipB && (int)
     && (int) $pa['aboard_ship'] === $shipB && (int) $pa['seated'] === 0,
     'после гибели корабль в порту, хозяин в кресле, пассажир на борту');
 
-// Хозяин вышел из игры. Опоздавшее сохранение пассажира «я на его
-// палубе» уже не пишется, а вход в игру возвращает его к себе.
+// Хозяин вышел из игры: вход в игру возвращает пассажира к себе, а
+// опоздавшее сохранение «я на его палубе» назад его не ставит.
 Db::update('player', ['online' => 0], '`id`=?', [$rb['player_id']]);
-$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false,
-    'walk' => ['pos' => [0, 0, 6], 'yaw' => 0, 'pitch' => 0]]], $ta);
-ok(($r['meDenied'] ?? '') === 'owner_away', 'хозяина нет в игре — на его палубе пассажира больше не пишут');
 $st = Api::call('player.state', [], $ta);
 ok($st['me']['aboard'] === $shipA1 && $st['me']['seated'] === true && $st['me']['systemId'] === 0
     && $st['aboard'] === null,
     'хозяин ушёл — пассажир входит в игру в кресле своего корабля, в его системе');
+$r = Api::call('player.save', ['me' => ['aboard' => $shipB, 'seated' => false,
+    'walk' => ['pos' => [0, 0, 6], 'yaw' => 0, 'pitch' => 0]]], $ta);
+ok(!empty($r['meStale']) && (int) Players::byId($ra['player_id'])['aboard_ship'] === $shipA1,
+    'опоздавшее сохранение пассажира «я на его палубе» на чужой борт его не возвращает');
 
 // Второй свой корабль: командование — только из его кресла.
 $typeId = (int) Db::one('SELECT `type_id` FROM `ship` WHERE `id`=?', [$shipA1]);
@@ -1357,15 +1386,34 @@ denies('not_aboard', fn() => Api::call('ship.command', ['id' => $shipA2], $ta),
     'своим — только с его борта');
 Db::update('player', ['aboard_ship' => null, 'seated' => 0, 'out_body' => $L,
     'out_pose' => json_encode($outAt(-0.09))], '`id`=?', [$ra['player_id']]);
-Api::call('player.save', ['me' => ['aboard' => $shipA2, 'seated' => true]], $ta);
+Api::call('pilot.move', ['me' => ['aboard' => $shipA2, 'seated' => true]], $ta);
 $st = Api::call('ship.command', ['id' => $shipA2], $ta);
 $fleet = array_column($st['fleet'], 'active', 'id');
 ok($st['ship']['id'] === $shipA2 && $st['me']['seated'] === true && count($st['fleet']) === 2
     && $fleet[$shipA2] === true && $fleet[$shipA1] === false && $st['position']['landedBody'] === $L,
     'пересел во второй свой корабль: им и командует, первый стоит на месте');
-Api::call('player.save', ['ship' => ['id' => $shipA1, 'landed' => null]], $ta);
-ok((int) Players::shipRow($shipA1)['landed_body'] === $L,
-    'сохранение за прежний корабль после пересадки не пишется');
+// Место каждого корабля — с точкой: по ней карта ставит значок (js/game/fleet.js).
+$byId = array_column($st['fleet'], null, 'id');
+$f2 = $byId[$shipA2];
+$p2 = $f2['point'] ?? ['b' => 0, 'x' => 0, 'y' => 0, 'z' => 0];
+$want = $poseAt(-0.1);
+ok($f2['where'] === 'landed' && $p2['b'] === $L && $f2['pos'] === null
+    && abs(sqrt($p2['x'] ** 2 + $p2['y'] ** 2 + $p2['z'] ** 2) - $want['radius']) < 1e-6
+    && $f2['bodyName'] === (string) Db::one('SELECT `name` FROM `body` WHERE `system_id`=0 AND `local_id`=?', [$L])
+    && $f2['systemName'] === (string) Db::one('SELECT `name` FROM `star_system` WHERE `id`=0'),
+    'во флоте у корабля — место: на грунте ' . $f2['bodyName'] . ' (' . $f2['systemName']
+    . '), точка в осях тела на его стоянке');
+// Сохранение, собранное ДО пересадки, а дошедшее ПОСЛЕ (запросы идут
+// параллельно, порядок не обещан никем): ни корабль, ни место пилота из
+// него не пишутся. Раньше место писалось — и пилот оказывался на борту
+// прежнего корабля, пока новый улетал без него; порт потом отказывал
+// новому «не на борту», а рынок и заправка — «не в порту».
+$r = Api::call('player.save', ['ship' => ['id' => $shipA1, 'landed' => null],
+    'me' => ['aboard' => $shipA1, 'seated' => true]], $ta);
+$pa = Players::byId($ra['player_id']);
+ok(!empty($r['shipIgnored']) && !empty($r['meStale']) && (int) Players::shipRow($shipA1)['landed_body'] === $L
+    && (int) $pa['aboard_ship'] === $shipA2 && (int) $pa['seated'] === 1,
+    'опоздавшее сохранение прежнего корабля не пишется: ни его место, ни пилот на его борту');
 
 // --- Верфь корпусов: «Прометей» продают только в столицах, а пересаживаются
 // на купленный прямо в доке — оба корабля стоят в одном порту.
@@ -1447,10 +1495,22 @@ section('верфь корпусов');
         && $st['me']['aboard'] === $newId && $st['me']['seated'] === true
         && $st['position']['dockedBody'] === $top['localId'],
         'пересел в одном доке: командует «Прометеем», сидит в его кресле');
+    // Ровно тот случай, что ломал игру: сохранение «Челленджера», ушедшее
+    // до пересадки, дошло после неё. Пилот остаётся в кресле «Прометея»,
+    // и «Прометей» выходит из порта и встаёт в него снова — с рынком.
+    $r = Api::call('player.save', ['ship' => ['id' => $yHome, 'system' => 0],
+        'me' => ['aboard' => $yHome, 'seated' => true]], $tky);
+    $py = Players::byId($pidY);
+    ok(!empty($r['meStale']) && (int) $py['aboard_ship'] === $newId && (int) $py['seated'] === 1,
+        'опоздавшее сохранение «Челленджера» пилота назад не пересаживает');
+    Api::call('station.undock', [], $tky);
+    $d = Api::call('station.dock', ['system' => 0, 'station' => $top['localId']], $tky);
+    ok($d['station']['localId'] === $top['localId'] && count(Api::call('market.prices', [], $tky)['goods']) > 0,
+        'и «Прометей» встаёт в порт и торгует: его пилот на борту');
     // Палуба корабля — по его длине (Players::deckM): ангар «Прометея» в
     // ста метрах от центра масс, мостик — в тридцати над ним, и точка на
     // борту не обрезается до шестидесяти метров «Челленджера».
-    Api::call('player.save', ['me' => ['aboard' => $newId, 'seated' => false,
+    Api::call('pilot.move', ['me' => ['aboard' => $newId, 'seated' => false,
         'walk' => ['pos' => [0, 32.1, 100.5], 'yaw' => 0, 'pitch' => 0]]], $tky);
     $st = Api::call('player.state', [], $tky);
     ok($st['me']['seated'] === false && abs($st['me']['walk']['pos'][2] - 100.5) < 1e-9
@@ -1459,12 +1519,12 @@ section('верфь корпусов');
     $st = Api::call('ship.command', ['id' => $yHome], $tky);
     ok($st['ship']['id'] === $yHome && $st['ship']['type']['code'] === 'challenger',
         'и обратно — в «Челленджер» в том же доке');
-    Api::call('player.save', ['me' => ['aboard' => $yHome, 'seated' => false,
+    Api::call('pilot.move', ['me' => ['aboard' => $yHome, 'seated' => false,
         'walk' => ['pos' => [0, 0, 100.5], 'yaw' => 0, 'pitch' => 0]]], $tky);
     $st = Api::call('player.state', [], $tky);
     ok(abs($st['me']['walk']['pos'][2] - Players::DECK_M) < 1e-9,
         'а у «Челленджера» — прежние ' . Players::DECK_M . ' м: дальше точки на борту нет');
-    Api::call('player.save', ['me' => ['aboard' => $yHome, 'seated' => true]], $tky);
+    Api::call('pilot.move', ['me' => ['aboard' => $yHome, 'seated' => true]], $tky);
     // Корабли в разных портах — пересесть нельзя: туда ещё надо долететь.
     $other = null;
     foreach ($ports as $p) if ($p['localId'] !== $top['localId']) { $other = $p; break; }

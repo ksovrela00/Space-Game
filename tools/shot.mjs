@@ -233,12 +233,15 @@ globalThis.window = {
   innerWidth: W, innerHeight: H, devicePixelRatio: 1,
   addEventListener(t, fn) { (winL[t] ||= []).push(fn); }, removeEventListener() {},
 };
-// Снимок делается в АВТОНОМНОЙ игре: с появлением входа по токену игра
-// без него уходит на login.html, и картинке взяться неоткуда. Заодно
-// просим Canvas-2D-рендер: WebGL здесь не подменить, его путь проверяется
-// отдельно в tools/gl.mjs через мок GL-контекста.
+// Игра без сервера не идёт: его голос даёт поддельный сервер в памяти
+// (tools/fakeapi.mjs) — пилот в порту родной станции. Canvas-2D-рендер —
+// потому что WebGL здесь не подменить, его путь проверяется отдельно в
+// tools/gl.mjs через мок GL-контекста.
 globalThis.location = {
-  search: '?renderer=2d&offline=1',
+  search: '?renderer=2d',
+  // Адрес страницы: по нему игра находит API (js/net/api.js, base).
+  origin: 'http://localhost',
+  pathname: '/space_game/index.html',
   // Если игра всё же соберётся уйти со страницы — пусть скажет об этом
   // вслух. Молчаливый уход выглядел как «cb is not a function» в цикле
   // кадров, и искать причину пришлось в другом конце проекта.
@@ -247,8 +250,10 @@ globalThis.location = {
 // Язык проверок — русский: в них сверяются НАДПИСИ, и держать их в двух
 // видах значило бы писать каждую проверку дважды. Английский путь
 // проверяется отдельным шагом, который язык переключает сам.
+const { makeFakeServer, FAKE_TOKEN } = await import('./fakeapi.mjs');
 globalThis.localStorage = {
-  getItem: (k) => (k === 'solar_lang' ? 'ru' : null), setItem() {}, removeItem() {},
+  getItem: (k) => (k === 'solar_lang' ? 'ru' : (k === 'solar_trader_token' ? FAKE_TOKEN : null)),
+  setItem() {}, removeItem() {},
 };
 let rafCb = null, nowMs = 0;
 globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
@@ -261,9 +266,22 @@ const frames = (n) => {
 // Характеристики корабля — до игры, как в браузере (js/boot.js).
 const { loadSpecsFromDisk } = await import('./specs.mjs');
 loadSpecsFromDisk();
+{
+  const { readFileSync } = await import('node:fs');
+  const { systemById } = await import('../js/game/galaxy.js');
+  const { makeSystem } = await import('../js/game/world.js');
+  const specs = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const fake = makeFakeServer({ specs, station: makeSystem(systemById(0)).home.station.id });
+  globalThis.fetch = fake.fetch;
+  globalThis.WebSocket = fake.WebSocket;
+}
 
 await import('../js/main.js');
 const game = globalThis.window.GAME;
+// Игра поднимается, получив состояние у сервера: ждём готовый старт.
+for (let i = 0; i < 100 && !(nodes.bootBtn.listeners.click || []).length; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+}
 for (const fn of nodes.bootBtn.listeners.click || []) fn();
 frames(3);
 
@@ -468,3 +486,7 @@ lookOffAxis(home, 2.6, 2.2); show('планета у края кадра: сил
   };
   show('вплотную к планете, поворот 40°: видна часть кадра, не весь экран');
 }
+
+// Сокет поддельного сервера держит таймер (снимок положения раз в 200 мс):
+// без явного выхода процесс ждал бы его вечно.
+process.exit(0);

@@ -32,8 +32,12 @@ export const SEND_EVERY = 200;
  */
 export const PING_EVERY = 2000;
 
-/** Ступени задержки перед повторным соединением, мс. */
-const BACKOFF = [1000, 2000, 5000, 10000, 20000];
+/**
+ * Ступени задержки перед повторным соединением, мс. Потолок — пять
+ * секунд, а не двадцать: без хаба игра стоит (js/main.js, linkHeld), и
+ * поднявшийся сервер она обязана заметить быстро, а не через треть минуты.
+ */
+const BACKOFF = [1000, 2000, 3000, 5000];
 
 export const net = {
   // 'off' — не подключались; 'connecting'; 'live'; 'down' — оборвалось.
@@ -165,6 +169,9 @@ function open() {
       net.peers = msg.peers || [];
       net.people = msg.people || [];
       net.roster = msg.roster || [];
+      // Дальность локатора для NPC (server/src/Traffic.php): по ней метка
+      // NPC гаснет к краю, а не обрывается (js/game/npc.js).
+      net.npc = msg.npc || null;
       if (typeof msg.wt === 'number') net.wt = msg.wt;
       net.rev++;
       net.error = null;
@@ -185,7 +192,10 @@ function open() {
     } else if (msg.t === 'leave') {
       // Уходит человек, корабль — или оба. Корабль, на борту которого мы
       // едем, игра не выбросит: его ей пришлют и из прыжка.
-      net.left.push({ id: msg.id === undefined ? null : msg.id, ship: msg.ship === undefined ? null : msg.ship });
+      // q — ушёл квантовым прыжком (так уходят NPC): у тех, кто его
+      // видел, — вспышка выхода, а не тихое исчезновение.
+      net.left.push({ id: msg.id === undefined ? null : msg.id, ship: msg.ship === undefined ? null : msg.ship,
+        q: !!msg.q });
       if (net.left.length > 64) net.left.shift();
     } else if (msg.t === 'fuel') {
       // Бак по счёту сервера. Идёт в ту же очередь, что и бой: разбирает
@@ -199,7 +209,7 @@ function open() {
       if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'shot' || msg.t === 'hurt' || msg.t === 'hitok'
                || msg.t === 'boom' || msg.t === 'impact' || msg.t === 'hatchreq'
-               || msg.t === 'home') {
+               || msg.t === 'home' || msg.t === 'scan') {
       // Очередь не копим бесконечно: если игра почему-то перестала её
       // разбирать, сотня событий в памяти полезнее тысячи, а тысяча
       // ничем не лучше сотни.
@@ -207,6 +217,9 @@ function open() {
       if (net.events.length > 128) net.events.shift();
     } else if (msg.t === 'error') {
       net.error = msg.message || msg.code;
+      // Код — отдельно: по нему игра отличает «вошли в другом окне» от
+      // обрыва (js/main.js, linkHeld), а текст бывает на любом языке.
+      net.errorCode = msg.code || null;
       // 'replaced' — игрок открыл игру в другом окне. Это не сбой связи,
       // и переподключаться нельзя: два окна начнут выбивать друг друга
       // по кругу.

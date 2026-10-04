@@ -27,6 +27,7 @@ import { CY, CY_DIM, AMBER, GREEN, RED, INK, PEER } from './theme.js';
 import { SHIP } from '../game/ship.js';
 import { fmtDist, fmtSpeed, fmtTime } from './hud.js';
 import { targetLabel, targetKind, currentTarget } from '../game/nav.js';
+import { hullName } from '../game/npc.js';
 import { gearLabel } from '../game/landing.js';
 import { fuelCap, fuelReserve, fuelLevel } from '../game/fuel.js';
 import { L } from '../core/lang.js';
@@ -378,7 +379,9 @@ function targetScreen(ctx, W, H, game) {
   ctx.textAlign = 'left';
   ctx.font = f(20);
   ctx.fillStyle = CY;
-  ctx.fillText(kind ? L(kind) : L('ЦЕЛЬ'), 16, 60);
+  // У NPC рядом с видом — корпус (js/game/npc.js).
+  const hull = target.npc ? ' · ' + hullName(target.type).toUpperCase() : '';
+  ctx.fillText(kind ? L(kind) + hull : L('ЦЕЛЬ'), 16, 60);
   ctx.font = f(38);
   ctx.fillStyle = AMBER;
   ctx.fillText(String(target.name || targetLabel(target)).slice(0, 15), 16, 100);

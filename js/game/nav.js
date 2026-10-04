@@ -160,7 +160,7 @@ export function targetById(world, id) {
  */
 export function targetKind(t) {
   if (!t) return '';
-  if (t.isPeer) return 'ПИЛОТ';
+  if (t.isPeer) return t.npc ? 'NPC' : 'ПИЛОТ';
   if (t.isStation) return 'СТАНЦИЯ';
   if (t.isCity) return 'ГОРОД';
   if (t.isMarker) return 'МЕТКА';

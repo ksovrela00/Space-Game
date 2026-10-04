@@ -4,6 +4,7 @@
  *
  *   php server/ws/server.php            запустить
  *   php server/ws/server.php --quiet    без журнала в консоль
+ *   php server/ws/server.php --no-npc   без NPC (космос — только игроки)
  *
  * Это ДОЛГОЖИВУЩИЙ процесс, в отличие от api.php: он висит, пока его не
  * остановят (Ctrl+C). Apache для него не нужен вовсе — Ratchet слушает
@@ -29,7 +30,7 @@
 // нам по-прежнему нужны.
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
 
-require_once __DIR__ . '/../boot.php';
+require_once __DIR__ . '/../boot.npc.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use Ratchet\ConnectionInterface;
@@ -100,7 +101,14 @@ try {
     exit(1);
 }
 
-$hub = new Hub($log);
+// NPC (server/src/Traffic.php) и оракул рельефа для их посадок
+// (server/src/Oracle.php — дочерний Node с кодом мира игры). Оракула нет —
+// NPC летают, но не садятся.
+$traffic = null;
+if (!in_array('--no-npc', $argv, true)) {
+    $traffic = new Traffic(Oracle::spawn($log), null, $log);
+}
+$hub = new Hub($log, $traffic);
 // Кто был в игре у прошлого процесса — ждём, как ушедших (Hub::boot).
 $hub->boot(microtime(true));
 $loop = React\EventLoop\Loop::get();

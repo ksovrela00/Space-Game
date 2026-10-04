@@ -38,22 +38,22 @@
       'boot', 'main'
     ],
     'core/': [
-      'basis', 'input', 'lang.en', 'lang', 'mode', 'quality', 'rng',
+      'basis', 'input', 'lang.en', 'lang', 'quality', 'rng',
       'sound', 'vec3'
     ],
     'game/': [
       'airlock', 'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
-      'entry', 'flow', 'fuel', 'hull',
-      'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'peers', 'pilot',
+      'entry', 'fleet', 'flow', 'fuel', 'hull',
+      'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'npc', 'peers', 'pilot',
       'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface',
-      'vessels', 'walker', 'warp', 'weapons', 'world'
+      'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
       'forestworker', 'gputime', 'ground',
       'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
       'quadtree', 'rocks', 'scene', 'shaders', 'shipshadow', 'spacesuit', 'terrain', 'tilegeo', 'tilepool',
-      'hull', 'tiles', 'tileworker', 'wash'
+      'hull', 'tiles', 'tileworker', 'wash', 'water'
     ],
     'models/': [
       'airstair', 'bridge.prom', 'city', 'city.parts', 'cockpit', 'cockpit.prom', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',

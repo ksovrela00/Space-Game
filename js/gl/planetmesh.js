@@ -26,7 +26,9 @@ export function planetBuilder(body, level) {
 
   const positions = new Float32Array(base.positions.length);
   const colors = new Float32Array(n * 4);
-  const rgb = [0, 0, 0];
+  // Четвёртая ячейка — высота над морем (terrain.sample, js/gl/water.js).
+  const rgb = [0, 0, 0, 0];
+  const sea = terrain.kindCfg.liquid ? body.radius : 0;
 
   // Светило — однородный самосветящийся шар своего цвета: процедурные
   // биомы ему не нужны (иначе досталась бы серая каменная палитра).
@@ -53,7 +55,9 @@ export function planetBuilder(body, level) {
         colors[i * 4] = isStar ? sr : rgb[0];
         colors[i * 4 + 1] = isStar ? sg : rgb[1];
         colors[i * 4 + 2] = isStar ? sb : rgb[2];
-        colors[i * 4 + 3] = isStar ? 1 : 0;          // альфа = «сам светится»
+        // Альфа: у светила — «сам светится», у водного мира — высота
+        // над морем, км (js/gl/water.js), у остальных — нуль.
+        colors[i * 4 + 3] = isStar ? 1 : rgb[3] * sea;
       }
       if (i < n) return false;
       // Нормали считаем по УЖЕ смещённой геометрии, иначе рельеф не будет

@@ -526,16 +526,31 @@ final class Players
         ] + self::placeOf($row);
     }
 
-    /** Все корабли пилота: каким командует, где стоят остальные. */
+    /**
+     * Все корабли пилота: каким командует, где стоят остальные.
+     *
+     * Место — с точкой, а не одним «где-то у тела»: по ней карта
+     * (js/game/fleet.js) ставит значок корабля туда, где его оставили. На
+     * грунте и у тела — точка в осях тела (point: b, x, y, z — как у
+     * shipPoint): тело вращается, и мировая точка устарела бы за минуту.
+     * В пустоте — мировая (pos). В порту точки нет — корабль в станции.
+     * Названия тела и системы — для корабля в другой системе: её состава
+     * игра не знает, пока туда не прилетит.
+     */
     public static function fleet(int $playerId, int $activeId): array
     {
         $out = [];
         foreach (Db::all(
-            'SELECT sh.*, t.`code` AS `type_code`, t.`name` AS `type_name`
+            'SELECT sh.*, t.`code` AS `type_code`, t.`name` AS `type_name`,
+                    ss.`name` AS `system_name`, b.`name` AS `body_name`
              FROM `ship` sh JOIN `ship_type` t ON t.`id`=sh.`type_id`
+             LEFT JOIN `star_system` ss ON ss.`id` = sh.`system_id`
+             LEFT JOIN `body` b ON b.`system_id` = sh.`system_id`
+                 AND b.`local_id` = COALESCE(sh.`docked_body`, sh.`landed_body`, sh.`anchor_body`)
              WHERE sh.`owner_id`=? ORDER BY sh.`id`',
             [$playerId]
         ) as $r) {
+            $point = $r['docked_body'] === null ? self::shipPoint($r) : null;
             $out[] = [
                 'id' => (int) $r['id'],
                 'name' => (string) $r['name'],
@@ -548,6 +563,12 @@ final class Players
                 'body' => $r['docked_body'] !== null ? (int) $r['docked_body']
                     : ($r['landed_body'] !== null ? (int) $r['landed_body']
                         : ($r['anchor_body'] !== null ? (int) $r['anchor_body'] : null)),
+                'systemName' => $r['system_name'] === null ? null : (string) $r['system_name'],
+                'bodyName' => $r['body_name'] === null ? null : (string) $r['body_name'],
+                'point' => $point === null ? null
+                    : ['b' => $point['body'], 'x' => $point['p'][0], 'y' => $point['p'][1], 'z' => $point['p'][2]],
+                'pos' => $r['docked_body'] === null && $point === null
+                    ? ['x' => (float) $r['pos_x'], 'y' => (float) $r['pos_y'], 'z' => (float) $r['pos_z']] : null,
             ];
         }
         return $out;
@@ -803,16 +824,16 @@ final class Players
         }
 
         // --- сам пилот ----------------------------------------------------------
+        // МЕСТО пилота сохранение не меняет: на чьём он борту, в кресле
+        // ли, на грунте ли — это переходы, и делает их сервер в момент
+        // перехода (Players::move, pilot.move). Сохранение идёт фоном и
+        // опаздывает: собранное до пересадки, оно приходило после неё и
+        // возвращало пилота на борт прежнего корабля — новый улетал уже
+        // без него, а порт отказывал «не на борту». Здесь — только поза
+        // там, где пилот уже есть по счёту сервера; не совпало — мимо.
         $set = [];
-        $denied = null;
         $p = self::byId($playerId);
-        if (!$legacy && is_array($in['me'] ?? null)) {
-            [$set, $denied] = self::meFields($p, $in['me'], $shipId);
-        } elseif ($legacy && isset($shipSet['system_id']) && $p['aboard_ship'] === null) {
-            // Старый вид без места пилота — пилот считается в кресле.
-            $set = ['aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null,
-                'out_body' => null, 'out_pose' => null, 'system_id' => $shipSet['system_id']];
-        }
+        $stale = !$legacy && is_array($in['me'] ?? null) && !self::poseSave($p, $in['me']);
 
         // --- план полёта и счётчики ---------------------------------------------
         $sysP = isset($set['system_id']) ? $set['system_id']
@@ -871,14 +892,119 @@ final class Players
         if ($ignored) {
             $out['shipIgnored'] = true;
         }
-        if ($denied !== null) {
-            // Чего сервер не принял и почему: игра вернёт пилота туда,
-            // где он по счёту сервера есть.
-            $out['meDenied'] = $denied;
-            $out['me'] = self::meOf(self::byId($playerId));
+        if ($stale) {
+            // Место в сохранении не то, что у сервера: оно опоздало к
+            // переходу. Не ошибка — следующее придёт уже с новым местом.
+            $out['meStale'] = true;
         }
         return $out;
     }
+
+    /**
+     * Поза пилота из сохранения — там, где он уже есть: шаги по палубе,
+     * шаги по грунту. Условие места стоит в самом UPDATE, а не только в
+     * проверке перед ним: переход (move) мог закоммититься между ними.
+     *
+     * @return bool совпало ли место в сохранении с местом у сервера
+     */
+    private static function poseSave(array $p, array $me): bool
+    {
+        $id = (int) $p['id'];
+        $aboard = isset($me['aboard']) && is_numeric($me['aboard']) ? (int) $me['aboard'] : null;
+        if ($aboard !== null) {
+            if ($p['aboard_ship'] === null || (int) $p['aboard_ship'] !== $aboard) {
+                return false;
+            }
+            // Встал или сел — это переход, а не поза.
+            if (!empty($me['seated']) !== !empty($p['seated'])) {
+                return false;
+            }
+            $pose = empty($me['seated']) ? self::walkPose($me['walk'] ?? null, self::shipRow($aboard)) : null;
+            if ($pose !== null) {
+                Db::run('UPDATE `player` SET `walk_pose`=? WHERE `id`=? AND `aboard_ship`=? AND `seated`=0',
+                    [$pose, $id, $aboard]);
+            }
+            return true;
+        }
+        $out = $me['out'] ?? null;
+        if (!is_array($out) || !isset($out['body']) || $p['aboard_ship'] !== null || $p['out_body'] === null) {
+            return false;
+        }
+        // Номер тела сравнивается как есть: bodyIn бросил бы на чужой
+        // системе и уронил бы всё сохранение из-за опоздавшей позы.
+        $body = (int) $out['body'];
+        if ((int) $p['out_body'] !== $body) {
+            return false;
+        }
+        $o = self::vec($out['o'] ?? null);
+        $f = self::unit($out['f'] ?? null);
+        if ($o !== null && $f !== null) {
+            Db::run('UPDATE `player` SET `out_pose`=? WHERE `id`=? AND `out_body`=? AND `aboard_ship` IS NULL',
+                [json_encode(['o' => $o, 'f' => $f, 'pitch' => self::angle($out['pitch'] ?? 0, 1.6)]), $id, $body]);
+        }
+        return true;
+    }
+
+    /** Точка на палубе и взгляд — строкой для walk_pose; мусор — null. */
+    private static function walkPose($w, ?array $ship): ?string
+    {
+        if ($ship === null || !is_array($w) || !is_array($w['pos'] ?? null)) {
+            return null;
+        }
+        $dm = self::deckM($ship);
+        $pos = array_map(static fn($x) => max(-$dm, min($dm, self::num($x))),
+            array_slice(array_values($w['pos']), 0, 3));
+        if (count($pos) !== 3) {
+            return null;
+        }
+        return json_encode([
+            'pos' => $pos,
+            'yaw' => self::angle($w['yaw'] ?? 0),
+            'pitch' => self::angle($w['pitch'] ?? 0, 1.6),
+        ]);
+    }
+
+    /**
+     * Переход пилота: встал с кресла, сел в него, сошёл на грунт, поднялся
+     * на борт — свой или соседский.
+     *
+     * Действие, а не поле сохранения, и делается сразу, под замком строки
+     * пилота: переходы идут по порядку, и проверка «рядом ли корабль» —
+     * от того места, где пилот на самом деле, а не от того, что успело
+     * дойти фоном. Отказ — не ошибка: в ответе место по счёту сервера, и
+     * игра ставит пилота туда.
+     *
+     * @return array{moved:bool, me:array, denied?:string, why?:string}
+     */
+    public static function move(int $playerId, array $me): array
+    {
+        return Db::tx(function () use ($playerId, $me) {
+            $p = Db::row('SELECT * FROM `player` WHERE `id`=? FOR UPDATE', [$playerId]);
+            if ($p === null) {
+                throw ApiError::notFound('нет такого игрока');
+            }
+            $ship = self::ship($playerId);
+            [$set, $denied] = self::meFields($p, $me, (int) $ship['id']);
+            if ($denied === null && $set) {
+                $set['last_seen_at'] = Db::now();
+                Db::update('player', $set, '`id`=?', [$playerId]);
+            }
+            $out = ['moved' => $denied === null, 'me' => self::meOf(self::byId($playerId))];
+            if ($denied !== null) {
+                $out['denied'] = $denied;
+                $out['why'] = self::MOVE_WHY[$denied] ?? $denied;
+            }
+            return $out;
+        });
+    }
+
+    /** Почему переход не принят — словами для игрока. */
+    private const MOVE_WHY = [
+        'too_far' => 'корабль далеко',
+        'owner_away' => 'хозяина корабля нет в игре',
+        'no_ship' => 'такого корабля нет',
+        'bad_place' => 'непонятно, куда',
+    ];
 
     /**
      * Поля места корабля из сохранения.
@@ -900,8 +1026,8 @@ final class Players
      * ТОПЛИВО — по той же причине, что и корпус: оно стоит денег, и полный
      * бак из сохранения означал бы бесплатную заправку после каждого
      * прыжка. Расход считает хаб (Hub::meter) и варп (Fuel::arriveShip),
-     * заправку — Fuel::refuel. Поле `fuel` игра по-прежнему кладёт в
-     * сохранение — для автономного режима, — и здесь оно не читается.
+     * заправку — Fuel::refuel. Поле `fuel` в сохранении, если и придёт,
+     * здесь не читается.
      */
     private static function shipFields(array $in, ?int $sysId): array
     {
@@ -915,9 +1041,10 @@ final class Players
         if (isset($in['basis'])) {
             $set['basis'] = json_encode($in['basis']);
         }
-        if (array_key_exists('docked', $in)) {
-            $set['docked_body'] = self::bodyIn($in['docked'], $sysId);
-        }
+        // Порт сохранением не ставится и не снимается: встать в него —
+        // действие с ценой (Stations::dock), выйти — тоже действие
+        // (Stations::undock). Сохранение опаздывает, и опоздавшее с портом
+        // ставило бы корабль обратно в док — с рынком, верфью и даром.
         if (array_key_exists('landed', $in)) {
             $landed = $in['landed'];
             if (is_array($landed) && isset($landed['id'])) {
@@ -1020,20 +1147,7 @@ final class Players
             $seated = !empty($me['seated']) && $aboard === $activeId
                 && (int) $target['owner_id'] === (int) $p['id'];
             $set['seated'] = $seated ? 1 : 0;
-            $set['walk_pose'] = null;
-            $w = $me['walk'] ?? null;
-            if (!$seated && is_array($w) && is_array($w['pos'] ?? null)) {
-                $dm = self::deckM($target);
-                $pos = array_map(static fn($x) => max(-$dm, min($dm, self::num($x))),
-                    array_slice(array_values($w['pos']), 0, 3));
-                if (count($pos) === 3) {
-                    $set['walk_pose'] = json_encode([
-                        'pos' => $pos,
-                        'yaw' => self::angle($w['yaw'] ?? 0),
-                        'pitch' => self::angle($w['pitch'] ?? 0, 1.6),
-                    ]);
-                }
-            }
+            $set['walk_pose'] = $seated ? null : self::walkPose($me['walk'] ?? null, $target);
             return [$set, null];
         }
 

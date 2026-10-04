@@ -36,6 +36,15 @@
   <div class="panel" id="panel"></div>
 </div>
 
+<!-- Нет связи с сервером: игра стоит под этой надписью и ждёт
+     (js/main.js, holdForLink). Текст ставит игра — он переводится. -->
+<div id="link" class="overlay link hidden">
+  <div class="panel">
+    <h2 id="linkTitle"></h2>
+    <p class="sub" id="linkBody"></p>
+  </div>
+</div>
+
 <div id="boot" class="overlay">
   <div class="panel">
     <!-- Текст стартового экрана собирает игра (js/ui/screens.js): он

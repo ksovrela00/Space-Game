@@ -12,7 +12,7 @@
  */
 
 putenv('SOLAR_DB=solar_trader_test');
-require_once __DIR__ . '/../boot.php';
+require_once __DIR__ . '/../boot.npc.php';
 
 $fails = 0;
 $checks = 0;
@@ -905,6 +905,9 @@ $t += Hub::GRACE + 1;
 $hub6->tick($t);
 ok(($cb6->last('home')['ship'] ?? 0) === $shipA,
     'вошёл на борт той, кого нет в хабе, — через GRACE он у себя, даже не прислав снимка');
+
+// NPC — своим файлом: та же база, те же пилоты и соединения.
+require __DIR__ . '/npc.php';
 
 echo PHP_EOL . ($fails === 0
     ? "ХАБ: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ($checks)"

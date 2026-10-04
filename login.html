@@ -105,9 +105,7 @@ function paint() {
   $('pass').autocomplete = reg ? 'new-password' : 'current-password';
   $('note').innerHTML = (reg
     ? L('Пароль восстановить будет нечем: сервер хранит только его хеш.')
-    : L('Учётной записи нет? Заведите её здесь же.'))
-    + ' ' + L('Играть без сервера —')
-    + ' <a href="index.html?offline=1" style="color:#4fb3e0">' + L('автономно') + '</a>.';
+    : L('Учётной записи нет? Заведите её здесь же.'));
   for (const [code, id] of [['en', 'langEn'], ['ru', 'langRu']]) {
     $(id).classList.toggle('on', getLang() === code);
   }

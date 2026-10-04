@@ -42,7 +42,10 @@ if (!args.length) {
 // Предупреждения о чужих расширениях (в этом XAMPP их два) сыплются в
 // stderr при каждом запуске и к игре отношения не имеют. Глушим их
 // ключом, а не фильтром вывода: ошибки самого скрипта нам нужны.
+// SOLAR_NODE — путь к этому же Node: хаб запускает им оракул рельефа для
+// NPC (server/src/Oracle.php), а node в PATH бывает не всегда.
 const run = spawnSync(found, ['-d', 'error_reporting=E_ALL & ~E_WARNING', ...args], {
   stdio: 'inherit',
+  env: { ...process.env, SOLAR_NODE: process.env.SOLAR_NODE || process.execPath },
 });
 process.exit(run.status === null ? 1 : run.status);

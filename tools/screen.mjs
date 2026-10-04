@@ -22,7 +22,7 @@
 //   node tools/screen.mjs --do="GAME.ship.hull = 12" произвольная правка
 //
 // Снимок ГРУНТА просят с заплатками: node tools/screen.mjs --scene=…
-//   --url='http://localhost/space_game/?offline=1&surface=clipmap'
+//   --url='http://localhost/space_game/?surface=clipmap'
 // Плитки считаются на видеокарте, а в headless её нет — за отведённое
 // время успевает три штуки, и вместо рельефа в кадре гладкий шар. У
 // городских сцен это уже зашито в сцену (scene.url).
@@ -32,8 +32,12 @@
 // «деревьев не видно» разбирается на «не собрано», «не нарисовано» и
 // «ушло под грунт».
 //
-// Игру отдаёт тот же сервер, что и обычно (XAMPP, http://localhost/…).
-// Без сервера сцена не соберётся: числа корабля приходят из бэкенда.
+// Игру отдаёт тот же сервер, что и обычно (XAMPP, http://localhost/…), а
+// голос сервера игры — API и сокет — поддельный (tools/fakeapi.mjs): его
+// текст вкладывается в страницу до её скриптов. Игра без сервера не
+// запускается, а снимок не должен зависеть ни от базы, ни от того, кто
+// на этой машине вошёл в игру, ни от запущенного хаба. Профиль Chrome
+// временный, поддельный вход в нём и остаётся.
 
 import { spawn } from 'node:child_process';
 import { writeFileSync, mkdtempSync, existsSync, rmSync } from 'node:fs';
@@ -67,8 +71,8 @@ if (!chrome) {
   process.exit(1);
 }
 
-// Экран станции с ответами сервера. Снимок идёт без сервера (offline=1),
-// поэтому прайс и верфь подставляются здесь — такими, какими их отдаёт
+// Экран станции с ответами сервера. Сервер в снимке поддельный, поэтому
+// прайс и верфь подставляются здесь — такими, какими их отдаёт
 // server/src/Market.php и Outfit.php. Проверяется ВЁРСТКА экрана, а не
 // экономика: её проверяет серверный набор.
 const PORT_SCENE = (tab) => `
@@ -77,8 +81,8 @@ const PORT_SCENE = (tab) => `
     import('./js/net/session.js'), import('./js/ui/station.js'), import('./js/game/specs.js'),
   ])).then(([Sess, S, Sp]) => {
     Sess.session.mode = 'online';
-    // Бак и корпус — после буксира: без сервера порт заправляет и чинит
-    // даром, а снимок должен показать, как выглядит неполный бак.
+    // Бак и корпус — свои: снимок должен показать, как выглядит неполный
+    // бак и битый корпус.
     GAME.ship.fuel = 4.6;
     GAME.ship.hull = 72;
     GAME.player.balance = 41250;
@@ -194,6 +198,34 @@ const LOCK_SCENE = (hatch, then, pre = '', alt = 0.02) => `
     });
 `;
 
+// Берег: суша не выше пяти метров над морем, у которой в двухстах метрах
+// по какой-нибудь из восьми сторон — вода. Камера — в стороне на off км,
+// на высоте alt, нос опущен на pitch градусов.
+const COAST_SCENE = (alt, off, pitch) => `
+  liftoff();
+  return standWhere(atmoWorld(),
+    (t, F, b, d) => {
+      const h = window.__surf.groundRadius(b, d) - b.radius;
+      if (!(h > 0 && h < 0.02)) return 0;
+      const hp = Math.abs(d.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      let ux = hp.y * d.z - hp.z * d.y, uy = hp.z * d.x - hp.x * d.z, uz = hp.x * d.y - hp.y * d.x;
+      const ul = Math.hypot(ux, uy, uz); ux /= ul; uy /= ul; uz /= ul;
+      const vx = d.y * uz - d.z * uy, vy = d.z * ux - d.x * uz, vz = d.x * uy - d.y * ux;
+      const k = 0.5 / b.radius;
+      let wet = 0;
+      for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI / 4, c = Math.cos(a) * k, s = Math.sin(a) * k;
+        const q = { x: d.x + ux * c + vx * s, y: d.y + uy * c + vy * s, z: d.z + uz * c + vz * s };
+        const l = Math.hypot(q.x, q.y, q.z);
+        if (window.__surf.waterAt(b, { x: q.x / l, y: q.y / l, z: q.z / l })) wet++;
+      }
+      // Урез, а не мыс: вода с двух-шести сторон из восьми; ниже над
+      // морем — лучше (ближе к кромке).
+      return wet >= 2 && wet <= 6 ? 2 - h * 50 : 0;
+    }, ${alt}, 35, 0, ${pitch}, ${off})
+    .then(() => { console.log('берег: оценка места ' + window.__bestV); GAME.state.view = 'cockpit'; frames(12); });
+`;
+
 // Соседи (сокет без сокета, как в сцене pilots): рядом со своим кораблём
 // садится чужой — спящий, с открытым люком и трапом, — а по грунту идёт
 // человек. Всё кладётся туда, куда это кладёт сокет (window.NET), и
@@ -280,6 +312,65 @@ const PROM_SCENE = (then, dr = 0.125, df = 0.05, side = false) => LOCK_SCENE('sR
             lfx: F.x, lfy: F.y, lfz: F.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }];
           n.people = [];
           n.rev++;
+        };
+        window.__crew();
+        const hold0 = window.__hold;
+        window.__hold = () => { if (hold0) hold0(); window.__crew(); };
+        frames(4);
+        ${then}
+      });`);
+
+// NPC у стоянки (server/src/Traffic.php): сокет без сокета, как в
+// CREW_SCENE. Площадку ищет тот же код, что у оракула рельефа сервера
+// (server/ws/oracle.mjs: findSite, groundRadius, surfaceNormal), и центр
+// корабля ставится над ней на высоту его стоек — так NPC стоит у всех.
+// Один стоит впереди на стойках, второй снижается чуть дальше (шасси
+// выпущено, подъёмные тлеют), третий только что вышел из прыжка.
+const NPC_SCENE = (then, df = 0.42) => LOCK_SCENE('sR', `
+      const b = GAME.ship.landedAt, P = GAME.ship.landedPose;
+      return Promise.all([import('./js/game/surface.js'), import('./js/models/hulls.js'),
+        import('./js/game/weapons.js')]).then(([S, Hm, Wp]) => {
+        const gear = (code) => { const g = Hm.hullOf(code).gear; return g.legLengths[0] - g.hardpoints[0].y; };
+        // Точка впереди и сбоку от своего корабля: df вперёд, dr вправо (км).
+        const dirAt = (dr, df) => {
+          const R = P.radius;
+          const x = P.dir.x * R + P.right.x * dr + P.fwd.x * df;
+          const y = P.dir.y * R + P.right.y * dr + P.fwd.y * df;
+          const z = P.dir.z * R + P.right.z * dr + P.fwd.z * df;
+          const l = Math.hypot(x, y, z);
+          return { x: x / l, y: y / l, z: z / l };
+        };
+        const pad = (dr, df, code, lift) => {
+          const s = S.findSite(b, dirAt(dr, df), 0.08);
+          const d = { x: s.dir.x, y: s.dir.y, z: s.dir.z };
+          const r = S.groundRadius(b, d), n = S.surfaceNormal(b, d);
+          const h = gear(code) + lift;
+          // Нос — к своему кораблю боком: по правой оси стоянки.
+          const k = P.right.x * n.x + P.right.y * n.y + P.right.z * n.z;
+          const f = { x: P.right.x - n.x * k, y: P.right.y - n.y * k, z: P.right.z - n.z * k };
+          const fl = Math.hypot(f.x, f.y, f.z);
+          return { lx: d.x * r + n.x * h, ly: d.y * r + n.y * h, lz: d.z * r + n.z * h,
+            lfx: -f.x / fl, lfy: -f.y / fl, lfz: -f.z / fl, lux: n.x, luy: n.y, luz: n.z };
+        };
+        const row = (id, name, code, extra, at) => Object.assign({ id, npc: 1, by: null, name, ty: code,
+          sys: 0, b: b.id, v: 0, hull: code === 'prometheus' ? 600 : 100, hmax: code === 'prometheus' ? 600 : 100,
+          sh: 40, smax: 40, h: [], pilot: null }, extra, at);
+        const landed = pad(-0.05, ${df}, 'challenger', 0);
+        const sinking = pad(0.35, 1.3, 'prometheus', 0.18);
+        const n = window.NET;
+        let first = true;
+        window.__crew = () => {
+          n.state = 'live';
+          n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+          n.peers = [
+            row(-1, 'Mira Vorek', 'challenger', { mode: 'landed', g: 1, k: 0,
+              eq: first ? ['engine_x', 'shield', 'laser_g'] : undefined, ex: first ? ['engine_x'] : undefined }, landed),
+            row(-2, 'Kenji Solani', 'prometheus', { mode: 'flight', g: 1, k: 0.6,
+              eq: first ? ['engine', 'quantum_p'] : undefined, ex: first ? [] : undefined }, sinking),
+          ];
+          n.people = [];
+          n.rev++;
+          first = false;
         };
         window.__crew();
         const hold0 = window.__hold;
@@ -488,12 +579,12 @@ const SCENES = {
   // и ждать его значит не снять её вовсе. Отсюда plain: страница
   // снимается как страница, без игровой обвязки и без кадров.
   login: {
-    plain: 'login.html?offline=1',
+    plain: 'login.html',
     title: 'страница входа',
     run: '',
   },
   signup: {
-    plain: 'login.html?offline=1',
+    plain: 'login.html',
     title: 'страница входа: регистрация',
     run: "document.getElementById('swap').click();",
   },
@@ -681,6 +772,25 @@ const SCENES = {
         6, 28, 20, 9)
         .then(() => { GAME.state.view = 'cockpit'; frames(10); });
     `,
+  },
+  // Берег океанического мира с трёх высот. Место ищется само: суша у
+  // самого уреза (до пяти метров над морем), а в паре сотен метров от
+  // неё — вода. Камера висит в стороне и смотрит на этот урез, солнце
+  // за спиной.
+  coast: {
+    url: '&surface=clipmap',
+    title: 'берег с трёхсот метров: урез, вода, прибой',
+    run: COAST_SCENE(0.3, 2.0, 12),
+  },
+  coasthigh: {
+    url: '&surface=clipmap',
+    title: 'берег с четырёх километров: линия побережья',
+    run: COAST_SCENE(4, 12, 22),
+  },
+  shore: {
+    url: '&surface=clipmap',
+    title: 'у самой кромки: тридцать метров над пляжем',
+    run: COAST_SCENE(0.03, 0.35, 6),
   },
   gravel: {
     url: '&surface=clipmap',
@@ -1061,6 +1171,42 @@ const SCENES = {
     title: 'реакторный зал палубы 10',
     run: PROM_WALK([-4.0, 10, 47.0], '-Math.PI * 0.75', -0.05),
   },
+  npcland: {
+    url: '&surface=clipmap',
+    title: 'NPC у стоянки: торговец на стойках впереди (выбран целью), крейсер снижается, третий выходит из прыжка',
+    run: NPC_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(2);
+      // Цель — стоящий NPC: у его метки строка снаряжения.
+      const T = GAME.nav.list.findIndex((t) => t.id === -1);
+      if (T >= 0) GAME.nav.index = T;
+      frames(20);
+      // Третий — вспышка выхода из прыжка над горизонтом, левее курса.
+      const c = GAME.ship.pos, f = GAME.ship.basis.fwd, r = GAME.ship.basis.right, u = GAME.ship.basis.up;
+      const q = { x: c.x + f.x * 14 - r.x * 6 + u.x * 2.5, y: c.y + f.y * 14 - r.y * 6 + u.y * 2.5,
+        z: c.z + f.z * 14 - r.z * 6 + u.z * 2.5 };
+      Wp.quantumFx(GAME.guns, q, { x: r.x, y: r.y, z: r.z }, true);
+      frames(5);`),
+  },
+  npcnear: {
+    url: '&surface=clipmap',
+    title: 'NPC на стойках вблизи: пяты на грунте площадки, найденной кодом оракула',
+    run: NPC_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(24);`, 0.16),
+  },
+  npcjump: {
+    url: '&surface=clipmap',
+    title: 'NPC выходит из прыжка прямо по курсу: вспышка и след из глубины',
+    run: NPC_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(20);
+      const c = GAME.ship.pos, f = GAME.ship.basis.fwd, r = GAME.ship.basis.right, u = GAME.ship.basis.up;
+      const q = { x: c.x + f.x * 12 + u.x * 1.2, y: c.y + f.y * 12 + u.y * 1.2, z: c.z + f.z * 12 + u.z * 1.2 };
+      const d = { x: r.x * 0.8 + f.x * 0.6, y: r.y * 0.8 + f.y * 0.6, z: r.z * 0.8 + f.z * 0.6 };
+      Wp.quantumFx(GAME.guns, q, d, true);
+      frames(6);`),
+  },
   prometheus: {
     url: '&surface=clipmap',
     title: '«Прометей» на стоянке впереди, бортом: вид из кабины «Челленджера»',
@@ -1185,9 +1331,7 @@ const wait = Number(arg('wait', 1200));
 
 let url = arg('url', 'http://localhost/space_game/'
   + (scene.plain && !arg('url', null) ? scene.plain : ''));
-// Автономный режим: снимок не должен зависеть от того, вошёл ли кто-то в
-// игру на этой машине, а вход уводит на страницу входа.
-if (!url.includes('?')) url += '?offline=1';
+if (!url.includes('?')) url += '?shot=1';
 // Сцена может попросить свой ключ в адресе. Нужно городу: поверхность
 // плитками печётся на видеокарте, а в headless её изображает
 // SwiftShader — полсекунды на плитку, то есть за всё ожидание успевают
@@ -1195,6 +1339,29 @@ if (!url.includes('?')) url += '?offline=1';
 // Заплатки (surface=clipmap) считаются на процессоре и приезжают сразу.
 if (scene.url && !arg('url', null)) url += scene.url;
 if (hud) url += '&hud=' + hud;
+
+/**
+ * Текст, который ставит в странице поддельный сервер: API (fetch к
+ * api.php) и сокет отвечают из памяти, остальное — файлы игры — идёт с
+ * XAMPP как обычно. Пилот — в порту родной станции.
+ */
+async function fakeSource() {
+  const { readFileSync: read } = await import('node:fs');
+  const { systemById } = await import('../js/game/galaxy.js');
+  const { makeSystem } = await import('../js/game/world.js');
+  const lib = read(new URL('./fakeapi.mjs', import.meta.url), 'utf8').replace(/^export /gm, '');
+  const specs = read(new URL('../server/data/specs.json', import.meta.url), 'utf8');
+  const station = makeSystem(systemById(0)).home.station.id;
+  return `(() => {
+${lib}
+    const S = makeFakeServer({ specs: ${specs}, station: ${station} });
+    window.__fake = S;
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (u, o) => (String(u).indexOf('api.php') >= 0 ? S.fetch(u, o) : realFetch(u, o));
+    window.WebSocket = S.WebSocket;
+    try { localStorage.setItem('solar_trader_token', FAKE_TOKEN); } catch (e) { /* и ладно */ }
+  })();`;
+}
 
 // --- вспомогательное для сцен -------------------------------------------------
 //
@@ -1431,6 +1598,8 @@ const HELPERS = `
       if (!best || v > best.v) best = { v, d };
     }
     if (!best) return false;
+    // Что нашлось: сцены, которым место важно (берег), пишут это в лог.
+    window.__bestV = best.v;
     let d = best.d;
     let look = null;
     if (off > 0) {
@@ -1650,6 +1819,9 @@ try {
   await cdp.send('Emulation.setDeviceMetricsOverride',
     { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
+  // Поддельный сервер — в страницу до её скриптов (tools/fakeapi.mjs). У
+  // страницы входа его нет: она снимается такой, какой её видит гость.
+  if (!scene.plain) await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: await fakeSource() });
   await cdp.send('Page.navigate', { url });
 
   // Ждём не «загрузки страницы», а саму игру: модули грузятся, потом

@@ -299,7 +299,8 @@ export function updateGuns(guns, dt, ships, hits = []) {
     b.life -= dt;
 
     let gone = false;
-    if (ships && ships.length) {
+    // След прыжка (quantumFx) — свет, а не снаряд: ни во что не попадает.
+    if (ships && ships.length && !b.ghost) {
       for (const t of ships) {
         if (!t || !t.pos) continue;
         // В свой же корабль болт не попадает: он из него вылетел.
@@ -430,6 +431,58 @@ export function addForeignBolt(guns, msg, carry = null) {
   const b = makeBolt(from, dir, spec, false, msg.by | 0, carry);
   guns.bolts.push(b);
   return b;
+}
+
+// Цвет следа квантового прыжка: холодный, как у тоннеля привода.
+const QUANTUM_RGB = [0.62, 0.8, 1.0];
+
+/**
+ * Вспышка квантового прыжка там, где корабль вышел из него или ушёл в
+ * него. Так появляются и пропадают NPC (server/src/Traffic.php): без неё
+ * корабль возникал бы из пустоты и в пустоте же исчезал, а выход из
+ * прыжка — событие, которое пилот видит.
+ *
+ * Вспышка — та же, что у попадания (blast), только крупнее и дольше; след —
+ * длинный «болт» без урона (ghost): на выходе он прилетает к кораблю из
+ * глубины, на уходе — срывается с него вперёд.
+ *
+ * @param dir куда смотрит нос (единичный)
+ * @param inbound true — вышел из прыжка, false — ушёл в прыжок
+ */
+export function quantumFx(guns, pos, dir, inbound) {
+  const f = blast(guns, pos.x, pos.y, pos.z, QUANTUM_RGB, 3.2);
+  f.life = 0.9;
+  const speed = 150;                    // км/с — след проходит за долю секунды
+  const life = 0.22;
+  const back = inbound ? speed * life : 0;
+  guns.bolts.push({
+    x: pos.x - dir.x * back, y: pos.y - dir.y * back, z: pos.z - dir.z * back,
+    px: pos.x, py: pos.y, pz: pos.z,
+    vx: dir.x * speed, vy: dir.y * speed, vz: dir.z * speed,
+    dx: dir.x, dy: dir.y, dz: dir.z,
+    life, len: 9, damage: 0, color: QUANTUM_RGB, mine: false, by: 0, ghost: true, wide: 3,
+  });
+}
+
+/**
+ * Гибель корабля: вспышка в корпус величиной и обломки огня вокруг —
+ * несколько вспышек поменьше, разбросанных по его габариту.
+ *
+ * @param r радиус корпуса, км (hitRadius у типа)
+ */
+export function wreckFx(guns, pos, r = 0.035) {
+  const core = blast(guns, pos.x, pos.y, pos.z, [1.0, 0.95, 0.8], 2.6);
+  core.life = 0.6;
+  const fire = blast(guns, pos.x, pos.y, pos.z, [1.0, 0.55, 0.2], 4.5);
+  fire.life = 1.4;
+  for (let i = 0; i < 6; i++) {
+    const a = i * 2.399963, y = 1 - (i + 0.5) / 3;
+    const s = Math.sqrt(Math.max(0, 1 - y * y));
+    const k = r * (0.6 + 0.5 * ((i * 7) % 5) / 4);
+    const b = blast(guns, pos.x + Math.cos(a) * s * k, pos.y + y * k, pos.z + Math.sin(a) * s * k,
+      [1.0, 0.45 + 0.08 * (i % 3), 0.15], 1.3);
+    b.life = 0.7 + 0.12 * i;
+  }
 }
 
 /** Стволы корабля в мировых координатах — для вспышек у дула. */

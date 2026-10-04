@@ -2786,6 +2786,166 @@ console.log('\n== оболочка ударной волны ==');
     'PLUME_VS строит волну по корпусу и потоку, а не как тело вращения');
 }
 
+// --- 9w. Вода ------------------------------------------------------------------
+//
+// Урез, толща и волны считаются в шейдере (js/gl/water.js). Здесь — всё,
+// на чём он стоит: высота над морем в вершине, дно вместо синевы, волны
+// из семени и общих часов и то, что двое пилотов видят одну воду.
+console.log('\n== вода ==');
+{
+  const { systemById } = await import('../js/game/galaxy.js');
+  const W = await import('../js/gl/water.js');
+  const Surf = await import('../js/game/surface.js');
+  const { terrainOf } = await import('../js/gl/terrain.js');
+  const sys = makeSystem(systemById(0));
+  const sea = sys.planets.find((p) => p.kind === 'ocean');
+  const t = terrainOf(sea);
+  const rgb = [0, 0, 0, 0];
+
+  // 1. Высота над морем: знак — как у игры (waterAt), над морем — само
+  //    смещение грунта. Под водой цвет — дно, а не синева: синева цвета
+  //    вершин и давала полосу на урезе шириной в ячейку сетки.
+  let wrongSign = 0, wrongH = 0, wet = 0, dry = 0, blue = 0, capped = 0;
+  let wetDir = null, dryDir = null;
+  for (let i = 0; i < 6000; i++) {
+    const u = -1 + 2 * (i / 5999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+    const d = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+    const h = t.sample(d.x, d.y, d.z, null, rgb);
+    const water = Surf.waterAt(sea, d);
+    if (rgb[3] === 1e-7) { capped++; continue; }          // морской лёд шапки — суша
+    if ((rgb[3] <= 0) !== water) wrongSign++;
+    if (Math.abs(Math.max(rgb[3], 0) - h) > 1e-12 && rgb[3] < t.amp * 0.98) wrongH++;
+    if (water) {
+      wet++;
+      if (rgb[2] - Math.max(rgb[0], rgb[1]) > 0.03) blue++;
+      if (!wetDir && Math.abs(d.y) < 0.6) wetDir = d;
+    } else {
+      dry++;
+      if (!dryDir && Math.abs(d.y) < 0.6 && rgb[3] < 0.0002) dryDir = d;
+    }
+  }
+  ok(wet > 1000 && dry > 1000 && wrongSign === 0 && wrongH === 0,
+    'высота над морем в вершине: знак как у игры (waterAt) в ' + (wet + dry) + ' точках, над морем — само смещение'
+    + (wrongSign || wrongH ? ' (знак мимо ' + wrongSign + ', высота мимо ' + wrongH + ')' : '')
+    + '; морского льда шапок ' + capped);
+  ok(blue === 0, 'под водой цвет вершины — дно, а не синева: синих вершин ' + blue + ' из ' + wet);
+
+  // 2. Сетки несут её в альфе: дальняя сфера и плитка. У тела без моря
+  //    альфа — по-прежнему флаг «светится», ноль.
+  {
+    const geo = planetGeometry(sea, 3);
+    let neg = 0, pos = 0;
+    for (let i = 3; i < geo.colors.length; i += 4) { if (geo.colors[i] < 0) neg++; else if (geo.colors[i] > 0) pos++; }
+    const moon = sys.bodies.find((b) => b.kind === 'moon');
+    const mg = planetGeometry(moon, 3);
+    let moonA = 0;
+    for (let i = 3; i < mg.colors.length; i += 4) moonA = Math.max(moonA, Math.abs(mg.colors[i]));
+    const tb = tileBuilder(sea, { face: 0, level: 2, tx: 1, ty: 1 });
+    while (!tb.step(1e6));
+    const tc = tb.result.colors;
+    let tMin = Infinity, tMax = -Infinity;
+    for (let i = 3; i < tc.length; i += 4) { tMin = Math.min(tMin, tc[i]); tMax = Math.max(tMax, tc[i]); }
+    ok(neg > 50 && pos > 50 && moonA === 0 && tMin < tMax && Math.abs(tMin) < 50 && Math.abs(tMax) < 50,
+      'высота над морем в альфе вершин: сфера — ' + neg + ' в море, ' + pos + ' на суше; плитка — '
+      + tMin.toFixed(2) + '..' + tMax.toFixed(2) + ' км; у луны альфа 0');
+  }
+
+  // 3. Волны — из семени тела: у каждого игрока те же. Частота — по
+  //    дисперсии глубокой воды с тяжестью этого тела: ω² = g·k.
+  const plain = () => ({ name: sea.name, id: sea.id, mu: sea.mu, radius: sea.radius });
+  const wa = W.waveSet(plain()), wb = W.waveSet(plain());
+  let disp = 0;
+  for (let i = 0; i < wa.k.length; i++) disp = Math.max(disp, Math.abs(wa.omega[i] ** 2 - wa.g * wa.k[i]));
+  ok(JSON.stringify(wa) === JSON.stringify(wb) && wa.k.length === W.WATER.waves && disp < 1e-9,
+    'волны из семени тела одинаковы у всех; ω² = g·k (g = ' + wa.g.toFixed(2) + ' м/с²), период зыби '
+    + (2 * Math.PI / wa.omega[0]).toFixed(1) + ' с');
+
+  // 4. ОДНА ВОДА НА ВСЕХ. Двое пилотов в разных местах, с разным
+  //    разворотом камеры, через год мирового времени: фаза каждой волны в
+  //    одной точке моря у обоих одна — и та же, что по формуле в осях тела.
+  //    Счёт как в шейдере: смещение от камеры во float32 + фаза у камеры.
+  {
+    const waves = W.waveSet(sea);
+    const time = 3.15e7 + 0.37;
+    const B = bodyBasis(sea, makeBasis());
+    const R = sea.radius;
+    // Точка моря и две камеры: в 300 м над ней и в 2 км в стороне.
+    const d = normalize(v3(wetDir.x, wetDir.y, wetDir.z));
+    const world = (dl, r) => ({
+      x: sea.pos.x + (B.right.x * dl.x + B.up.x * dl.y + B.fwd.x * dl.z) * r,
+      y: sea.pos.y + (B.right.y * dl.x + B.up.y * dl.y + B.fwd.y * dl.z) * r,
+      z: sea.pos.z + (B.right.z * dl.x + B.up.z * dl.y + B.fwd.z * dl.z) * r,
+    });
+    const P = world(d, R);
+    const side = normalize(v3(d.y, -d.x, 0.3));
+    const camA = { pos: world(d, R + 0.3), basis: makeBasis() };
+    const camB = { pos: world(normalize(v3(d.x + side.x * 2 / R, d.y + side.y * 2 / R, d.z + side.z * 2 / R)), R + 0.05),
+      basis: makeBasis() };
+    lookAlong(camA.basis, normalize(v3(P.x - camA.pos.x, P.y - camA.pos.y, P.z - camA.pos.z)), v3(0, 1, 0));
+    lookAlong(camB.basis, normalize(v3(P.x - camB.pos.x, P.y - camB.pos.y, P.z - camB.pos.z)), v3(0.3, 0.9, 0.1));
+    const F = Math.fround;
+    const phaseFrom = (cam) => {
+      const fr = W.waterFrame(waves, cam.basis, cam.pos, B, sea.pos, time, W.makeWaterFrame());
+      const dx = P.x - cam.pos.x, dy = P.y - cam.pos.y, dz = P.z - cam.pos.z;
+      const b = cam.basis;
+      const pv = [F((dx * b.right.x + dy * b.right.y + dz * b.right.z) * 1000),
+        F((dx * b.up.x + dy * b.up.y + dz * b.up.z) * 1000),
+        F((dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z) * 1000)];
+      return waves.k.map((k, i) => F(F(k) * F(F(fr.dir[i * 3]) * pv[0] + F(fr.dir[i * 3 + 1]) * pv[1]
+        + F(fr.dir[i * 3 + 2]) * pv[2]) + F(fr.wave[i * 4 + 2])));
+    };
+    const pa = phaseFrom(camA), pb = phaseFrom(camB);
+    // Точка в осях тела, м, — в double: эталон.
+    const dl = { x: P.x - sea.pos.x, y: P.y - sea.pos.y, z: P.z - sea.pos.z };
+    const pl = [(dl.x * B.right.x + dl.y * B.right.y + dl.z * B.right.z) * 1000,
+      (dl.x * B.up.x + dl.y * B.up.y + dl.z * B.up.z) * 1000,
+      (dl.x * B.fwd.x + dl.y * B.fwd.y + dl.z * B.fwd.z) * 1000];
+    const wrap = (a) => Math.abs(((a % (2 * Math.PI)) + 3 * Math.PI) % (2 * Math.PI) - Math.PI);
+    let worst = 0;
+    for (let i = 0; i < waves.k.length; i++) {
+      const ref = W.wavePhase(waves, i, pl[0], pl[1], pl[2], time);
+      worst = Math.max(worst, wrap(pa[i] - ref), wrap(pb[i] - ref));
+    }
+    ok(worst < 0.02,
+      'одна вода на всех: две камеры (над точкой и в 2 км) через год мирового времени — фаза в точке моря '
+      + 'та же, что в осях тела, расхождение до ' + worst.toFixed(4) + ' рад (float32, как в шейдере)');
+    // Время идёт — волна бежит: через секунду фаза в точке сдвинулась на ω.
+    const later = W.wavePhase(waves, 0, pl[0], pl[1], pl[2], time + 1);
+    ok(wrap(W.wavePhase(waves, 0, pl[0], pl[1], pl[2], time) - waves.omega[0] - later) < 1e-6,
+      'волна бежит по часам мира: через секунду фаза сдвинулась ровно на ω');
+  }
+
+  // 5. Камни на воду не ложатся: валун на море был бы плавучим.
+  {
+    // Урез — бисекцией между водой и сушей.
+    let a = normalize(v3(wetDir.x, wetDir.y, wetDir.z)), b = normalize(v3(dryDir.x, dryDir.y, dryDir.z));
+    for (let i = 0; i < 60; i++) {
+      const m = normalize(v3(a.x + b.x, a.y + b.y, a.z + b.z));
+      if (Surf.waterAt(sea, m)) a = m; else b = m;
+    }
+    const rocks = scatterRocks(sea, b, 0.4);
+    const onWater = rocks.filter((r) => Surf.waterAt(sea, r.dir)).length;
+    ok(rocks.length > 0 && onWater === 0,
+      'камни у уреза — только на суше: ' + rocks.length + ' камней, на воде ' + onWater);
+  }
+
+  // 6. Шейдер: вода включается флагом тела, урез — по высоте над морем
+  //    плюс мелкие октавы детали, а грунт с высотой в альфе не светится.
+  ok(MESH_FS_DETAIL.includes('uniform float uWater') && MESH_FS.includes('seaColor(')
+    && MESH_FS_DETAIL.includes('seaH += dh * uSeaR')
+    && MESH_FS.includes('mix(lit, 1.0, uWater > 0.5 ? 0.0 : vColor.a)')
+    && MESH_FS_DETAIL.includes('vColor.a < -SEA_SKIP_DEEP'),
+    'шейдер поверхности: море по флагу тела, урез — сетка плюс деталь, над глубиной деталь не считается');
+  // Цена: в «Прометее» у пляжа кадр падал до 40. Грунт под обшивкой
+  // шейдится целиком (логарифмическая глубина выключает ранний тест), и
+  // воду платил каждый его пиксель. Теперь суша выше наката воду не
+  // считает вовсе, небо в отражении — одна экспонента, а не луч воздуха,
+  // и зыбь мельче пикселя не крутит восемь косинусов.
+  ok(MESH_FS_DETAIL.includes('uWater > 0.5 && seaH < SEA_SWASH * 1.4 + seaAA')
+    && !W.WATER_GLSL.includes('airAlong(') && W.WATER_GLSL.includes('rough2 = SEA_ROUGH_ALL'),
+    'вода дёшева там, где её не видно: суша выше наката, небо без луча воздуха, зыбь мельче пикселя — без цикла');
+}
+
 // --- 9. Геометрия планеты ---------------------------------------------------
 console.log('\n== геометрия планеты ==');
 {
@@ -2798,10 +2958,15 @@ console.log('\n== геометрия планеты ==');
       const r = Math.hypot(geo.positions[i * 3], geo.positions[i * 3 + 1], geo.positions[i * 3 + 2]);
       minR = Math.min(minR, r); maxR = Math.max(maxR, r);
       if (Math.abs(Math.hypot(geo.normals[i * 3], geo.normals[i * 3 + 1], geo.normals[i * 3 + 2]) - 1) > 1e-5) badN++;
-      for (let k = 0; k < 4; k++) {
+      for (let k = 0; k < 3; k++) {
         const v = geo.colors[i * 4 + k];
         if (!(v >= 0 && v <= 1)) badC++;
       }
+      // Альфа у водного мира — высота над морем, км (js/gl/water.js):
+      // любое конечное число в пределах рельефа. У остальных — флаг 0/1.
+      const al = geo.colors[i * 4 + 3];
+      const liquid = makeTerrain(body).kindCfg.liquid;
+      if (liquid ? !(Math.abs(al) < body.radius * 0.05) : !(al >= 0 && al <= 1)) badC++;
     }
     const amp = makeTerrain(body).amp;
     ok(badN === 0 && badC === 0 && minR >= 0.999 && maxR <= 1 + amp * 1.05 + 1e-5,
@@ -3276,8 +3441,8 @@ console.log('\n== мок GL: путь отрисовки ==');
       };
       const hTop = air.radius * ENTRY.top;
       const above = at(hTop + 5), below = at(hTop - 5), low = at(2);
-      // У самой земли и НИЖЕ средней сферы (рельеф ниже уровня моря —
-      // обычное дело, у Lave II дно океана на 12 км ниже): воздух обязан
+      // У самой земли и НИЖЕ средней сферы: грунт туда не опускается
+      // (море срезано по ней), но камера попасть может — воздух обязан
       // рисоваться и там.
       const ground = at(0.179), basin = at(-5);
       cam.pos.x = save.x; cam.pos.y = save.y; cam.pos.z = save.z;

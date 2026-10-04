@@ -51,16 +51,22 @@
  *         (ship_type.code: соседа рисуют его корпусом); dorm — без
  *         водителя: хозяин в игре, но ведёт не его, и стоит он по базе;
  *       people — люди: id игрока, где и как стоит
+ *       NPC (server/src/Traffic.php) — в том же list: id отрицательный,
+ *         npc:1, by:null; qx — только что вышел из прыжка (вспышка),
+ *         eq — снаряжение (раз, когда NPC показался этому пилоту).
+ *         Видны лишь те, что ближе дальности локатора (Traffic::SEE_KM)
  *
  * wt — время мира (Clock): по нему клиенты держат орбиты в одной фазе.
  * Оно идёт в каждом снимке, а не только при входе: вкладка в фоне
  * перестаёт получать кадры, её часы отстают, и без поправки пилот,
  * вернувшийся к игре, увидит станцию не там, где остальные.
  *     {"t":"leave","id":7,"ship":12}         игрок 7 ушёл (и увёл корабль 12)
+ *     {"t":"leave","id":null,"ship":-4,"q":1}  NPC -4 ушёл квантовым прыжком
  *     {"t":"shot","by":7,...}                чужой выстрел — только картинка
  *     {"t":"hurt","by":7,"dmg":3,"hull":61,"dead":false}   попали В НАС
  *     {"t":"hitok","id":12,"hull":61,"dead":false}         попали МЫ
- *     {"t":"boom","id":12}                   корабль 12 уничтожен
+ *     {"t":"boom","id":12}                   корабль 12 уничтожен (у NPC ещё "npc":1)
+ *     {"t":"scan","id":-4,"name":"..."}      NPC -4 подлетел и сканирует нас
  *     {"t":"hatchreq","ship":12,"id":"nL","open":true,"by":7}  просят люк НАШЕГО корабля
  *     {"t":"home","ship":12,"by":7,"home":30}  хозяин корабля 12 ушёл из игры:
  *                                            вы в кресле своего (30)
@@ -165,9 +171,13 @@ final class Hub
     /** @var callable|null куда писать события (для журнала) */
     private $log;
 
-    public function __construct(?callable $log = null)
+    /** NPC вокруг пилотов (server/src/Traffic.php); null — космос пуст. */
+    private ?Traffic $traffic;
+
+    public function __construct(?callable $log = null, ?Traffic $traffic = null)
     {
         $this->log = $log;
+        $this->traffic = $traffic;
     }
 
     public function count(): int
@@ -284,6 +294,10 @@ final class Hub
             'regen' => 0.0, 'delay' => 0.0,
             'shieldAt' => $now, 'statAt' => 0.0,
             'moved' => false,
+            // NPC, которых пилот сейчас видит (Traffic::rowsFor): видимый
+            // пропадает дальше, чем показывается, а об уходе NPC прыжком
+            // говорят только тем, кто его видел.
+            'npcVis' => [],
             // Топливо (server/src/Fuel.php): модель бака, счётчики работы
             // сопел из прошлого снимка и то, что ещё не ушло в базу.
             'ship' => null, 'fm' => null, 'fuel' => null,
@@ -545,6 +559,10 @@ final class Hub
             // Состав сети целиком — вошедшему он нужен сразу, а не после
             // первого чужого входа.
             'roster' => $this->online(),
+            // Дальность локатора для NPC: игра гасит их метку к краю, а не
+            // обрывает на границе (js/ui/hud.js).
+            'npc' => $this->traffic !== null
+                ? ['see' => Traffic::SEE_KM, 'hide' => Traffic::HIDE_KM] : null,
         ]);
         // А остальным — обновлённый состав с новичком в нём.
         $this->sendRoster();
@@ -572,7 +590,7 @@ final class Hub
         // корабля стрелка: у крейсера с пятью башнями он впятеро выше.
         $shipId = (int) ($msg['id'] ?? 0);
         $code = (string) ($msg['w'] ?? '');
-        if ($shipId <= 0 || $shipId === $peer['ship'] || $code === '') {
+        if ($shipId === 0 || $shipId === $peer['ship'] || $code === '') {
             return;
         }
 
@@ -590,15 +608,18 @@ final class Hub
         // что уже спрятала его из снимка, и повторяет НАМЕРЕННО: у
         // стрелка список соседей мог остаться с прошлой секунды, и
         // выстрел по исчезнувшему приходит на сервер как обычный.
+        //
+        // NPC (id меньше нуля) ищется у Traffic: в базе его нет.
         $victim = null;
         foreach ($this->peers as $p) {
-            if ($p['player'] !== null && $p['hosting'] && $p['ship'] === $shipId
+            if ($shipId > 0 && $p['player'] !== null && $p['hosting'] && $p['ship'] === $shipId
                 && $p['sys'] === $peer['sys'] && !self::between($p)) {
                 $victim = $p;
                 break;
             }
         }
-        if ($victim === null) {
+        $npc = $shipId < 0 && $this->traffic !== null ? $this->traffic->get($shipId) : null;
+        if ($victim === null && ($npc === null || $npc->sys !== $peer['sys'])) {
             return;
         }
 
@@ -619,6 +640,10 @@ final class Hub
         // Попадания не чаще, чем бьют все гнёзда корабля этим оружием.
         if ($now - $peer['hitAt'] < 1.0 / Combat::hitRate($gun, (int) $gun['mounts'])) {
             return;                                  // темп выше оружейного
+        }
+        if ($victim === null) {
+            $this->hitNpc($conn, $peer, $shipId, $gun, $now);
+            return;
         }
 
         $d = sqrt(
@@ -662,6 +687,125 @@ final class Hub
             $this->wreck($shipId, $victim['sys'], $now);
             $this->say('уничтожен корабль ' . $victim['name'] . ' (огнём ' . $peer['name'] . ')');
         }
+    }
+
+    /**
+     * Попадание по NPC: те же проверки, что по кораблю игрока, — оружие и
+     * темп проверены выше, дальность — у Traffic, в осях NPC (у тела
+     * стрелок говорит, где он, и в них). Счёт ведёт хаб, а не база: NPC в
+     * базе нет.
+     */
+    private function hitNpc($conn, array &$peer, int $id, array $gun, float $now): void
+    {
+        $res = $this->traffic->hit($id, $this->eyeOf($peer), $gun, $now);
+        if ($res === null) {
+            return;                                  // далеко, или его уже нет
+        }
+        $peer['hitAt'] = $now;
+        $this->send($conn, [
+            't' => 'hitok', 'id' => $id,
+            'hull' => $res['hull'], 'max' => $res['max'],
+            'shield' => $res['shield'], 'smax' => $res['smax'],
+            'absorbed' => $res['absorbed'], 'dead' => $res['dead'],
+        ]);
+        if (!$res['dead']) {
+            return;
+        }
+        $this->traffic->remove($id);
+        // Гибель видят те, кто видел его самого: дальше локатора вспышки
+        // не разглядеть, а весть «где-то рядом уничтожен корабль» с другого
+        // конца системы только путает.
+        $me = $this->key($conn);
+        foreach ($this->peers as $k => $p) {
+            if ($p['player'] !== null && (isset($p['npcVis'][$id]) || $k === $me)) {
+                $this->send($p['conn'], ['t' => 'boom', 'id' => $id, 'npc' => 1]);
+            }
+            unset($this->peers[$k]['npcVis'][$id]);
+        }
+        $this->say('NPC ' . $res['npc']->name . ' уничтожен огнём ' . $peer['name']);
+    }
+
+    /**
+     * Шаг NPC. Ушедшего прыжком провожают те, кто его видел, — у них
+     * вспышка выхода (leave с q). Пропавшего тихо не видел никто.
+     */
+    private function moveTraffic(float $now, ?float $wt = null): void
+    {
+        foreach ($this->traffic->step($now, $this->eyes(), $wt) as $ev) {
+            if ($ev['how'] === 'arrive') {
+                continue;                   // в снимок он попадёт сам, с qx
+            }
+            if ($ev['how'] === 'scan') {
+                // Подлетел и разглядывает — тот, кого разглядывают, это видит.
+                $k = $this->peerOf((int) $ev['pid']);
+                if ($k !== null) {
+                    $this->send($this->peers[$k]['conn'], ['t' => 'scan', 'id' => $ev['id'], 'name' => $ev['name']]);
+                }
+                continue;
+            }
+            foreach ($this->peers as $k => $p) {
+                if (!isset($p['npcVis'][$ev['id']])) {
+                    continue;
+                }
+                unset($this->peers[$k]['npcVis'][$ev['id']]);
+                if ($ev['how'] === 'jump') {
+                    $this->send($p['conn'], ['t' => 'leave', 'id' => null, 'ship' => $ev['id'], 'q' => 1]);
+                }
+            }
+        }
+    }
+
+    /** Где все пилоты — для NPC (игрок => eyeOf). */
+    private function eyes(): array
+    {
+        $out = [];
+        foreach ($this->peers as $p) {
+            $e = $this->eyeOf($p);
+            if ($e !== null) {
+                $out[$p['player']] = $e;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Откуда пилот смотрит — для NPC (Traffic): кого ему показывать, около
+     * кого звать новых и откуда он стреляет.
+     *
+     * Стоит на грунте — его ноги, в осях тела. Ведёт корабль — точка
+     * корабля: мировая и, у тела, в его осях. Едет на чужом борту — точка
+     * того, кто этот борт ведёт. Иначе — нигде (стоит на спящем корабле,
+     * ещё не прислал снимка): NPC ему не показываются, пока не прислал.
+     */
+    private function eyeOf(array $p, bool $deep = true): ?array
+    {
+        if ($p['player'] === null || $p['sys'] === null || self::between($p)) {
+            return null;
+        }
+        $me = $p['me'];
+        if ($me !== null && $me['st'] === 'out') {
+            return ['sys' => $p['sys'], 'w' => null, 'b' => $me['b'],
+                'l' => [$me['lx'], $me['ly'], $me['lz']], 'spawn' => true];
+        }
+        if ($p['hosting']) {
+            $l = $p['local'];
+            return [
+                'sys' => $p['sys'], 'w' => [$p['x'], $p['y'], $p['z']],
+                'b' => $l !== null ? $l['b'] : null,
+                'l' => $l !== null ? [$l['lx'], $l['ly'], $l['lz']] : null,
+                // Из дока космоса не видно, а в прыжке NPC вокруг не
+                // успеть разглядеть: таким NPC к себе не зовут.
+                'spawn' => $p['mode'] !== 'docked' && $p['v'] < Traffic::QUANTUM_V,
+            ];
+        }
+        if ($deep && $p['aboard'] !== null) {
+            foreach ($this->peers as $q) {
+                if ($q['player'] !== null && $q['hosting'] && $q['ship'] === $p['aboard'] && $q['sys'] === $p['sys']) {
+                    return $this->eyeOf($q, false);
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -832,6 +976,11 @@ final class Hub
         // к базе, а снимок у всех всё равно один и тот же.
         $wt = Clock::worldTime();
         $this->strandGone($now);
+        // NPC летят, уходят и прибывают ДО рассылки: снимок говорит о них
+        // то же, что о пилотах, — как есть на этот тик.
+        if ($this->traffic !== null) {
+            $this->moveTraffic($now, $wt);
+        }
         foreach ($this->peers as $key => $peer) {
             if ($peer['player'] === null) {
                 // Молчит и не представился — закрываем: это либо сканер
@@ -851,7 +1000,12 @@ final class Hub
                 $this->loadStats($this->peers[$key], $now);
                 $peer = $this->peers[$key];
             }
-            $this->send($peer['conn'], ['t' => 'peers', 'list' => $this->shipsOf($peer, $now),
+            $list = $this->shipsOf($peer, $now);
+            if ($this->traffic !== null) {
+                $list = array_merge($list,
+                    $this->traffic->rowsFor($this->eyeOf($peer), $this->peers[$key]['npcVis'], $now));
+            }
+            $this->send($peer['conn'], ['t' => 'peers', 'list' => $list,
                 'people' => $this->peopleOf($peer), 'wt' => $wt]);
             $sent++;
         }

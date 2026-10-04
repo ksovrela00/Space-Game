@@ -60,7 +60,9 @@ const KEEP = 6;
 const FWD = { x: 0, y: 0, z: 1 };
 const UP = { x: 0, y: 1, z: 0 };
 
-export const makePeers = () => ({ by: new Map() });
+// arrivals — NPC, только что вышедшие из прыжка (поле qx снимка): игра
+// разбирает их и зажигает вспышку выхода там, где они показались.
+export const makePeers = () => ({ by: new Map(), arrivals: [] });
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -115,6 +117,12 @@ function record(id) {
       // корпусом и стойками (js/models/hulls.js). Нет в снимке — такой же,
       // как у нас.
       type: null,
+      // NPC — корабль, которым правит сервер (server/src/Npc.php): номер
+      // у него отрицательный, хозяина нет, люки заперты. eq — что на нём
+      // стоит, ex — что из этого сверх заводского (js/game/npc.js).
+      npc: false,
+      eq: null,
+      ex: null,
       // Шасси (0..1), открытые люки и работа подъёмных — чтобы корабль
       // стоял на стойках, люк был открыт и сопла тлели как у хозяина.
       gear: { out: false, t: 0, drop: null },
@@ -147,7 +155,13 @@ export function ingestPeers(store, list, now) {
     if (!local && (x === null || y === null || z === null)) continue;
 
     let r = store.by.get(id);
-    if (!r) { r = record(id); store.by.set(id, r); }
+    if (!r) {
+      r = record(id);
+      store.by.set(id, r);
+      // Показался впервые и только что из прыжка — вспышка выхода. Не
+      // впервые (снимок пропал и вернулся) — вспышки нет: он не прыгал.
+      if (p.qx && store.arrivals) store.arrivals.push(id);
+    }
     if (typeof p.name === 'string' && p.name) r.name = p.name;
     if (typeof p.mode === 'string' && p.mode) r.mode = p.mode;
     const o = r.out;
@@ -164,6 +178,11 @@ export function ingestPeers(store, list, now) {
     if (Number.isFinite(p.smax)) o.shieldMax = p.smax;
     o.by = num(p.by);
     o.dorm = !!p.dorm;
+    o.npc = !!p.npc;
+    // Снаряжение приходит раз, когда NPC показался, — дальше его в снимке
+    // нет, и прежнее остаётся.
+    if (Array.isArray(p.eq)) o.eq = p.eq.filter((s) => typeof s === 'string');
+    if (Array.isArray(p.ex)) o.ex = p.ex.filter((s) => typeof s === 'string');
     o.gear.out = !!(num(p.g) > 0.5);
     o.hatches = Array.isArray(p.h) ? p.h.filter((s) => typeof s === 'string') : [];
     o.lift = num(p.k) ?? 0;

@@ -2,6 +2,8 @@
 // кадры main.js во всех режимах. Ловит падения в рендере, HUD и экранах,
 // которые иначе видны только в браузере.
 
+import { readFileSync } from 'node:fs';
+
 const calls = {};
 let texts = null;        // включается на время проверки вёрстки
 let rects = null;        // то же для полосок: у них нет текста
@@ -174,12 +176,12 @@ globalThis.window = {
 // проверяется отдельно в tools/gl.mjs через мок GL-контекста.
 // touch=1 — принудительно мобильный профиль: касаний в Node нет, а
 // сенсорные органы проверять надо (js/core/quality.js).
-// offline=1 — этот набор проверяет ИГРУ, а не сеть: сервер здесь не
-// поднят, и игра обязана работать без него ровно как раньше. Сетевой
-// запуск (вход, состояние с сервера, сохранение по сети) проверяется
-// отдельно — tools/net.mjs, где для этого подменяется fetch.
+// Сервера здесь нет, а игра без него не идёт: его голос даёт поддельный
+// сервер в памяти (tools/fakeapi.mjs) — пилот в порту родной станции,
+// груз, задания, ответы на сохранение. Сетевой запуск как таковой (вход,
+// обрыв, «нет связи») проверяется отдельно — tools/net.mjs.
 globalThis.location = {
-  search: '?renderer=2d&touch=1&offline=1',
+  search: '?renderer=2d&touch=1',
   origin: 'http://localhost',
   pathname: '/space_game/index.html',
   replace(url) { this.replaced = url; },
@@ -188,18 +190,32 @@ globalThis.location = {
 // Язык проверок — русский: в них сверяются НАДПИСИ, и держать их в двух
 // видах значило бы писать каждую проверку дважды. Английский путь
 // проверяется отдельным шагом, который язык переключает сам.
-const store = { solar_lang: 'ru' };
+const { makeFakeServer, FAKE_TOKEN } = await import('./fakeapi.mjs');
+const store = { solar_lang: 'ru', solar_trader_token: FAKE_TOKEN };
 globalThis.localStorage = {
   getItem: (k) => (k in store ? store[k] : null),
   setItem: (k, v) => { store[k] = String(v); },
   removeItem: (k) => { delete store[k]; },
 };
-// Сейв ищется по началу ключа, а не по полному имени. Версия в ключе
-// меняется всякий раз, когда старое сохранение перестаёт быть
-// осмысленным (последний раз — когда в систему добавили планеты и
-// сдвинулись id тел), и три проверки ниже каждый раз падали не по делу.
-// Отсутствие сейва так же видно: ключ не найдётся и разбор упадёт.
-const savedJson = () => store[Object.keys(store).find((k) => k.startsWith('solar_trader_save_')) || ''];
+// Сохранение — то, что игра последним отдала серверу: в очереди
+// (session.dirty) или уже отправленное (fake.saved). Местной копии нет.
+let session = null;
+let fake = null;
+const savedJson = () => {
+  const s = (session && session.dirty) || (fake && fake.saved);
+  return s ? JSON.stringify(s) : '';
+};
+// Дать отработать обещаниям игры: ответы поддельного сервера приходят
+// асинхронно, а кадры здесь крутятся синхронно.
+const settle = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+// Разбились — «Продолжить» (Space) и дождаться сервера: корабль в порт
+// возвращает его страховка, и игра забирает его состояние (game.respawn).
+const recover = async () => {
+  if (game.state.mode !== 'crashed') return;
+  key('Space'); frames(2);
+  await settle(6);
+  frames(5);
+};
 let rafCb = null;
 globalThis.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
 globalThis.performance = { now: () => nowMs };
@@ -283,9 +299,21 @@ console.log('\n== smoke: отрисовка и режимы ==');
 // браузере тем же занят js/boot.js, здесь — слепок с диска.
 const { loadSpecsFromDisk } = await import('./specs.mjs');
 loadSpecsFromDisk();
+{
+  const { systemById } = await import('../js/game/galaxy.js');
+  const { makeSystem } = await import('../js/game/world.js');
+  const specs = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  fake = makeFakeServer({ specs, station: makeSystem(systemById(0)).home.station.id });
+  globalThis.fetch = fake.fetch;
+  globalThis.WebSocket = fake.WebSocket;
+}
 
 const mod = await import('../js/main.js');
 const game = globalThis.window.GAME;   // main.js пишет в window, а не в globalThis
+session = (await import('../js/net/session.js')).session;
+// Игра поднимается, получив состояние у сервера: ждём, пока стартовый
+// экран не будет готов (кнопка ВЗЛЁТ получит обработчик).
+for (let i = 0; i < 100 && !(nodes.bootBtn.listeners.click || []).length; i++) await settle(1);
 const { lookAlong } = await import('../js/core/basis.js');
 const { exitPoint } = await import('../js/game/quantum.js');
 const { SHIP } = await import('../js/game/ship.js');
@@ -693,9 +721,17 @@ await step('пилот на ногах: Y — встать, ходьба, гол
     frames(2);
     const fwd0 = { ...sh.basis.fwd };
 
+    const moves0 = fake.moves.length;
     key('KeyY'); frames(2);
     if (!game.walk.on) throw new Error('Y не поднял пилота');
     if (game.state.view !== 'cockpit') throw new Error('на ногах вид не от первого лица');
+    // Встать — переход, и о нём сервер узнаёт сразу (pilot.move), а не
+    // фоновым сохранением: то опаздывает и место пилота больше не меняет.
+    await settle();
+    const up = fake.moves[fake.moves.length - 1];
+    if (fake.moves.length !== moves0 + 1 || up.seated !== false || up.aboard !== sh.id) {
+      throw new Error('встал — а сервер об этом не узнал (pilot.move): ' + JSON.stringify(up));
+    }
     frames(Math.ceil(WALK.rise * 60) + 2);
     if (game.walk.phase !== 'walk') throw new Error('пилот не встал: ' + game.walk.phase);
 
@@ -758,6 +794,11 @@ await step('пилот на ногах: Y — встать, ходьба, гол
     key('KeyE'); frames(Math.ceil(WALK.sit * 60) + 3);
     if (game.walk.on) throw new Error('E у кресла не посадил пилота');
     if (game.state.view !== view0) throw new Error('вид не вернулся: ' + game.state.view);
+    await settle();
+    const down = fake.moves[fake.moves.length - 1];
+    if (!down || down.seated !== true || down.aboard !== sh.id) {
+      throw new Error('сел — а сервер об этом не узнал (pilot.move): ' + JSON.stringify(down));
+    }
     // Сидя ручки снова у пилота.
     holdDown('KeyW'); frames(10); release('KeyW');
     if (!(sh.control.pitch !== 0 || game.yoke.pitch !== 0)) throw new Error('сев, пилот не взял ручку');
@@ -769,6 +810,70 @@ await step('пилот на ногах: Y — встать, ходьба, гол
     sh.speed = keep.speed; sh.throttle = keep.throttle;
     Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
     Object.assign(sh.basis.fwd, keep.basis.fwd);
+  }
+});
+
+// Приближение нажатием колеса: ×2 → ×4 → ×8 → обычный вид, и в кабине,
+// и пешком. Поле зрения сужается (камера та же), взгляд мышью под ним
+// медленнее во столько же раз; на карте колесо своё.
+await step('колесо нажатием: приближение ×2 ×4 ×8 в полёте и пешком', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { WALK } = await import('../js/game/walker.js');
+  const { input } = await import('../js/core/input.js');
+  const middle = () => { mouse('mousedown', { button: 1 }); frames(1); mouse('mouseup', { button: 1 }); };
+  const saved = game.cockpit;
+  try {
+    if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+    frames(30);
+    const fov0 = game.camera.fov;
+    const seen = [];
+    let said8 = false;
+    for (let i = 0; i < 3; i++) {
+      middle(); frames(1);
+      // Надпись живёт полторы секунды — смотрим сразу, а не после того,
+      // как поле зрения доедет.
+      said8 = said8 || game.state.messages.some((m) => /ПРИБЛИЖЕНИЕ ×8/.test(m.text));
+      frames(90);
+      seen.push(game.zoom + ':' + game.camera.fov.toFixed(4));
+    }
+    const want8 = 2 * Math.atan(Math.tan(fov0 / 2) / 8);
+    if (game.zoom !== 8 || Math.abs(game.camera.fov - want8) > 0.002) {
+      throw new Error('в полёте приближение не дошло до ×8: ' + seen.join(', ') + ' (ждали ' + want8.toFixed(4) + ')');
+    }
+    if (!said8) throw new Error('о ×8 не сказано');
+    middle(); frames(90);
+    if (game.zoom !== 1 || Math.abs(game.camera.fov - fov0) > 0.002) throw new Error('четвёртое нажатие не вернуло обычный вид');
+
+    // На карте колесо своё: нажатие вид под ней не приближает.
+    key('KeyM'); frames(2);
+    middle(); frames(2);
+    key('KeyM'); frames(2);
+    if (game.zoom !== 1) throw new Error('нажатие колеса на карте приблизило вид под ней');
+
+    // Пешком: то же, и голова под ×2 поворачивается вдвое медленнее.
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    game.ship.throttle = 0;
+    key('KeyY'); frames(Math.ceil(WALK.rise * 60) + 4);
+    if (!game.walk.on || game.walk.phase !== 'walk') throw new Error('пилот не встал');
+    middle(); frames(90);
+    if (game.zoom !== 2 || !(game.camera.fov < fov0 * 0.6)) throw new Error('пешком приближение не сработало: ×' + game.zoom);
+    const yaw0 = game.walk.yaw;
+    input.locked = true;
+    for (const fn of winListeners.mousemove || []) fn({ movementX: 100, movementY: 0 });
+    frames(1);
+    input.locked = false;
+    if (Math.abs(game.walk.yaw - yaw0 - 100 * WALK.look / 2) > 1e-6) {
+      throw new Error('под ×2 голова не замедлилась вдвое: ' + (game.walk.yaw - yaw0).toFixed(4));
+    }
+    for (let i = 0; i < 3; i++) { middle(); frames(2); }
+    if (game.zoom !== 1) throw new Error('пешком приближение не снялось по кругу: ×' + game.zoom);
+    key('KeyE'); frames(Math.ceil(WALK.sit * 60) + 3);
+    if (game.walk.on) throw new Error('E у кресла не посадил пилота');
+  } finally {
+    if (game.walk.on) { key('KeyE'); frames(50); }
+    game.zoom = 1;
+    game.cockpit = saved;
   }
 });
 
@@ -1361,11 +1466,12 @@ await step('к соседу на борт: по его трапу, чужое к
     texts = []; frames(2);
     let seen = texts.map((t) => t.s); texts = null;
     if (!seen.some((s) => s.indexOf('НА БОРТУ: КОРАБЛЬ СОСЕД') >= 0)) throw new Error('нет строки «на борту: корабль соседа»');
-    // Люк — чужой: открыть его можно только просьбой, а сети в прогоне нет.
+    // Люк — чужой: открыть его можно только просьбой к тому, кто его ведёт,
+    // — она уходит по сокету, а не открывает люк сама.
     if (!game.walkHatch || game.walkHatchShip !== V) throw new Error('люк под рукой — не соседа');
     key('KeyE'); frames(2);
-    if (!game.state.messages.some((m) => m.text.indexOf('ЛЮК ЧУЖОГО КОРАБЛЯ') >= 0)) {
-      throw new Error('чужой люк без связи — без отказа: ' + game.state.messages.map((m) => m.text).join(' | '));
+    if (!game.state.messages.some((m) => /ПРОСЬБА (ОТКРЫТЬ|ЗАКРЫТЬ) ЛЮК · СОСЕД/.test(m.text))) {
+      throw new Error('чужой люк — не просьбой: ' + game.state.messages.map((m) => m.text).join(' | '));
     }
     // Чужое кресло: не садятся.
     w.pos = game.interior.seat.stand.slice(); w.room = game.interior.roomById.bridge; w.vel = [0, 0, 0];
@@ -1381,10 +1487,12 @@ await step('к соседу на борт: по его трапу, чужое к
     if (game.sys.id !== 2 || !sh.away || !w.on || !w.vessel || w.vessel.id !== 900) {
       throw new Error(`за кораблём в систему 2 не ушли: система ${game.sys.id}, свой ${sh.away ? 'остался' : 'с нами'}`);
     }
+    // На сервер уходит, где сам пилот (система 2, борт соседа), а место
+    // своего корабля — нет: он остался в другой системе, и где он стоит,
+    // сервер знает лучше игры (js/main.js, save).
     const there = JSON.parse(savedJson());
-    if (there.system !== 2 || there.me.aboard !== 900 || !there.ship || there.ship.system !== sys0
-      || !there.ship.landed || there.ship.landed.id !== b.id) {
-      throw new Error('сохранение пассажира не то: ' + JSON.stringify({ s: there.system, me: there.me, ship: there.ship && there.ship.system }));
+    if (there.system !== 2 || there.me.aboard !== 900 || there.ship !== null) {
+      throw new Error('сохранение пассажира не то: ' + JSON.stringify({ s: there.system, me: there.me, ship: there.ship }));
     }
     // Вернулись — свой корабль снова на своей стоянке.
     pin = entry();
@@ -1730,10 +1838,28 @@ await step('квантовый привод (B) доводит до цели', (
 });
 
 
-await step('карта системы (M): масштаб, выбор, назначение цели', () => {
+await step('карта системы (M): масштаб, выбор, назначение цели; под картой корабль летит', () => {
   key('KeyM'); frames(5);
-  if (game.state.mode !== 'map') throw new Error('режим ' + game.state.mode);
+  if (!game.map.open || game.state.mode !== 'flight') {
+    throw new Error('карта не открылась поверх полёта: режим ' + game.state.mode);
+  }
   const map = game.map;
+  // Под картой мир не стоит: корабль летит, как летел. Раньше карта была
+  // РЕЖИМОМ, и ход под ней не считался вовсе — корабль вставал посреди
+  // полёта, хотя мир, соседи и NPC ехали дальше. Ручки при этом отпущены:
+  // Shift (тяга) под картой корабль не трогает.
+  {
+    const sh = game.ship;
+    const keepV = { ...sh.vel }, keepS = sh.speed;
+    sh.vel.x = sh.basis.fwd.x * 2; sh.vel.y = sh.basis.fwd.y * 2; sh.vel.z = sh.basis.fwd.z * 2;
+    sh.speed = 2;
+    const p0 = { ...sh.pos }, thr = sh.throttle;
+    holdDown('ShiftLeft'); frames(30); release('ShiftLeft'); frames(1);
+    const moved = Math.hypot(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
+    if (!(moved > 0.3)) throw new Error('под картой корабль стоит: за полсекунды на 2 км/с сдвинулся на ' + moved.toFixed(4) + ' км');
+    if (sh.throttle !== thr) throw new Error('под картой Shift тронул тягу: ' + thr + ' -> ' + sh.throttle);
+    Object.assign(sh.vel, keepV); sh.speed = keepS; Object.assign(sh.pos, p0);
+  }
   // Курсор: в полёте он спрятан (мешал бы прицелу), на карте им выбирают
   // объекты — и без него карта неуправляема.
   if (!nodes.screen.classList.contains('map')) throw new Error('курсор не показан на карте');
@@ -1801,8 +1927,49 @@ await step('карта системы (M): масштаб, выбор, назн�
   key('KeyX'); frames(2);
   if (Math.abs(map.zoom - 1) > 1e-6 || map.follow) throw new Error('X не сбросил вид');
 
+  // Свои корабли: список «МОИ КОРАБЛИ» в углу и щелчок по строке, который
+  // наводит карту на корабль. Второй стоит в порту этой системы, третий —
+  // в другой: щелчок по нему открывает галактику на его системе.
+  const st0 = game.world.stations[0];
+  const fleetWas = game.fleet;
+  game.fleet = [
+    { id: 901, name: 'ВТОРОЙ', typeName: 'Challenger', active: false, systemId: game.sys.id, where: 'docked', body: st0.id },
+    { id: 902, name: 'ТРЕТИЙ', typeName: 'Prometheus', active: false, systemId: 3, where: 'docked', body: 7,
+      bodyName: 'Xeor Station', systemName: 'Ried' },
+  ];
+  texts = [];
+  frames(2);
+  const listed = texts.some((t) => t.s.indexOf('МОИ КОРАБЛИ') >= 0)
+    && texts.some((t) => t.s.indexOf('ВТОРОЙ') >= 0) && texts.some((t) => t.s.indexOf('В ПОРТУ ') >= 0);
+  texts = null;
+  if (!listed) throw new Error('на карте нет списка своих кораблей');
+  const row2 = map.rows.find((r) => r.mark.id === 901);
+  if (!row2) throw new Error('строки второго корабля нет');
+  mouse('mousemove', { clientX: row2.x + 30, clientY: row2.y + 6 });
+  mouse('mousedown', { button: 0, clientX: row2.x + 30, clientY: row2.y + 6 });
+  frames(2);
+  mouse('mouseup', { button: 0 });
+  if (map.sel !== row2.mark || map.follow !== row2.mark) throw new Error('щелчок по строке не навёл карту на корабль');
+  if (!(map.zoom > 5)) throw new Error('к кораблю в порту карта не приблизилась: ×' + map.zoom.toFixed(1));
+  if (!map.items.some((it) => it.obj === row2.mark)) throw new Error('значка корабля на плане нет');
+  const row3 = map.rows.find((r) => r.mark.id === 902);
+  // Выбор на карте галактики — это цель варпа: после шага её возвращаем,
+  // иначе метка прыжка осталась бы в кадре следующих шагов.
+  const warpWas = game.warpTarget, gselWas = map.gsel;
+  mouse('mousedown', { button: 0, clientX: row3.x + 30, clientY: row3.y + 6 });
+  frames(2);
+  mouse('mouseup', { button: 0 });
+  if (map.view !== 'galaxy' || !map.gsel || map.gsel.id !== 3) {
+    throw new Error('корабль в другой системе — карта не открыла галактику на ней');
+  }
+  key('KeyG'); frames(2);
+  game.fleet = fleetWas;
+  game.warpTarget = warpWas;
+  map.gsel = gselWas;
+  key('KeyX'); frames(2);
+
   key('KeyM'); frames(5);
-  if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+  if (game.map.open || game.state.mode !== 'flight') throw new Error('карта не закрылась: режим ' + game.state.mode);
   if (nodes.screen.classList.contains('map')) throw new Error('курсор остался после карты');
 });
 
@@ -1844,7 +2011,8 @@ await step('меню пилота (I): разделы, живой мир, мёр
     const list = texts; texts = null;
     // Меню рисуется последним, и первая его надпись — заголовок. Всё, что
     // до него, принадлежит приборам под меню.
-    const from = list.findIndex((t) => t.s === 'МЕНЮ ПИЛОТА');
+    // В шапке — и имя пилота (с сервера): «МЕНЮ ПИЛОТА · JAMESON».
+    const from = list.findIndex((t) => t.s.indexOf('МЕНЮ ПИЛОТА') === 0);
     if (from < 0) throw new Error(title + ': заголовка меню нет в кадре');
     const r = game.menu.rect, fs = game.menu.fs;
     // Consolas: ширина знака 0.55 em — ровно та же оценка, что у
@@ -2145,7 +2313,9 @@ await step('связь: пинг и качество в углу — всегд�
     throw new Error('после обрыва показан старый пинг');
   }
 
-  net.state = 'off';
+  // Связь возвращаем: без неё игра через пять секунд встала бы под
+  // надписью «нет связи» (js/main.js, holdForLink).
+  net.state = 'live';
   net.rev++;
   frames(2);
 });
@@ -2298,6 +2468,81 @@ await step('цель по Tab и огонь левой кнопкой', () => {
   frames(2);
 });
 
+// NPC — корабль, которым правит сервер (server/src/Traffic.php). Приходит
+// он тем же снимком, но с пометкой npc: метка своего цвета с корпусом, у
+// выбранного — снаряжение строкой, выход из прыжка, уход и гибель —
+// вспышками, и ушедший или погибший пропадает сразу.
+await step('NPC: метка, снаряжение, вспышки прыжка и гибель', () => {
+  if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+  if (game.state.view !== 'chase') { key('KeyV'); frames(2); }
+  const p = game.ship.pos, f = game.ship.basis.fwd, u = game.ship.basis.up;
+  const row = (extra = {}) => Object.assign({
+    id: -5, npc: 1, by: null, name: 'Mira Vorek', ty: 'challenger', v: 0, mode: 'flight',
+    x: p.x + f.x * 1.5, y: p.y + f.y * 1.5, z: p.z + f.z * 1.5,
+    fx: f.x, fy: f.y, fz: f.z, ux: u.x, uy: u.y, uz: u.z,
+    hull: 100, hmax: 100, sh: 40, smax: 40, g: 0, h: [], k: 0,
+  }, extra);
+  game.guns.blasts.length = 0;
+  game.guns.bolts.length = 0;
+  net.peers = [row({ qx: 1, eq: ['engine_x', 'shield', 'laser_g'], ex: ['engine_x'] })];
+  net.rev++;
+  frames(2);
+  if (!game.guns.blasts.length || !game.guns.bolts.some((b) => b.ghost)) {
+    throw new Error('NPC вышел из прыжка без вспышки');
+  }
+  key('Tab'); frames(2);
+  const t = game.nav.list[game.nav.index];
+  if (!t || !t.npc) throw new Error('Tab не выбрал NPC: ' + (t ? t.name : '—'));
+  net.peers = [row()];
+  net.rev++;
+  texts = [];
+  frames(2);
+  const label = texts.find((x) => x.s.indexOf('Mira Vorek') >= 0);
+  const gear = texts.find((x) => x.s.indexOf('ФОРСИРОВАННЫЙ ДВИГАТЕЛЬ') >= 0);
+  const count = texts.find((x) => x.s === 'NPC 1');
+  const card = texts.find((x) => x.s.indexOf('ЦЕЛЬ · NPC · CHALLENGER') >= 0);
+  texts = null;
+  if (!label || label.s.indexOf('Challenger') < 0) {
+    throw new Error('метка NPC без имени и корпуса: ' + (label ? label.s : '—'));
+  }
+  if (!gear) throw new Error('у выбранного NPC нет строки снаряжения');
+  if (!count) throw new Error('на сканере не посчитан NPC');
+  if (!card) throw new Error('в карточке цели не сказано, что это NPC и какой корпус');
+
+  // Подлетел и разглядывает (server/src/Npc.php, inspect) — пилоту об этом
+  // сказано строкой.
+  net.events.push({ t: 'scan', id: -5, name: 'Mira Vorek' });
+  texts = [];
+  frames(2);
+  const scan = texts.find((x) => x.s.indexOf('ВАС СКАНИРУЕТ · Mira Vorek') >= 0);
+  texts = null;
+  if (!scan) throw new Error('о сканировании NPC пилоту не сказано');
+
+  // Ушёл прыжком (leave с q) — вспышка, и его нет.
+  game.guns.blasts.length = 0;
+  net.peers = [];
+  net.left.push({ id: null, ship: -5, q: true });
+  net.rev++;
+  frames(2);
+  if (!game.guns.blasts.length) throw new Error('NPC ушёл прыжком без вспышки');
+  if (game.peers.some((x) => x.id === -5)) throw new Error('ушедший NPC остался в списке');
+
+  // Погиб (boom, npc) — огонь по габариту, и его нет сразу, не через PEER_TTL.
+  net.peers = [row({ id: -6, name: 'Teo Halski' })];
+  net.rev++;
+  frames(2);
+  game.guns.blasts.length = 0;
+  net.events.push({ t: 'boom', id: -6, npc: 1 });
+  net.peers = [];
+  net.rev++;
+  frames(2);
+  if (game.guns.blasts.length < 6) throw new Error('гибель NPC без огня: вспышек ' + game.guns.blasts.length);
+  if (game.peers.some((x) => x.id === -6)) throw new Error('погибший NPC остался в списке');
+  game.guns.blasts.length = 0;
+  game.guns.bolts.length = 0;
+  frames(2);
+});
+
 // Прыжок к чужому кораблю: пилот — такая же точка назначения, как
 // станция. И такая же ненадёжная: он может уйти из системы посреди
 // калибровки, и привод обязан это заметить.
@@ -2352,11 +2597,24 @@ await step('квантовый прыжок к пилоту и срыв, ког�
   frames(2);
 });
 
-await step('справка (H)', () => {
+await step('справка (H): слой поверх полёта, а не пауза', () => {
   key('KeyH'); frames(3);
-  if (game.state.mode !== 'help') throw new Error('режим ' + game.state.mode);
+  if (!game.help || game.state.mode !== 'flight') throw new Error('справка не открылась поверх полёта: ' + game.state.mode);
+  // Под справкой корабль летит, как и под картой. Всё, что полёт меняет
+  // по пути (бак, счётчики сопел, цель), возвращается: дальше прогон идёт
+  // по своему сценарию, и сдвинутая цель уводила посадку на луну в другое
+  // место.
+  const sh = game.ship, p0 = { ...sh.pos }, keepV = { ...sh.vel }, keepS = sh.speed;
+  const keep = { fuel: sh.fuel, burned: sh.burned, work: { ...sh.work }, nav: game.nav.index };
+  sh.vel.x = sh.basis.fwd.x * 2; sh.vel.y = sh.basis.fwd.y * 2; sh.vel.z = sh.basis.fwd.z * 2;
+  sh.speed = 2;
+  frames(30);
+  const moved = Math.hypot(sh.pos.x - p0.x, sh.pos.y - p0.y, sh.pos.z - p0.z);
+  Object.assign(sh.vel, keepV); sh.speed = keepS; Object.assign(sh.pos, p0);
+  sh.fuel = keep.fuel; sh.burned = keep.burned; Object.assign(sh.work, keep.work); game.nav.index = keep.nav;
+  if (!(moved > 0.3)) throw new Error('под справкой корабль стоит: ' + moved.toFixed(4) + ' км');
   key('KeyH'); frames(3);
-  if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+  if (game.help || game.state.mode !== 'flight') throw new Error('справка не закрылась: ' + game.state.mode);
 });
 
 await step('отладочный оверлей (~) показывает состояние связи', () => {
@@ -2375,7 +2633,7 @@ await step('отладочный оверлей (~) показывает сос�
   if (line.indexOf('сервер:') < 0) throw new Error('в строке связи нет состояния сервера: ' + line);
 });
 
-await step('топливо: расход в полёте, шкала в приборах, резерв, пустой бак, буксир', () => {
+await step('топливо: расход в полёте, шкала в приборах, резерв, пустой бак, буксир', async () => {
   if (game.state.mode !== 'flight') { key('Space'); frames(4); }
   // Уходим в пустоту: тяготение тела добавило бы работу подъёмным, а
   // здесь проверяется, что списано ровно то, что сделали сопла.
@@ -2429,12 +2687,18 @@ await step('топливо: расход в полёте, шкала в приб
   if (Math.abs(game.ship.speed - v0) > 1e-9) throw new Error('без топлива корабль разгоняется');
   if (!game.state.messages.some((m) => /КОНЧИЛОСЬ/.test(m.text))) throw new Error('о пустом баке не сказано');
 
-  // Буксир: U — предупреждение, U ещё раз — в порт. Без сервера даром.
+  // Буксир: U — предупреждение, U ещё раз — в порт. Решает и берёт
+  // плату сервер (Fuel::rescue): игра забирает его состояние.
   key('KeyU'); frames(2);
   if (game.state.mode !== 'flight') throw new Error('буксир пришёл с первого нажатия');
-  key('KeyU'); frames(5);
+  key('KeyU'); frames(2);
+  await settle(6);
+  frames(3);
   if (game.state.mode !== 'docked') throw new Error('буксир не дотянул: режим ' + game.state.mode);
-  if (game.ship.fuel !== SHIP.fuelCap) throw new Error('в автономном порту бак не залит: ' + game.ship.fuel);
+  if (!fake.calls.includes('ship.rescue')) throw new Error('буксир вызван не у сервера');
+  if (!game.state.messages.some((m) => /БУКСИР ДОТЯНУЛ ДО ПОРТА · −300/.test(m.text))) {
+    throw new Error('о плате за буксир не сказано');
+  }
   key('Space'); frames(5);
   if (game.state.mode !== 'flight') throw new Error('после буксира не вылетели');
   if (view !== game.state.view) { key('KeyV'); frames(1); }
@@ -2453,24 +2717,28 @@ await step('докинг-компьютер доводит до стыковки
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode + ', фаза ' + (game.ship.docking && game.ship.docking.phase) + ', причина: ' + game.crashReason);
 });
 
-await step('экран станции: разделы, клавиши 1–5, автономная заправка, английский', () => {
+await step('экран станции: разделы, клавиши 1–5, рынок и верфь с сервера, английский', async () => {
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
   const html = () => nodes.panel.innerHTML;
   for (const want of ['СТЫКОВКА', '1 ПОРТ', '2 РЫНОК', '3 ВЕРФЬ', '4 ЗАПРАВКА', '5 КОРАБЛИ', 'ВЫЛЕТ']) {
     if (html().indexOf(want) < 0) throw new Error('на экране порта нет «' + want + '»');
   }
   if (!nodes.panel.classList.contains('station')) throw new Error('панель без разметки станции');
-  if (game.ship.fuel !== SHIP.fuelCap) throw new Error('в автономном порту бак не залит');
-  key('Digit2'); frames(1);
-  if (!/НЕТ СВЯЗИ С СЕРВЕРОМ/.test(html())) throw new Error('рынок без сервера не сказал, что его нет');
-  key('Digit3'); frames(1);
-  if (!/Модули ставит верфь/.test(html())) throw new Error('верфь без сервера не объяснилась');
-  key('Digit4'); frames(1);
-  if (!/class="fuelbar/.test(html()) || !/заправляет даром/.test(html())) {
+  // Разделы спрашивают сервер — ответ приходит не в том же кадре.
+  const tab = async (n) => { key('Digit' + n); frames(1); await settle(4); frames(1); };
+  await tab(2);
+  if (!/ВОДА/.test(html())) throw new Error('рынок не показал товары сервера');
+  await tab(3);
+  if (!/Замена засчитывает/.test(html())) throw new Error('верфь не нарисована по ответу сервера');
+  await tab(4);
+  if (!/class="fuelbar/.test(html()) || !/ДО ПОЛНОГО|БАК ПОЛОН/.test(html())) {
     throw new Error('раздел заправки не нарисован');
   }
-  key('Digit5'); frames(1);
-  if (!/Корабли продаёт верфь/.test(html())) throw new Error('раздел кораблей без сервера не объяснился');
+  await tab(5);
+  if (!/ВЕРФЬ КОРАБЛЕЙ/.test(html()) || !/Prometheus/.test(html())) {
+    throw new Error('раздел кораблей не нарисован по ответу сервера');
+  }
+  if (/Автономн|без сервера|даром/.test(html())) throw new Error('экран порта говорит об автономной игре');
   // Английский: во всех пяти разделах ни одной русской буквы.
   const CYR = /[А-Яа-яЁё]/;
   try {
@@ -2490,6 +2758,55 @@ await step('экран станции: разделы, клавиши 1–5, а�
   // Справка поверх порта — в своей рамке, а не в широкой станционной.
   key('KeyH'); frames(2);
   key('KeyH'); frames(2);
+});
+
+// Пересадка в доке. ЖАЛОБА: «нажал ПЕРЕСЕСТЬ на "Прометей", а напротив
+// него опять ПЕРЕСЕСТЬ — как будто сижу в "Челленджере"». Сервер пересадил,
+// игра пересела, а экран порта показывал ответы о прежнем корабле: список
+// кораблей, верфь с его модулями. Здесь в доке два корабля, и проверяется
+// и игра (корпус, номер), и экран.
+await step('пересадка в доке: игра — на новом корабле, экран порта — про него', async () => {
+  const { stationAct } = await import('../js/ui/station.js');
+  const { HULL } = await import('../js/game/hull.js');
+  if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+  const S = fake.state;
+  const first = JSON.parse(JSON.stringify(S.ship));
+  const second = Object.assign(JSON.parse(JSON.stringify(first)), { id: 2, hull: 600, fuelT: 270,
+    type: { code: 'prometheus', name: 'Prometheus' } });
+  const html = () => nodes.panel.innerHTML;
+  const row = (name) => (html().split('<tr').find((r) => r.indexOf('>' + name + '<') >= 0) || '');
+  fake.routes['ship.command'] = (b) => {
+    S.ship = JSON.parse(JSON.stringify(b.id === 2 ? second : first));
+    return JSON.parse(JSON.stringify(S));
+  };
+  fake.routes['shipyard.list'] = () => ({ open: true, tech: 5, hulls: [], here: [
+    { id: 1, active: S.ship.id === 1, typeName: 'Challenger', title: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ' },
+    { id: 2, active: S.ship.id === 2, typeName: 'Prometheus', title: 'ТЯЖЁЛЫЙ КРЕЙСЕР' }] });
+  try {
+    // Список кораблей прошлого шага — без второго корабля: спросить заново.
+    game.station.ships = null;
+    key('Digit5'); frames(1); await settle(4); frames(1);
+    if (row('Prometheus').indexOf('data-act="board"') < 0) throw new Error('у «Прометея» нет кнопки «пересесть»');
+    stationAct(game, 'board', { id: '2' });
+    await settle(12); frames(2); await settle(6); frames(1);
+    if (game.ship.id !== 2 || HULL.code !== 'prometheus') {
+      throw new Error('игра не пересела: корабль №' + game.ship.id + ', корпус ' + HULL.code);
+    }
+    if (row('Prometheus').indexOf('data-act="board"') >= 0 || row('Prometheus').indexOf('ВЫ В ЕГО КРЕСЛЕ') < 0) {
+      throw new Error('экран порта — про прежний корабль: у «Прометея» снова «пересесть»');
+    }
+    if (row('Challenger').indexOf('data-act="board"') < 0) throw new Error('у «Челленджера» нет кнопки «пересесть»');
+    // И обратно.
+    stationAct(game, 'board', { id: '1' });
+    await settle(12); frames(2); await settle(6); frames(1);
+    if (game.ship.id !== 1 || HULL.code !== 'challenger') throw new Error('обратно не пересели: ' + HULL.code);
+    if (row('Challenger').indexOf('ВЫ В ЕГО КРЕСЛЕ') < 0) throw new Error('после обратной пересадки экран не обновился');
+  } finally {
+    delete fake.routes['ship.command'];
+    delete fake.routes['shipyard.list'];
+    S.ship = first;
+    key('Digit1'); frames(1);
+  }
 });
 
 await step('в порту: Y — пройтись по кораблю (экран порта прячется), E у кресла — экран обратно', async () => {
@@ -2527,24 +2844,55 @@ await step('в порту меню пилота не открывается', ()
   if (game.menu.open) throw new Error('меню открылось на станции');
 });
 
-await step('вылет со станции по Space', () => {
+await step('вылет со станции по Space', async () => {
+  if (fake.state.position.dockedBody === null) throw new Error('стыковка не дошла до сервера (station.dock)');
   key('Space'); frames(10);
   if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
+  // Вылет — действие сервера (station.undock): сохранением порт больше
+  // не снимается и не ставится.
+  await settle();
+  if (fake.state.position.dockedBody !== null) throw new Error('вылет не дошёл до сервера (station.undock)');
 });
 
-await step('столкновение с планетой -> экран крушения', () => {
+// Порт отказал (у сервера пилот не на борту, денег нет на сбор) — раньше
+// отказ глотался молча, и игра стояла в доке, которого у сервера не было:
+// рынок и заправка на каждое нажатие отвечали «не в порту».
+await step('порт отказал в стыковке — игра говорит это словами и выходит из дока', async () => {
+  const st = game.world.home.station;
+  fake.refuse['station.dock'] = ['not_aboard', 'в порт ставит корабль тот, кто на его борту'];
+  try {
+    game.dockHere(st);
+    if (game.state.mode !== 'docked') throw new Error('не встали в порт: ' + game.state.mode);
+    await settle(6);
+    frames(2);
+    if (game.state.mode !== 'flight' || game.ship.dockedAt) throw new Error('после отказа игра осталась в доке');
+    const said = game.state.messages.map((m) => m.text).join(' | ');
+    if (!/ПОРТ ОТКАЗАЛ/.test(said)) throw new Error('отказ порта не сказан: ' + said);
+  } finally {
+    delete fake.refuse['station.dock'];
+  }
+});
+
+await step('столкновение с планетой -> экран крушения', async () => {
   const p = game.world.home;
   game.ship.pos.x = p.pos.x + p.radius * 0.999;   // внутрь поверхности
   game.ship.pos.y = p.pos.y;
   game.ship.pos.z = p.pos.z;
   frames(20);
   if (game.state.mode !== 'crashed') throw new Error('режим ' + game.state.mode);
-  key('Space'); frames(10);
-  if (game.state.mode !== 'docked') throw new Error('после рестарта режим ' + game.state.mode);
+  // «Продолжить» забирает у сервера, где теперь корабль: его вернула в
+  // порт страховка (Combat::respawn), а не игра.
+  key('Space'); frames(2);
+  await settle(6);
+  frames(8);
+  if (game.state.mode !== 'docked') throw new Error('после крушения режим ' + game.state.mode);
 });
 
-await step('пролёт у планеты крупным планом (терминатор, кольца)', () => {
+await step('пролёт у планеты крупным планом (терминатор, кольца)', async () => {
   key('Space'); frames(5);
+  // Вылет дошёл до сервера (station.undock) — дальше в этом шаге разбиваются,
+  // и страховка у сервера должна прийти ПОСЛЕ вылета, как и в жизни.
+  await settle();
   const gasP = game.world.planets.find((x) => x.kind === 'gas');
   for (const d of [1.02, 1.2, 2, 6, 40]) {
     game.ship.pos.x = gasP.pos.x + gasP.radius * d;
@@ -2559,8 +2907,8 @@ await step('пролёт у планеты крупным планом (терм
   frames(3);
 });
 
-await step('телепорт к цели (K) и смена высоты (Shift+K)', () => {
-  if (game.state.mode === 'crashed') { key('Space'); frames(5); }
+await step('телепорт к цели (K) и смена высоты (Shift+K)', async () => {
+  await recover();
   if (game.state.mode === 'docked') { key('Space'); frames(5); }
   const moon = game.world.bodies.find((b) => b.kind === 'moon');
   game.nav.index = game.nav.list.indexOf(moon);
@@ -2686,10 +3034,12 @@ await step('приборы подхода: в левой колонке, цен�
 
     game.teleAlt = 0;                     // 2000 км — далеко
     key('KeyK'); frames(3);
-    const l1 = calls.lineTo || 0, d1 = calls.setLineDash || 0;
+    const d1 = calls.setLineDash || 0;
     frames(1);
+    // С орбиты отметки нет: её выдаёт пунктир нити, которого тогда нет
+    // вовсе. Общее число отрезков за кадр сравнивать нельзя — его задаёт
+    // картинка планет, и при другом освещении оно гуляет на десятки.
     if ((calls.setLineDash || 0) - d1 > 0) throw new Error('отметка рисуется и с орбиты');
-    if ((calls.lineTo || 0) - l1 > ring - 16) throw new Error('кольцо рисуется и с орбиты');
 
     // И приборы с орбиты ужимаются сами: вертикальная скорость
     // относительно грунта за две тысячи километров не значит ничего, а
@@ -2745,9 +3095,9 @@ await step('удар о грунт: отскок, урон и потеря уп�
   }
 });
 
-await step('шасси выпускается и убирается по G', () => {
+await step('шасси выпускается и убирается по G', async () => {
   // Возвращаемся в полёт: предыдущий шаг оставляет корабль внутри звезды.
-  if (game.state.mode === 'crashed') { key('Space'); frames(5); }
+  await recover();
   if (game.state.mode === 'docked') { key('Space'); frames(5); }
   key('KeyG'); frames(60 * 3);
   if (!(game.ship.gear.t > 0.99)) throw new Error('шасси не выпустилось: ' + game.ship.gear.t);
@@ -2782,13 +3132,21 @@ await step('посадочный компьютер (L) доводит до гр
     y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
     z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
   };
+  game.crashReason = null;          // от прошлых шагов (удар о грунт) — не наша
   key('KeyL');
   frames(30);
   if (!game.ship.landing) throw new Error('посадочный компьютер не включился');
-  for (let i = 0; i < 500 && game.state.mode === 'flight'; i++) frames(60);
+  // Спуск с 250 км меряли над дюжиной точек луны: 365–405 с модельного
+  // времени, из них выравнивание — от 5 до 76 с. Прежние 500 с были
+  // впритык, и сдвиг на пару кадров ставил корабль над местом, где
+  // выравнивание шло дольше, — шаг падал на исправной посадке. Цикл
+  // кончается касанием, лишнее время стоит только при поломке.
+  let flown = 0;
+  for (; flown < 900 && game.state.mode === 'flight'; flown++) frames(60);
   if (game.state.mode !== 'landed') {
-    throw new Error('режим ' + game.state.mode + ', фаза ' +
-      (game.ship.landing && game.ship.landing.phase) + ', причина: ' + game.crashReason);
+    throw new Error('режим ' + game.state.mode + ' через ' + flown + ' с, фаза ' +
+      (game.ship.landing && game.ship.landing.phase)
+      + (game.state.mode === 'crashed' ? ', причина: ' + game.crashReason : ''));
   }
   if (!(game.stats.landings > 0)) throw new Error('посадка не засчитана');
 });
@@ -2802,6 +3160,25 @@ await step('стоянка на грунте: кнопка вместо экра
     throw new Error('на посадке показан экран поверх игры');
   }
   if (game.ship.secured) throw new Error('корабль зафиксирован сам, без пилота');
+
+  // Карта на грунте: под ней корабль стоит на своей площадке и едет с
+  // телом. Режимом карта не вела стоянку — тело уезжало из-под корабля.
+  {
+    const body = game.ship.landedAt;
+    const rel = (s) => ({ x: s.pos.x - body.pos.x, y: s.pos.y - body.pos.y, z: s.pos.z - body.pos.z });
+    key('KeyM'); frames(2);
+    if (!game.map.open || game.state.mode !== 'landed') throw new Error('карта на грунте не открылась: ' + game.state.mode);
+    const r0 = rel(game.ship);
+    frames(120);
+    const r1 = rel(game.ship);
+    key('KeyM'); frames(2);
+    // Тело вращается: точка стоянки поворачивается, но остаётся на том же
+    // расстоянии от центра — с точностью до метра.
+    const d0 = Math.hypot(r0.x, r0.y, r0.z), d1 = Math.hypot(r1.x, r1.y, r1.z);
+    if (game.state.mode !== 'landed' || Math.abs(d1 - d0) > 1e-3) {
+      throw new Error('под картой стоянка уехала: ' + game.state.mode + ', ' + ((d1 - d0) * 1000).toFixed(1) + ' м');
+    }
+  }
 
   // Кадр на грунте рисует приборы и кнопку.
   texts = [];
@@ -2902,6 +3279,11 @@ await step('стоянка на грунте: кнопка вместо экра
 // промах в 174°, а отметка показывала «точно в цель».
 await step('отметка варпа не врёт, когда цель за спиной', () => {
   if (game.state.mode === 'docked') { key('Space'); frames(4); }
+  // После стоянки корабль мог снова сесть: отрыв — секунда работы
+  // подъёмных, дальше без рук он опускается обратно, и успеет ли сесть до
+  // этого шага, зависит от того, как повёрнута луна. Перенос ниже режима
+  // стоянки не снимает — взлетаем.
+  if (game.state.mode === 'landed') { game.takeoff(); frames(4); }
   game.ship.pos.x = 0; game.ship.pos.y = 2.4e6; game.ship.pos.z = 0;
   game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
   game.ship.speed = 0; game.ship.throttle = 0;
@@ -2915,7 +3297,11 @@ await step('отметка варпа не врёт, когда цель за с
   if (game.map.view !== 'galaxy') { key('KeyG'); frames(2); }
   key('KeyM'); frames(2);
   key('KeyJ'); frames(2);
-  if (game.warp.phase !== 'align') throw new Error('центровка не началась');
+  if (game.warp.phase !== 'align') {
+    throw new Error('центровка не началась: режим ' + game.state.mode + ', карта ' + game.map.open
+      + ', цель ' + (game.warpTarget && game.warpTarget.name) + ', сказано: '
+      + game.state.messages.map((m) => m.text).join(' | '));
+  }
 
   const name = game.warpTarget.name.toUpperCase();
   const d = game.warp.dir;
@@ -3068,7 +3454,7 @@ await step('варп-прыжок (J) в другую систему целик�
 
   // Цель — на карте галактики: M, G, Tab. Другого места назначить её нет.
   key('KeyM'); frames(2);
-  if (game.state.mode !== 'map') throw new Error('карта не открылась');
+  if (!game.map.open) throw new Error('карта не открылась');
   key('KeyG'); frames(2);
   if (game.map.view !== 'galaxy') throw new Error('карта галактики не открылась');
   // ЖАЛОБА БЫЛА РОВНО ОБ ЭТОМ: «выбрал систему, нажал J, ничего не
@@ -3156,59 +3542,25 @@ await step('варп-прыжок (J) в другую систему целик�
   key('KeyM'); frames(1); key('KeyG'); frames(1); key('KeyM'); frames(1);
 });
 
-await step('рестарт с начала по Shift+N (с подтверждением)', () => {
-  // Наигрываем состояние, которое рестарт обязан снести.
-  game.stats.docks = 7;
-  game.stats.landings = 3;
-  game.ship.hull = 42;
-  game.world.time = 12345;
-  frames(2);
-
-  // Одного нажатия мало: сначала предупреждение.
-  holdDown('ShiftLeft');
-  key('KeyN');
-  frames(2);
-  release('ShiftLeft');
-  if (game.state.mode === 'docked' && game.ship.hull === 100) {
-    throw new Error('рестарт случился с одного нажатия');
-  }
-  if (!game.state.messages.some((m) => /ЕЩЁ РАЗ/.test(m.text))) {
-    throw new Error('нет предупреждения о рестарте');
-  }
-
-  // Второе нажатие в окне подтверждения — рестарт.
-  holdDown('ShiftLeft');
-  key('KeyN');
-  frames(2);
-  release('ShiftLeft');
+// Где пилот, решает сервер: сказал «в порту родной станции» — игра там,
+// даже если сейчас она у чужой звезды. Система собирается заново по его
+// ответу (applyState -> enterSystem), а не остаётся прежней.
+await step('сервер вернул пилота домой: игра сама ушла в его систему', async () => {
+  const home = game.world.home;
+  const homeSys = 0;
+  fake.state.position = Object.assign(fake.state.position, {
+    systemId: homeSys, dockedBody: fake.state.position.lastStation, landedBody: null, landedPose: null,
+    anchorBody: null, anchorPose: null,
+  });
+  delete fake.state.me;
+  await game.respawn();
   frames(3);
-
-  if (game.state.mode !== 'docked') throw new Error('после рестарта режим ' + game.state.mode);
-  if (game.ship.dockedAt !== game.world.home.station) {
-    throw new Error('рестарт не в порту родной станции');
+  if (game.sys.id !== homeSys) throw new Error('система после ответа сервера: ' + game.sys.id);
+  if (game.state.mode !== 'docked' || !game.ship.dockedAt || game.ship.dockedAt.id !== fake.state.position.lastStation) {
+    throw new Error('не в порту родной станции: режим ' + game.state.mode);
   }
-  if (game.ship.hull !== 100) throw new Error('корпус не восстановлен: ' + game.ship.hull);
-  if (game.stats.docks !== 0 || game.stats.landings !== 0) {
-    throw new Error('счётчики не обнулены: ' + JSON.stringify(game.stats));
-  }
-  if (game.world.time > 1) throw new Error('часы мира не обнулены: ' + game.world.time);
-  const saved = JSON.parse(savedJson() || 'null');
-  if (!saved || saved.hull !== 100 || (saved.stats && saved.stats.docks !== 0)) {
-    throw new Error('сохранение не переписано: ' + JSON.stringify(saved && saved.stats));
-  }
-
-  // Окно подтверждения закрывается само.
-  holdDown('ShiftLeft');
-  key('KeyN');
-  frames(2);
-  release('ShiftLeft');
-  frames(60 * 5);                       // ждём дольше окна
-  const before = game.world.time;
-  holdDown('ShiftLeft');
-  key('KeyN');
-  frames(2);
-  release('ShiftLeft');
-  if (game.world.time < before) throw new Error('рестарт сработал после истечения окна');
+  if (!game.world.cities.length) throw new Error('в родной системе нет города');
+  void home;
 });
 
 await step('изменение размера окна', () => {
@@ -3292,10 +3644,10 @@ await step('крупные приборы помещаются в кадр', () 
 });
 
 
-await step('город: цель по Tab и посадка на площадку', () => {
+await step('город: цель по Tab и посадка на площадку', async () => {
   // Шаг идёт последним, и в каком состоянии его застанут предыдущие,
   // заранее не известно: возвращаем корабль в полёт сами.
-  if (game.state.mode === 'crashed') { key('Space'); frames(10); }
+  await recover();
   if (game.state.mode === 'docked') { key('Space'); frames(90); }
   const city = game.world.cities[0];
   if (!city) throw new Error('в родной системе нет города');
@@ -3395,10 +3747,15 @@ await step('город: цель по Tab и посадка на площадк�
   key('Space'); frames(10);          // вернуться в игру
 });
 
-await step('сохранение в localStorage', () => {
+await step('сохранение уходит на сервер, местного нет', async () => {
   frames(60 * 6);
+  await settle(4);
   if (!savedJson()) throw new Error('сейв не записан');
   JSON.parse(savedJson());
+  if (!(fake.saves > 0) || !fake.calls.includes('player.save')) throw new Error('на сервер не ушло ни одного сохранения');
+  if (Object.keys(store).some((k) => k.startsWith('solar_trader_save'))) {
+    throw new Error('игра пишет местное сохранение — его быть не должно');
+  }
 });
 
 console.log('\nвызовов ctx:', Object.entries(calls)

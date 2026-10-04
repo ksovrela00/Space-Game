@@ -1649,6 +1649,40 @@ export function visibleFrom(id, P = CHALLENGER) {
  * рисовать её незачем. Двери открываются, только когда к ним подходят, —
  * так что обычно видна одна-две комнаты из одиннадцати.
  */
+/**
+ * Видно ли из этих комнат то, что за бортом: окно, рубка (фонарь,
+ * окна мостика) или открытый люк шлюза. Нет — внешний мир в кадр не идёт
+ * вовсе (js/gl/scene.js, outsideSeen): изнутри глухой комнаты его всё
+ * равно закрывают стены, а логарифмическая глубина выключает ранний тест
+ * глубины, и видеокарта шейдила бы весь мир под ними — небо, грунт с
+ * деталью, море. В «Прометее» на палубе 11 это было 13 мс на кадр.
+ *
+ * Незнакомая комната — «видно»: лишний раз нарисовать мир дешевле, чем
+ * однажды показать пустоту в окне.
+ *
+ * @param vis видимые комнаты (visibleNow)
+ * @param air шлюзы этого корабля (js/game/airlock.js) или null
+ */
+export function seesOutside(I, vis, air) {
+  const win = I._winRooms || (I._winRooms = new Set(I.windows.map((w) => w.room)));
+  for (const id of vis) {
+    const r = I.roomById[id];
+    if (!r || r.kind === 'bridge' || id === I.seat.room || win.has(id)) return true;
+    if (r.kind === 'lock' && air && air.hatches.some((hx) => hx.lock === id && hx.open > 0)) return true;
+  }
+  return false;
+}
+
+/**
+ * Нужен ли изнутри корпус корабля. Комнаты закрыты своими стенами, корпус
+ * в них вырезан; исключение — шлюз: закрытый люк изнутри и есть панель
+ * обшивки в конце его тоннеля.
+ */
+export const seesHull = (I, vis) => vis.some((id) => {
+  const r = I.roomById[id];
+  return !r || r.kind === 'lock';
+});
+
 export function visibleNow(id, doors, P = CHALLENGER) {
   const open = new Set();
   for (const d of doors) if (d.open > 0.01) open.add(d.rooms[0] + '|' + d.rooms[1]);

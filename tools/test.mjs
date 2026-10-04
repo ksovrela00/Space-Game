@@ -127,8 +127,8 @@ import { modules, applyModuleSpecs, applyShipEquipment, flightModel, SCANNER_STE
   from '../js/game/loadout.js';
 
 // Характеристики корабля и оружия приходят из бэкенда, и в игре их нет
-// ни одного. Проверкам сервер не нужен — они берут тот же слепок, что и
-// автономный режим. Без этой строки SHIP пуст, и падает всё подряд:
+// ни одного. Проверкам сервер не нужен — они берут слепок
+// server/data/specs.json. Без этой строки SHIP пуст, и падает всё подряд:
 // именно так и должно быть, пустой объект честнее значений «по
 // умолчанию» (см. js/game/ship.js).
 loadSpecsFromDisk();
@@ -5988,10 +5988,11 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   ok(p.cargo.find((c) => c.name === 'РУДА').tons === 6 && cargoTons(p) === 10,
     'частичный сброс оставляет остаток: ' + cargoTons(p) + ' т');
 
-  // Демо-набор обязан помещаться в трюм ЭТОГО корабля: иначе меню с
-  // первого запуска показывает перегруз, которого не может быть.
-  ok(cargoTons(makePlayer()) <= SHIP.hold,
-    `стартовый груз влезает в трюм: ${cargoTons(makePlayer())} из ${SHIP.hold} т`);
+  // Своих дел у игры нет: пилот пуст, пока его не наполнит сервер
+  // (applyServer). Выдуманный стартовый набор выглядел бы как настоящий.
+  const blank = makePlayer();
+  ok(blank.balance === 0 && blank.cargo.length === 0 && blank.missions.length === 0 && blank.ledger.length === 0,
+    'до ответа сервера у пилота ничего нет: ни крон, ни груза, ни заданий — всё приходит с сервера');
 }
 {
   // ВРЕМЯ НА ЭКРАНЕ. Округление секунд после деления на минуты давало
@@ -6020,6 +6021,9 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // правят руками. Кривое поле обязано давать пустоту, а не падение
   // меню посреди полёта.
   const p = makePlayer();
+  ledgerAdd(p, 'НАЧАЛЬНЫЙ КАПИТАЛ', 3400);
+  loadCargo(p, 'ВОДА', 6, 20);
+  addMission(p, { title: 'ДОСТАВКА', desc: 'куда-нибудь', reward: 900, time: 100 });
   updatePlayer(p, 12);
   const back = loadPlayer(makePlayer(false), JSON.parse(JSON.stringify(savePlayer(p))));
   ok(back.balance === p.balance && cargoTons(back) === cargoTons(p) &&
@@ -6140,7 +6144,7 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   console.log('\n== часы мира ==');
 
   const dt = 1 / 60;
-  ok(clockStep(100, null, dt) === dt, 'без сервера часы идут как шли');
+  ok(clockStep(100, null, dt) === dt, 'без отметки сервера часы идут как шли');
 
   const c = makeClock();
   ok(clockTarget(c, 5) === null, 'пока сервер не ответил, цели нет');
@@ -6453,8 +6457,8 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   ok(pilotRows(null).length === 0 && pilotRows([{ id: 5 }])[0].name === '#5',
     'пустой и кривый список панель не роняют');
 
-  // Панель есть только в сети и только по клавише: без сервера показывать
-  // в ней нечего, и пустая рамка читается как поломка.
+  // Панель открывается только по клавише, а без связи говорит об этом:
+  // пустая рамка читается как поломка.
   ok(!pilotsShown({ showPilots: false, link: { mode: 'live' } })
     && pilotsShown({ showPilots: true, link: { mode: 'live' } })
     && pilotsShown({ showPilots: true, link: { mode: 'down' } }),
@@ -6462,7 +6466,7 @@ console.log("\n== пилот: кроны, трюм, задания ==");
 
   // Всё, что панель пишет, переведено. Без этой строки новая надпись
   // молча осталась бы русской на английском экране: список пилотов
-  // дымовой прогон не открывает — без сервера его нет.
+  // дымовой прогон не открывает.
   {
     const need = ['ПИЛОТЫ В СЕТИ', '  В СЕТИ ', 'никого', 'В ПРЫЖКЕ', 'СВЯЗИ НЕТ',
       'кто ещё в игре и в какой он системе'];
@@ -6526,6 +6530,8 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     ArrowLeft: ['&larr;'], ArrowRight: ['&rarr;'],
     ShiftLeft: ['Shift'], ShiftRight: ['Shift'],
     ControlLeft: ['Ctrl'], ControlRight: ['Ctrl'],
+    // Кнопка колеса — не клавиша, но читается так же (js/core/input.js).
+    MouseMiddle: ['колесо (нажать)'],
   };
 
   const src = readFileSync(new URL('js/ui/screens.js', root), 'utf8');
@@ -6641,6 +6647,27 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     'стрелка в длинном экране прокручивает его, а не глохнет');
   input.releaseAll();
 
+  // Колесо нажатием — клавиша MouseMiddle (приближение), и автопрокрутку
+  // браузера оно не включает. Удержание — одно нажатие, а не по одному на
+  // каждое событие mousedown.
+  {
+    const press = (type) => {
+      let stopped = false;
+      for (const f of on[type] || []) f({ button: 1, target: overScene, preventDefault: () => { stopped = true; } });
+      return stopped;
+    };
+    input.endFrame();
+    const stopped = press('mousedown');
+    const once = input.pressed('MouseMiddle');
+    input.endFrame();
+    press('mousedown');
+    const again = input.pressed('MouseMiddle');
+    press('mouseup');
+    input.endFrame();
+    ok(stopped && once && !again && !input.down.has('MouseMiddle') && press('auxclick'),
+      'нажатие колеса — одно нажатие MouseMiddle; автопрокрутка и «вставить» браузера отменены');
+  }
+
   // Пальцем на телефоне — то же самое, но решает это CSS: у страницы
   // сенсорное поведение выключено целиком (touch-action: none), иначе
   // ломается джойстик, и панели нужно исключение.
@@ -6658,6 +6685,25 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     ok(/p\.scrollTop = 0/.test(src) && /p\.tabIndex = -1/.test(src),
       'экран открывается с начала и может брать фокус для клавиш прокрутки');
   }
+}
+
+// --- приближение колесом ------------------------------------------------------
+//
+// Кнопка колеса — бинокль: ×2 → ×4 → ×8 → обычный вид. Сужается тангенс
+// половины угла, а не сам угол: тогда середина кадра растёт ровно во
+// столько раз, сколько написано.
+{
+  console.log('\n== приближение колесом ==');
+  const { ZOOMS, nextZoom, zoomFov, lookScale } = await import('../js/game/zoom.js');
+  const seq = [1];
+  for (let i = 0; i < 4; i++) seq.push(nextZoom(seq[seq.length - 1]));
+  ok(seq.join(' ') === '1 2 4 8 1' && nextZoom(3) === 1 && ZOOMS.length === 4,
+    'по кругу: ' + seq.join(' → ') + '; непонятная ступень — сначала');
+  const base = 68 * Math.PI / 180;
+  const grow = (k) => Math.tan(base / 2) / Math.tan(zoomFov(base, k) / 2);
+  ok(Math.abs(grow(2) - 2) < 1e-12 && Math.abs(grow(8) - 8) < 1e-12 && zoomFov(base, 1) === base,
+    'середина кадра растёт ровно в ×2 и ×8: поле ' + (zoomFov(base, 8) * 180 / Math.PI).toFixed(1) + '° на ×8');
+  ok(lookScale(1) === 1 && lookScale(8) === 1 / 8, 'взгляд под ×8 медленнее в восемь раз');
 }
 
 // --- качество связи ---------------------------------------------------------
@@ -8401,10 +8447,16 @@ console.log('\n== наземный город ==');
     ok(/струя 20[\s ]000 км\/с/.test(fit) && /струя 14[\s ]500 км\/с/.test(fit),
       'двигатели сравниваются по струе: видно, что форсированный прожорливее');
 
-    // Без сервера — честно, а не пустые таблицы.
-    sess.mode = 'offline';
+    // Автономной игры нет: ни один раздел порта о ней не говорит и не
+    // обещает ничего «даром без сервера».
+    let solo = '';
+    for (const tab of ['port', 'market', 'outfit', 'ships', 'fuel']) {
+      game.station.tab = tab;
+      const h = S.stationHtml(game);
+      if (/Автономн|без сервера|даром/i.test(h)) solo = tab;
+    }
     game.station.tab = 'market';
-    ok(/НЕТ СВЯЗИ С СЕРВЕРОМ/.test(S.stationHtml(game)), 'без сервера рынок говорит, что его нет');
+    ok(solo === '', 'автономной игры нет: ни один раздел порта о ней не говорит' + (solo ? ' (' + solo + ')' : ''));
 
     // Клавиши 1–4 переключают разделы.
     const keys = { pressed: (...c) => c.includes('Digit3') };
@@ -9429,6 +9481,42 @@ console.log('\n== наземный город ==');
       (blockers.length ? ': ' + [...new Set(blockers)].join(', ') : ''));
   }
 
+  // --- мир за бортом рисуется, только если его видно (js/gl/scene.js,
+  // outsideSeen). ЖАЛОБА: в коридоре палубы 11 «Прометея» на пляже кадр
+  // стоял на 56, и ходьба дёргалась: видеокарта 13 мс шейдила грунт,
+  // море и небо под стенами — логарифмическая глубина выключает ранний
+  // тест глубины. Двери в проверке закрыты — как у пилота, который от
+  // них дальше двух метров.
+  {
+    const A = await import('../js/game/airlock.js');
+    const vis = (Ix, id) => Ix.visibleNow(id);
+    for (const d of In.doors) d.open = 0;
+    const airP = A.makeAir(In, 0.01);
+    const sees = (id) => I.seesOutside(In, vis(In, id), airP);
+    const deck11 = In.rooms.filter((r) => /ПАЛУБА 11|^11$/.test(String(r.deck)) || r.id === 'corS' || r.id === 'corM');
+    const blind11 = ['corS', 'corM', 'hall11'].filter((id) => In.roomById[id]).every((id) => !sees(id));
+    const cabin = In.rooms.find((r) => /^cab\d+$/.test(r.id));
+    // Шлюз: закрытый люк — мир не нужен, корпус нужен (его панель и есть
+    // конец тоннеля); открытый — нужен и мир.
+    const hx = airP.hatches[0];
+    const shutLock = !sees(hx.lock) && I.seesHull(In, vis(In, hx.lock));
+    hx.open = 0.4;
+    const openLock = sees(hx.lock);
+    hx.open = 0;
+    const ch = (await import('../js/models/ships.js')).buildCobra();
+    const Ic = I.buildInterior(ch);
+    for (const d of Ic.doors) d.open = 0;
+    const airC = A.makeAir(Ic, 0.01);
+    const seesC = (id) => I.seesOutside(Ic, vis(Ic, id), airC);
+    const blindP = In.rooms.filter((r) => !sees(r.id)).length;
+    ok(deck11.length > 0 && blind11 && sees('bridge') && cabin && sees(cabin.id) && shutLock && openLock
+      && seesC('bridge') && seesC('hall') && !seesC('storage') && !seesC('engine'),
+      'мир за бортом — только когда его видно: «Прометей» — коридоры палубы 11 глухие, мостик, каюта с '
+      + 'иллюминатором и шлюз с открытым люком видят наружу, шлюз с закрытым — только корпус; '
+      + '«Челленджер» — рубка и кают-компания с окном видят, склад и машинное глухие. Глухих комнат '
+      + 'у «Прометея» при закрытых дверях — ' + blindP + ' из ' + In.rooms.length);
+  }
+
   // --- лифт: двенадцать остановок, поездка по разгону и скорости.
   {
     const L = In.lifts[0];
@@ -9808,6 +9896,188 @@ console.log('\n== наземный город ==');
       `сидящий в кресле: глаз на ${(head - In.seat.eye[1]).toFixed(2)} м от глаза кресла, `
       + `ступни на ${(feet - In.INT.deck.bridge).toFixed(2)} м над полом рубки — не сквозь него`);
   }
+}
+
+// NPC: их водит сервер (server/src/Traffic.php), а игре они приходят
+// снимком. Здесь — то, что живёт в JS: оракул рельефа, которым сервер
+// выбирает площадки (server/ws/oracle.mjs), приём NPC в снимке, приборы
+// и вспышки прыжка.
+{
+  console.log('\n== NPC: оракул рельефа, снимок, приборы ==');
+  const { makeOracle, NPC_SLOPE } = await import('../server/ws/oracle.mjs');
+  const S = await import('../js/game/surface.js');
+  const W = await import('../js/game/world.js');
+  const G = await import('../js/game/galaxy.js');
+  const P = await import('../js/game/peers.js');
+  const N = await import('../js/game/npc.js');
+  const Wp = await import('../js/game/weapons.js');
+  const Nav = await import('../js/game/nav.js');
+  const { setHull: setHullFor, HULL: H } = await import('../js/game/hull.js');
+
+  // Оракул отвечает ТЕМ ЖЕ кодом, что игра: площадка, которую он назвал,
+  // у клиента сухая и ровная, и грунт там ровно на том радиусе.
+  const o = makeOracle();
+  const world = W.makeSystem(G.systemById(0));
+  const ocean = world.bodies.find((b) => b.name === 'Lave II');
+  const rock = world.bodies.find((b) => b.kind === 'rock');
+  let worst = 0, dry = true, flat = true, found = 0;
+  for (let i = 0; i < 24; i++) {
+    const y = 1 - (i + 0.5) / 12, a = i * 2.399963, r = Math.sqrt(Math.max(0, 1 - y * y));
+    for (const body of [ocean, rock]) {
+      const s = o.answer({ t: 'site', sys: 0, body: body.id, dir: [Math.cos(a) * r, y, Math.sin(a) * r], span: 3 });
+      if (!s.ok) continue;
+      found++;
+      const d = { x: s.dir[0], y: s.dir[1], z: s.dir[2] };
+      worst = Math.max(worst, Math.abs(s.r - S.groundRadius(body, d)) * 1000);
+      dry = dry && !S.waterAt(body, d);
+      flat = flat && S.slopeAt(body, d) <= NPC_SLOPE + 1e-9;
+    }
+  }
+  ok(found > 24 && worst < 0.01 && dry && flat,
+    `оракул рельефа (server/ws/oracle.mjs) — тем же кодом, что игра: ${found} площадок на ${ocean.name} и `
+    + `${rock.name}, все сухие и не круче ${(NPC_SLOPE * 180 / Math.PI).toFixed(0)}°, грунт сходится до `
+    + `${worst.toFixed(4)} м`);
+  const again = o.answer({ t: 'site', sys: 0, body: ocean.id, dir: [0.3, 0.5, 0.81], span: 3 });
+  const twice = o.answer({ t: 'site', sys: 0, body: ocean.id, dir: [0.3, 0.5, 0.81], span: 3 });
+  const gas = world.bodies.find((b) => b.kind === 'gas');
+  ok(JSON.stringify(again) === JSON.stringify(twice) && !o.answer({ t: 'site', sys: 0, body: gas.id, dir: [0, 1, 0] }).ok
+    && !o.answer({ t: 'site', sys: 99, body: 3, dir: [0, 1, 0] }).ok && !o.answer({ t: 'nope' }).ok,
+    'оракул отвечает одинаково на один вопрос; у газового гиганта, в чужой системе и на чепуху — отказ');
+  const ar = o.answer({ t: 'area', sys: 0, body: ocean.id, dir: [0.3, 0.5, 0.81], km: 60 });
+  let above = true;
+  for (let i = 0; i < 50; i++) {
+    const ang = (60 / ocean.radius) * Math.sqrt((i + 0.5) / 50), az = i * 1.7;
+    const d0 = normalize(v3(0.3, 0.5, 0.81));
+    const u = normalize(cross(v3(0, 1, 0), d0)), w = cross(d0, u);
+    const q = normalize(v3(
+      d0.x * Math.cos(ang) + (u.x * Math.cos(az) + w.x * Math.sin(az)) * Math.sin(ang),
+      d0.y * Math.cos(ang) + (u.y * Math.cos(az) + w.y * Math.sin(az)) * Math.sin(ang),
+      d0.z * Math.cos(ang) + (u.z * Math.cos(az) + w.z * Math.sin(az)) * Math.sin(ang)));
+    above = above && S.groundRadius(ocean, q) <= ar.top + 0.3;
+  }
+  ok(ar.ok && ar.top > ocean.radius && above,
+    `верх грунта в круге 60 км — ${(ar.top - ocean.radius).toFixed(2)} км над радиусом; `
+    + 'выше него грунт в округе не поднимается (с запасом в 300 м на пик между точками выборки)');
+  // В черте города площадок нет: findSite про дома не знает.
+  const town = world.cities[0];
+  const tsite = town ? o.answer({ t: 'site', sys: 0, body: town.body.id,
+    dir: [town.dir.x, town.dir.y, town.dir.z], span: 3, tries: 64 }) : null;
+  const tgap = tsite && tsite.ok ? Math.acos(Math.min(1, tsite.dir[0] * town.dir.x + tsite.dir[1] * town.dir.y
+    + tsite.dir[2] * town.dir.z)) * town.body.radius : 0;
+  ok(town && tsite.ok && tgap >= town.radius + 1.5 - 1e-6,
+    `площадку у города (${town ? town.name : '—'}, ${town ? town.radius.toFixed(1) : 0} км) оракул даёт за его чертой: в `
+    + `${tgap.toFixed(1)} км от центра`);
+  const ty = o.answer({ t: 'types' }).types;
+  const gearOk = Object.keys(ty).every((c) => { setHullFor(c); return Math.abs(ty[c].gear - H.gearClear) < 1e-9; });
+  setHullFor('challenger');
+  ok(gearOk && ty.prometheus.gear > ty.challenger.gear,
+    `стойки корпусов — из моделей: ${Object.keys(ty).map((c) => c + ' ' + (ty[c].gear * 1000).toFixed(1) + ' м').join(', ')}`);
+
+  // NPC в снимке: номер отрицательный, пометка npc, снаряжение — раз, и
+  // оно остаётся, когда следующие снимки его уже не несут.
+  {
+    const st = P.makePeers();
+    const row = (t, extra) => P.ingestPeers(st, [Object.assign({ id: -7, npc: 1, by: null, name: 'Mira Vorek',
+      ty: 'prometheus', mode: 'flight', sys: 0, x: 100, y: 0, z: 0, fx: 0, fy: 0, fz: 1, ux: 0, uy: 1, uz: 0,
+      v: 1, hull: 600, hmax: 600, sh: 40, smax: 40, g: 0, h: [], k: 0 }, extra)], t);
+    row(10, { qx: 1, eq: ['engine_x', 'shield', 'laser_g'], ex: ['engine_x'] });
+    const arrived = st.arrivals.slice();
+    st.arrivals.length = 0;
+    row(10.2, { qx: 1 });
+    row(10.4, {});
+    const V = P.peerPoses(st, 10.5, [])[0];
+    ok(V && V.npc && V.id === -7 && V.by === null && V.type === 'prometheus' && V.eq.length === 3
+      && V.ex[0] === 'engine_x' && arrived.length === 1 && arrived[0] === -7 && st.arrivals.length === 0
+      && V.radius > 0.05,
+      'NPC в снимке: номер −7, пометка npc, без хозяина, корпус крейсера (и его радиус для прицела); '
+      + 'снаряжение пришло раз и осталось; вспышка выхода — только при первом показе');
+    ok(Nav.targetKind(V) === 'NPC' && Nav.targetLabel(V) === 'Mira Vorek',
+      'в приборах цели NPC — «NPC» с именем, а не «пилот»');
+    const gear = N.npcGear(V.eq, V.ex);
+    const bare = N.npcGear(['engine', 'rcs'], []);
+    ok(gear[0] === 'ЛАЗЕРНАЯ ПУШКА' && gear[1] === 'ЩИТЫ' && gear.includes('ФОРСИРОВАННЫЙ ДВИГАТЕЛЬ')
+      && gear.length === 3 && bare[0] === 'БЕЗ ОРУЖИЯ' && bare[1] === 'БЕЗ ЩИТА' && bare.length === 2
+      && N.npcGear(null).length === 0,
+      `снаряжение NPC строкой: «${gear.join(' · ')}», у голого — «${bare.join(' · ')}»; заводское не перечисляется`);
+  }
+
+  // Метка NPC гаснет к краю локатора, а не обрывается.
+  const was = { see: N.NPC_RANGE.see, hide: N.NPC_RANGE.hide };
+  N.setNpcRange({ see: 80, hide: 100 });
+  N.setNpcRange({ see: 50, hide: 40 });          // чепуха с сервера — не принимается
+  const fades = [60, 80, 90, 100, 120].map((d) => N.npcFade(d));
+  ok(fades[0] === 1 && fades[1] === 1 && Math.abs(fades[2] - 0.5) < 1e-9 && fades[3] === 0 && fades[4] === 0
+    && N.NPC_RANGE.see === 80,
+    `метка NPC у края локатора гаснет: 60/80/90/100/120 км — ${fades.map((f) => f.toFixed(2)).join('/')}`);
+  N.setNpcRange(was);
+
+  // Вспышка прыжка — свет, а не снаряд; гибель — огонь по габариту.
+  {
+    const g = Wp.makeGuns('laser_g');
+    const at = v3(10, 0, 0), dir = v3(0, 0, 1);
+    Wp.quantumFx(g, at, dir, true);
+    const streak = g.bolts[g.bolts.length - 1];
+    const startBack = Math.hypot(streak.x - at.x, streak.y - at.y, streak.z - at.z);
+    const ships = [{ id: 1, pos: v3(10, 0, -2), own: true }, { id: -3, pos: v3(10, 0, -1) }];
+    let hits = 0, steps = 0;
+    while (g.bolts.length && steps < 200) { hits += Wp.updateGuns(g, 1 / 60, ships).length; steps++; }
+    const g2 = Wp.makeGuns('laser_g');
+    Wp.wreckFx(g2, at, 0.1);
+    const spread = Math.max(...g2.blasts.map((b) => Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z)));
+    ok(startBack > 20 && hits === 0 && g.impacts.length === 0 && g2.blasts.length === 8
+      && spread > 0.04 && spread < 0.12 && g2.blasts.some((b) => b.life >= 1.4),
+      `выход из прыжка — вспышка и след из глубины (${startBack.toFixed(0)} км), который ни во что не попадает; `
+      + `гибель — ${g2.blasts.length} вспышек огня по габариту корпуса (до ${(spread * 1000).toFixed(0)} м)`);
+  }
+}
+
+// Свои корабли на карте (js/game/fleet.js): где стоит каждый — в порту, на
+// грунте, у тела, в пустоте, в другой системе, — и живой свой.
+{
+  console.log('\n== свои корабли на карте ==');
+  const F = await import('../js/game/fleet.js');
+  const W = await import('../js/game/world.js');
+  const G = await import('../js/game/galaxy.js');
+  const Vs = await import('../js/game/vessels.js');
+  const world = W.makeSystem(G.systemById(0));
+  W.updateWorld(world, 5000);
+  const st = world.stations[0];
+  const body = world.bodies.find((b) => b.name === 'Lave II');
+  const l = { x: 0, y: body.radius + 0.0136, z: 0 };
+  const fleet = [
+    { id: 1, name: '', typeName: 'Challenger', active: false, systemId: 0, where: 'docked', body: st.id },
+    { id: 2, name: 'ВТОРОЙ', typeName: 'Challenger', active: false, systemId: 0, where: 'landed', body: body.id,
+      point: { b: body.id, x: l.x, y: l.y, z: l.z } },
+    { id: 3, name: '', typeName: 'Prometheus', active: false, systemId: 0, where: 'flight', body: null,
+      pos: { x: 900000, y: 0, z: -300000 } },
+    { id: 4, name: '', typeName: 'Challenger', active: false, systemId: 3, where: 'docked', body: 7,
+      bodyName: 'Xeor Station', systemName: 'Ried' },
+    { id: 5, name: '', typeName: 'Challenger', active: true, systemId: 0, where: 'docked', body: st.id },
+  ];
+  const own = { id: 5, pos: v3(123, 4, 5), away: false, dockedAt: null, landedAt: body, near: body };
+  const cache = new Map();
+  const marks = F.fleetMarks(fleet, world, 0, own, cache);
+  const by = (id) => marks.find((m) => m.id === id);
+  const onGround = Vs.bodyWorld(body, l);
+  ok(marks.length === 5 && by(1).here && by(1).pos.x === st.pos.x && by(1).place === 'В ПОРТУ ' + st.name
+    && by(1).host === st && by(1).name === 'Challenger',
+    `в порту — значок у станции: «${by(1).name} — ${by(1).place}»`);
+  ok(by(2).here && Math.hypot(by(2).pos.x - onGround.x, by(2).pos.y - onGround.y, by(2).pos.z - onGround.z) < 1e-9
+    && by(2).place === 'НА ГРУНТЕ Lave II' && by(3).here && by(3).pos.x === 900000 && by(3).place === 'В ПУСТОТЕ',
+    'на грунте — точка в осях тела, переведённая в мир (вращается с ним); в пустоте — мировая точка');
+  ok(!by(4).here && by(4).place === 'В ПОРТУ Xeor Station · RIED' && by(4).sysId === 3,
+    `в другой системе — без значка на плане, а в списке — «${by(4).place}»`);
+  ok(by(5).active && by(5).here && by(5).pos.x === 123 && by(5).where === 'landed' && by(5).place === 'НА ГРУНТЕ Lave II',
+    'свой, которым командуешь, — по живому кораблю, а не по записи сервера (та отстаёт на сохранение)');
+  W.updateWorld(world, 3600);
+  const again = F.fleetMarks(fleet, world, 0, own, cache);
+  const moved = Vs.bodyWorld(body, l);
+  ok(again.find((m) => m.id === 2) === by(2) && Math.hypot(by(2).pos.x - moved.x, by(2).pos.z - moved.z) < 1e-9
+    && Math.hypot(moved.x - onGround.x, moved.z - onGround.z) > 1,
+    'через час значок стоящего на грунте уехал вместе с телом, а объект тот же — карта едет за ним');
+  const solo = F.fleetMarks([], world, 0, { id: null, pos: v3(1, 2, 3), away: false, dockedAt: st }, new Map());
+  ok(solo.length === 1 && solo[0].active && solo[0].place === 'В ПОРТУ ' + st.name,
+    'без записей сервера в списке всё равно есть свой корабль');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

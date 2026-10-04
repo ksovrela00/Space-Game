@@ -60,6 +60,10 @@ html, body {
   z-index: 10;
 }
 .overlay.hidden { display: none; }
+/* «Нет связи»: поверх всего, даже экрана порта и стартового — игра под ним
+   стоит, и нажимать там нечего. Фон прозрачнее: видно, где остановились. */
+.overlay.link { z-index: 30; background: rgba(0,4,10,.72); }
+.overlay.link h2 { color: #ff7a66; }
 
 .panel {
   min-width: 340px; max-width: min(760px, 92vw);

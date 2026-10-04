@@ -150,6 +150,13 @@ export function saveBeacon(payload) {
 }
 
 export const dock = (system, station) => call('station.dock', { system, station });
+/** Выйти из порта: действие, как и стыковка (Stations::undock). */
+export const undock = () => call('station.undock');
+/**
+ * Переход пилота: встал, сел, сошёл на грунт, поднялся на борт.
+ * Место пилота меняет только этот вызов, а не сохранение (Players::move).
+ */
+export const movePilot = (me) => call('pilot.move', { me });
 export const repair = () => call('station.repair');
 
 /** Заправка: `tons` — сколько налить; без него — до полного бака. */

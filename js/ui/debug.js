@@ -27,7 +27,7 @@ export function tickDebug(dbg, dt) {
  */
 function netLine() {
   const api = session.mode === 'online' ? 'сервер: есть'
-    : session.mode === 'offline' ? 'сервер: НЕ ОТВЕЧАЕТ'
+    : session.mode === 'lost' ? 'сервер: НЕ ОТВЕЧАЕТ'
       : 'сервер: входа нет';
 
   const sock = {
@@ -51,7 +51,8 @@ export function drawDebug(r, game, dbg) {
   const rs = game.renderStats || { polys: 0, items: 0, backend: '?' };
   const lines = [
     `fps ${dbg.fps.toFixed(0)}   ${rs.backend}: треугольников ${rs.polys}, вызовов ${rs.items}` +
-      (rs.detail ? ', деталь на пиксель' : ''),
+      (rs.detail ? ', деталь на пиксель' : '') +
+      (rs.inside ? ', за бортом не рисуется (глухая комната)' : ''),
     rs.gpu ? `GPU ${rs.gpu}` : '',
     // Цена кадра. Время карты — от таймера драйвера, а не от fps: при
     // синхронизации кадров fps стоит на шестидесяти, пока запас есть,

@@ -33,6 +33,7 @@ import { canJump } from '../game/quantum.js';
 import { currentTarget } from '../game/nav.js';
 import { say } from '../game/state.js';
 import { galaxy, systemDistance, warpSeconds, SPREAD } from '../game/galaxy.js';
+import { fleetMarks } from '../game/fleet.js';
 import { L } from '../core/lang.js';
 
 const CY = '#4fb3e0';
@@ -53,6 +54,9 @@ const PAD_BOT = 40;
 
 export function makeMap() {
   return {
+    // Открыта ли карта. Это слой поверх игры, а не режим: под ним корабль
+    // летит дальше (js/main.js, «карта и справка»).
+    open: false,
     // Карта одна, а видов у неё два: система и галактика. Отдельным
     // экраном галактику делать не стали — это тот же вопрос «куда
     // лететь», только на другом масштабе, и переключаться между ними
@@ -69,8 +73,49 @@ export function makeMap() {
     mx: -1, my: -1,        // курсор
     hover: null,
     dragged: false,
+    // Свои корабли (js/game/fleet.js): значки на плане, список «МОИ
+    // КОРАБЛИ» и строки списка, по которым ловится щелчок.
+    fleet: new Map(),
+    marks: [],
+    rows: [],
+    shipIdx: -1,
   };
 }
+
+/** Свои корабли на этот кадр: значки и строки списка (js/game/fleet.js). */
+export function fleetOf(game) {
+  const ship = game.ship, map = game.map;
+  const own = {
+    id: ship.id === undefined ? null : ship.id, pos: ship.pos, away: !!ship.away,
+    dockedAt: ship.dockedAt || null, landedAt: ship.landedAt || null, near: game.capture || null,
+  };
+  return fleetMarks(game.fleet, game.world, game.sys ? game.sys.id : null, own, map.fleet, map.marks);
+}
+
+/**
+ * Навести карту на свой корабль. Здесь, в этой системе, — выбрать его и
+ * подъехать, как к любому объекту. В другой — открыть галактику на его
+ * системе: дальше туда и лететь.
+ */
+export function showShip(game, m) {
+  const map = game.map;
+  if (!m) return;
+  if (m.here) {
+    if (map.view !== 'system') { map.view = 'system'; map.items.length = 0; }
+    map.sel = m;
+    focusOn(map, game.world, m);
+    return;
+  }
+  const s = m.sysId === null ? null : galaxy().systems.find((x) => x.id === m.sysId);
+  if (!s) { say(game.state, L('ГДЕ ЭТОТ КОРАБЛЬ, НЕИЗВЕСТНО'), AMBER); return; }
+  map.view = 'galaxy';
+  map.items.length = 0;
+  aimGalaxy(game, s);
+  map.gsel = s;
+}
+
+/** Строка списка кораблей под курсором — или null. */
+const rowAt = (map, x, y) => map.rows.find((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) || null;
 
 // --- геометрия ---------------------------------------------------------------
 
@@ -92,6 +137,13 @@ const clampZoom = (z) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
  */
 function spanOf(obj, world) {
   if (!obj) return outerOrbit(world);
+  // Свой корабль — вместе с тем, у чего он стоит: в порту — станция с её
+  // орбитой, на грунте и у тела — само тело, чтобы значок встал на диск.
+  if (obj.isFleet) {
+    if (obj.host && obj.host.isStation) return obj.host.orbit.radius * 1.5;
+    if (obj.host) return obj.host.radius * 2.5;
+    return 3000;
+  }
   if (obj.isMarker) return obj.dist * 1.6;
   if (obj.isStation) return obj.orbit.radius * 1.5;
   // Город стоит НА теле, и сам по себе он точка. Показываем его вместе с
@@ -255,6 +307,9 @@ export function mapInput(game, input) {
   }
   if (map.view === 'galaxy') { galaxyInput(game, input); return; }
 
+  // F — по своим кораблям, по кругу: где каждый, карта показывает сама.
+  if (fleetKey(game, input)) return;
+
   // Колесо — масштаб вокруг курсора.
   const wheel = input.takeWheel();
   if (wheel) zoomBy(map, Math.exp(-wheel * 0.0015), map.mx, map.my);
@@ -278,6 +333,9 @@ export function mapInput(game, input) {
   // должна прыгать под рукой.
   if (input.mouse.clicked) {
     map.dragged = false;
+    // Строка списка «МОИ КОРАБЛИ» — навести карту на корабль.
+    const row = rowAt(map, map.mx, map.my);
+    if (row) { showShip(game, row.mark); return; }
     const hit = pickAt(map, map.mx, map.my);
     if (hit) map.sel = hit;
   }
@@ -298,13 +356,26 @@ export function mapInput(game, input) {
   if (input.pressed('KeyX', 'Digit0', 'Numpad0')) resetMap(map, world);
 
   if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
-    const t = map.sel;
-    if (!t) say(game.state, L('ОБЪЕКТ НЕ ВЫБРАН'), AMBER);
+    // Свой корабль целью не назначается — назначается то, у чего он
+    // стоит: станция или тело. К ним и летят.
+    const t = map.sel && map.sel.isFleet ? map.sel.host : map.sel;
+    if (!t) say(game.state, map.sel ? L('КОРАБЛЬ В ПУСТОТЕ: ЦЕЛИ РЯДОМ НЕТ') : L('ОБЪЕКТ НЕ ВЫБРАН'), AMBER);
     else {
       game.selectTarget(t);
       say(game.state, L('ЦЕЛЬ: ') + t.name);
     }
   }
+}
+
+/** F — следующий свой корабль. Возвращает, было ли нажатие. */
+function fleetKey(game, input) {
+  if (!input.pressed('KeyF')) return false;
+  const marks = fleetOf(game);
+  if (!marks.length) return true;
+  const map = game.map;
+  map.shipIdx = (map.shipIdx + 1) % marks.length;
+  showShip(game, marks[map.shipIdx]);
+  return true;
 }
 
 // --- карта галактики ---------------------------------------------------------
@@ -355,8 +426,11 @@ function galaxyInput(game, input) {
   // получает «цель не выбрана». Выделение на этой карте ВСЕГДА означает
   // цель варпа, без исключений.
   if (!map.gsel) aimGalaxy(game, game.warpTarget || list[1] || list[0]);
+  if (fleetKey(game, input)) return;
 
   if (input.mouse.clicked) {
+    const row = rowAt(map, map.mx, map.my);
+    if (row) { showShip(game, row.mark); return; }
     const hit = pickAt(map, map.mx, map.my);
     if (hit) aimGalaxy(game, hit);
   }
@@ -481,14 +555,24 @@ function drawGalaxy(ctx, map, game, w, h) {
     ctx.fillStyle = s.seed === cur.seed ? PALE : 'rgba(159,217,230,0.8)';
     ctx.textAlign = 'center';
     ctx.fillText(s.name.toUpperCase(), x, y + r + 14);
+
+    // Свои корабли в этой системе — значком и числом под именем.
+    const mine = map.marks.filter((m) => m.sysId === s.id).length;
+    if (mine) {
+      shipGlyph(ctx, x - 10, y + r + 25, GREEN, false);
+      ctx.fillStyle = GREEN;
+      ctx.textAlign = 'left';
+      ctx.fillText('× ' + mine, x - 2, y + r + 29);
+    }
   }
 
   drawSystemCard(ctx, game, sel, w - panelW - 6, PAD_TOP - 8, panelW, h - PAD_TOP - PAD_BOT + 18);
+  drawFleetList(ctx, map, game, 18, PAD_TOP + 6, Math.min(360, map.vw - 36));
 
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(159,217,230,0.6)';
   ctx.fillText(L('←,→ / ЛКМ — ВЫБРАТЬ СИСТЕМУ (ОНА СРАЗУ СТАНОВИТСЯ ЦЕЛЬЮ ВАРПА)'), 18, h - 26);
-  ctx.fillText(L('G — НАЗАД К СИСТЕМЕ · M — ЗАКРЫТЬ · ПРЫЖОК — J В ПОЛЁТЕ'), 18, h - 12);
+  ctx.fillText(L('G — НАЗАД К СИСТЕМЕ · F — МОИ КОРАБЛИ · M — ЗАКРЫТЬ · ПРЫЖОК — J В ПОЛЁТЕ'), 18, h - 12);
   ctx.restore();
 }
 
@@ -613,6 +697,23 @@ export function objectCard(game, obj) {
     rows.push([L('ДО КОРАБЛЯ'), fmtDist(Math.max(0, d - (obj.radius || 0)))]);
   };
 
+  if (obj.isFleet) {
+    // Свой корабль: где он и что с ним. Коридора и физики тут нет — это
+    // не тело, а место, куда возвращаются.
+    card.kind = L('ВАШ КОРАБЛЬ') + (obj.typeName ? ' · ' + obj.typeName.toUpperCase() : '');
+    card.desc = obj.active
+      ? L('Вы им командуете. Он здесь — там, где крест.')
+      : L('Стоит без пилота там, где его оставили. Сесть в него — подняться на борт и в кресло.');
+    rows.push([L('МЕСТО'), obj.place]);
+    if (!obj.active) {
+      const d = Math.hypot(obj.pos.x - ship.pos.x, obj.pos.y - ship.pos.y, obj.pos.z - ship.pos.z);
+      rows.push([L('ДО НЕГО'), fmtDist(d)]);
+    }
+    if (obj.host) rows.push([L('ЦЕЛЬЮ'), obj.host.name + L(' — TAB')]);
+    card.jumpOk = false;
+    return card;
+  }
+
   if (obj.isMarker) {
     card.desc = L('Точка в пустоте, к которой можно прыгнуть. Нужна, когда ') +
       L('прямой коридор до цели перекрыт телом, над которым висишь: сначала ') +
@@ -710,6 +811,7 @@ export function drawMap(r, game) {
   const map = game.map;
   const world = game.world;
 
+  fleetOf(game);
   if (map.view === 'galaxy') {
     ctx.save();
     ctx.fillStyle = 'rgba(0,4,10,0.94)';
@@ -743,6 +845,7 @@ export function drawMap(r, game) {
 
   drawPlan(ctx, map, game, world);
   drawScaleBar(ctx, map);
+  drawFleetList(ctx, map, game, 18, PAD_TOP + 6, Math.min(360, map.vw - 36));
   drawPanel(ctx, game, w - panelW - 6, PAD_TOP - 8, panelW, h - PAD_TOP - PAD_BOT + 18);
 
   // Подсказки в две строки: одной они не помещаются в узкое окно, а
@@ -751,7 +854,7 @@ export function drawMap(r, game) {
   ctx.fillStyle = 'rgba(159,217,230,0.6)';
   ctx.fillText(L('КОЛЕСО / W,S — МАСШТАБ · ЛКМ — ВЫБОР · ТЯНУТЬ — СДВИГ'), 18, h - 26);
   ctx.fillText(L('←,→ — ПО ОБЪЕКТАМ · ПРОБЕЛ — К ВЫБРАННОМУ · TAB — НАЗНАЧИТЬ ЦЕЛЬЮ · ') +
-    L('X — СБРОС · M — ЗАКРЫТЬ'), 18, h - 12);
+    L('F — МОИ КОРАБЛИ · X — СБРОС · M — ЗАКРЫТЬ'), 18, h - 12);
   ctx.fillStyle = 'rgba(255,204,102,0.7)';
   ctx.fillText(L('G — КАРТА ГАЛАКТИКИ'), 18, h - 40);
   ctx.restore();
@@ -797,6 +900,27 @@ function drawPlan(ctx, map, game, world) {
     if (sy < map.vy - 40 || sy > map.vy + map.vh + 40) continue;
     items.push({ obj, sx, sy });
     drawGlyph(ctx, obj, sx, sy, map, obj === target);
+  }
+
+  // Свои корабли, оставленные где-то: в порту, на грунте, у тела, в
+  // пустоте. Тот, которым командуешь, — крест ниже; у одного места
+  // несколько кораблей встают лесенкой, а не друг на друга.
+  const stack = new Map();
+  for (const m of map.marks) {
+    if (!m.here) continue;
+    const at = { x: projX(map, m.pos.x), y: projY(map, m.pos.z) };
+    if (m.active) { items.push({ obj: m, sx: at.x, sy: at.y }); continue; }
+    const key = m.host ? m.host.id : Math.round(at.x) + ':' + Math.round(at.y);
+    const n = stack.get(key) || 0;
+    stack.set(key, n + 1);
+    const sx = at.x + 10, sy = at.y - 9 - n * 13;
+    if (sx < map.vx - 20 || sx > map.vx + map.vw + 20 || sy < map.vy - 20 || sy > map.vy + map.vh + 20) continue;
+    items.push({ obj: m, sx, sy });
+    const sel = m === map.sel;
+    shipGlyph(ctx, sx, sy, sel ? AMBER : GREEN, sel);
+    ctx.fillStyle = sel ? AMBER : 'rgba(120,224,143,0.9)';
+    ctx.textAlign = 'left';
+    ctx.fillText(m.name, sx + 8, sy + 4);
   }
 
   // Корабль — зелёный крест, и от него пунктир к выбранному: по нему
@@ -902,6 +1026,82 @@ function drawGlyph(ctx, obj, sx, sy, map, isTarget) {
   }
 }
 
+/** Значок своего корабля: остроносый силуэт, как стрелка вверх. */
+function shipGlyph(ctx, x, y, color, sel) {
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.lineWidth = 3;
+  const path = () => {
+    ctx.beginPath();
+    ctx.moveTo(x, y - 5);
+    ctx.lineTo(x + 4.5, y + 4);
+    ctx.lineTo(x, y + 2);
+    ctx.lineTo(x - 4.5, y + 4);
+    ctx.closePath();
+  };
+  path();
+  ctx.stroke();
+  ctx.fillStyle = color;
+  path();
+  ctx.fill();
+  if (sel) {
+    ctx.strokeStyle = AMBER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+/**
+ * Список «МОИ КОРАБЛИ» в углу карты: каждый свой корабль — имя, корпус и
+ * место. Щелчок по строке наводит карту на корабль (showShip): в этой
+ * системе — подъезжает к нему, в другой — открывает галактику на ней.
+ * Строки запоминаются (map.rows): по ним ловится щелчок в mapInput.
+ */
+function drawFleetList(ctx, map, game, x, y, w) {
+  map.rows.length = 0;
+  const marks = map.marks;
+  if (!marks.length) return;
+  const lh = 15, n = Math.min(marks.length, 8);
+  const h = 22 + n * lh + 4;
+  ctx.save();
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = 'rgba(2,10,18,0.78)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = CY_DIM;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = CY;
+  ctx.fillText(L('МОИ КОРАБЛИ') + ' · F', x + 8, y + 15);
+  for (let i = 0; i < n; i++) {
+    const m = marks[i];
+    const ry = y + 22 + i * lh;
+    const row = { x, y: ry - 1, w, h: lh, mark: m };
+    map.rows.push(row);
+    const hover = map.mx >= row.x && map.mx <= row.x + row.w && map.my >= row.y && map.my <= row.y + row.h;
+    if (hover || m === map.sel) {
+      ctx.fillStyle = hover ? 'rgba(79,179,224,0.18)' : 'rgba(255,204,102,0.12)';
+      ctx.fillRect(x + 1, ry - 1, w - 2, lh);
+    }
+    shipGlyph(ctx, x + 12, ry + 7, m.active ? GREEN : 'rgba(120,224,143,0.8)', false);
+    const who = m.name + (m.typeName && m.typeName !== m.name ? ' · ' + m.typeName : '') + (m.active ? ' ●' : '');
+    ctx.fillStyle = m.active ? GREEN : PALE;
+    ctx.fillText(clip(ctx, who, w * 0.42), x + 22, ry + 10);
+    ctx.fillStyle = m.here ? 'rgba(159,217,230,0.8)' : 'rgba(255,204,102,0.8)';
+    ctx.fillText(clip(ctx, m.place, w * 0.55 - 26), x + 22 + w * 0.42, ry + 10);
+  }
+  ctx.restore();
+}
+
+/** Обрезать строку под ширину, с многоточием. */
+function clip(ctx, s, width) {
+  s = String(s);
+  if (ctx.measureText(s).width <= width) return s;
+  while (s.length > 1 && ctx.measureText(s + '…').width > width) s = s.slice(0, -1);
+  return s + '…';
+}
+
 function drawScaleBar(ctx, map) {
   // Отрезок «круглой» длины: берём примерно 160 пикселей и округляем
   // километры вниз до 1/2/5·10^n — читается только такое.
@@ -994,6 +1194,13 @@ function drawPanel(ctx, game, x, y, w, h) {
 
   // Что нажать — внизу карточки, а не в общем списке подсказок: это
   // действие относится к выбранному объекту.
+  if (obj.isFleet) {
+    if (obj.host) {
+      ctx.fillStyle = AMBER;
+      ctx.fillText(L('TAB — ЦЕЛЬЮ: ') + obj.host.name, x + pad, y + h - 14);
+    }
+    return;
+  }
   const cur = currentTarget(game.nav);
   const isCur = obj === cur || (obj.isMarker && cur === obj.body);
   ctx.fillStyle = isCur ? GREEN : AMBER;

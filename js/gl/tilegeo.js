@@ -58,7 +58,10 @@ export function tileBuilder(body, t) {
   const cell = tileCellAngle(t.level);
   const drop = terrain.detailGap(detail) * 1.5 + cell * cell / 8 * 3 + 1e-7;
 
-  const rgb = [0, 0, 0];
+  // Четвёртая ячейка — высота над морем (terrain.sample): у водного мира
+  // она уходит в альфу цвета вершины, км (js/gl/water.js).
+  const rgb = [0, 0, 0, 0];
+  const sea = terrain.kindCfg.liquid ? body.radius : 0;
   const dir = { x: 0, y: 0, z: 0 };
   // Начало отсчёта — середина плитки на её же рельефе.
   const od = faceDir(t.face, (b.u0 + b.u1) / 2, (b.v0 + b.v1) / 2, { x: 0, y: 0, z: 0 });
@@ -83,7 +86,7 @@ export function tileBuilder(body, t) {
         colors[i * 4] = rgb[0];
         colors[i * 4 + 1] = rgb[1];
         colors[i * 4 + 2] = rgb[2];
-        colors[i * 4 + 3] = 0;
+        colors[i * 4 + 3] = rgb[3] * sea;
         uv[i * 2] = ix / g;
         uv[i * 2 + 1] = iy / g;
         grain[i * 2] = (su - b.u0) * gk;

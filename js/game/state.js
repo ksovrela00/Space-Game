@@ -5,8 +5,6 @@ export const ST = {
   DOCKED: 'docked',
   LANDED: 'landed',       // стоим на поверхности тела
   CRASHED: 'crashed',
-  MAP: 'map',
-  HELP: 'help',
 };
 
 export function makeState() {

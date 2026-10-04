@@ -114,12 +114,24 @@ class Input {
     win.addEventListener('mousedown', (e) => {
       if (e.button === 2) { this.mouse.right = true; if (e.preventDefault) e.preventDefault(); }
       if (e.button === 0) { this.mouse.left = true; this.mouse.clicked = true; }
+      // Колесо нажатием — клавиша, как любая другая: игра читает её
+      // через pressed('MouseMiddle') (приближение, js/game/zoom.js).
+      // Браузер на нём включает автопрокрутку — её отменяем.
+      if (e.button === 1) {
+        if (!this.down.has('MouseMiddle')) this.pressedThisFrame.add('MouseMiddle');
+        this.down.add('MouseMiddle');
+        if (e.preventDefault) e.preventDefault();
+      }
       this.setPos(e);
     });
     win.addEventListener('mouseup', (e) => {
       if (e.button === 2) this.mouse.right = false;
       if (e.button === 0) this.mouse.left = false;
+      if (e.button === 1) this.down.delete('MouseMiddle');
     });
+    // Средний щелчок у браузера — ещё и «вставить» (Linux) и «открыть в
+    // новой вкладке»: в игре ни то ни другое не нужно.
+    win.addEventListener('auxclick', (e) => { if (e.button === 1 && e.preventDefault) e.preventDefault(); });
     win.addEventListener('mousemove', (e) => {
       // В захвате курсора нет — есть только сдвиг, и он весь уходит
       // взгляду: ни карте, ни осмотру из-за спины его отдавать незачем.

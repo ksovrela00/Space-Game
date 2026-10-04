@@ -15,10 +15,9 @@
 // нет ни одной цены, посчитанной на месте. Посчитай их игра — и первый
 // же желающий купил бы тысячу тонн за одну крону.
 //
-// Без сервера (автономная игра) рынка и верфи нет вовсе, и экран говорит
-// это прямо, а не показывает пустые таблицы: торговать не с кем. Бак и
-// корпус в автономной игре порт восстанавливает даром при стыковке — как
-// было всегда.
+// Без сервера игры нет вовсе (js/boot.js), а пропала связь посреди
+// стоянки — игра стоит под надписью «нет связи» (js/main.js), и экран
+// порта под ней ждёт вместе с ней.
 //
 // Вёрстка — DOM, а не холст: это таблицы, кнопки и прокрутка, и браузер
 // делает их лучше, чем сделала бы игра. Нажатия разбирает один
@@ -107,6 +106,7 @@ export function syncFromServer(game, state = session.player) {
 /** Догрузить то, что нужно открытому разделу. Повторный вызов ничего не шлёт. */
 function load(game) {
   const s = st(game);
+  // Связь пропала — запрос подождёт: экран перерисуют, когда она вернётся.
   if (!isOnline()) return;
   const need = s.tab === 'market' || s.tab === 'fuel' ? 'market'
     : (s.tab === 'outfit' ? 'outfit' : (s.tab === 'ships' ? 'ships' : null));
@@ -136,6 +136,22 @@ function loadYards(game) {
 }
 
 /**
+ * Забыть ответы сервера о порту: прайс, верфь, корабли дока. Они — про
+ * КОРАБЛЬ, а не только про порт: верфь показывает его модули, прайс — его
+ * трюм, список кораблей — в чьём кресле пилот. После пересадки они чужие:
+ * экран показывал «Прометей» с кнопкой «пересесть», в который пилот уже
+ * пересел, и модули «Челленджера» на верфи — и казалось, что пересадки не
+ * было.
+ */
+export function forgetPort(game) {
+  const s = st(game);
+  s.market = null;
+  s.outfit = null;
+  s.ships = null;
+  s.err = {};
+}
+
+/**
  * Действие с ценой: заправка, сделка, модуль.
  *
  * Кнопки на время запроса запираются: второй щелчок по «купить» до
@@ -160,10 +176,7 @@ async function run(game, fn, done) {
   } finally {
     s.busy = false;
     // Склады и верфь после сделки другие: перечитываем то, что открыто.
-    s.market = null;
-    s.outfit = null;
-    s.ships = null;
-    s.err = {};
+    forgetPort(game);
     redraw(game);
   }
 }
@@ -184,7 +197,7 @@ export function stationAct(game, act, arg = {}) {
   }
   if (act === 'launch') { game.launch(); return true; }
   if (act === 'stand') { if (game.rise) game.rise(); return true; }
-  if (act === 'map') { hideOverlay(); game.state.mode = ST.MAP; return true; }
+  if (act === 'map') { game.openMap(); return true; }
   if (act === 'repair') { game.repair(); return true; }
   if (s.busy) return false;
   const tons = +arg.tons;
@@ -215,8 +228,19 @@ export function stationAct(game, act, arg = {}) {
   }
   if (act === 'board') {
     // Пересесть — не сделка, а смена корабля: её ведёт игра (js/main.js),
-    // экран порта перерисуется под новый корабль сам.
-    if (game.switchShip) game.switchShip(+arg.id);
+    // и она же забывает ответы о прежнем корабле (forgetPort). Кнопки на
+    // время пересадки заперты: второй щелчок ушёл бы вдогонку первому.
+    if (!game.switchShip) return true;
+    s.busy = true;
+    s.note = L('ЗАПРОС…');
+    s.noteKind = '';
+    redraw(game);
+    Promise.resolve(game.switchShip(+arg.id)).finally(() => {
+      s.busy = false;
+      s.note = '';
+      forgetPort(game);
+      redraw(game);
+    });
     return true;
   }
   if (act === 'refuel') {
@@ -234,7 +258,6 @@ function portTab(game) {
   const station = ship.dockedAt;
   const planet = station ? station.parent : null;
   const port = game.port;
-  const online = isOnline();
   const rows = [
     [L('Планета'), planet ? planet.name : '—'],
     [L('Тип'), planet ? L(KIND_RU[planet.kind] || planet.kind) : '—'],
@@ -242,7 +265,7 @@ function portTab(game) {
     [L('Высота орбиты'), station && planet ? fmtDist(station.orbit.radius - planet.radius) : '—'],
     [L('Стыковок выполнено'), String(game.stats.docks)],
   ];
-  if (online && port) {
+  if (port) {
     rows.push([L('Уровень порта'), port.tech + ' ' + L('из 5')]);
     rows.push([L('Сбор за место'), kr(port.fee)]);
     const svc = [
@@ -252,19 +275,12 @@ function portTab(game) {
     rows.push([L('Услуги'), svc.join(', ')]);
   }
   const lines = rows.map(([a, b]) => `<tr><td>${esc(a)}</td><td class="v">${esc(b)}</td></tr>`).join('');
-  const note = online
-    ? L('Рынок — товары на перевозку, верфь — модули корабля, заправка — топливо и ремонт. Клавиши 1–4 переключают разделы, Пробел — вылет.')
-    : L('Автономная игра: бак и корпус восстановлены при стыковке. Рынка и верфи без сервера нет — торговать не с кем.');
+  const note = L('Рынок — товары на перевозку, верфь — модули корабля, заправка — топливо и ремонт. Клавиши 1–4 переключают разделы, Пробел — вылет.');
   return `<table class="rows">${lines}</table><p class="sub">${esc(note)}</p>`;
-}
-
-function offlineNote(what) {
-  return `<p class="warn">${esc(L('НЕТ СВЯЗИ С СЕРВЕРОМ'))}</p><p class="sub">${esc(what)}</p>`;
 }
 
 function marketTab(game) {
   const s = st(game);
-  if (!isOnline()) return offlineNote(L('Цены и склады ведёт сервер: без него рынка нет.'));
   if (s.err.market && s.err.market !== 'loading') return `<p class="warn">${esc(s.err.market)}</p>`;
   if (!s.market) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ БИРЖУ…'))}</p>`;
 
@@ -304,7 +320,6 @@ function marketTab(game) {
 
 function outfitTab(game) {
   const s = st(game);
-  if (!isOnline()) return offlineNote(L('Модули ставит верфь, а её счёт ведёт сервер: без него верфи нет.'));
   if (s.err.outfit && s.err.outfit !== 'loading') return `<p class="warn">${esc(s.err.outfit)}</p>`;
   if (!s.outfit) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ВЕРФЬ…'))}</p>`;
   const o = s.outfit;
@@ -362,7 +377,6 @@ function outfitTab(game) {
  */
 function shipsTab(game) {
   const s = st(game);
-  if (!isOnline()) return offlineNote(L('Корабли продаёт верфь, а её счёт ведёт сервер: без него верфи нет.'));
   if (s.err.ships && s.err.ships !== 'loading') return `<p class="warn">${esc(s.err.ships)}</p>`;
   if (!s.ships) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ВЕРФЬ…'))}</p>`;
   const o = s.ships;
@@ -418,9 +432,7 @@ function fuelTab(game) {
     + L(' млн км.'))}</p>`;
 
   let fuel;
-  if (!isOnline()) {
-    fuel = `<p class="sub">${esc(L('Автономная игра: порт заправляет даром при стыковке.'))}</p>`;
-  } else if (s.err.market && s.err.market !== 'loading') {
+  if (s.err.market && s.err.market !== 'loading') {
     fuel = `<p class="warn">${esc(s.err.market)}</p>`;
   } else if (!s.market) {
     fuel = `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ЦЕНУ…'))}</p>`;
@@ -444,8 +456,7 @@ function fuelTab(game) {
   const port = game.port;
   const damage = Math.max(0, (SHIP.maxHull || 100) - Math.round(ship.hull));
   let repair;
-  if (!isOnline()) repair = L('Корпус восстановлен.');
-  else if (damage <= 0) repair = L('Корпус цел.');
+  if (damage <= 0) repair = L('Корпус цел.');
   else if (!port || !port.services || !port.services.repair) {
     repair = L('Корпус повреждён, а чинить здесь нечем: нужен порт с мастерской.');
   } else repair = null;
@@ -470,10 +481,9 @@ function html(game) {
   const ship = game.ship;
   const station = ship.dockedAt;
   const planet = station ? station.parent : null;
-  const online = isOnline();
   const lvl = fuelLevel(ship);
   const sum = [
-    online ? [L('СЧЁТ'), kr(game.player.balance), ''] : null,
+    [L('СЧЁТ'), kr(game.player.balance), ''],
     [L('ТРЮМ'), t1(cargoTons(game.player)) + ' / ' + t1(SHIP.hold || 0), ''],
     [L('БАК'), t1(ship.fuel) + ' / ' + t1(fuelCap()), lvl === 'ok' ? '' : (lvl === 'low' ? 'low' : 'bad')],
     [L('КОРПУС'), Math.round(ship.hull) + '%', ship.hull < 40 ? 'bad' : ''],

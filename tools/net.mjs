@@ -6,7 +6,8 @@
 // проверка запускает саму себя тремя дочерними процессами:
 //
 //   server   — токен есть, сервер отвечает: игра поднимается с сервера;
-//   offline  — токен есть, сервера нет: игра поднимается из кэша браузера;
+//   lost     — токен есть, сервера нет: игра НЕ стартует, на экране «нет
+//              связи», попытки снова; сервер ответил — поднимается сама;
 //   notoken  — токена нет: игра не стартует, а уходит на страницу входа.
 //
 // Сервер здесь поддельный: настоящий PHP проверяется своим набором
@@ -24,7 +25,7 @@ const CASE = arg ? arg.slice(7) : null;
 if (!CASE) {
   console.log('\n== сеть: запуск игры с сервером ==');
   let bad = 0;
-  for (const name of ['server', 'offline', 'notoken', 'wreck', 'onfoot', 'outside', 'rider']) {
+  for (const name of ['server', 'lost', 'notoken', 'wreck', 'onfoot', 'outside', 'rider']) {
     const r = spawnSync(process.execPath, [process.argv[1], '--case=' + name], {
       stdio: 'inherit',
     });
@@ -68,7 +69,8 @@ const el = (id) => ({
   focus() {}, closest: () => null,
 });
 const nodes = { screen: el('screen'), hud: el('hud'), overlay: el('overlay'),
-  panel: el('panel'), boot: el('boot'), bootBtn: el('bootBtn') };
+  panel: el('panel'), boot: el('boot'), bootBtn: el('bootBtn'), bootBody: el('bootBody'),
+  link: el('link'), linkTitle: el('linkTitle'), linkBody: el('linkBody') };
 globalThis.document = { getElementById: (id) => nodes[id] || el(id), createElement: () => el('div') };
 
 const winListeners = {};
@@ -223,6 +225,8 @@ SERVER_SPECS.modules.find((m) => m.slot === 'engine').spec.flight.maxSpeed = SER
 
 const calls = [];
 let saved = null;
+// Случай lost: сервер «лежит», пока проверка его не поднимет.
+let serverUp = CASE !== 'lost';
 // Цена топлива у поддельного порта и варп, который он «списал» при
 // следующем сохранении.
 const FUEL_PRICE = 80;
@@ -234,11 +238,6 @@ globalThis.fetch = async (url, opts = {}) => {
   // разбираем по адресу: первая версия проверки считала обращением к
   // серверу загрузку каждого сэмпла.
   calls.push(href);
-  // Слепок характеристик лежит обычным файлом рядом с игрой: им живёт
-  // автономный режим, и путь к нему проверяется здесь же.
-  if (href.indexOf('server/data/specs.json') >= 0) {
-    return { ok: true, status: 200, json: async () => SNAPSHOT };
-  }
   if (href.indexOf('api.php') < 0) {
     return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0),
       json: async () => ({}) };
@@ -246,7 +245,7 @@ globalThis.fetch = async (url, opts = {}) => {
   const route = href.split('r=')[1] || '';
   const body = opts.body ? JSON.parse(opts.body) : {};
 
-  if (CASE === 'offline') {
+  if (!serverUp) {
     // Сервера нет вовсе: fetch падает так же, как при обрыве сети.
     throw new TypeError('failed to fetch');
   }
@@ -317,6 +316,9 @@ globalThis.fetch = async (url, opts = {}) => {
     return reply({ installed: body.code, removed: 'engine', cost: 23800,
       balance: SERVER_STATE.player.balance, fuel: SERVER_STATE.ship.fuelT, refund: 0 });
   }
+  if (route === 'pilot.move') {
+    return reply({ moved: true, me: SERVER_STATE.me || null });
+  }
   if (route === 'station.dock') {
     return reply({ station: { systemId: 0, localId: body.station, name: 'ПОРТ', tech: 4,
       fee: 68, repairRate: 18, pads: 6,
@@ -326,24 +328,35 @@ globalThis.fetch = async (url, opts = {}) => {
   return reply({});
 };
 
-// Кэш браузера с ЧУЖИМ положением: если игра возьмёт его вместо
-// серверного, это сразу будет видно.
-const LOCAL_X = 999999;
-store['solar_trader_save_v2'] = JSON.stringify({
-  system: 0, pos: { x: LOCAL_X, y: 0, z: 0 },
-  basis: { right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 }, fwd: { x: 0, y: 0, z: 1 } },
-  hull: 100, view: 'cockpit', gear: false, time: 10,
-  stats: { docks: 0, crashes: 0, flownKm: 0, landings: 0 },
-});
 if (CASE !== 'notoken') store['solar_trader_token'] = TOKEN;
+// Сокет — поддельный (tools/fakeapi.mjs): на hello отвечает welcome, и
+// игра, которая без хаба стоит, едет. Настоящий хаб в проверках не нужен.
+{
+  const { makeFakeServer } = await import('./fakeapi.mjs');
+  const sock = makeFakeServer({ specs: SNAPSHOT });
+  // Время мира и состав сети у сокета — те же, что у API: сервер один.
+  sock.state.world = SERVER_STATE.world;
+  sock.roster = [{ id: 1, name: 'ПИЛОТ', sys: SERVER_STATE.position.systemId }];
+  if (CASE === 'rider') sock.roster.push({ id: 5, name: 'ХОЗЯИН', sys: RIDE_SYS });
+  globalThis.WebSocket = sock.WebSocket;
+}
 
 // --- поехали ------------------------------------------------------------------
 
 // Запуск идёт ЧЕРЕЗ ЗАГРУЗЧИК, как в браузере: он получает
 // характеристики корабля и только потом поднимает игру. Звать main.js
 // напрямую значило бы проверять порядок, которого в игре нет.
-await import('../js/boot.js');
-const { specsSource } = await import('../js/game/specs.js');
+// Без сервера загрузчик ждёт его вечно — поэтому в случае lost его не
+// дожидаемся, а смотрим, что он делает, пока ждёт.
+const booting = import('../js/boot.js');
+if (CASE === 'lost') {
+  await new Promise((r) => setTimeout(r, 300));
+  ok(!globalThis.window.GAME && !rafCb, 'сервера нет — игра не запускается: ни мира, ни кадров');
+  ok(/НЕТ СВЯЗИ С СЕРВЕРОМ/.test(nodes.bootBody.innerHTML), 'на стартовом экране — «нет связи с сервером»');
+  ok(location.replaced === null, 'на страницу входа не выкидывает: вход-то есть');
+  serverUp = true;                // сервер поднялся — загрузчик заметит сам
+}
+await booting;
 
 const mod = await import('../js/main.js');
 // Запуск игры асинхронный: ждём, пока он доберётся до конца.
@@ -448,15 +461,10 @@ if (CASE === 'onfoot' || CASE === 'outside' || CASE === 'rider') {
 if (CASE === 'notoken') {
   ok(location.replaced === 'login.html', 'без входа игра уходит на страницу входа');
   ok(!game || !rafCb, 'кадры при этом не запускаются');
-  // За ЛИЧНЫМ к серверу не ходим: без входа спрашивать нечего, и
-  // показывать чужое состояние на секунду тоже незачем. Характеристики
-  // корабля — исключение и единственное: они общие для всех, лежат на
-  // открытом маршруте и нужны ещё до того, как выяснится, есть ли вход
-  // (js/boot.js собирает корабль раньше).
+  // Без входа к серверу не ходим вовсе: спрашивать нечего, а игра без
+  // входа не запускается — характеристики корабля ей не нужны.
   const apiCalls = calls.filter((u) => u.indexOf('api.php') >= 0);
-  const personal = apiCalls.filter((u) => u.indexOf('catalog.specs') < 0);
-  ok(personal.length === 0, 'за личным к серверу не ходим: спрашивать нечего');
-  ok(apiCalls.length === 1, 'спросили только общедоступные характеристики');
+  ok(apiCalls.length === 0, 'без входа к серверу не ходим вовсе');
 }
 
 if (CASE === 'server') {
@@ -464,14 +472,14 @@ if (CASE === 'server') {
   // Числа корабля пришли С СЕРВЕРА, а не с диска: предел хода у
   // поддельного сервера свой.
   const { SHIP } = await import('../js/game/ship.js');
-  ok(specsSource() === 'server' && SHIP.maxSpeed === SERVER_TOP_SPEED,
+  ok(SHIP.maxSpeed === SERVER_TOP_SPEED,
     'предел хода взят у сервера: ' + SHIP.maxSpeed + ' км/с (в слепке '
     + snapshotTopSpeed() + ')');
   ok(calls.some((u) => u.indexOf('catalog.specs') >= 0),
     'за характеристиками игра сходила к серверу');
   ok(!!game, 'игра поднялась');
   ok(Math.abs(game.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6,
-    'место взято С СЕРВЕРА, а не из кэша браузера: x = ' + game.ship.pos.x);
+    'место взято с сервера: x = ' + game.ship.pos.x);
   ok(Math.abs(game.ship.hull - 61.5) < 1e-9, 'корпус с сервера: ' + game.ship.hull);
   // Щит тоже серверный: он тратится в бою и отрастает по серверным
   // часам, и взятый из местного кэша он соврал бы ровно в бою.
@@ -482,7 +490,6 @@ if (CASE === 'server') {
     'трюм с сервера: ' + game.player.cargo.map((c) => c.name).join(', '));
   ok(game.player.missions.length === 1 && game.player.missions[0].left === 780,
     'подряд с сервера, срок ' + game.player.missions[0].left + ' с');
-  ok(game.player.server === true, 'стартовый набор затёрт серверными данными');
   // Орбиты планет и станций считаются от времени мира. Разойдись оно у
   // двоих — и они, стоя рядом, увидят станцию в разных местах; ровно это
   // и было, пока сюда подставлялся налёт пилота (4200 с).
@@ -495,6 +502,7 @@ if (CASE === 'server') {
   // его видят остальные, а не на пять минут назад.
   {
     const before = game.world.time;
+    frames(5);                      // приветствие сокета (время мира) — до сна, как в жизни
     nowMs += 300000;                // пять минут вкладка была в фоне
     frames(30);
     const behind = SERVER_STATE.world.time + 300 - game.world.time;
@@ -503,11 +511,8 @@ if (CASE === 'server') {
       + behind.toFixed(1) + ' с');
   }
 
-  // Кэш браузера приведён к серверному состоянию: следующий запуск без
-  // сети должен поднять игру там же, где сервер её оставил.
-  const cached = JSON.parse(store['solar_trader_save_v2']);
-  ok(Math.abs(cached.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6 && cached.me.seated === true,
-    'местный кэш переписан серверным состоянием: корабль и пилот в его кресле');
+  // Местной копии нет: правда одна, и она на сервере.
+  ok(!Object.keys(store).some((k) => k.startsWith('solar_trader_save')), 'местного сохранения игра не пишет');
 
   // Сохранение уходит на сервер — не чаще раза в SAVE_EVERY секунд.
   for (const fn of nodes.bootBtn.listeners.click || []) fn();
@@ -516,7 +521,7 @@ if (CASE === 'server') {
   frames(60 * 8);
   ok(saved !== null, 'сохранение ушло на сервер');
   ok(saved && typeof saved.system === 'number' && 'hull' in saved && 'player' in saved,
-    'на сервер уходит тот же снимок, что и в браузер');
+    'на сервер уходит снимок игры: система, корпус, дела пилота');
 
   // --- ПОРТ ЧЕРЕЗ СЕРВЕР: заправка, рынок, верфь.
   //
@@ -585,21 +590,36 @@ if (CASE === 'server') {
   ok(beacons > 0, 'при закрытии вкладки уходит маячок sendBeacon');
 }
 
-if (CASE === 'offline') {
-  ok(session.mode === 'offline', 'режим связи: ' + session.mode);
-  // Сервера нет — числа взяты из слепка, и игра всё равно поднялась.
-  // Это и есть смысл слепка: без него автономного режима не было бы
-  // вовсе, потому что числа корабля теперь живут на сервере.
+if (CASE === 'lost') {
+  // Сервер поднялся — загрузчик это заметил и поднял игру сам, без
+  // перезагрузки страницы, и сразу с серверным состоянием.
   const { SHIP } = await import('../js/game/ship.js');
-  ok(specsSource() === 'snapshot' && SHIP.maxSpeed === snapshotTopSpeed(),
-    'без сервера характеристики взяты из слепка: ' + SHIP.maxSpeed + ' км/с');
-  ok(!!game, 'игра поднялась и без сервера');
-  ok(Math.abs(game.ship.pos.x - LOCAL_X) < 1e-6,
-    'место взято из кэша браузера: x = ' + game.ship.pos.x);
-  ok(location.replaced === null, 'на страницу входа не выкидывает: токен-то есть');
+  ok(!!game && session.mode === 'online', 'сервер ответил — игра поднялась сама: ' + session.mode);
+  ok(SHIP.maxSpeed === SERVER_TOP_SPEED && Math.abs(game.ship.pos.x - SERVER_STATE.position.pos.x) < 1e-6,
+    'и сразу с сервера: характеристики и место');
   for (const fn of nodes.bootBtn.listeners.click || []) fn();
-  ok(frames(120), 'кадры идут, полёт не сломан');
-  ok(game.player.server === false, 'дела пилота — местные, серверных нет');
+  ok(frames(60), 'кадры идут');
+
+  // Связь пропала посреди полёта — игра стоит под надписью и ждёт.
+  serverUp = false;
+  const { flush } = await import('../js/net/session.js');
+  session.dirty = { probe: 1 };
+  await flush();
+  const x0 = game.ship.pos.x;
+  game.ship.vel.x = 1;
+  frames(30);
+  const shown = !nodes.link.classList.contains('hidden') && /НЕТ СВЯЗИ/.test(nodes.linkTitle.textContent);
+  ok(session.mode === 'lost' && Math.abs(game.ship.pos.x - x0) < 1e-9 && shown,
+    'связь пропала — игра стоит под надписью «нет связи»: корабль не сдвинулся ни на метр');
+  // Вернулась — игра едет дальше сама.
+  // Пробы связи идут по настоящим часам: раз в три секунды.
+  serverUp = true;
+  await new Promise((r) => setTimeout(r, 3100));
+  frames(1);
+  await new Promise((r) => setTimeout(r, 30));
+  frames(10);
+  ok(session.mode === 'online' && game.ship.pos.x > x0 && nodes.link.classList.contains('hidden'),
+    'связь вернулась — надпись ушла, игра поехала дальше сама');
 }
 
 console.log(fails === 0 ? '  --- случай пройден' : '  --- случай упал');

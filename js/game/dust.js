@@ -100,7 +100,8 @@ const _back = v3();
 const _aft = v3();
 const _load = { lift: 0, main: 0 };
 const _wash = makeWash();
-const _rgb = [0, 0, 0];
+// Четвёртая ячейка — высота над морем (js/gl/terrain.js, sample).
+const _rgb = [0, 0, 0, 0];
 
 /**
  * Пересчитать пыль.
@@ -312,8 +313,10 @@ function updateAirDust(dust, game, dt) {
     const g = 1 + terrain.displace(dx, dy, dz);
     terrain.color(dx, dy, dz, _rgb);
     // Цвет — самого грунта, посветлее: это поднятая пыль, а не тень. Над
-    // водой струя поднимает не пыль, а брызги, и они белые.
-    const wet = _rgb[2] - Math.max(_rgb[0], _rgb[1]) > 0.02;
+    // водой струя поднимает не пыль, а брызги, и они белые. Вода — по
+    // высоте над морем, а не по синеве: синим море теперь красит шейдер,
+    // а цвет вершин под водой — это дно.
+    const wet = _rgb[3] < 0;
     const col = wet ? [0.86, 0.9, 0.94]
       : [_rgb[0] * 0.7 + 0.28, _rgb[1] * 0.7 + 0.26, _rgb[2] * 0.7 + 0.22];
     list.push({

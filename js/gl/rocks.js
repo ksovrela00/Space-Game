@@ -85,6 +85,8 @@ const hash4 = (a, b, c) => {
 export function scatterRocks(body, dir, radius, out = []) {
   out.length = 0;
   const R = body.radius;
+  const terrain = terrainOf(body);
+  const sea = !!terrain.kindCfg.liquid;
   // Грань куба и координаты на ней. Параметр грани идёт от -1 до 1 через
   // тангенс (см. quadtree.js), поэтому линейные координаты выборки
   // переводим в него арктангенсом — иначе у краёв грани шаг решётки
@@ -112,6 +114,8 @@ export function scatterRocks(body, dir, radius, out = []) {
       // Площадка города расчищена: валуны на перроне и в улицах означали
       // бы, что город никто не строил, а просто положил поверх камней.
       if (body.plate && plateAt(body.plate, d.x, d.y, d.z) > 0) continue;
+      // На море камней нет: валун, лежащий на воде, — это плавучий валун.
+      if (sea && terrain.displace(d.x, d.y, d.z) <= 0) continue;
       // Размер: мелких много, крупных мало — так и выглядит настоящая
       // россыпь (распределение размеров у них степенное и крутое).
       const t = h[3] ** 3;

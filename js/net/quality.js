@@ -79,7 +79,7 @@ export function linkGrade(ping, loss) {
  * Состояние связи для приборов.
  *
  * @param net состояние сокета (js/net/socket.js)
- * @param api режим связи с API: 'online' | 'offline' | 'none'
+ * @param api режим связи с API: 'online' | 'lost' | 'none'
  */
 export function linkState(net, now, api = 'online') {
   const mode = net && net.state ? net.state : 'off';

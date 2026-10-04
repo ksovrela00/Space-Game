@@ -9,6 +9,7 @@ import { MAT } from '../models/hulldetail.js';
 import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
 import { SHIP_SHADOW_GLSL } from './shipshadow.js';
+import { WATER_GLSL } from './water.js';
 
 // Глубина пишется логарифмически (см. mat4.js): иначе на диапазоне от
 // метров до миллионов километров начинается z-fighting.
@@ -320,6 +321,8 @@ ${GRAIN_GLSL}
 // Обшивка корабля: швы, переплёт мостика, сопла (js/gl/hull.js).
 ${HULL_GLSL}
 ${AIR_GLSL}
+// Море водного мира (js/gl/water.js): урез, толща, волны, прибой.
+${WATER_GLSL}
 ${detail ? `
 // Во сколько раз расширен след пикселя: ручка цены кадра, её ведёт
 // регулятор в js/gl/detail.js. Единица — полная резкость.
@@ -353,6 +356,14 @@ ${LOG_DEPTH_FRAG}
   // не освещают, он светит сам.
   vec3 emit = vec3(0.0);
 
+  // Море (js/gl/water.js). У грунта водного мира в альфе цвета вершины —
+  // высота над морем по сетке, км (светиться грунту нечем, флаг там
+  // свободен). Ширина уреза и след пикселя на воде — здесь, вне ветвлений:
+  // производные внутри них не определены.
+  float seaH = vColor.a;
+  float seaAA = max(fwidth(vColor.a), 2e-6);
+  float seaFw = max(length(dFdx(vViewPos)), length(dFdy(vViewPos))) * 1000.0;
+
   // Готовая поверхность из текстуры: нормаль берётся целиком из неё,
   // поэтому освещение не зависит от того, какой уровень сетки под
   // текстурой — переключения LOD в картинке не видны вовсе.
@@ -380,16 +391,25 @@ ${detail ? `
     // единицы — иначе не выставленный uniform (нуль) обнулил бы след.
     float fw = max(max(length(dFdx(dirL)), length(dFdy(dirL))), 1e-9)
              * max(uFwScale, 1.0);
-    if ((uBakeFw <= 0.0 || fw < 2.0 * uBakeFw) && dot(n, uSunDir) > NIGHT_SKIP) {
+    // Над глубоким морем деталь не считается вовсе: урез ею не сдвинуть,
+    // дна под такой толщей не видно, а пикселей моря — пол-экрана.
+    if ((uBakeFw <= 0.0 || fw < 2.0 * uBakeFw) && dot(n, uSunDir) > NIGHT_SKIP
+        && !(uWater > 0.5 && vColor.a < -SEA_SKIP_DEEP)) {
       vec3 helper = abs(dirL.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
       vec3 U = normalize(cross(helper, dirL));
       vec3 V = cross(dirL, U);
       float dh; vec2 dg; float dcr;
       dDetail(dirL, U, V, fw, dh, dg, dcr);
-      // Вода должна оставаться гладкой: рябь на океане в километры высотой
-      // выглядит нелепо. Признак воды — синева цвета вершины; считать для
-      // этого ещё и крупные октавы шума было бы вдвое дороже.
-      float wet = clamp((vColor.b - max(vColor.r, vColor.g)) * 4.0, 0.0, 1.0);
+      // Урез водного мира — по высоте над морем: сетка плюс мелкие октавы,
+      // которые деталь только что посчитала. Это та же функция, по которой
+      // игра решает «вода или суша» (js/game/surface.js, waterAt). Вода
+      // гладкая: рельеф дна под ней — дело толщи, а не нормали. У тел без
+      // жидкого моря признак прежний — синева цвета вершины (замёрзшее
+      // море ледяного мира).
+      if (uWater > 0.5) seaH += dh * uSeaR;
+      float wet = uWater > 0.5
+        ? 1.0 - smoothstep(-seaAA, seaAA, seaH)
+        : clamp((vColor.b - max(vColor.r, vColor.g)) * 4.0, 0.0, 1.0);
       float dry = 1.0 - 0.85 * wet;
       // Площадка города срезана до ровного: мелкого рельефа на ней нет
       // ни в геометрии, ни здесь. Иначе бетон перрона выглядел бы
@@ -410,13 +430,56 @@ ${detail ? `
     }
   }
 ` : ''}
+  // Море: где урез, куда наклонена вода, где пена и мокрый песок.
+  float water = 0.0;
+  float foam = 0.0;
+  float seaRough = 0.0;
+  float seaDepth = 0.0;
+  vec3 seaN = n;
+  vec3 seaUp = n;
+  // Суша выше наката за воду не платит ничем: ни волн, ни пены, ни
+  // мокрого песка. Иначе восемь косинусов шли бы на каждый пиксель
+  // грунта водного мира — в том числе под обшивкой стоящего на пляже
+  // корабля, которую грунт потом закрывает (логарифмическая глубина
+  // ранний тест глубины выключает).
+  if (uWater > 0.5 && seaH < SEA_SWASH * 1.4 + seaAA) {
+    seaUp = normalize(uNormalMat * normalize(vLocal));
+    vec2 longPh;
+    seaN = normalize(seaUp - seaSlope(vViewPos * 1000.0, seaUp, seaFw, seaRough, longPh));
+    // Накат: урез поднимается на пляж и откатывается раз в период
+    // прибоя. Вдоль берега он рвётся — где волна приходит раньше, где
+    // позже: фаза сдвинута двумя длинными волнами.
+    float brk = 1.3 * sin(longPh.x * 0.37 + longPh.y * 0.23);
+    float swash = SEA_SWASH * (0.5 + 0.5 * sin(uShoreT + brk));
+    float h = seaH - swash;
+    water = 1.0 - smoothstep(-seaAA, seaAA, h);
+    seaDepth = max(-h, 0.0) * 1000.0;
+    // Мокрый песок: всё, до чего накат достаёт, темнее сухого.
+    albedo *= 1.0 - SEA_WET_DARK * (1.0 - smoothstep(SEA_SWASH * 0.8, SEA_SWASH * 1.4, seaH));
+    // Гребни прибоя — линии равной глубины; с фазой прибоя они идут к
+    // берегу. Мельче пикселя — не рисуются: вдали полосы дали бы муар.
+    float crest = sin(seaDepth * SURF_K + uShoreT + brk);
+    float bands = 1.0 - smoothstep(0.8, 2.5, seaAA * 1000.0 * SURF_K);
+    float zone = 1.0 - smoothstep(0.0, SURF_ZONE, seaDepth);
+    // Пена рвётся: гребень белеет кусками, а не сплошной линией вдоль
+    // всего берега — иначе прибой читается изолиниями карты.
+    float rip = 0.5 + 0.5 * sin(longPh.x * 2.7 + longPh.y * 1.9 + uShoreT * 0.5);
+    foam = smoothstep(0.35, 1.0, crest) * zone * zone * bands * smoothstep(0.25, 0.8, rip);
+    // Кромка наката — тонкая пена у самого уреза. Издали её нет: линия
+    // уже пикселя обвела бы весь берег белым.
+    float edge = (1.0 - smoothstep(0.0, 0.15, seaDepth)) * water
+               * (1.0 - smoothstep(2.0, 20.0, seaFw));
+    foam = max(foam, 0.8 * edge) * water;
+  }
+
   // Фотография грунта — САМАЯ МЕЛКАЯ ступень, поэтому последней: всё,
   // что крупнее, уже посчитано выше (js/gl/ground.js).
   if (uGrainOn > 0.5) {
     vec3 dirG = normalize(vLocal);
-    // Вода остаётся гладкой — признак тот же, что у мелкого рельефа:
-    // синева цвета вершины. Гравий на море выглядел бы нелепо.
-    float gw = 1.0 - clamp((vColor.b - max(vColor.r, vColor.g)) * 4.0, 0.0, 1.0);
+    // Вода остаётся гладкой. Признак — урез водного мира, у остальных
+    // тел — синева цвета вершины. Гравий на море выглядел бы нелепо.
+    float gw = 1.0 - (uWater > 0.5 ? water
+      : clamp((vColor.b - max(vColor.r, vColor.g)) * 4.0, 0.0, 1.0));
 ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки не гравий' : ''}
     if (gw > 0.01) groundPhoto(dirG, vGrain, uNormalMat, gw, n, albedo);
   }
@@ -424,6 +487,8 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   // Обшивка корабля. У всего, что не корабль, материала нет (vMat = 0),
   // и блок пропускается одним сравнением.
   if (vMat > 0.5) hullDetail(vViewPos, n, albedo, emit);
+  // Над водой свет ложится по волнам, а не по грунту дна.
+  if (water > 0.0) n = normalize(mix(n, seaN, water));
   // Свой корпус ИЗНУТРИ (вид из рубки): изнанка обшивки у фонаря — это
   // стены рубки. Снаружи она тёмный борт в тени, а изнутри — крашеная
   // стена, освещённая тем, что попало под стекло.
@@ -439,7 +504,11 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   // Свой корабль заслоняет солнце: гаснет прямой свет, рассеянный
   // остаётся. Нормаль здесь уже развёрнута к камере, и раз lam > 0 —
   // к солнцу тоже: по ней точку и отодвигают от поверхности.
-  if (uShipShadowOn > 0.5 && lam > 0.0) lam *= shipShadowAt(vViewPos, n);
+  float sunVis = 1.0;
+  if (uShipShadowOn > 0.5 && lam > 0.0) {
+    sunVis = shipShadowAt(vViewPos, n);
+    lam *= sunVis;
+  }
   float lit = uAmbient + (1.0 - uAmbient) * lam;
   if (inner) lit = max(lit, 0.36);
 
@@ -482,8 +551,16 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   // выжигают кадр в белое.
   lit = min(lit, 1.45);
 
-  float shade = mix(lit, 1.0, vColor.a);
+  // Альфа цвета вершины — «светится сам», кроме грунта водного мира:
+  // у него там высота над морем.
+  float shade = mix(lit, 1.0, uWater > 0.5 ? 0.0 : vColor.a);
   vec3 rgb = albedo * shade + emit;
+  // Море поверх дна: толща, отражение неба, блик солнца — и пена.
+  if (water > 0.0) {
+    vec3 sea = seaColor(albedo, seaN, seaUp, -normalize(vViewPos), seaDepth, lit, sunVis, seaRough);
+    rgb = mix(rgb, sea, water);
+  }
+  if (foam > 0.0) rgb = mix(rgb, SEA_FOAM * lit, foam);
 
   // Дымка: воздух между камерой и ЭТОЙ точкой. Расстояние здесь
   // известно точно — это сам фрагмент, — поэтому ни сфер грунта, ни

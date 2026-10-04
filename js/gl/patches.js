@@ -155,7 +155,9 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
   const sag = parentCell * parentCell / 8;
   const drop = sag * 3 + terrain.detailGap(parent) * 1.5 + 1e-6;
 
-  const rgb = [0, 0, 0];
+  // Четвёртая ячейка — высота над морем (terrain.sample, js/gl/water.js).
+  const rgb = [0, 0, 0, 0];
+  const sea = terrain.kindCfg.liquid ? body.radius : 0;
   const dir = { x: 0, y: 0, z: 0 };
   let idx = 0;                 // индекс текущей вершины сетки
   let result = null;
@@ -211,7 +213,8 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
         colors[idx * 4] = rgb[0];
         colors[idx * 4 + 1] = rgb[1];
         colors[idx * 4 + 2] = rgb[2];
-        colors[idx * 4 + 3] = 0;
+        // Высота над морем, км (js/gl/water.js); у тел без моря — нуль.
+        colors[idx * 4 + 3] = rgb[3] * sea;
       }
       if (idx < gridVerts) return false;
 
@@ -248,7 +251,7 @@ export function patchBuilder(body, center, half, holeFrac, detail, parent, paren
           colors[s * 4] = colors[src * 4];
           colors[s * 4 + 1] = colors[src * 4 + 1];
           colors[s * 4 + 2] = colors[src * 4 + 2];
-          colors[s * 4 + 3] = 0;
+          colors[s * 4 + 3] = colors[src * 4 + 3];
           grain[s * 2] = grain[src * 2];
           grain[s * 2 + 1] = grain[src * 2 + 1];
         }

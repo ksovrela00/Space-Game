@@ -9,11 +9,12 @@ import { warpDistance, offWarpAxis, warpAxis } from '../game/warp.js';
 import { LIMITS, dockingQuality } from '../game/docking.js';
 import { gearLabel, landedInfo, LAND } from '../game/landing.js';
 import { SLOT } from '../models/stations.js';
-import { targetLabel, targetKind } from '../game/nav.js';
+import { targetLabel, targetKind, currentTarget } from '../game/nav.js';
 import { gravityAt } from '../game/gravity.js';
 import { fuelCap, fuelLevel } from '../game/fuel.js';
 import { altitudeOf, worldPoint } from '../game/surface.js';
-import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK } from './theme.js';
+import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK, NPC_COLOR } from './theme.js';
+import { npcFade, npcGear, hullName } from '../game/npc.js';
 import { Q } from '../core/quality.js';
 import { L, numLocale } from '../core/lang.js';
 // Палитра живёт отдельно (js/ui/theme.js): её делят угловые панели
@@ -830,7 +831,9 @@ function drawTargetCard(ctx, px, py, game, target, q) {
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = CY;
   const kind = targetKind(target);
-  ctx.fillText(kind ? L('ЦЕЛЬ') + ' · ' + L(kind) : L('ЦЕЛЬ'), px + 12, py + 14);
+  // У NPC рядом с видом — корпус: Challenger и Prometheus — разные цели.
+  const hull = target && target.npc ? ' · ' + hullName(target.type).toUpperCase() : '';
+  ctx.fillText(kind ? L('ЦЕЛЬ') + ' · ' + L(kind) + hull : L('ЦЕЛЬ'), px + 12, py + 14);
 
   ctx.font = '22px Consolas, monospace';
   ctx.fillStyle = target ? AMBER : CY_DIM;
@@ -1165,7 +1168,7 @@ function drawLink(ctx, game) {
 
   // Цвет у полосок и у надписи один: разойдись они — и прибор пришлось бы
   // читать дважды.
-  const color = !live ? (l.api === 'offline' || l.mode === 'connecting' ? AMBER
+  const color = !live ? (l.mode === 'connecting' ? AMBER
     : l.mode === 'down' ? RED : CY_DIM)
     : l.grade >= 3 ? GREEN : l.grade === 2 ? AMBER : RED;
 
@@ -1179,8 +1182,7 @@ function drawLink(ctx, game) {
       + (n ? L('  В СЕТИ ') + n : '')
       + (l.loss > 0.05 ? L('  ПОТЕРИ ') + Math.round(l.loss * 100) + '%' : '');
   } else {
-    text = l.api === 'offline' ? L('АВТОНОМНО')
-      : l.mode === 'connecting' ? L('СОЕДИНЕНИЕ')
+    text = l.mode === 'connecting' ? L('СОЕДИНЕНИЕ')
         : l.mode === 'down' ? L('СВЯЗЬ ОБОРВАНА')
           : L('БЕЗ СЕТИ');
   }
@@ -1270,6 +1272,7 @@ function drawGunAim(ctx, cam, game) {
 function drawPeerMarks(ctx, cam, game) {
   const peers = game.peers;
   if (!peers || !peers.length) return;
+  const target = game.nav ? currentTarget(game.nav) : null;
   ctx.save();
   ctx.lineJoin = 'round';
   ctx.font = '11px Consolas, monospace';
@@ -1281,6 +1284,12 @@ function drawPeerMarks(ctx, cam, game) {
     const s = cam.project(c, _pp);
     if (s.x < 8 || s.x > cam.w - 8 || s.y < 8 || s.y > cam.h - 8) continue;
     const r = 6;
+    const dist = dist3(cam.pos, p.pos);
+    // NPC — своим цветом, и к краю локатора метка гаснет: сервер прячет
+    // NPC дальше него (js/game/npc.js, npcFade).
+    const col = p.npc ? NPC_COLOR : PEER;
+    ctx.globalAlpha = p.npc ? npcFade(dist) : 1;
+    if (ctx.globalAlpha <= 0.01) continue;
     const box = () => {
       ctx.beginPath();
       ctx.rect(s.x - r, s.y - r, r * 2, r * 2);
@@ -1291,7 +1300,7 @@ function drawPeerMarks(ctx, cam, game) {
     ctx.strokeStyle = 'rgba(0,0,0,0.65)';
     ctx.lineWidth = 3.5;
     box();
-    ctx.strokeStyle = PEER;
+    ctx.strokeStyle = col;
     ctx.lineWidth = 1.4;
     box();
 
@@ -1301,7 +1310,8 @@ function drawPeerMarks(ctx, cam, game) {
     const th = game.targetHull;
     const hull = th && th.id === p.id && (game.now || 0) - th.at < 6
       ? '  ' + Math.round((th.hull / (th.max || 100)) * 100) + '%' : '';
-    const label = (p.name || L('ПИЛОТ')) + '  ' + fmtDist(dist3(cam.pos, p.pos)) + hull;
+    const who = p.npc ? (p.name || 'NPC') + ' · ' + hullName(p.type) : (p.name || L('ПИЛОТ'));
+    const label = who + '  ' + fmtDist(dist) + hull;
 
     // Корпус и щит — полосками НАД квадратом. Числами их пришлось бы
     // читать, а в бою читать некогда: нужен один взгляд, чтобы понять,
@@ -1323,9 +1333,20 @@ function drawPeerMarks(ctx, cam, game) {
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.7)';
     ctx.strokeText(label, s.x + r + 6, s.y);
-    ctx.fillStyle = PEER;
+    ctx.fillStyle = col;
     ctx.fillText(label, s.x + r + 6, s.y);
+    // У выбранного NPC — что на нём стоит: оружие, щит и всё сверх
+    // заводского. Это и есть ответ на вопрос «стоит ли с ним связываться».
+    if (p.npc && target === p && p.eq) {
+      const gear = npcGear(p.eq, p.ex).join(' · ');
+      ctx.font = '10px Consolas, monospace';
+      ctx.strokeText(gear, s.x + r + 6, s.y + 13);
+      ctx.fillStyle = 'rgba(227,214,160,0.8)';
+      ctx.fillText(gear, s.x + r + 6, s.y + 13);
+      ctx.font = '11px Consolas, monospace';
+    }
   }
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 
@@ -1438,12 +1459,23 @@ function drawScanner(ctx, cx, cy, game) {
   ctx.save();
   // Чужие пилоты в системе: их отметки на кольце оранжевые, но по одной
   // точке не понять, сколько их и есть ли они вообще, — поэтому число.
-  const peers = game.peers ? game.peers.length : 0;
-  if (peers > 0) {
-    ctx.fillStyle = '#ff9f6b';
+  // NPC считаются отдельно: пилот — это человек, и путать их нельзя.
+  let peers = 0, npcs = 0;
+  for (const p of game.peers || []) {
+    if (p.npc) npcs++;
+    else peers++;
+  }
+  if (peers > 0 || npcs > 0) {
     ctx.font = '11px Consolas, monospace';
     ctx.textAlign = 'right';
-    ctx.fillText(L('ПИЛОТОВ РЯДОМ ') + peers, cx + rw, cy - rh - 6);
+    const npcText = npcs > 0 ? 'NPC ' + npcs : '';
+    ctx.fillStyle = NPC_COLOR;
+    ctx.fillText(npcText, cx + rw, cy - rh - 6);
+    if (peers > 0) {
+      ctx.fillStyle = PEER;
+      ctx.fillText(L('ПИЛОТОВ РЯДОМ ') + peers + (npcs > 0 ? ' · ' : ''),
+        cx + rw - ctx.measureText(npcText).width, cy - rh - 6);
+    }
   }
   ctx.strokeStyle = CY_DIM;
   ctx.lineWidth = 1;
