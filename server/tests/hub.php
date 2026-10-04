@@ -341,6 +341,44 @@ ok(isset($seenPeer['hull'], $seenPeer['hmax'], $seenPeer['sh'], $seenPeer['smax'
     . ($seenPeer['sh'] ?? '—') . '/' . ($seenPeer['smax'] ?? '—'));
 
 
+// Оружейные гнёзда: стоящее оружие бьёт из каждого гнезда корпуса в своём
+// темпе (Combat::mounts, gunMounts в server/data/specs.php). У крейсера
+// пять башен на крыше — и попадания от него принимаются впятеро чаще; у
+// торговца с одной спаренной пушкой — по-прежнему не чаще восьми в
+// секунду. Два попадания в один миг не проходят ни у кого.
+$g = Auth::register('kreiser', 'secret', 'КРЕЙСЕР');
+$shipG = (int) Players::ship($g['player_id'])['id'];
+$promType = (int) Db::one('SELECT `id` FROM `ship_type` WHERE `code`=?', ['prometheus']);
+Db::update('ship', ['type_id' => $promType], '`id`=?', [$shipG]);
+ok(Combat::mounts($shipG) === 5 && Combat::mounts($shipA) === 1,
+    'оружейных гнёзд у крейсера ' . Combat::mounts($shipG) . ', у торговца ' . Combat::mounts($shipA));
+$cg = new FakeConn('g');
+$hub->open($cg, $t);
+$hub->message($cg, json_encode(['t' => 'hello', 'token' => $g['token']]), $t);
+$t += 1;
+$hub->message($cg, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 0, 'y' => 1, 'z' => 0]), $t);
+$hub->message($ca, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 0, 'y' => 0, 'z' => 0]), $t);
+$hub->message($cb, json_encode(['t' => 'pos', 'sys' => 0, 'x' => 1, 'y' => 0, 'z' => 0]), $t);
+$hub->tick($t);
+// Сколько из двух попаданий с промежутком $dt принято: по корпусу цели
+// (щит снят, урон лазера — 3).
+$landed = static function (FakeConn $conn, float $dt) use (&$t, $hub, $shipB, $b, $hullOf): int {
+    Db::update('ship', ['hull' => 100, 'shield' => 0, 'hit_at' => Db::now()], '`owner_id`=?', [$b['player_id']]);
+    $t += 1;
+    $h0 = $hullOf($b['player_id']);
+    $hub->message($conn, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t);
+    $hub->message($conn, json_encode(['t' => 'hit', 'id' => $shipB, 'w' => 'laser_g']), $t + $dt);
+    return (int) round(($h0 - $hullOf($b['player_id'])) / (float) Combat::weapon('laser_g')['damage']);
+};
+$fromTrader = $landed($ca, 0.07);
+$fromCruiser = $landed($cg, 0.07);
+$sameInstant = $landed($cg, 0.0);
+ok($fromTrader === 1 && $fromCruiser === 2 && $sameInstant === 1,
+    "два попадания через 70 мс: от торговца принято $fromTrader, от крейсера с пятью гнёздами — $fromCruiser; "
+    . "в один миг от крейсера — $sameInstant");
+Db::update('ship', ['hull' => 100, 'shield' => 0], '`owner_id`=?', [$b['player_id']]);
+$hub->close($cg, $t);
+
 // --- прыжок: пилота между системами нет ---------------------------------------
 //
 // Игра ставит корабль к звезде НОВОЙ системы за несколько секунд до

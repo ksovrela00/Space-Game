@@ -6854,6 +6854,36 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // Стволы работают по очереди: залпом из всех сразу темп удваивается.
   ok(Math.abs(first[0].x - third[0].x) > 0.03, 'стволы бьют по очереди, а не оба сразу');
 
+  // Оружейные гнёзда (gunMounts в server/data/specs.php). У крейсера их
+  // пять — спаренные башни на крыше среднего корпуса: болты вылетают из
+  // их дул, каждый ствол бьёт в темпе оружия, вместе — впятеро чаще, по
+  // кругу всех пяти. У торговца гнездо одно: спаренная пушка, стволы по
+  // очереди, темп оружия.
+  {
+    const { specsDoc } = await import('../js/game/specs.js');
+    const promHull = buildPrometheus();
+    const P = promHull.guns || [];
+    const above = P.every((p) => !promHull.prom.inside(p.x * 1000, p.y * 1000, p.z * 1000)
+      && p.y * 1000 > promHull.prom.decks.find((d) => d.n === 6).floor);
+    const gm = makeGuns('laser_g');
+    let shots = 0;
+    const used = new Set();
+    for (let i = 0; i < 600; i++) {
+      const out = fireGuns(gm, ship, still, P, [], 5);
+      for (const b of out) { shots++; used.add(Math.round(b.x * 1e6) + ':' + Math.round(b.z * 1e6)); }
+      updateGuns(gm, 1 / 600, []);
+    }
+    const g1 = makeGuns('laser_g');
+    let one = 0;
+    for (let i = 0; i < 600; i++) { one += fireGuns(g1, ship, still, ports, []).length; updateGuns(g1, 1 / 600, []); }
+    const types = specsDoc() ? specsDoc().shipTypes : [];
+    const mounts = (c) => ((types.find((t) => t.code === c) || {}).spec || {}).gunMounts;
+    ok(P.length === 5 && above && mounts('prometheus') === 5 && mounts('challenger') === 1 &&
+       Math.abs(shots - 5 * spec.rate) <= 1 && used.size === 5 && Math.abs(one - spec.rate) <= 1,
+    `оружейных гнёзд у крейсера ${mounts('prometheus')} — ${P.length} стволов в дулах башен над обшивкой; ` +
+    `за секунду ${shots} выстрелов из ${used.size} разных стволов, у торговца (гнёзд ${mounts('challenger')}) — ${one}`);
+  }
+
   // Болт летит и умирает на своей дальности, а не живёт вечно.
   const g3 = makeGuns('laser_g');
   fireGuns(g3, ship, null, [v3(0, 0, 0)], []);

@@ -64,7 +64,9 @@ export function setHull(code) {
   // длин; у «Прометея» — 2.8 (длиннее он втрое, но тоньше в поясе).
   HULL.k = Math.cbrt(HULL.volume / REF.volume);
   HULL.shield = shieldAxesOf(mesh.verts, e.size);
-  HULL.guns = gunPortsOf(e.size);
+  // Откуда вылетают болты: у корпуса со своими оружейными башнями
+  // («Прометей», mesh.guns) — из их дул, иначе — спаренная пушка в носу.
+  HULL.guns = mesh.guns || gunPortsOf(e.size);
   HULL.eye = mesh.eye;                // км, глаз пилота (кокпит или мостик)
   HULL.exhausts = mesh.exhausts;
   return HULL;

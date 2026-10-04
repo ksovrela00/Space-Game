@@ -200,10 +200,13 @@ export function aimDir(guns, ship, target, out = v3()) {
 /**
  * Выстрел, если пушка остыла.
  *
+ * @param mounts оружейных гнёзд корпуса (SHIP.gunMounts): каждое бьёт
+ *               стоящим оружием в его темпе, и вместе они стреляют в mounts
+ *               раз чаще — по очереди, из своих стволов (ports)
  * @returns массив новых болтов (пустой, если не выстрелили) — их же надо
  *          отправить в сеть, чтобы чужие видели огонь.
  */
-export function fireGuns(guns, ship, target, ports, out = []) {
+export function fireGuns(guns, ship, target, ports, out = [], mounts = 1) {
   out.length = 0;
   if (guns.cool > 0) return out;
   const spec = guns.spec;
@@ -217,7 +220,7 @@ export function fireGuns(guns, ship, target, ports, out = []) {
 
   out.push(makeBolt(from, guns.aim, spec, true, 0, ship.vel));
   guns.bolts.push(out[0]);
-  guns.cool = 1 / spec.rate;
+  guns.cool = 1 / (spec.rate * Math.max(1, mounts || 1));
   guns.shots++;
   return out;
 }

@@ -125,6 +125,7 @@ export function buildPrometheus() {
   const kit = new Kit(303);
   const hatches = [];
   const lights = [];
+  const gunsAt = [];          // дула оружейных башен (оси сборки, м)
   const wells = [];
   let windows = 0, lit = 0;
 
@@ -615,7 +616,14 @@ export function buildPrometheus() {
     }
     kit.box(s > 0 ? 9.4 : -9.6, s > 0 ? 9.6 : -9.4, 26, 26.35, 73, 140, { c: COL.mast, solid: false, mat: MAT.plain });
   }
-  for (const [x, z] of [[-7.5, 90], [7.5, 90], [-7.5, 124], [7.5, 124], [0, 104]]) turret(x, 26, z);
+  // Пять башен на крыше среднего корпуса — оружейные гнёзда корабля
+  // (gunMounts в server/data/specs.php): болты вылетают из их дул, между
+  // спаренными стволами. Башни ПРО на палубе кормы — не гнёзда: они
+  // смотрят и в корму, и закрыты от носа башней-«островом».
+  for (const [x, z] of [[-7.5, 90], [7.5, 90], [-7.5, 124], [7.5, 124], [0, 104]]) {
+    turret(x, 26, z);
+    gunsAt.push([x, 26 + 1.18, z + 4.1]);
+  }
   // Короба на крыше — люки обслуживания.
   for (const z of [101, 116]) for (const s of [1, -1]) kit.box(s * 1.5, s * 3.3, 26, 26.7, z, z + 2.4, { c: COL.greeble, solid: false, ch: 0.2 });
 
@@ -738,6 +746,9 @@ export function buildPrometheus() {
   // их берёт игра у текущего корпуса (js/game/hull.js).
   mesh.volumeM3 = mass.volume;
   mesh.eye = toModel(BRIDGE_EYE);
+  // Оружейные гнёзда — дула башен, км в осях модели (как gunPortsOf у
+  // «Челленджера»): из них вылетают болты (js/game/hull.js, guns).
+  mesh.guns = gunsAt.map(toModel);
   // Сведения для проверок и следующих шагов (помещения, шлюзы, шасси) —
   // в осях модели, метрах: так же, как у помещений «Челленджера».
   const toM = (p) => [p[0], p[1] - y0, p[2] - z0];

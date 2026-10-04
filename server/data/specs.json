@@ -14,7 +14,8 @@
                 "maxHull": 100,
                 "fuelMax": 12,
                 "fuelReserve": 1.2,
-                "hitRadius": 0.035
+                "hitRadius": 0.035,
+                "gunMounts": 1
             }
         },
         {
@@ -30,7 +31,8 @@
                 "maxHull": 600,
                 "fuelMax": 270,
                 "fuelReserve": 27,
-                "hitRadius": 0.1
+                "hitRadius": 0.1,
+                "gunMounts": 5
             }
         }
     ],

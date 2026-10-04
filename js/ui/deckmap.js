@@ -288,9 +288,10 @@ export function drawDeckMap(ctx, w, h, game, I) {
     ctx.fillText((mine ? '● ' : '  ') + L(d.deck) + (goalDeck && goalDeck === d.deck ? '  ◆' : ''), lx + sc(8), y + row * 0.65);
   });
 
-  // «Закрыть» — в правом верхнем углу, над списком палуб.
+  // «Закрыть» — над списком палуб, по его левой кромке: в самом углу
+  // кадра — кнопка полного экрана.
   {
-    const bw = sc(118), bh = sc(30), bx = w - pad - bw, by = sc(20);
+    const bw = sc(118), bh = sc(30), bx = w - listW - pad, by = sc(22);
     const hov = M.hover === DECKMAP_CLOSE;
     ctx.fillStyle = hov ? 'rgba(255,204,102,0.28)' : 'rgba(79,179,224,0.12)';
     ctx.fillRect(bx, by, bw, bh);

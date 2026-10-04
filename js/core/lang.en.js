@@ -956,6 +956,8 @@ export const EN = {
   'ЩЕЛЧОК ПО ПОМЕЩЕНИЮ — ПУТЬ · КОЛЕСО ИЛИ ←→ — ПАЛУБА · ↑↓ И ENTER — С КЛАВИАТУРЫ · M — ЗАКРЫТЬ':
     'CLICK A ROOM — ROUTE · WHEEL OR ←→ — DECK · ↑↓ AND ENTER — KEYBOARD · M — CLOSE',
   'ЩЕЛЧОК — ПУТЬ: ': 'CLICK — ROUTE: ',
+  'ОРУЖЕЙНЫЕ ГНЁЗДА': 'WEAPON HARDPOINTS',
+  'ОРУЖЕЙНЫХ ГНЁЗД: ': 'WEAPON HARDPOINTS: ',
   'ЗАКРЫТЬ': 'CLOSE',
   'НАЖМИТЕ НА ПОМЕЩЕНИЕ — ПРОЛОЖИТЬ ПУТЬ · НА ПАЛУБУ СПРАВА — ЕЁ ПЛАН':
     'TAP A ROOM — SET ROUTE · TAP A DECK ON THE RIGHT — ITS PLAN',

@@ -2456,7 +2456,9 @@ function gunTarget() {
 }
 
 function fireNow() {
-  const fired = fireGuns(game.guns, ship, gunTarget(), HULL.guns, _fired);
+  // Гнёзд у крейсера пять: болты идут из всех башен по очереди, и темп —
+  // впятеро (server/data/specs.php, gunMounts).
+  const fired = fireGuns(game.guns, ship, gunTarget(), HULL.guns, _fired, SHIP.gunMounts || 1);
   if (!fired.length) return;
   const b = fired[0];
   // Чужие увидят выстрел только если мы о нём скажем: сервер пересылает
@@ -3698,8 +3700,10 @@ function render() {
   hud.begin();
   if (game.state.mode === ST.MAP) drawMap(hud, game);
   else if (game.walk.on && game.state.mode !== ST.HELP) {
-    drawWalkHud(hud, game, walkHints());
+    // План палубы — вместо приборов ходьбы, а не поверх: их подсказки и
+    // строки просвечивали сквозь подложку плана и мешали его читать.
     if (game.deckMap.open && game.interior) drawDeckMap(hud.ctx, hud.camera.w, hud.camera.h, game, game.interior);
+    else drawWalkHud(hud, game, walkHints());
   }
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
   // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в

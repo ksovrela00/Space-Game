@@ -19,8 +19,14 @@
 
 final class Combat
 {
-    /** Сколько попаданий в секунду принимаем от одного пилота. */
+    /** Сколько попаданий в секунду принимаем от одного пилота (одно гнездо). */
     public const HIT_RATE = 8;
+
+    /**
+     * Запас к темпу оружия: попадания приходят пачками — кадры стрелка и
+     * сеть неровные, — и два подряд бывают ближе, чем 1/темп.
+     */
+    public const RATE_SLACK = 1.25;
 
     /**
      * Запас к дальности оружия.
@@ -149,6 +155,31 @@ final class Combat
         $spec['code'] = $row['code'];
         $spec['name'] = $row['name'];
         return $spec;
+    }
+
+    /**
+     * Оружейных гнёзд у корабля — по его корпусу (ship_type.spec,
+     * gunMounts в server/data/specs.php). Стоящее оружие бьёт из каждого
+     * гнезда в своём темпе: у крейсера с пятью башнями попаданий впятеро
+     * больше, и сервер принимает их в этом темпе (Hub::hit).
+     */
+    public static function mounts(int $shipId): int
+    {
+        $spec = json_decode((string) Db::one(
+            'SELECT t.`spec` FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id` WHERE s.`id`=?',
+            [$shipId]
+        ), true);
+        return max(1, (int) (is_array($spec) ? ($spec['gunMounts'] ?? 1) : 1));
+    }
+
+    /**
+     * Сколько попаданий в секунду принимать от корабля с этим оружием:
+     * темп оружия на число гнёзд с запасом RATE_SLACK — но не меньше
+     * общего потолка HIT_RATE (одноствольным — прежние восемь).
+     */
+    public static function hitRate(array $gun, int $mounts): float
+    {
+        return max((float) self::HIT_RATE, (float) $gun['rate'] * max(1, $mounts) * self::RATE_SLACK);
     }
 
     /** Стоит ли это оружие на корабле, которым пилот командует. */

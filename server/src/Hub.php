@@ -568,9 +568,8 @@ final class Hub
             $this->send($conn, ['t' => 'error', 'code' => 'auth', 'message' => 'сначала hello']);
             return;
         }
-        if ($now - $peer['hitAt'] < 1.0 / Combat::HIT_RATE) {
-            return;                                  // темп выше оружейного
-        }
+        // Темп попаданий проверяется ниже, когда известно оружие и гнёзда
+        // корабля стрелка: у крейсера с пятью башнями он впятеро выше.
         $shipId = (int) ($msg['id'] ?? 0);
         $code = (string) ($msg['w'] ?? '');
         if ($shipId <= 0 || $shipId === $peer['ship'] || $code === '') {
@@ -606,12 +605,20 @@ final class Hub
         if (!isset($peer['guns'][$code])) {
             $peer['guns'][$code] = Combat::armed($peer['player'], $code)
                 ? Combat::weapon($code) : null;
+            // Гнёзда — у корабля стрелка (пересел — кэш сброшен, см. ниже).
+            if ($peer['guns'][$code] !== null) {
+                $peer['guns'][$code]['mounts'] = Combat::mounts((int) $peer['ship']);
+            }
         }
         $gun = $peer['guns'][$code];
         if ($gun === null) {
             $this->send($conn, ['t' => 'error', 'code' => 'no_gun',
                 'message' => 'такого оружия на корабле нет']);
             return;
+        }
+        // Попадания не чаще, чем бьют все гнёзда корабля этим оружием.
+        if ($now - $peer['hitAt'] < 1.0 / Combat::hitRate($gun, (int) $gun['mounts'])) {
+            return;                                  // темп выше оружейного
         }
 
         $d = sqrt(

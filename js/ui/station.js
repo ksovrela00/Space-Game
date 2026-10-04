@@ -31,7 +31,7 @@ import { ST } from '../game/state.js';
 import { SHIP } from '../game/ship.js';
 import { cargoTons } from '../game/player.js';
 import { fuelCap, fuelReserve, fuelLevel, warpRange } from '../game/fuel.js';
-import { useShipEquipment, specsDoc } from '../game/specs.js';
+import { useShipEquipment, specsDoc, typeSpec } from '../game/specs.js';
 import { describeModule, moduleDetail } from '../game/loadout.js';
 import { applyServer } from '../game/player.js';
 import { say } from '../game/state.js';
@@ -391,7 +391,11 @@ function shipsTab(game) {
       s.busy || money < h.price);
     const dims = m1(h.lengthM) + ' × ' + m1(h.widthM) + ' × ' + m1(h.heightM) + ' · '
       + Math.round(h.massT).toLocaleString(numLocale()) + L(' т');
-    return `<tr><td>${esc(h.name)}<div class="dim">${esc(L(h.title))}</div></td>
+    // Оружейных гнёзд у корпуса — из каталога (server/data/specs.php): у
+    // крейсера их пять, и выбирают его в том числе за это.
+    const spec = typeSpec(h.code);
+    const guns = spec && spec.gunMounts > 0 ? ' · ' + L('ОРУЖЕЙНЫХ ГНЁЗД: ') + spec.gunMounts : '';
+    return `<tr><td>${esc(h.name)}<div class="dim">${esc(L(h.title) + guns)}</div></td>
       <td class="v">${esc(dims)}</td><td class="acts">${act}</td></tr>`;
   }).join('');
   return `<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('В ЭТОМ ДОКЕ'))}</td></tr>${here}</table>

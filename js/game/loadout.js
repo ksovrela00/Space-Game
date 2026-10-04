@@ -24,6 +24,7 @@
 //   корабль остался бы без двигателя вовсе.
 
 import { WEAPONS } from './weapons.js';
+import { SHIP } from './ship.js';
 import { L, numLocale } from '../core/lang.js';
 
 /**
@@ -210,11 +211,13 @@ const plain = (spec) => Object.entries(spec)
  * карточке, где написано «3 урона», и в выстреле, который снимает четыре,
  * виноват всегда второй список.
  */
-function gun(w) {
+function gun(w, n = 1) {
+  // Стоящее оружие бьёт из всех оружейных гнёзд корпуса (SHIP.gunMounts):
+  // у крейсера — из пяти башен, и темп в карточке — общий, как в бою.
   return {
-    code: w.code, slot: 'gun', name: L(w.name) + ' · ' + L(w.mountName),
+    code: w.code, slot: 'gun', name: L(w.name) + ' · ' + L(w.mountName) + (w.ready && n > 1 ? ' × ' + n : ''),
     value: w.ready
-      ? w.damage + ' × ' + w.rate + L('/с, до ') + w.range + L(' км')
+      ? w.damage + ' × ' + (w.rate * n) + L('/с, до ') + w.range + L(' км')
       : L('ГНЕЗДО СВОБОДНО'),
     installed: !!w.ready,
     spec: {
@@ -274,6 +277,9 @@ export function modules() {
       });
     }
   }
-  for (const w of Object.values(WEAPONS)) rows.push(gun(w));
+  // Оружие: сколько у корпуса оружейных гнёзд, и что в них бьёт.
+  const n = Math.max(1, SHIP.gunMounts || 1);
+  rows.push({ code: 'mounts', slot: 'mounts', name: L('ОРУЖЕЙНЫЕ ГНЁЗДА'), value: String(n), installed: true, spec: { n } });
+  for (const w of Object.values(WEAPONS)) rows.push(gun(w, n));
   return rows;
 }
