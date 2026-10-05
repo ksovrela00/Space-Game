@@ -104,6 +104,7 @@ export function makeWalker() {
     from: null,          // откуда встали: взгляд головы в кресле
     grid: null,          // твёрдое, разложенное по клеткам
     crates: [],          // ящики груза в трюме (твёрдые, меняются с грузом)
+    props: [],           // вездеход в трюме: кузов и трап в осях носителя (js/game/hangar.js)
   };
 }
 
@@ -164,7 +165,26 @@ function makeWorld(w, interior, air = w.air || interior.air, buf = w._air || (w.
   }
   // Люки и трапы (js/game/airlock.js): закрытая панель — стена, трап —
   // ступени и поручни. Люки — того корабля, где стоит пилот.
-  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, airSolids(air, buf)) };
+  return { grid: w.grid, extra: doorSolids(interior).concat(w.crates, w.props || [],
+    air ? airSolids(air, buf) : restingBays(interior)) };
+}
+
+/**
+ * Плиты грузовых платформ в поднятом положении — пол трюма, пока у
+ * корабля нет состояния шлюзов (оно заводится после помещений, а у чужого
+ * корабля — когда к нему подходят). В полу трюма проём под платформу, и
+ * без этого он был бы ямой: так провалился маршрутный робот.
+ */
+function restingBays(interior) {
+  if (!interior.bays || !interior.bays.length) return [];
+  if (!interior._bayRest) {
+    interior._bayRest = [];
+    for (const b of interior.bays) {
+      interior._bayRest.push({ lo: [b.x[0], b.deck - b.plate, b.z[0]], hi: [b.x[1], b.deck, b.z[1]], bay: b.id, plate: true });
+      if (b.panelBox) interior._bayRest.push({ lo: b.panelBox.lo, hi: b.panelBox.hi, bay: b.id, panel: true });
+    }
+  }
+  return interior._bayRest;
 }
 
 const _deckAir = [];
@@ -555,6 +575,29 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
   return ev;
 }
 
+// Насколько вбок тело ищет проход, когда упёрлось плечом в кромку, м.
+const SLIP = 0.15;
+
+/**
+ * Сдвиг вбок, с которым шаг q (из p по оси ax) проходит: ближайший из
+ * 3, 6 … SLIP см в обе стороны. Сам сдвиг — не больше шага step за раз и
+ * только там, где тело встаёт и сбоку. Нет такого — null.
+ */
+function slipAside(W, p, q, ax, H, step) {
+  const ox = ax === 0 ? 2 : 0;
+  for (let k = 1; k * 0.03 <= SLIP + 1e-9; k++) {
+    for (const s of [1, -1]) {
+      const r = [q[0], q[1], q[2]];
+      r[ox] += s * k * 0.03;
+      if (!(fitHeight(W, r, H) > 0)) continue;
+      const t = [p[0], p[1], p[2]];
+      t[ox] += s * Math.min(k * 0.03, step);
+      if (fitHeight(W, t, H) > 0) return t;
+    }
+  }
+  return null;
+}
+
 function stepBody(w, W, ctl, dt, jump) {
   const p = w.pos, v = w.vel;
   // Куда хочет идти: от взгляда в плане палубы.
@@ -596,10 +639,14 @@ function stepBody(w, W, ctl, dt, jump) {
   // ступени), ступня встаёт на него; выше ступени — это уступ, стена.
   const G = W.ground || null;
   if (G) {
-    // Сменилась подробность нарисованного грунта (подгрузились плитки) —
-    // ноги могли оказаться чуть ниже него: встать на него.
+    // Ноги ниже грунта ПОД НИМИ ЖЕ — встать на него, на любую высоту.
+    // Грунт — поле высот: под ним ни пещер, ни палуб, стоять там нельзя
+    // никогда. Раньше подъём был не выше ступени (42 см), и пешеход,
+    // оказавшийся под грунтом глубже (грунт сменил подробность, место
+    // записано по другому грунту), так под ним и оставался: грунт вокруг —
+    // уступ, а уступ — стена. Уступ — это грунт ВПЕРЕДИ, по ходу (ниже).
     const gy = G(p[0], p[2]);
-    if (gy > p[1] && gy - p[1] <= WALK.step) p[1] = gy;
+    if (gy > p[1]) p[1] = gy;
   }
   // По плану — по осям, с подъёмом на порог.
   for (const ax of [0, 2]) {
@@ -635,6 +682,15 @@ function stepBody(w, W, ctl, dt, jump) {
         }
       }
     }
+    // Задел кромку проёма боком — соскользнуть с неё в проём, как человек
+    // в дверь. Тело — коробка в полметра, а дверь вездехода — 0.9 м: стоило
+    // идти в четверти метра от оси, и плечо цепляло щёку проёма на пять
+    // сантиметров, а шаг вперёд гасился весь — пилот стоял у двери и не мог
+    // войти. Если на сдвиге вбок не больше SLIP впереди свободно — тело
+    // смещается в ту сторону со скоростью шага (не рывком), пока проход не
+    // откроется. Стена шире SLIP так не обходится: упёрся — стоит.
+    const side = slipAside(W, p, q, ax, H, Math.abs(d));
+    if (side) { p[0] = side[0]; p[2] = side[2]; continue; }
     v[ax] = 0;
   }
 

@@ -38,6 +38,14 @@
 // Корабль висит выше — трап висит в воздухе; сойти с него можно, если до
 // земли не больше двух метров: дальше прыжок, а не шаг.
 //
+// ГРУЗОВАЯ ПЛАТФОРМА — тоже здесь, хотя она не шлюз и не люк: это пол
+// трюма, который едет к грунту (js/models/interior.js, BAYS). Живёт она
+// рядом с люками ради того, что у них общее: её просят открытой тем же
+// списком имён (сохранение, снимок сокета, просьба к хозяину чужого
+// корабля), её закрывают те же запреты (прыжок, напор воздуха) и та же
+// посадка пилота в кресло, а открытая она — такая же дыра в корпусе для
+// воздуха. Ход, грунт и заслоны у неё свои — раздел «платформа» ниже.
+//
 // Всё здесь — в осях корабля и метрах, без единого обращения к миру:
 // забортное давление, грунт и запреты приходят снаружи (env), из
 // js/main.js. Поэтому шлюз проверяется в Node целиком.
@@ -57,6 +65,16 @@ export const AIR = {
   near: 1.6,           // м — дотянуться до пульта люка
   slide: 0.22,         // м — панель отходит от борта перед сдвигом
   cabin: 1.0,          // бар — давление в корабле
+};
+
+// Грузовая платформа (раздел «платформа» ниже).
+export const BAY = {
+  speed: 0.55,         // м/с — ход: от пола до грунта восемь секунд
+  accel: 0.6,          // м/с² — разгон и торможение: платформа с грузом не дёргается
+  extra: 0.6,          // м — ход сверх «до грунта на ровной стоянке»: на склоне грунт под ней ниже
+  seal: 0.03,          // м — с какого хода между плитой и полом щель: трюм открыт забортному
+  guard: 0.6,          // м — заслон: выше шага (WALK.step, 0.42), перешагнуть нельзя
+  near: 1.3,           // м — дотянуться до пульта
 };
 
 const smooth = (t) => { const k = Math.max(0, Math.min(1, t)); return k * k * (3 - 2 * k); };
@@ -137,16 +155,42 @@ export function makeAir(I, gearClear) {
       state: 'sealed',   // sealed | cycle | open | close
     };
   }
+  // Платформы: ход до грунта на ровной стоянке (верх плиты над ним — на
+  // её толщину) и предел — немного сверх, на ямку под ней на склоне.
+  const bays = (I.bays || []).map((b) => ({
+    b,
+    id: b.id,
+    room: b.room,
+    reach: b.deck - b.plate - ground,
+    stroke: b.deck - b.plate - ground + BAY.extra,
+    area: (b.x[1] - b.x[0]) * (b.z[1] - b.z[0]),   // м² — проём в полу
+    want: false,         // просили опустить
+    travel: 0,           // м — насколько опущена (0 — вровень с полом)
+    target: 0,           // м — куда идёт сейчас
+    vel: 0,              // м/с — скорость хода (модуль)
+    dir: 0,              // −1 — вверх, +1 — вниз, 0 — стоит
+    dy: 0,               // м — сколько прошла за последний шаг (вниз — плюс)
+    open: 0,             // щель между плитой и полом: 0 — трюм закрыт, 1 — открыт
+    floor: false,        // легла на грунт (а не повисла на всём ходу)
+    gap: Infinity,       // м — от верха плиты до грунта у её краёв
+    exitOk: false,       // можно ли сойти с неё на грунт
+    snap: false,         // в конечное положение сразу (setHatches)
+    solids: null,
+    solidsKey: '',
+  }));
   // I — планировка, по которой собраны эти шлюзы: у корабля другого типа
   // она своя (js/models/interior.prom.js), и проёмы люков, тоннели и
   // комнаты берутся отсюда, а не из помещений, где стоит пилот.
-  return { I, hatches, locks, rooms, links, pOut: 0, block: null };
+  return { I, hatches, bays, locks, rooms, links, pOut: 0, block: null, bayBlock: null };
 }
 
 /** Какие люки просят открытыми: имена (в сохранение и в снимок сокета). */
 export function openHatches(air, out = []) {
   out.length = 0;
-  if (air) for (const hx of air.hatches) if (hx.want) out.push(hx.id);
+  if (!air) return out;
+  for (const hx of air.hatches) if (hx.want) out.push(hx.id);
+  // Платформа едет в том же списке: имя её — такое же «открыто».
+  for (const bx of air.bays || []) if (bx.want) out.push(bx.id);
   return out;
 }
 
@@ -167,6 +211,11 @@ export function setHatches(air, names, snap = false) {
     hx.open = hx.want ? 1 : 0;
     hx.stair = hx.want && hx.h.stair !== false ? 1 : 0;
     hx.solids = null; hx.solidsKey = '';
+  }
+  for (const bx of air.bays || []) {
+    bx.want = list.includes(bx.id);
+    // Сразу — тоже до грунта, а где он, знает только шаг (env.ground).
+    if (snap) { bx.snap = true; bx.vel = 0; bx.dir = 0; }
   }
   if (!snap) return;
   for (const L of Object.values(air.locks)) {
@@ -203,6 +252,7 @@ export function toggleHatch(air, hx, opts = {}) {
 /** Закрыть всё (пилот сел в кресло, прыжок, крушение). */
 export function closeAll(air) {
   for (const hx of air.hatches) hx.want = false;
+  for (const bx of air.bays || []) bx.want = false;
 }
 
 /** Сразу всё закрыто и под давлением — новый корабль, страховка, рестарт. */
@@ -218,6 +268,10 @@ export function resetAirlocks(air) {
   }
   for (const r of Object.values(air.rooms)) { r.p = AIR.cabin; r.leak = false; }
   for (const k of air.links) k.was = k.door ? 0 : 1;
+  for (const bx of air.bays || []) {
+    bx.want = false; bx.travel = 0; bx.target = 0; bx.vel = 0; bx.dir = 0; bx.dy = 0;
+    bx.open = 0; bx.floor = false; bx.exitOk = false; bx.snap = false; bx.solids = null; bx.solidsKey = '';
+  }
 }
 
 /**
@@ -238,11 +292,17 @@ export function updateAirlocks(air, env, dt) {
   const ev = [];
   air.pOut = Math.max(0, env.pOut || 0);
   air.block = env.block || null;
+  air.bayBlock = env.bayBlock || air.block;
   // Запрет на ходу (прыжок, напор воздуха): открытое закрывается само.
   if (air.block) {
     for (const hx of air.hatches) {
       if (hx.want && !(env.occupied && env.occupied(hx))) { hx.want = false; ev.push({ kind: 'forced', id: hx.id }); }
     }
+  }
+  // Платформа поднимается и с человеком на ней: она его везёт, а не
+  // уходит из-под ног.
+  if (air.bayBlock) {
+    for (const bx of air.bays || []) if (bx.want) { bx.want = false; ev.push({ kind: 'forced', id: bx.id }); }
   }
   for (const L of Object.values(air.locks)) {
     const wantOut = L.hatches.some((x) => x.want);
@@ -296,6 +356,7 @@ export function updateAirlocks(air, env, dt) {
       }
     }
   }
+  for (const bx of air.bays || []) stepBay(bx, env, dt, ev);
   breathe(air, dt, ev);
   for (const L of Object.values(air.locks)) L.p = L.room.p;
   for (const hx of air.hatches) settleStair(hx, env, dt);
@@ -341,6 +402,7 @@ function breathe(air, dt, ev) {
   // Какие отсеки открыты забортному: люк открыт или насос шлюза стравливает.
   _leak.clear();
   for (const hx of air.hatches) if (hx.open > 0) _leak.add(rootOf(R[hx.lock]));
+  for (const bx of air.bays || []) if (bx.open > 0) _leak.add(rootOf(R[bx.room]));
   for (const L of Object.values(air.locks)) if (L.vent) _leak.add(rootOf(L.room));
   for (const id in R) R[id].leak = _leak.has(rootOf(R[id]));
   // Перетекание.
@@ -357,6 +419,14 @@ function breathe(air, dt, ev) {
     if (hx.open <= 0) continue;
     const r = R[hx.lock];
     r.p = air.pOut + (r.p - air.pOut) * Math.exp(-AIR.flow * hx.area * hx.open * dt / r.V);
+  }
+  // И через щель вокруг опущенной платформы: насоса у трюма нет, он не
+  // шлюз, и воздух уходит сразу — с ним и всего, что связано с трюмом
+  // проёмами без дверей.
+  for (const bx of air.bays || []) {
+    if (bx.open <= 0) continue;
+    const r = R[bx.room];
+    r.p = air.pOut + (r.p - air.pOut) * Math.exp(-AIR.flow * bx.area * bx.open * dt / r.V);
   }
   // Насос шлюза стравливает его до забортного.
   for (const L of Object.values(air.locks)) {
@@ -521,6 +591,7 @@ function settleStair(hx, env, dt) {
 export function airSolids(air, out = []) {
   out.length = 0;
   if (!air) return out;
+  for (const bx of air.bays || []) for (const s of baySolids(bx)) out.push(s);
   for (const hx of air.hatches) {
     const h = hx.h, sd = h.side;
     const x0 = sd * (h.skin - 0.12), x1 = sd * (h.skin + 0.35);
@@ -588,6 +659,263 @@ function stairSolids(hx) {
     out.push({ lo: [Math.min(a[0], b[0]), a[1], hx.zc - AIR.half], hi: [Math.max(a[0], b[0]), a[1] + AIR.rail, hx.zc + AIR.half],
       stair: hx.id, tag: 'gate' });
   }
+  return out;
+}
+
+// --- платформа -----------------------------------------------------------------------
+//
+// Большая часть пола трюма — лифт до грунта (js/models/interior.js, BAYS):
+// в трюм заезжают наземной машиной, и он становится ангаром.
+//
+// КУДА ОНА ИДЁТ. На стоянке — до грунта: плита ложится на самую высокую
+// точку грунта под собой (на ровной площадке это 4.4 м хода, верх плиты —
+// на её толщину над землёй). В полёте, в воздухе над грунтом — на весь
+// ход, BAY.extra сверх «до грунта на ровной стоянке»: дальше тросам
+// некуда. Опускается корабль на опущенную платформу — грунт поднимает её,
+// и она укорачивается сама: предел хода считается каждый шаг.
+//
+// ЧТО ЗА ЕЁ КРАЕМ. Пока плита в колодце, вбок не сойти — стенки колодца
+// твёрдые. Ниже днища по краю плиты стоит заслон, пока сойти некуда: она
+// едет, висит выше AIR.drop над грунтом (то же правило, что у пяты трапа)
+// или ещё не легла. Вокруг проёма в полу трюма — свой заслон, пока
+// платформы в нём нет: шаг с палубы в колодец был бы падением на пять
+// метров. Звать её наверх с палубы — пультом на переборке трюма.
+//
+// КТО НА НЕЙ — ЕДЕТ. Стоящего на плите везёт игра (js/main.js, carryBay):
+// плита — твёрдое мира ходьбы, и без переноса она проходила бы сквозь
+// ноги вверх, а вниз уходила бы из-под них. Сколько прошла за шаг — dy.
+//
+// ВНИЗ — НЕ НА ГОЛОВУ. Человек под плитой (на грунте под опущенной
+// платформой) останавливает спуск, пока не отойдёт (env.below).
+
+const _bayG = [];
+
+/**
+ * Насколько платформа может опуститься, м: до самой высокой точки грунта
+ * под плитой, но не дальше хода. Грунта под ней нет (пустота, порт) — на
+ * весь ход.
+ */
+function bayLimit(bx, ground) {
+  if (!ground) return bx.stroke;
+  const b = bx.b;
+  let top = -Infinity;
+  for (let i = 0; i <= 4; i++) {
+    for (let k = 0; k <= 6; k++) {
+      const y = ground(b.x[0] + (b.x[1] - b.x[0]) * i / 4, b.z[0] + (b.z[1] - b.z[0]) * k / 6);
+      if (y === null || y === undefined) return bx.stroke;
+      if (y > top) top = y;
+    }
+  }
+  return Math.max(0, Math.min(bx.stroke, b.deck - b.plate - top));
+}
+
+/** Грунт у краёв плиты — там, куда с неё сходят (оси корабля, м), или null. */
+function bayEdgeGround(bx, ground) {
+  if (!ground) return null;
+  const b = bx.b, o = 0.35;
+  _bayG.length = 0;
+  for (let i = 0; i <= 4; i++) {
+    const x = b.x[0] + (b.x[1] - b.x[0]) * i / 4;
+    _bayG.push([x, b.z[0] - o], [x, b.z[1] + o]);
+  }
+  for (let k = 1; k < 6; k++) {
+    const z = b.z[0] + (b.z[1] - b.z[0]) * k / 6;
+    _bayG.push([b.x[0] - o, z], [b.x[1] + o, z]);
+  }
+  let low = Infinity;
+  for (const [x, z] of _bayG) {
+    const y = ground(x, z);
+    if (y === null || y === undefined) return null;
+    if (y < low) low = y;
+  }
+  return low;
+}
+
+/** Верх плиты сейчас (оси корабля, м). */
+export const bayTop = (bx) => bx.b.deck - bx.travel;
+
+/** Платформа по имени. */
+export const bayById = (air, id) => (air && air.bays ? air.bays.find((x) => x.id === id) : null) || null;
+
+/**
+ * Попросить платформу вниз или наверх.
+ * @returns null — принято, иначе строка: почему нельзя
+ */
+export function toggleBay(air, bx) {
+  if (!bx.want) {
+    if (air.bayBlock) return air.bayBlock;
+    bx.want = true;
+    return null;
+  }
+  bx.want = false;
+  return null;
+}
+
+/** Шаг платформы: куда идёт, ход с разгоном и торможением, что за краем. */
+function stepBay(bx, env, dt, ev) {
+  const lim = bayLimit(bx, env.ground);
+  bx.floor = !!env.ground && lim < bx.stroke - 1e-3;
+  const was = bx.travel;
+  // Грунт под плитой выше, чем она опущена (корабль садится на опущенную
+  // платформу), — грунт её и поднимает, сразу, а не ходом.
+  if (bx.travel > lim) bx.travel = lim;
+  const target = bx.want ? lim : 0;
+  if (bx.snap) { bx.travel = target; bx.snap = false; bx.vel = 0; bx.dir = 0; }
+  // Доехала — ровно в цель. Остановка в десятой доле миллиметра от неё
+  // оставляла щель между плитой и полом: трюм числился открытым, и
+  // воздух уходил из него без конца.
+  if (Math.abs(target - bx.travel) <= 1e-4) bx.travel = target;
+  const d = target - bx.travel;
+  // Вниз — только если под плитой никого.
+  const held = d > 0 && !!env.below && env.below(bx);
+  if (Math.abs(d) > 1e-4 && !held) {
+    const dir = Math.sign(d);
+    if (dir !== bx.dir) {
+      if (bx.dir === 0) ev.push({ kind: 'bay', id: bx.id, dir: dir > 0 ? 'down' : 'up' });
+      bx.vel = 0;
+      bx.dir = dir;
+    }
+    // Разгон до хода и торможение к цели — по одному ускорению: v = √(2ad)
+    // тормозит ровно на a. Не медленнее a·dt — иначе корень у цели уходит в
+    // ноль и последний миллиметр тянется без конца. Добавка к корню (было
+    // +0.02) тормозила резче a втрое: профиль шёл быстрее своего.
+    const vmax = Math.min(BAY.speed, Math.max(Math.sqrt(2 * BAY.accel * Math.abs(d)), BAY.accel * dt));
+    bx.vel = Math.min(vmax, bx.vel + BAY.accel * dt);
+    bx.travel += dir * Math.min(Math.abs(d), bx.vel * dt);
+  } else {
+    if (bx.dir !== 0) {
+      ev.push({ kind: 'bayStop', id: bx.id, at: held ? 'held' : bx.travel < 0.01 ? 'top' : bx.floor ? 'ground' : 'air' });
+      bx.dir = 0;
+    }
+    bx.vel = 0;
+  }
+  if (bx.travel < 0) bx.travel = 0;
+  bx.dy = bx.travel - was;
+  bx.target = target;
+  bx.open = Math.min(1, bx.travel / BAY.seal);
+  const top = bayTop(bx);
+  const gy = bayEdgeGround(bx, env.ground);
+  bx.gap = gy === null ? Infinity : top - gy;
+  // Сойти — когда стоит внизу, верх плиты ниже днища, а грунт у краёв не
+  // дальше, чем сходят с конца трапа.
+  bx.exitOk = bx.want && bx.dir === 0 && top < bx.b.belly && bx.gap <= AIR.drop;
+}
+
+/**
+ * Твёрдое платформы (оси корабля, м): плита и пульт на ней — всегда (плита
+ * поднятая и есть пол трюма), заслон вокруг проёма — пока её в нём нет,
+ * заслон по краю плиты — пока сойти нельзя. Оба заслона — СНАРУЖИ края:
+ * стоящий на плите не оказывается внутри них, когда они появляются.
+ */
+export function baySolids(bx) {
+  const key = bx.travel.toFixed(4) + ':' + (bx.exitOk ? 1 : 0);
+  if (bx.solids && bx.solidsKey === key) return bx.solids;
+  const b = bx.b, out = [];
+  const [x0, x1] = b.x, [z0, z1] = b.z, t = 0.06;
+  const top = bayTop(bx);
+  out.push({ lo: [x0, top - b.plate, z0], hi: [x1, top, z1], bay: bx.id, plate: true });
+  const pb = bx.panelBox || (bx.panelBox = b.panelBox || null);
+  if (pb) out.push({ lo: [pb.lo[0], pb.lo[1] - bx.travel, pb.lo[2]], hi: [pb.hi[0], pb.hi[1] - bx.travel, pb.hi[2]], bay: bx.id, panel: true });
+  const ring = (y0, y1, tag) => {
+    out.push({ lo: [x0 - t, y0, z0 - t], hi: [x0, y1, z1 + t], bay: bx.id, guard: tag });
+    out.push({ lo: [x1, y0, z0 - t], hi: [x1 + t, y1, z1 + t], bay: bx.id, guard: tag });
+    out.push({ lo: [x0, y0, z0 - t], hi: [x1, y1, z0], bay: bx.id, guard: tag });
+    out.push({ lo: [x0, y0, z1], hi: [x1, y1, z1 + t], bay: bx.id, guard: tag });
+  };
+  if (bx.travel > 0.02) ring(b.deck, b.deck + BAY.guard, 'deck');
+  if (bx.travel > 0.02 && !bx.exitOk && top < b.belly) ring(top, top + BAY.guard, 'edge');
+  bx.solids = out;
+  bx.solidsKey = key;
+  return out;
+}
+
+/** Стоит ли точка ног (оси корабля, м) на плите платформы. */
+export function onBay(bx, p, tol = 0.06) {
+  const b = bx.b;
+  return p[0] >= b.x[0] - 0.05 && p[0] <= b.x[1] + 0.05 && p[2] >= b.z[0] - 0.05 && p[2] <= b.z[1] + 0.05
+    && Math.abs(p[1] - bayTop(bx)) <= tol;
+}
+
+/**
+ * Насколько сдвинуть стоящего на платформе после её шага, м (вниз —
+ * плюс): стоял на плите до шага — едет на её ход, иначе ноль. Плита —
+ * твёрдое мира ходьбы, и без переноса она проходила бы сквозь ноги вверх,
+ * а вниз уходила бы из-под них: тело падало бы следом, на каждом шаге на
+ * миг повисая.
+ */
+export function bayCarry(air, p) {
+  for (const bx of (air && air.bays) || []) {
+    if (!bx.dy) continue;
+    const b = bx.b, was = bayTop(bx) + bx.dy;
+    if (p[0] < b.x[0] - 0.05 || p[0] > b.x[1] + 0.05 || p[2] < b.z[0] - 0.05 || p[2] > b.z[1] + 0.05) continue;
+    if (Math.abs(p[1] - was) <= 0.08) return bx.dy;
+  }
+  return 0;
+}
+
+/** Под плитой ли точка (оси корабля, м): в её плане и ниже низа плиты. */
+export function underBay(bx, p) {
+  const b = bx.b;
+  return p[0] > b.x[0] - 0.3 && p[0] < b.x[1] + 0.3 && p[2] > b.z[0] - 0.3 && p[2] < b.z[1] + 0.3
+    && p[1] < bayTop(bx) - b.plate;
+}
+
+/**
+ * Пульт платформы под рукой (оси корабля, м): на самой плите — тот, на
+ * котором едут, или настенный в трюме — тот, которым зовут.
+ * @returns { bx, kind: 'ride' | 'call' } или null
+ */
+export function bayPanelNear(air, p) {
+  for (const bx of (air && air.bays) || []) {
+    const b = bx.b;
+    if (onBay(bx, p, 0.5) && Math.hypot(p[0] - b.panel[0], p[2] - b.panel[1]) < BAY.near) return { bx, kind: 'ride' };
+    if (b.call && Math.abs(p[1] - b.deck) < 0.5 && Math.hypot(p[0] - b.call[0], p[2] - b.call[1]) < BAY.near
+      && !onBay(bx, p, 0.5)) return { bx, kind: 'call' };
+  }
+  return null;
+}
+
+/** Насколько точка (оси корабля, м) за краем плиты в плане: плюс — снаружи, минус — внутри. */
+const bayOut = (b, p) => Math.max(b.x[0] - p[0], p[0] - b.x[1], b.z[0] - p[2], p[2] - b.z[1]);
+
+/**
+ * Платформа, с края которой сходит точка ног (оси корабля, м): сойти с
+ * неё можно, а ноги уже за краем плиты, но у самого её верха. Тело в
+ * полметра ещё опирается на плиту — переход в оси грунта идёт, пока ноги
+ * на ней, а не после падения.
+ */
+export function pastBay(air, p) {
+  for (const bx of (air && air.bays) || []) {
+    if (!bx.exitOk) continue;
+    const out = bayOut(bx.b, p), top = bayTop(bx);
+    if (out > 0.05 && out < 1.0 && p[1] > top - 0.8 && p[1] < top + 0.3) return bx;
+  }
+  return null;
+}
+
+/**
+ * Платформа, на которую с грунта ступила точка ног (оси корабля, м): плита
+ * снаружи корабля, ноги внутри её плана (с запасом — у края не дёргаться
+ * туда-обратно) и на её верху.
+ */
+export function ontoBay(air, p) {
+  for (const bx of (air && air.bays) || []) {
+    const top = bayTop(bx);
+    if (top >= bx.b.belly) continue;
+    if (bayOut(bx.b, p) < -0.1 && Math.abs(p[1] - top) < 0.12) return bx;
+  }
+  return null;
+}
+
+/**
+ * Проём в днище под платформой — где обшивку не рисовать, пока она не
+ * поднята (метры модели): от пола трюма до низа колодца по её плану.
+ */
+export function bayCut(bx, out = { lo: [0, 0, 0], hi: [0, 0, 0] }) {
+  const b = bx.b;
+  out.lo[0] = b.x[0] - 0.01; out.hi[0] = b.x[1] + 0.01;
+  out.lo[1] = b.belly - 0.3; out.hi[1] = b.deck - 0.01;
+  out.lo[2] = b.z[0] - 0.01; out.hi[2] = b.z[1] + 0.01;
   return out;
 }
 

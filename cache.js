@@ -46,7 +46,7 @@
       'entry', 'fleet', 'flow', 'fuel', 'hull',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'npc', 'peers', 'pilot',
       'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface',
-      'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly'
+      'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly', 'rover', 'drivecam', 'rovernav', 'hangar'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
@@ -56,18 +56,18 @@
       'hull', 'tiles', 'tileworker', 'wash', 'water'
     ],
     'models/': [
-      'airstair', 'bridge.prom', 'city', 'city.parts', 'cockpit', 'cockpit.prom', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
-      'interior', 'interior.parts', 'interior.prom', 'kit',
-      'nature.parts', 'prometheus', 'rocks.parts', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations'
+      'airstair', 'bridge.prom', 'city', 'city.parts', 'cockpit', 'cockpit.prom', 'cockpit.rover', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
+      'interior', 'interior.parts', 'interior.prom', 'interior.rover', 'kit',
+      'nature.parts', 'prometheus', 'rocks.parts', 'ships', 'spacesuit', 'spacesuit.data', 'station.parts', 'stations', 'rover'
     ],
     'net/': [
       'api', 'quality', 'session', 'socket'
     ],
     'render/': [
-      'camera', 'clip', 'planetview', 'renderer', 'starfield'
+      'camera', 'starfield'
     ],
     'ui/': [
-      'debug', 'deckmap', 'displays', 'hud', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
+      'debug', 'deckmap', 'displays', 'hud', 'layer', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
       'touch', 'walkhud'
     ]
   };

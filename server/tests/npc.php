@@ -238,9 +238,11 @@ foreach ($drafts as $n) {
     $types[$n->type]++;
 }
 $share = $types['prometheus'] / count($drafts);
-ok(min($types) > 0 && $share > 0.06 && $share < 0.22,
-    'корпус — из всех типов в базе (' . implode(', ', array_map(static fn($k, $v) => "$k $v", array_keys($types), $types))
-    . '); крейсер — редкая встреча: ' . round($share * 100) . ' %');
+// Вездеход (npcWeight 0) NPC не водят: из типов с весом — все, без веса — ни одного.
+$weighted = array_filter($types, static fn($k) => (Specs::typeSpec($k)['npcWeight'] ?? 1) > 0, ARRAY_FILTER_USE_KEY);
+ok(min($weighted) > 0 && ($types['rover'] ?? 0) === 0 && $share > 0.06 && $share < 0.22,
+    'корпус — из всех типов в базе с весом (' . implode(', ', array_map(static fn($k, $v) => "$k $v", array_keys($types), $types))
+    . '), вездехода нет; крейсер — редкая встреча: ' . round($share * 100) . ' %');
 
 $modRows = [];
 foreach (Db::all('SELECT `code`,`slot`,`spec` FROM `equipment_type`') as $row) {

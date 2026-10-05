@@ -1,6 +1,6 @@
 {
  "version": 2,
- "generatedAt": "2026-10-05T05:29:15.517Z",
+ "generatedAt": "2026-10-05T11:20:28.569Z",
  "galaxySeed": 39985,
  "shipTypes": [
   {
@@ -16,6 +16,13 @@
    "widthM": 80,
    "heightM": 65.8,
    "massT": 38500.8
+  },
+  {
+   "code": "rover",
+   "lengthM": 6.8,
+   "widthM": 3.6,
+   "heightM": 2.8,
+   "massT": 4.7
   }
  ],
  "systems": [

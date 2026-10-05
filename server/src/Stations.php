@@ -69,6 +69,10 @@ final class Stations
             if ((int) $p['aboard_ship'] !== $shipId) {
                 throw ApiError::denied('not_aboard', 'в порт ставит корабль тот, кто на его борту');
             }
+            // Вездеход не летает — и в порт на орбите не встаёт.
+            if (Specs::isGround((string) $ship['type_code'])) {
+                throw ApiError::denied('ground', 'вездеход в порт не встаёт: он ездит по грунту');
+            }
             $shipSys = $ship['system_id'] === null ? null : (int) $ship['system_id'];
             $sys = $systemId ?? $shipSys;
             if ($sys === null || $localId === null) {
@@ -101,6 +105,7 @@ final class Stations
                 'anchor_pose' => null,
                 'hatches' => null,
             ], '`id`=?', [$shipId]);
+            Players::carryAlong($shipId);
             Db::update('player', [
                 'docks' => (int) $p['docks'] + 1,
                 'last_seen_at' => Db::now(),
@@ -136,6 +141,7 @@ final class Stations
             }
             if ($ship['docked_body'] !== null) {
                 Db::update('ship', ['docked_body' => null], '`id`=?', [$shipId]);
+                Players::carryAlong($shipId);
             }
             return ['undocked' => true];
         });

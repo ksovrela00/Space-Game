@@ -114,8 +114,6 @@ import {
 } from '../js/ui/touch.js';
 import { input } from '../js/core/input.js';
 import { readFileSync, readdirSync } from 'node:fs';
-import { Renderer } from '../js/render/renderer.js';
-import { drawBody, sunGeometry } from '../js/render/planetview.js';
 import { copy } from '../js/core/vec3.js';
 import { lookAlong } from '../js/core/basis.js';
 import { box, prismZ, loft } from '../js/models/geometry.js';
@@ -356,324 +354,26 @@ console.log('== силуэт шара ==');
   }
 }
 
-// --- 2c. Отрисовка планеты вне оси взгляда ----------------------------------
-// Регрессия на «дыхание» планеты: диск обязан совпадать с аналитическим
-// силуэтом, а пятна поверхности (они проецируются точка за точкой) —
-// лежать внутри него при любом положении планеты на экране.
-console.log('== планета в кадре ==');
+// --- 2c. Силуэт планеты в кадре ---------------------------------------------
+// По силуэту (js/render/camera.js) HUD ставит прицельные рамки на тела.
+// Двумерный рендер, который по нему же рисовал диск планеты, вырезан
+// (README, «Рендер»): проверки его картинки ушли вместе с ним, а эта —
+// про сам силуэт — осталась.
+console.log('== силуэт планеты ==');
 {
-  // Пишущий ctx: запоминаем вызовы вместе с глубиной save/restore.
-  const log = [];
-  let depth = 0;
-  const ctx = new Proxy({}, {
-    get(_t, prop) {
-      if (prop === 'save') return () => { depth++; };
-      if (prop === 'restore') return () => { depth--; };
-      if (prop === 'createRadialGradient' || prop === 'createLinearGradient') {
-        return () => ({ addColorStop() {} });
-      }
-      if (prop === 'measureText') return () => ({ width: 10 });
-      if (typeof prop === 'string') return (...args) => log.push({ op: prop, args, depth });
-      return undefined;
-    },
-    set() { return true; },
-  });
-  const canvas = { getContext: () => ctx, style: {}, width: 0, height: 0 };
-  globalThis.window = globalThis.window || {};
-  globalThis.window.innerWidth = 1600;
-  globalThis.window.innerHeight = 900;
-  globalThis.window.devicePixelRatio = 1;
-
-  const r = new Renderer(canvas);
-  r.resize();
+  const cam = new Camera();
+  cam.resize(1600, 900);
   const w2 = makeSystem(0x1a7e);
   const planet = w2.home;
-
-  const runFrame = (camPos, lookAt) => {
-    log.length = 0; depth = 0;
-    copy(r.camera.pos, camPos);
-    const f = normalize(v3(lookAt.x - camPos.x, lookAt.y - camPos.y, lookAt.z - camPos.z));
-    lookAlong(r.camera.basis, f);
-    r.begin();
-    drawBody(r, planet, w2.star.pos);
-    r.end();
-    return r.camera.silhouette(r.camera.toCamera(planet.pos), planet.radius, {});
-  };
-
-  // Точка обзора: 2.5 радиуса от планеты; цель взгляда смещаем, чтобы
-  // планета уезжала от центра экрана.
   const base = v3(
     planet.pos.x + planet.radius * 2.5,
     planet.pos.y + planet.radius * 0.6,
     planet.pos.z + planet.radius * 1.2);
 
-  for (const off of [0, 0.35, 0.8, 1.3]) {
-    // Смотрим «мимо» планеты: сдвигаем точку взгляда в сторону.
-    const aim = v3(
-      planet.pos.x + planet.radius * off * 2,
-      planet.pos.y,
-      planet.pos.z - planet.radius * off * 2);
-    const sil = runFrame(base, aim);
-    if (!sil.ok) { ok(false, `смещение ${off}: силуэт не посчитался`); continue; }
-
-    // Клип-эллипс — первый ellipse на глубине 1, сразу перед clip().
-    const ci = log.findIndex((e, i) => e.op === 'ellipse' &&
-      log.slice(i + 1, i + 3).some((n) => n.op === 'clip'));
-    if (ci < 0) { ok(false, `смещение ${off}: клип-эллипс не найден`); continue; }
-    const [qx, qy, qa, qb, qang] = log[ci].args;
-    const sameAsAnalytic =
-      Math.abs(qx - sil.x) < 1e-6 && Math.abs(qy - sil.y) < 1e-6 &&
-      Math.abs(qa - sil.a) < 1e-6 && Math.abs(qb - sil.b) < 1e-6 &&
-      Math.abs(qang - sil.angle) < 1e-9;
-
-    // Пятна поверхности: ellipse на той же глубине после клипа.
-    const spots = log.slice(ci + 1).filter((e) => e.op === 'ellipse' && e.depth === log[ci].depth);
-    const cosA = Math.cos(-sil.angle), sinA = Math.sin(-sil.angle);
-    let worst = 0;
-    for (const sp of spots) {
-      const dx = sp.args[0] - sil.x, dy = sp.args[1] - sil.y;
-      const ux = dx * cosA - dy * sinA, uy = dx * sinA + dy * cosA;
-      worst = Math.max(worst, (ux / sil.a) ** 2 + (uy / sil.b) ** 2);
-    }
-    ok(sameAsAnalytic && spots.length > 0 && worst <= 1.02,
-      `смещение ${off}: диск = силуэт (${sil.a.toFixed(0)}x${sil.b.toFixed(0)} px), ` +
-      `пятен ${spots.length}, самое дальнее на ${Math.sqrt(worst).toFixed(3)} радиуса`);
-  }
-
-  // Регрессия на «планета видна и спереди, и сзади»: отлетаем от планеты
-  // носом наружу — в очередь отрисовки не должно попасть ничего.
-  {
-    let visibleBehind = 0;
-    for (const mul of [1.3, 2, 5, 20, 200]) {
-      const camPos = v3(
-        planet.pos.x + planet.radius * mul,
-        planet.pos.y,
-        planet.pos.z);
-      // Смотрим строго ОТ планеты
-      const aim = v3(
-        planet.pos.x + planet.radius * mul * 2,
-        planet.pos.y,
-        planet.pos.z);
-      log.length = 0; depth = 0;
-      copy(r.camera.pos, camPos);
-      lookAlong(r.camera.basis, normalize(v3(aim.x - camPos.x, aim.y - camPos.y, aim.z - camPos.z)));
-      r.begin();
-      drawBody(r, planet, w2.star.pos);
-      if (r.items.length > 0) visibleBehind++;
-      r.end();
-    }
-    ok(visibleBehind === 0,
-      `при отлёте от планеты она не рисуется (кадров с артефактом: ${visibleBehind})`);
-
-    // И наоборот: развернувшись на неё, планета обязана быть в кадре.
-    const camPos = v3(planet.pos.x + planet.radius * 3, planet.pos.y, planet.pos.z);
-    copy(r.camera.pos, camPos);
-    lookAlong(r.camera.basis, normalize(v3(
-      planet.pos.x - camPos.x, planet.pos.y - camPos.y, planet.pos.z - camPos.z)));
-    r.begin();
-    drawBody(r, planet, w2.star.pos);
-    const seen = r.items.length;
-    r.end();
-    ok(seen > 0, 'развернувшись на планету, она снова в кадре');
-  }
-
-  // Освещение не должно зависеть от ориентации корабля: разворот меняет
-  // только угол, под которым виден терминатор, но не долю освещённого
-  // диска. Раньше фаза считалась через ось взгляда, и тень «ездила» за
-  // кораблём, как будто солнце крутится вместе с ним.
-  {
-    const cam = r.camera;
-    const camPos = v3(
-      planet.pos.x + planet.radius * 3.0,
-      planet.pos.y + planet.radius * 0.8,
-      planet.pos.z + planet.radius * 1.5);
-    copy(cam.pos, camPos);
-    const toPlanet = normalize(v3(
-      planet.pos.x - camPos.x, planet.pos.y - camPos.y, planet.pos.z - camPos.z));
-
-    const phases = [], angles = [];
-    const rolls = [0, 0.5, 1.2, 2.4, 4.0];
-    for (const roll of rolls) {
-      lookAlong(cam.basis, v3(toPlanet.x, toPlanet.y, toPlanet.z));
-      rotateBasis(cam.basis, 0, 0, roll);
-      const g = sunGeometry(planet, w2.star.pos, cam,
-        cam.pos.x - planet.pos.x, cam.pos.y - planet.pos.y, cam.pos.z - planet.pos.z);
-      phases.push(g.cosPhase);
-      angles.push(g.sunAng);
-    }
-    const dPhase = Math.max(...phases) - Math.min(...phases);
-    ok(dPhase < 1e-12,
-      `крен не меняет фазу освещения (фаза ${phases[0].toFixed(4)}, разброс ${dPhase.toExponential(1)})`);
-
-    // При этом экранный угол терминатора обязан поворачиваться ровно на
-    // крен — в противоположную сторону: при крене вправо картинка на
-    // экране поворачивается влево.
-    let worstAng = 0;
-    for (let i = 1; i < rolls.length; i++) {
-      const expected = angles[0] - rolls[i];
-      let diff = (angles[i] - expected) % (Math.PI * 2);
-      if (diff > Math.PI) diff -= Math.PI * 2;
-      if (diff < -Math.PI) diff += Math.PI * 2;
-      worstAng = Math.max(worstAng, Math.abs(diff));
-    }
-    ok(worstAng < 1e-9,
-      `терминатор поворачивается ровно на крен (ошибка ${worstAng.toExponential(1)})`);
-
-    // Отворот носа в сторону тоже не должен менять фазу.
-    const offPhases = [];
-    for (const yaw of [0, 0.2, 0.5, 0.9]) {
-      lookAlong(cam.basis, v3(toPlanet.x, toPlanet.y, toPlanet.z));
-      rotateBasis(cam.basis, 0.1, yaw, 0);
-      const g = sunGeometry(planet, w2.star.pos, cam,
-        cam.pos.x - planet.pos.x, cam.pos.y - planet.pos.y, cam.pos.z - planet.pos.z);
-      offPhases.push(g.cosPhase);
-    }
-    const dOff = Math.max(...offPhases) - Math.min(...offPhases);
-    ok(dOff < 1e-12, `отворот носа не меняет фазу (разброс ${dOff.toExponential(1)})`);
-
-    // А смена ПОЗИЦИИ корабля фазу менять обязана: облетаем планету и
-    // смотрим, что фаза проходит от почти полной до почти новой.
-    const around = [];
-    const L = normalize(v3(
-      w2.star.pos.x - planet.pos.x,
-      w2.star.pos.y - planet.pos.y,
-      w2.star.pos.z - planet.pos.z));
-    let perp = normalize(v3(-L.z, 0, L.x));
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      const dir = normalize(v3(
-        L.x * Math.cos(a) + perp.x * Math.sin(a),
-        L.y * Math.cos(a) + perp.y * Math.sin(a),
-        L.z * Math.cos(a) + perp.z * Math.sin(a)));
-      const pos = v3(
-        planet.pos.x + dir.x * planet.radius * 3,
-        planet.pos.y + dir.y * planet.radius * 3,
-        planet.pos.z + dir.z * planet.radius * 3);
-      copy(cam.pos, pos);
-      lookAlong(cam.basis, normalize(v3(
-        planet.pos.x - pos.x, planet.pos.y - pos.y, planet.pos.z - pos.z)));
-      const g = sunGeometry(planet, w2.star.pos, cam,
-        pos.x - planet.pos.x, pos.y - planet.pos.y, pos.z - planet.pos.z);
-      around.push(g.cosPhase);
-    }
-    ok(Math.max(...around) > 0.99 && Math.min(...around) < -0.99,
-      `облёт планеты даёт все фазы: от ${Math.max(...around).toFixed(2)} до ${Math.min(...around).toFixed(2)}`);
-  }
-
-  // Главная проверка: нарисованная область экрана должна совпадать с
-  // трассировкой лучей. Именно здесь ловятся два симптома вблизи планеты —
-  // «планета пропала» и «экран залит, будто мы внутри».
-  {
-    const COLS = 64, ROWS = 36;
-    const cam = r.camera;
-
-    // Что реально попало на экран по записанным вызовам ctx.
-    const drawnRegion = () => {
-      // Заливка всего кадра
-      for (const e of log) {
-        if (e.op === 'fillRect' && e.depth === 0 &&
-            e.args[2] >= cam.w && e.args[3] >= cam.h) return () => true;
-      }
-      // Клип-эллипс (нормальный случай)
-      const ci = log.findIndex((e, i) => e.op === 'ellipse' &&
-        log.slice(i + 1, i + 3).some((n) => n.op === 'clip'));
-      if (ci >= 0) {
-        const [qx, qy, qa, qb, qang] = log[ci].args;
-        const ca = Math.cos(-qang), sa = Math.sin(-qang);
-        return (x, y) => {
-          const dx = x - qx, dy = y - qy;
-          const ux = dx * ca - dy * sa, uy = dx * sa + dy * ca;
-          return (ux / qa) ** 2 + (uy / qb) ** 2 <= 1;
-        };
-      }
-      // Полигон силуэта (вырожденный случай)
-      const mi = log.findIndex((e) => e.op === 'moveTo');
-      if (mi >= 0) {
-        const poly = [{ x: log[mi].args[0], y: log[mi].args[1] }];
-        for (let i = mi + 1; i < log.length && log[i].op === 'lineTo'; i++) {
-          poly.push({ x: log[i].args[0], y: log[i].args[1] });
-        }
-        if (poly.length >= 3) {
-          return (x, y) => {
-            let inside = false;
-            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-              const a = poly[i], b = poly[j];
-              if ((a.y > y) !== (b.y > y) &&
-                  x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-            }
-            return inside;
-          };
-        }
-      }
-      return () => false;
-    };
-
-    // Истина: пересечение луча через пиксель со сферой.
-    const truth = (c, R) => (x, y) => {
-      const dx = (x - cam.cx) / cam.focal;
-      const dy = -(y - cam.cy) / cam.focal;
-      const l = Math.hypot(dx, dy, 1);
-      const ox = dx / l, oy = dy / l, oz = 1 / l;
-      const b = ox * c.x + oy * c.y + oz * c.z;       // проекция центра на луч
-      const disc = b * b - (c.x * c.x + c.y * c.y + c.z * c.z) + R * R;
-      return disc >= 0 && b + Math.sqrt(disc) > 0;
-    };
-
-    const compare = (label, camPos, aim) => {
-      log.length = 0; depth = 0;
-      copy(cam.pos, camPos);
-      lookAlong(cam.basis, normalize(v3(aim.x - camPos.x, aim.y - camPos.y, aim.z - camPos.z)));
-      r.begin();
-      drawBody(r, planet, w2.star.pos);
-      r.end();
-
-      const c = cam.toCamera(planet.pos);
-      const hit = truth(c, planet.radius);
-      const drawn = drawnRegion();
-      let expected = 0, got = 0, diff = 0;
-      for (let iy = 0; iy < ROWS; iy++) {
-        for (let ix = 0; ix < COLS; ix++) {
-          const x = (ix + 0.5) * cam.w / COLS;
-          const y = (iy + 0.5) * cam.h / ROWS;
-          const h = hit(x, y), g = drawn(x, y);
-          if (h) expected++;
-          if (g) got++;
-          if (h !== g) diff++;
-        }
-      }
-      const total = COLS * ROWS;
-      ok(diff / total < 0.04,
-        `${label}: планета занимает ${(expected / total * 100).toFixed(0)}% кадра, ` +
-        `нарисовано ${(got / total * 100).toFixed(0)}%, расхождение ` +
-        `${(diff / total * 100).toFixed(1)}%`);
-    };
-
-    const R = planet.radius;
-    // Подлёт по оси: от далёкого диска до самой поверхности.
-    for (const mul of [4, 2, 1.5, 1.2, 1.05, 1.01]) {
-      const camPos = v3(planet.pos.x + R * mul, planet.pos.y, planet.pos.z);
-      compare(`подлёт x${mul}`, camPos, planet.pos);
-    }
-    // Разворот вблизи планеты: критичная зона theta + alpha ~ 90 градусов.
-    for (const mul of [1.15, 1.5, 2.5]) {
-      for (const deg of [0, 20, 40, 55, 70, 90, 120, 170]) {
-        const camPos = v3(planet.pos.x + R * mul, planet.pos.y, planet.pos.z);
-        const a = deg * Math.PI / 180;
-        // Смотрим в сторону, повёрнутую на deg от направления на планету.
-        const aim = v3(
-          camPos.x - Math.cos(a) * R * 10,
-          camPos.y,
-          camPos.z + Math.sin(a) * R * 10);
-        compare(`x${mul}, поворот ${deg}°`, camPos, aim);
-      }
-    }
-  }
-
   // Крен корабля не должен менять размер планеты.
   const sizes = [];
   for (let i = 0; i < 8; i++) {
     const ang = (i / 8) * Math.PI * 2;
-    const cam = r.camera;
     copy(cam.pos, base);
     const f = normalize(v3(
       planet.pos.x - base.x + planet.radius * 1.2,
@@ -9337,6 +9037,20 @@ console.log('\n== наземный город ==');
     const want = Wk.jumpSpeed() ** 2 / (2 * g);
     ok(Math.abs(peak - want) / want < 0.03 && wj.ground,
       `на ${icy ? icy.name : 'лёгком теле'} (${g.toFixed(2)} м/с²) прыгают на ${peak.toFixed(2)} м, а не на ${Wk.WALK.jump} — толчок тот же`);
+    // Под грунтом глубже ступени — встаёт на него и идёт. Так пилот
+    // оставался под землёй после входа: место записано по одному грунту, а
+    // грунт сменил подробность и поднялся на 2.3 м; подъём был не выше
+    // ступени, а грунт вокруг — уступ. Уступ же по ходу — по-прежнему стена.
+    {
+      const wu = Wk.makeWalker();
+      Wk.standUp(wu, In); wu.phase = 'walk'; wu.out = { test: true }; wu.pos = [0, 0, 0]; wu.yaw = 0;
+      const Wu = Wk.outsideWorld([], (x, z) => (z > 3 ? 3.3 : 2.3), null, 9.81);
+      Wk.updateWalker(wu, In, {}, 1 / 60, Wu);
+      const stood = wu.pos[1];
+      for (let i = 0; i < 120; i++) Wk.updateWalker(wu, In, { fwd: 1 }, 1 / 60, Wu);
+      ok(Math.abs(stood - 2.3) < 1e-9 && wu.ground && wu.pos[2] > 2 && wu.pos[2] < 3 && Math.abs(wu.pos[1] - 2.3) < 1e-6,
+        `под грунтом на 2.3 м — встал на него (ноги на ${stood.toFixed(2)} м) и пошёл; уступ в метр по ходу — стена (дошёл до ${wu.pos[2].toFixed(2)} м)`);
+    }
     // obSpan — какие высоты занимает повёрнутая коробка над прямоугольником
     // плана — против точного ответа: всех вершин пересечения коробки со
     // столбом над прямоугольником (тройки из десяти плоскостей).
@@ -9455,6 +9169,295 @@ console.log('\n== наземный город ==');
         `охватывающими коробками тело на пороге упиралось в ${oldStuck} случаях из 4`);
     }
   }
+}
+
+// --- грузовая платформа -----------------------------------------------------
+//
+// Большая часть пола трюма — лифт до грунта: на нём в трюм будут заезжать
+// наземной машиной (js/models/interior.js, BAYS; ход — js/game/airlock.js,
+// «платформа»). Проверяется то, что сломалось бы молча: проём, сквозь
+// который видно шасси или изнанку корпуса; плита, ушедшая в грунт или
+// повисшая над ним; пилот, которого она не везёт, а роняет; и проём в
+// полу, в который с палубы шагают на пять метров вниз.
+{
+  console.log('\n== грузовая платформа ==');
+  const { buildCobra, GEAR_CLEAR } = await import('../js/models/ships.js');
+  const { HULL_GEAR } = await import('../js/models/hull.data.js');
+  const I = await import('../js/models/interior.js');
+  const A = await import('../js/game/airlock.js');
+  const Wk = await import('../js/game/walker.js');
+  const hull = buildCobra();
+  const In = I.buildInterior(hull);
+  const b = In.bays[0];
+  const Hd = In.roomById.hold;
+
+  // --- где она: в полу трюма, мимо ящиков, трапа, дверей и пульта.
+  ok(!!b && b.room === 'hold' && b.x[0] > Hd.lo[0] && b.x[1] < Hd.hi[0] && b.z[0] > Hd.lo[2] && b.z[1] < Hd.hi[2]
+    && b.deck === Hd.lo[1], `платформа — в полу трюма: ${(b.x[1] - b.x[0]).toFixed(1)} × ${(b.z[1] - b.z[0]).toFixed(1)} м`);
+  {
+    const crates = In.slots.filter((s) => s.x + s.half > b.x[0] - 0.15 && s.x - s.half < b.x[1] + 0.15);
+    ok(crates.length === 0 && In.slots.length === 36,
+      'все 36 мест под ящики — мимо платформы, на неподвижном полу: груз ради неё вывозить незачем');
+  }
+  // Сзади сходит трап и выходит дверь нижнего коридора, спереди — дверь
+  // носового шлюза: к ним ходят, не наступая на платформу.
+  ok(b.z[0] - Hd.lo[2] >= 1.2 && Hd.hi[2] - b.z[1] >= 0.9,
+    `у кормовой переборки ${(b.z[0] - Hd.lo[2]).toFixed(1)} м пола, у носового шлюза ${(Hd.hi[2] - b.z[1]).toFixed(1)} м`);
+  ok(b.call && (b.call[0] < b.x[0] || b.call[0] > b.x[1] || b.call[1] < b.z[0] || b.call[1] > b.z[1])
+    && b.panel[0] > b.x[0] && b.panel[0] < b.x[1] && b.panel[1] > b.z[0] && b.panel[1] < b.z[1],
+    'пульт езды — на самой плите, пульт вызова — на полу трюма, мимо неё');
+
+  // --- под полом только обшивка днища, и она — в колодце.
+  {
+    const T = [];
+    for (const fc of hull.faces) {
+      for (let k = 1; k + 1 < fc.v.length; k++) {
+        T.push([fc.v[0], fc.v[k], fc.v[k + 1]].map((i) => hull.verts[i]).map((v) => ({ x: v.x * 1000, y: v.y * 1000, z: v.z * 1000 })));
+      }
+    }
+    const ys = (x, z) => {
+      const out = [];
+      for (const [p, q, r] of T) {
+        const d = (q.z - r.z) * (p.x - r.x) + (r.x - q.x) * (p.z - r.z);
+        if (Math.abs(d) < 1e-12) continue;
+        const l1 = ((q.z - r.z) * (x - r.x) + (r.x - q.x) * (z - r.z)) / d;
+        const l2 = ((r.z - p.z) * (x - r.x) + (p.x - r.x) * (z - r.z)) / d;
+        if (l1 < 0 || l2 < 0 || l1 + l2 > 1) continue;
+        out.push(l1 * p.y + l2 * q.y + (1 - l1 - l2) * r.y);
+      }
+      return out;
+    };
+    let low = Infinity, high = -Infinity, n = 0;
+    for (let i = 0; i <= 6; i++) {
+      for (let k = 0; k <= 8; k++) {
+        const x = b.x[0] + 0.05 + (b.x[1] - b.x[0] - 0.1) * i / 6, z = b.z[0] + 0.05 + (b.z[1] - b.z[0] - 0.1) * k / 8;
+        for (const y of ys(x, z)) if (y < b.deck) { low = Math.min(low, y); high = Math.max(high, y); n++; }
+      }
+    }
+    // Всё, что есть от корпуса под плитой, — в колодце, между полом и его
+    // дном: вырез днища (bayCut) снимает это целиком, а ниже колодца
+    // корпуса нет — плита ниже его дна уже снаружи корабля.
+    ok(n > 0 && low > b.belly && high < b.deck,
+      `под платформой корпус — от ${high.toFixed(2)} до ${low.toFixed(2)} м, весь в колодце до ${b.belly} м: ниже — уже снаружи`);
+    const nose = HULL_GEAR.find((g) => g[0] === 0).map((v) => v / 1000);
+    ok(nose[2] > b.z[1] + 1.0, `носовая стойка шасси (z ${nose[2].toFixed(1)}) — впереди проёма, а не в нём`);
+  }
+
+  // --- пол: в проёме его нет, колодец твёрдый, а без состояния шлюзов
+  // плита стоит поднятой — пол как пол.
+  {
+    const mid = [(b.x[0] + b.x[1]) / 2, b.deck, (b.z[0] + b.z[1]) / 2];
+    const floor = In.solids.filter((s) => !s.bayWell && s.hi[1] >= b.deck - 0.01 && s.lo[1] < b.deck - 0.01
+      && s.lo[0] < mid[0] && s.hi[0] > mid[0] && s.lo[2] < mid[2] && s.hi[2] > mid[2]);
+    ok(floor.length === 0 && In.solids.filter((s) => s.bayWell).length === 4,
+      'в полу трюма проём под платформу, вокруг — четыре твёрдые стенки колодца');
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    p.phase = 'walk'; p.pos = mid.slice(); p.room = Hd;
+    for (let i = 0; i < 90; i++) Wk.updateWalker(p, In, {}, 1 / 60);
+    ok(Math.abs(p.pos[1] - b.deck) < 0.01,
+      `без состояния шлюзов плита — пол: пилот стоит на ${p.pos[1].toFixed(2)} м, а не в яме (так провалился маршрутный робот)`);
+  }
+
+  // --- ход.
+  const ground = -GEAR_CLEAR * 1000;
+  const dt = 1 / 60;
+  const env = (o = {}) => ({ pOut: 0, block: null, ground: () => ground, occupied: () => false, ...o });
+  const ride = (air, e, limit = 20) => {
+    const bx = air.bays[0], ev = [];
+    let t = 0, vmax = 0, amax = 0, v0 = 0, last = 0;
+    for (; t < limit; t += dt) {
+      for (const x of A.updateAirlocks(air, e, dt)) ev.push(x);
+      const v = Math.abs(bx.dy) / dt;
+      // Последний сантиметр в разгон не считается: у цели корень √(2ad)
+      // дискретно тормозит чуть резче (0.65–0.8 м/с² на долях миллиметра),
+      // а последний шаг проходит остаток за кадр. Там важна скорость
+      // подхода — last, — а не ускорение.
+      if (v > 0 && Math.abs(bx.target - bx.travel) > 0.01) amax = Math.max(amax, Math.abs(v - v0) / dt);
+      if (v > 0) last = v;
+      vmax = Math.max(vmax, v); v0 = v;
+      if (bx.dir === 0 && t > 0.2) break;
+    }
+    return { t, vmax, amax, last, ev };
+  };
+  {
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    ok(Math.abs(bx.reach - (b.deck - b.plate - ground)) < 1e-9 && bx.reach > 4 && bx.reach < 5,
+      `на ровной стоянке до грунта ${bx.reach.toFixed(2)} м хода: пол трюма в ${(b.deck - ground).toFixed(2)} м над грунтом, плита ${b.plate} м`);
+    ok(A.toggleBay(air, bx) === null && bx.want, 'платформу просят вниз');
+    const r = ride(air, env());
+    ok(Math.abs(bx.travel - bx.reach) < 1e-3 && bx.floor && bx.exitOk && Math.abs(bx.gap - b.plate) < 1e-3,
+      `легла на грунт за ${r.t.toFixed(1)} с: верх плиты в ${bx.gap.toFixed(2)} м над землёй, сойти можно`);
+    ok(r.vmax <= A.BAY.speed + 1e-6 && r.amax <= A.BAY.accel * 1.05 + 1e-6 && r.last < 0.03 && r.t > 7 && r.t < 11,
+      `ход ровный: до ${r.vmax.toFixed(2)} м/с (предел ${A.BAY.speed}), разгон и торможение до ${r.amax.toFixed(2)} м/с² `
+      + `(предел ${A.BAY.accel}), к грунту подходит на ${(r.last * 100).toFixed(1)} см/с — без удара`);
+    ok(r.ev.some((e) => e.kind === 'bay' && e.dir === 'down') && r.ev.some((e) => e.kind === 'bayStop' && e.at === 'ground'),
+      'о спуске и остановке на грунте есть события — по ним звук и слова');
+    ok(A.openHatches(air).includes('bay'), 'опущенная платформа едет в том же списке открытых, что люки: сохранение и снимок сокета');
+
+    // Воздух: трюм открыт забортному — в пустоте он и всё, что с ним
+    // связано проёмами без дверей, без воздуха; за закрытой дверью воздух
+    // остаётся.
+    ok(air.rooms.hold.p < 0.01 && air.rooms.shaftB.p < 0.2 && air.rooms.cabin.p > 0.99 && air.rooms.hold.leak,
+      `в пустоте трюм стравлен (${air.rooms.hold.p.toFixed(3)} бар), каюта за закрытой дверью — ${air.rooms.cabin.p.toFixed(2)}`);
+
+    // Наверх: и воздух возвращается сам — жизнеобеспечением.
+    A.closeAll(air);
+    const up = ride(air, env());
+    ok(bx.travel === 0 && bx.open === 0 && !bx.exitOk && up.ev.some((e) => e.kind === 'bayStop' && e.at === 'top'),
+      `пилот сел — платформа поднялась за ${up.t.toFixed(1)} с, пол снова цел`);
+    for (let t = 0; t < 40; t += dt) A.updateAirlocks(air, env(), dt);
+    ok(air.rooms.hold.p > 0.99 && !air.rooms.hold.leak, `трюм снова под давлением: ${air.rooms.hold.p.toFixed(2)} бар`);
+  }
+  {
+    // В полёте — грунта нет: весь ход, и сойти некуда — по краю заслон.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.toggleBay(air, bx);
+    ride(air, env({ ground: null }));
+    const edge = A.baySolids(bx).filter((s) => s.guard === 'edge').length;
+    const deck = A.baySolids(bx).filter((s) => s.guard === 'deck').length;
+    ok(Math.abs(bx.travel - bx.stroke) < 1e-6 && !bx.floor && !bx.exitOk && edge === 4 && deck === 4,
+      `в полёте — на весь ход, ${bx.stroke.toFixed(2)} м; по краю плиты и вокруг проёма в полу — заслоны`);
+    // Корабль садится на опущенную платформу: грунт её поднимает сразу.
+    A.updateAirlocks(air, env({ ground: () => ground + 2.0 }), dt);
+    ok(Math.abs(bx.travel - (bx.reach - 2.0)) < 1e-6,
+      `грунт подошёл к плите — она поднялась вместе с ним в тот же шаг: ход ${bx.travel.toFixed(2)} м`);
+    // Запрет на ходу (прыжок, напор воздуха) — поднимается сама.
+    const ev = A.updateAirlocks(air, env({ block: 'ПРЫЖОК' }), dt);
+    ok(!bx.want && ev.some((e) => e.kind === 'forced' && e.id === 'bay'), 'при запрете платформа поднимается сама');
+    // В порту — свой запрет: под кораблём там конструкция станции.
+    A.updateAirlocks(air, env({ bayBlock: 'ПОРТ' }), dt);
+    ok(A.toggleBay(air, bx) === 'ПОРТ' && !bx.want, 'в порту платформу не опустить');
+  }
+  {
+    // На склоне плита ложится на самую высокую точку грунта под собой, а
+    // к нижнему краю до земли выше — пока это не больше, чем с конца
+    // трапа, сойти можно.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    const slope = (x, z) => ground + 0.12 * x;
+    A.toggleBay(air, bx);
+    ride(air, env({ ground: slope }));
+    const hi = slope(b.x[1], 0);
+    ok(Math.abs(b.deck - bx.travel - b.plate - hi) < 1e-6 && bx.gap > b.plate + 0.5 && bx.exitOk,
+      `на склоне в 7° плита легла на высокий край, у низкого до земли ${bx.gap.toFixed(2)} м — сойти можно`);
+  }
+  {
+    // Под плитой человек — спуск ждёт и не идёт ему на голову.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.toggleBay(air, bx);
+    let held = false;
+    for (let t = 0; t < 3; t += dt) A.updateAirlocks(air, env(), dt);
+    const at = bx.travel;
+    for (let t = 0; t < 3; t += dt) {
+      for (const e of A.updateAirlocks(air, env({ below: () => true }), dt)) if (e.kind === 'bayStop' && e.at === 'held') held = true;
+    }
+    ok(bx.travel - at < 0.01 && held, `под платформой человек — она встала на ${bx.travel.toFixed(2)} м и ждёт`);
+  }
+  {
+    // Загрузка игры с опущенной платформой — сразу на грунте, без хода.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.setHatches(air, ['nL', 'bay'], true);
+    A.updateAirlocks(air, env(), dt);
+    ok(bx.want && Math.abs(bx.travel - bx.reach) < 1e-6, 'из сохранения — сразу на грунте, а не спуском заново');
+  }
+
+  // --- едет пилот: стоящего на плите она везёт вниз и наверх.
+  {
+    const air = A.makeAirlocks(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    const p = Wk.makeWalker();
+    Wk.standUp(p, In);
+    p.phase = 'walk'; p.pos = [0.4, b.deck, 6.0]; p.room = Hd;
+    for (let i = 0; i < 30; i++) Wk.updateWalker(p, In, {}, dt);
+    const go = (want, carry) => {
+      if (bx.want !== want) A.toggleBay(air, bx);
+      let off = 0, loose = 0, n = 0;
+      for (let t = 0; t < 14; t += dt) {
+        Wk.updateWalker(p, In, {}, dt);
+        A.updateAirlocks(air, env(), dt);
+        if (carry) p.pos[1] -= A.bayCarry(air, p.pos);
+        off = Math.max(off, Math.abs(p.pos[1] - A.bayTop(bx)));
+        if (!p.ground) loose++;
+        n++;
+        if (bx.dir === 0 && t > 0.5) break;
+      }
+      return { off, loose: loose / n };
+    };
+    const down = go(true, true);
+    ok(down.off < 0.02 && down.loose < 0.05 && Math.abs(p.pos[1] - A.bayTop(bx)) < 0.005 && A.onBay(bx, p.pos),
+      `вниз пилот едет на плите: ноги от неё не дальше ${(down.off * 100).toFixed(1)} см, в воздухе ${(down.loose * 100).toFixed(0)}% шагов`);
+    const upRide = go(false, true);
+    ok(upRide.off < 0.02 && Math.abs(p.pos[1] - b.deck) < 0.005,
+      `наверх — тоже: пилот снова на палубе трюма, ${p.pos[1].toFixed(3)} м`);
+    // Проверка кусается: без переноса плита на подъёме проходит сквозь ноги.
+    const p2 = p.pos.slice();
+    go(true, true);
+    const noCarry = go(false, false);
+    ok(noCarry.off > 1.0, `без переноса плита уходит из-под ног или сквозь них: разошлись на ${noCarry.off.toFixed(2)} м`);
+    p.pos = p2;
+    In.air = null;
+  }
+
+  // --- пороги: сойти с края опущенной плиты и ступить на неё с грунта.
+  {
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.toggleBay(air, bx);
+    ride(air, env());
+    const top = A.bayTop(bx);
+    ok(!A.pastBay(air, [b.x[1] - 0.2, top, 7]) && A.pastBay(air, [b.x[1] + 0.12, top, 7]) === bx,
+      'сходят с любого края опущенной плиты: ноги за краем — пора в оси грунта');
+    ok(A.ontoBay(air, [b.x[1] - 0.2, top, 7]) === bx && !A.ontoBay(air, [b.x[1] - 0.05, top, 7])
+      && !A.ontoBay(air, [b.x[1] + 0.12, top, 7]),
+      'с грунта на плиту — только шагнув внутрь на десять сантиметров: у края не дёргаться туда-обратно');
+    bx.want = false;
+    for (let t = 0; t < 0.5; t += dt) A.updateAirlocks(air, env(), dt);
+    ok(!A.pastBay(air, [b.x[1] + 0.12, A.bayTop(bx), 7]), 'едущая плита — не порог: с неё не сходят');
+  }
+
+  // --- пульты: на плите — ехать, на полу трюма — звать.
+  {
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const ride0 = A.bayPanelNear(air, [b.panel[0] + 0.3, b.deck, b.panel[1] + 0.8]);
+    const call = A.bayPanelNear(air, [b.call[0] + 0.3, b.deck, b.call[1] + 0.4]);
+    ok(ride0 && ride0.kind === 'ride' && call && call.kind === 'call' && !A.bayPanelNear(air, [0, b.deck, 7.5]),
+      'у пульта на плите E — ехать, у пульта на переборке — звать; посреди трюма — ничего');
+  }
+}
+
+// --- перевод: каждая надпись в словаре --------------------------------------
+//
+// Ключ перевода — сама русская строка (js/core/lang.js), и забытая в
+// словаре надпись молча остаётся русской на английском экране. Сверка
+// проходит по всем L('…') в исходниках игры: так нашлись двадцать пять
+// надписей грузовой платформы, которые иначе дожили бы до игрока.
+{
+  console.log('\n== перевод: каждая надпись в словаре ==');
+  const files = [];
+  (function walk(dir) {
+    for (const e of readdirSync(new URL('../' + dir, import.meta.url), { withFileTypes: true })) {
+      if (e.isDirectory()) walk(dir + e.name + '/');
+      else if (e.name.endsWith('.js')) files.push(dir + e.name);
+    }
+  })('js/');
+  const miss = [];
+  let n = 0;
+  for (const f of files) {
+    const src = readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+    for (const m of src.matchAll(/\bL\('((?:[^'\\]|\\.)*)'\)/g)) {
+      const t = m[1].replace(/\\'/g, "'");
+      if (!/[А-Яа-яЁё]/.test(t)) continue;
+      n++;
+      if (!hasEn(t) && !miss.includes(t)) miss.push(t);
+    }
+  }
+  ok(n > 500 && miss.length === 0,
+    `все ${n} русских надписей в L('…') переведены` + (miss.length ? ': нет у ' + miss.slice(0, 6).join(' | ') : ''));
 }
 
 // --- помещения «Прометея» ---------------------------------------------------
@@ -10163,6 +10166,272 @@ console.log('\n== наземный город ==');
   const solo = F.fleetMarks([], world, 0, { id: null, pos: v3(1, 2, 3), away: false, dockedAt: st }, new Map());
   ok(solo.length === 1 && solo[0].active && solo[0].place === 'В ПОРТУ ' + st.name,
     'без записей сервера в списке всё равно есть свой корабль');
+}
+
+// Числа вездехода — из слепка бэкенда (server/data/specs.json), как и у кораблей.
+const roverSpec = () => JSON.parse(readFileSync('server/data/specs.json', 'utf8')).shipTypes.find((t) => t.code === 'rover').spec;
+
+console.log('\n== вездеход: пост водителя ==');
+{
+  const { buildRoverCockpit, ROVER_SCREENS, RCP, WHEEL, updateDriveYoke } = await import('../js/models/cockpit.rover.js');
+  const { ROVER_PLAN } = await import('../js/models/interior.rover.js');
+  const { buildInterior } = await import('../js/models/interior.js');
+  const { buildRover, RV } = await import('../js/models/rover.js');
+  const cp = buildRoverCockpit();
+  const In = buildInterior(buildRover(), ROVER_PLAN);
+  const W = 1600, H = 900;
+  const focal = (H / 2) / Math.tan(34 * Math.PI / 180);
+  const px = (p) => ({ x: W / 2 + focal * p.x / p.z, y: H / 2 - focal * p.y / p.z });
+  const trisOf = (verts, faces, M = null) => {
+    const out = [];
+    const T = (v) => (M ? M(v) : v);
+    for (const f of faces) for (let t = 1; t + 1 < f.v.length; t++) out.push([T(verts[f.v[0]]), T(verts[f.v[t]]), T(verts[f.v[t + 1]]), f]);
+    return out;
+  };
+  const hit = (tris, d) => {
+    let best = Infinity;
+    for (const [a, b, c] of tris) {
+      const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z, e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
+      const p1 = d.y * e2z - d.z * e2y, p2 = d.z * e2x - d.x * e2z, p3 = d.x * e2y - d.y * e2x;
+      const det = e1x * p1 + e1y * p2 + e1z * p3;
+      if (Math.abs(det) < 1e-12) continue;
+      const inv = 1 / det, tx = -a.x, ty = -a.y, tz = -a.z;
+      const u = (tx * p1 + ty * p2 + tz * p3) * inv;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (d.x * qx + d.y * qy + d.z * qz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 1e-6 && t < best) best = t;
+    }
+    return best;
+  };
+  // Глаз поста — глаз кресла помещений и глаз модели вездехода.
+  const se = In.seat.eye;
+  ok(In.pod === true && Math.abs(cp.eye.x - se[0]) + Math.abs(cp.eye.y - se[1]) + Math.abs(cp.eye.z - se[2]) < 1e-9
+    && se[0] === RV.eye[0] && se[2] === RV.eye[2],
+    'глаз поста водителя — глаз кресла кабины и модели вездехода; в кабине — пост');
+  // Пост — внутри кузова: ни одна вершина не вылезает за борта, пол,
+  // крышу и нос. Рама лобового стекла — под самой крышей: стекло доходит до неё.
+  {
+    const B = RV.body;
+    const bad = [];
+    for (const v of cp.shell.verts) {
+      const x = v.x + se[0], y = v.y + se[1], z = v.z + se[2];
+      if (Math.abs(x) > B.side + 1e-6 || y < RV.floor - 1e-6 || y > B.top + 1e-6 || z > B.z1 + 1e-6) {
+        bad.push([x, y, z].map((c) => c.toFixed(2)).join(','));
+      }
+    }
+    ok(bad.length === 0, `пост целиком в кузове: вершин за бортом, полом, крышей или носом — ${bad.length}`
+      + (bad.length ? ': ' + bad.slice(0, 3).join(' ') : ''));
+  }
+  // Экраны: три монитора и табло, в кадре, не зеркальны; заслоняет их
+  // только обод руля — и только нижнюю кромку среднего.
+  const shell = trisOf(cp.shell.verts, cp.shell.faces);
+  const t = (RCP.wheel.tilt - 90) * Math.PI / 180;
+  const c0 = Math.cos(t), s0 = Math.sin(t);
+  // Руль в позе «прямо»: наклон колонки вокруг x (как partMatrix, js/gl/cabin.js).
+  const wheelAt = (v) => ({ x: v.x + cp.stick.pivot.x, y: v.y * c0 - v.z * s0 + cp.stick.pivot.y, z: v.y * s0 + v.z * c0 + cp.stick.pivot.z });
+  const wheel = trisOf(cp.stick.mesh.verts, cp.stick.mesh.faces, wheelAt);
+  const ids = ROVER_SCREENS.map((s) => s.id);
+  ok(ids.every((id) => cp.screens[id]) && Object.keys(cp.screens).length === 4 && ids.join() === 'rnav,rdrive,rsys,rann',
+    'экранов у поста четыре: навигация, ход, системы и табло');
+  const bad = [], hidden = [], mirror = [];
+  let wheelCover = 0;
+  for (const s of Object.values(cp.screens)) {
+    const pts = s.corners.map((q) => ({ x: s.pos.x + (q.x - s.pos.x) * 0.96, y: s.pos.y + (q.y - s.pos.y) * 0.96, z: s.pos.z + (q.z - s.pos.z) * 0.96 }));
+    if (pts.map(px).some((p) => p.x < 0 || p.x > W || p.y < 0 || p.y > H)) bad.push(s.id);
+    // Сетка точек по экрану: что их закрывает — оболочка поста или руль.
+    for (let i = 0; i <= 10; i++) {
+      for (let j = 0; j <= 10; j++) {
+        const u = (i / 10 - 0.5) * 0.96, v = (j / 10 - 0.5) * 0.96;
+        const q = { x: s.pos.x + s.right.x * s.w * u + s.up.x * s.h * v, y: s.pos.y + s.right.y * s.w * u + s.up.y * s.h * v,
+          z: s.pos.z + s.right.z * s.w * u + s.up.z * s.h * v };
+        const L = Math.hypot(q.x, q.y, q.z), d = { x: q.x / L, y: q.y / L, z: q.z / L };
+        if (hit(shell.filter((tr) => tr[3].screen !== s.id), d) < L - 0.004) { if (!hidden.includes(s.id)) hidden.push(s.id); }
+        if (hit(wheel, d) < L - 0.004) {
+          if (s.id !== 'rdrive' || v > -0.3) { if (!hidden.includes(s.id + ' рулём')) hidden.push(s.id + ' рулём'); } else wheelCover++;
+        }
+      }
+    }
+    const c = px(s.pos);
+    const r = px({ x: s.pos.x + s.right.x * s.w * 0.4, y: s.pos.y + s.right.y * s.w * 0.4, z: s.pos.z + s.right.z * s.w * 0.4 });
+    const up = px({ x: s.pos.x + s.up.x * s.h * 0.4, y: s.pos.y + s.up.y * s.h * 0.4, z: s.pos.z + s.up.z * s.h * 0.4 });
+    if (!(r.x > c.x + 1) || !(up.y < c.y - 1)) mirror.push(s.id);
+  }
+  ok(bad.length === 0 && hidden.length === 0,
+    `экраны поста в кадре и не заслонены; обод руля закрывает только нижнюю кромку среднего (${wheelCover} точек из 121)`
+    + (bad.length ? '; за кадром: ' + bad.join(', ') : '') + (hidden.length ? '; заслонены: ' + hidden.join(', ') : ''));
+  ok(wheelCover > 0, 'и обод руля в кадре виден — сквозь него смотрят на средний монитор, как на приборы в машине');
+  ok(mirror.length === 0, 'ни один экран поста не зеркальный' + (mirror.length ? ': ' + mirror.join(', ') : ''));
+  // Табло — как табло связи у «Челленджера»: 10 : 1, софт верстает 800 × 80.
+  {
+    const a = cp.screens.rann;
+    ok(Math.abs(a.w / a.h - 10) < 1e-9, `табло вездехода — ${a.w} × ${a.h} м, 10 : 1, как софт его верстает`);
+  }
+  // Руль: вправо — макушка обода уходит вправо; колонка не дёргается.
+  {
+    const yoke = { pitch: 0, roll: 0, yaw: 0, throttle: 0 };
+    updateDriveYoke(yoke, { steer: 0.3, pedal: 1 }, 1);
+    const [ax, az, ay] = cp.stick.pose(yoke);
+    // Метка на макушке обода — z детали; поворот вокруг y детали, потом наклон.
+    const topX = Math.sin(ay) * RCP.wheel.r;
+    ok(yoke.wheel === 0.3 && Math.abs(ay - 0.3 * WHEEL.ratio) < 1e-9 && topX > 0.1 && az === 0
+      && Math.abs(ax - (RCP.wheel.tilt - 90) * Math.PI / 180) < 1e-9,
+      `руль за колёсами: колёса на 0.3 рад вправо — руль на ${(ay * 57.3).toFixed(0)}°, макушка обода вправо на ${(topX * 100).toFixed(0)} см`);
+    const [lx] = cp.throttle.pose(yoke);
+    ok(lx > 0 && yoke.lever > 0.99, 'рычаг хода — за педалью: газ — вперёд');
+  }
+  // Кабина и шлюз: встаёт водитель у прохода, не в кресле и не в стене;
+  // проход в кабину — справа от пульта двери.
+  {
+    const Wk = await import('../js/game/walker.js');
+    const w = Wk.makeWalker();
+    Wk.standUp(w, In);
+    const stand = In.seat.stand;
+    const inSolid = In.solids.some((s) => stand[0] + 0.25 > s.lo[0] && stand[0] - 0.25 < s.hi[0]
+      && stand[1] + 0.9 > s.lo[1] && stand[1] + 0.9 < s.hi[1] && stand[2] + 0.25 > s.lo[2] && stand[2] - 0.25 < s.hi[2]);
+    const op = In.openings.find((o) => o.a === 'rlock' && o.b === 'rcab');
+    ok(!inSolid && w.room && w.room.id === 'rcab' && op && op.u[0] >= 0.2,
+      `встаёт водитель справа от кресла, в кабине (${w.room && w.room.id}); проход из шлюза — справа, x ${op.u.join('…')} м`);
+    ok(In.hatches.length === 1 && In.hatches[0].id === 'rdoor' && In.roomById.rlock.kind === 'lock',
+      'дверь вездехода — люк с шлюзом: цикл давления, створка, трап');
+    // Шлюз целиком в кузове: в открытую дверь видно его изнутри, и всё,
+    // что торчит за борт или фаску крыши, видно и снаружи (так было: стены
+    // и колонны пака с глубиной за лицом, вырез по фаскам).
+    const Bd = RV.body, p = In.meshes.rlock.pos;
+    let outside = 0;
+    for (let i = 0; i < p.length; i += 3) {
+      const x = Math.abs(p[i]), y = p[i + 1];
+      const edge = y > Bd.top - Bd.chamfer ? Bd.side - (y - (Bd.top - Bd.chamfer)) / Bd.chamfer * (Bd.side - Bd.roof) : Bd.side;
+      if (x > edge + 1e-6 || y > Bd.top + 1e-6 || p[i + 2] < Bd.z0 || p[i + 2] > Bd.z1) outside++;
+    }
+    ok(outside === 0 && In.carve.length === 0 && RV.door.y[1] <= Bd.top - Bd.chamfer,
+      `шлюз вездехода целиком в кузове: вершин его сетки за бортом и фаской — ${outside}; выреза кузова нет, дверь — под фаской`);
+  }
+}
+
+console.log('\n== вездеход: ход в трюме ==');
+{
+  const R = await import('../js/game/rover.js');
+  const spec = roverSpec();
+  const rv = R.makeRover();
+  rv.mode = 'hangar';
+  rv.hg = { x: 0, y: -6, z: 7.2, yaw: 0 };
+  // Трюм 9 × 11.2 м: стены — коробки.
+  const walls = [{ lo: [-6, -7, 12.6], hi: [6, 0, 14] }, { lo: [-6, -7, 0], hi: [6, 0, 1.4] },
+    { lo: [4.5, -7, 0], hi: [6, 0, 14] }, { lo: [-6, -7, 0], hi: [-4.5, 0, 14] }];
+  const env = { floor: () => -6, solids: walls };
+  let bump = 0;
+  for (let i = 0; i < 300; i++) { R.stepHangar(rv, { throttle: 1, steer: 0, brake: 0 }, spec, env, 1 / 60); bump = Math.max(bump, rv.bump); }
+  const nose = rv.hg.z + 2.2 + 1.7;
+  ok(Math.abs(nose - 12.6) < 0.01 && rv.v === 0 && bump > 1,
+    `тронулся в трюме — упёрся носом в переборку (${nose.toFixed(2)} м, стена 12.6) и встал; удар ${bump.toFixed(1)} м/с`);
+  for (let i = 0; i < 240; i++) R.stepHangar(rv, { throttle: -1, steer: 1, brake: 0 }, spec, env, 1 / 60);
+  ok(rv.hg.z < 7 && rv.hg.yaw < -0.2 && rv.hg.y === -6,
+    `назад с рулём вправо — нос уходит влево, как у машины (курс ${(rv.hg.yaw * 57.3).toFixed(0)}°), колёса на полу`);
+  // Пол — плита: плита ушла вниз — и машина с ней.
+  env.floor = () => -9.5;
+  R.stepHangar(rv, { throttle: 0, steer: 0, brake: 1 }, spec, env, 1 / 60);
+  ok(rv.hg.y === -9.5, 'плита ушла вниз — машина на ней');
+}
+
+console.log('\n== вездеход: ангар ==');
+{
+  const Hg = await import('../js/game/hangar.js');
+  const { makeAir, bayTop } = await import('../js/game/airlock.js');
+  const { buildInterior } = await import('../js/models/interior.js');
+  const In = buildInterior(buildCobra());
+  const air = makeAir(In, SHIP.gearClear);
+  const bx = Hg.hangarBay(air);
+  const m = Hg.bayCenter(bx);
+  ok(bx && bx.id === 'bay' && Hg.overBay(bx, m.x, m.z) && !Hg.overBay(bx, bx.b.x[1] + 0.1, m.z)
+    && Hg.hangarFloor(bx, m.x, m.z) === bayTop(bx) && Hg.hangarFloor(bx, 3.8, m.z) === bx.b.deck,
+    'пол трюма: над плитой — её верх, мимо неё — палуба');
+  // Машина на середине плиты целиком на ней — и в трюме, и при спуске.
+  const { RV } = await import('../js/models/rover.js');
+  ok(m.x - 1.86 > bx.b.x[0] && m.x + 1.86 < bx.b.x[1] && m.z - 3.36 > bx.b.z[0] && m.z + 3.46 < bx.b.z[1]
+    && RV.roofBar < (In.roomById[bx.room].hi[1] - bx.b.deck),
+    `вездеход встаёт на плиту целиком и под потолок трюма (${RV.roofBar} м при ${(In.roomById[bx.room].hi[1] - bx.b.deck).toFixed(2)})`);
+  // Плита у грунта — только когда доехала и стоит.
+  bx.travel = 1; bx.dir = 1; bx.floor = false;
+  const moving = Hg.bayDown(bx);
+  bx.dir = 0; bx.floor = true;
+  ok(!moving && Hg.bayDown(bx), 'с плиты съезжают, только когда она легла на грунт и стоит');
+  bx.travel = 0; bx.floor = false;
+  // В мир и обратно: место в трюме сохраняется.
+  const C = { pos: v3(100, 200, 300), basis: makeBasis() };
+  C.basis.right = normalize(v3(0.8, 0.6, 0)); C.basis.up = normalize(v3(-0.6, 0.8, 0)); C.basis.fwd = v3(0, 0, 1);
+  const hg = { x: 0.4, y: -6.1, z: 7.5, yaw: 0.3 };
+  const o = { pos: v3(), basis: makeBasis() };
+  Hg.hangarToWorld(C, hg, o);
+  const back = Hg.worldToHangar(C, o.pos, o.basis.fwd, {});
+  ok(Math.abs(back.x - hg.x) + Math.abs(back.y - hg.y) + Math.abs(back.z - hg.z) + Math.abs(back.yaw - hg.yaw) < 1e-6,
+    'место в трюме -> мир -> место в трюме: то же');
+  // Твёрдое машины в трюме — тем же поворотом, что и её место в мире.
+  const T = Hg.hangarTransform(hg);
+  const p = [0, 0, 1];
+  const q = [T.R[0] * p[0] + T.R[1] * p[1] + T.R[2] * p[2] + T.t[0], T.R[3] * p[0] + T.R[4] * p[1] + T.R[5] * p[2] + T.t[1],
+    T.R[6] * p[0] + T.R[7] * p[1] + T.R[8] * p[2] + T.t[2]];
+  const wq = { x: C.pos.x + (C.basis.right.x * q[0] + C.basis.up.x * q[1] + C.basis.fwd.x * q[2]) / 1000,
+    y: C.pos.y + (C.basis.right.y * q[0] + C.basis.up.y * q[1] + C.basis.fwd.y * q[2]) / 1000,
+    z: C.pos.z + (C.basis.right.z * q[0] + C.basis.up.z * q[1] + C.basis.fwd.z * q[2]) / 1000 };
+  const wo = { x: o.pos.x + o.basis.fwd.x / 1000, y: o.pos.y + o.basis.fwd.y / 1000, z: o.pos.z + o.basis.fwd.z / 1000 };
+  ok(Math.hypot(wq.x - wo.x, wq.y - wo.y, wq.z - wo.z) < 1e-9,
+    'точка машины в трюме (её коробки) и та же точка в мире совпадают: один поворот');
+  // Стены трюма упирают машину: она внутри коробок помещений не оказывается.
+  const R = await import('../js/game/rover.js');
+  const spec = roverSpec();
+  const rv = R.makeRover();
+  rv.hg = { x: m.x, y: bx.b.deck, z: m.z, yaw: 0 };
+  const env = { floor: (x, z) => Hg.hangarFloor(bx, x, z), solids: Hg.hangarSolids(In, air) };
+  for (let i = 0; i < 600; i++) R.stepHangar(rv, { throttle: 1, steer: 0.6, brake: 0 }, spec, env, 1 / 60);
+  const room = In.roomById[bx.room];
+  const inside = R.HULL_CIRCLES.every((c) => {
+    const x = rv.hg.x + Math.sin(rv.hg.yaw) * c.z, z = rv.hg.z + Math.cos(rv.hg.yaw) * c.z;
+    return x - c.r > room.lo[0] - 0.3 && x + c.r < room.hi[0] + 0.3 && z - c.r > room.lo[2] - 0.3 && z + c.r < room.hi[2] + 0.3;
+  });
+  ok(inside && env.solids.length > 10,
+    `десять секунд газа с рулём в настоящем трюме «Челленджера» — машина в его стенах (${env.solids.length} коробок трюма)`);
+}
+
+console.log('\n== вездеход: навигация и приборы ==');
+{
+  const N = await import('../js/game/rovernav.js');
+  const R = await import('../js/game/rover.js');
+  const rv = R.makeRover();
+  // На экваторе, «вверх» — +x тела; север — +y (ось вращения).
+  rv.lp = { x: 2000, y: 0, z: 0 };
+  R.frameFrom({ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, rv.lb);
+  const head0 = N.roverHeading(rv);
+  R.frameFrom({ x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, rv.lb);
+  const head90 = N.roverHeading(rv);
+  ok(Math.abs(head0) < 1e-9 && Math.abs(head90 - 90) < 1e-9,
+    `курс: нос по оси вращения тела — 0° (север), по вращению — ${head90.toFixed(0)}° (восток)`);
+  // Корабль справа по курсу — повернуть вправо.
+  rv.body = { pos: { x: 0, y: 0, z: 0 }, pole: { x: 0, y: 1, z: 0 }, eqRef: { x: 1, y: 0, z: 0 }, eqSide: { x: 0, y: 0, z: -1 }, spinPhase: 0 };
+  R.frameFrom({ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, rv.lb);
+  const game = { rover: rv, roverHome: () => ({ pos: { x: 2000, y: 0.3, z: -0.3 }, name: 'Challenger' }) };
+  // Мир = оси тела (базис тела — единичный при spinPhase 0: right = eqRef, up = pole).
+  const h = N.roverHomeInfo(game);
+  ok(h && Math.abs(h.dist - Math.hypot(0.3, 0.3)) < 1e-6 && h.turn > 40 && h.turn < 50,
+    `до своего корабля ${(h.dist * 1000).toFixed(0)} м, повернуть вправо на ${h.turn.toFixed(0)}°`);
+  const t = N.roverTilt(rv);
+  ok(Math.abs(t.pitch) < 1e-9 && Math.abs(t.roll) < 1e-9, 'стоит ровно — крен и тангаж нулевые');
+
+  // Мониторы вездехода: рисуются, ход — в км/ч, курс и корабль — с цифрами.
+  const P = await import('../js/ui/panels.js');
+  const said = [];
+  const ctx = new Proxy({}, { get: (o, k) => (k in o ? o[k] : (k === 'measureText' ? () => ({ width: 10 })
+    : (...a) => { if (k === 'fillText') said.push(String(a[0])); })), set: (o, k, v) => { o[k] = v; return true; } });
+  rv.v = 10;
+  const g2 = { ship: { hull: 30, lights: true }, shipMesh: buildCobra(), rover: rv, peers: [], now: 1, roverHome: game.roverHome,
+    ownAir: () => null };
+  const drew = ['rnav', 'rdrive', 'rsys', 'rann'].every((id) => P.drawScreen(id, ctx, 400, 260, g2));
+  ok(drew && said.includes('36') && said.includes('ВПЕРЁД') && said.includes('000°') && said.some((s) => /^\d+ м$/.test(s)),
+    `мониторы вездехода рисуются: ход 36 км/ч, «ВПЕРЁД», курс 000°, до корабля — метры`);
+  ok(P.NOMINAL.rann[0] / P.NOMINAL.rann[1] === 10 && P.SCREEN_RATE.rdrive === 30,
+    'табло — 800 × 80, экран хода — тридцать кадров в секунду, как экран полёта');
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

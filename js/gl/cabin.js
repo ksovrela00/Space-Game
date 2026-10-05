@@ -37,7 +37,10 @@ import { CMAT, EYE } from '../models/cockpit.js';
 import { MAT as HULL_MAT } from '../models/hulldetail.js';
 import { HULL_FRAME_GLSL } from './hull.js';
 import { ENTRY } from '../game/entry.js';
-import { lockLight } from '../game/airlock.js';
+import { lockLight, hatchPanelAt, stairPose } from '../game/airlock.js';
+import { hullOf } from '../models/hulls.js';
+import { RV } from '../models/rover.js';
+import { buildStairMesh, buildHatchMesh } from '../models/airstair.js';
 
 /**
  * Сколько ламп кабина освещает разом. Пост пилота — шесть своих
@@ -487,6 +490,30 @@ export function cabinArrays(mesh, atlasUv) {
   return out;
 }
 
+// Стекло и окна корпуса в трюме — тёмным композитом: стекло кабины
+// (CMAT.glass) рисует отдельный проход, а здесь кузов один.
+const GLASSY = new Set([HULL_MAT.glass, HULL_MAT.window, HULL_MAT.clear]);
+
+/**
+ * Сетка корпуса (км, материалы корпуса) — в формат кабины (м, CMAT):
+ * так вездеход в трюме освещают лампы трюма, а не солнце сквозь обшивку.
+ */
+export function hullInCabinMesh(mesh, keep = null) {
+  const verts = [], faces = [];
+  const add = (m) => {
+    const base = verts.length;
+    for (const v of m.verts) verts.push({ x: v.x * 1000, y: v.y * 1000, z: v.z * 1000 });
+    for (const fc of m.faces) {
+      if (keep && !keep(fc, m.verts)) continue;
+      faces.push({ v: fc.v.map((i) => i + base), c: fc.c, n: fc.n, emissive: fc.emissive || 0,
+        mat: GLASSY.has(fc.mat) ? CMAT.trim : CMAT.paint });
+    }
+  };
+  add(mesh);
+  if (mesh.decal) add(mesh.decal);
+  return { verts, faces };
+}
+
 function upload(gl, data) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
@@ -892,6 +919,9 @@ export class CabinView {
       windows,
       door: uploadInterior(gl, packed(interior.doorMesh)),
       crate: uploadInterior(gl, packed(interior.crateMesh)),
+      // Плиты грузовых платформ — в поднятом положении, оси корабля:
+      // на высоту хода их ставит рисование.
+      bay: Object.fromEntries(Object.entries(interior.bayMeshes || {}).map(([id, m]) => [id, uploadInterior(gl, packed(m))])),
       lazy: !!interior.lazy, tris: 0, of: interior,
     };
     this.interOf = interior;
@@ -950,7 +980,7 @@ export class CabinView {
     for (const inter of this.inters.values()) {
       const parts = [...Object.values(inter.rooms).filter(Boolean).map((r) => r.part),
         ...Object.values(inter.frames).filter(Boolean).map((r) => r.part), ...inter.windows.map((r) => r.part),
-        inter.door, inter.crate];
+        inter.door, inter.crate, ...Object.values(inter.bay || {})];
       for (const p of parts) { gl.deleteBuffer(p.buf); gl.deleteVertexArray(p.vao); }
     }
     this.inters.clear();
@@ -1132,8 +1162,14 @@ export class CabinView {
     const parts = [];
     if (cp) {
       const y = game.yoke || { pitch: 0, roll: 0, yaw: 0, throttle: 0 };
-      partMatrix(cp.stick.pivot, -y.pitch, -y.roll, y.yaw, this.mStick);
-      partMatrix(cp.throttle.pivot, y.throttle || 0, 0, 0, this.mThrottle);
+      // У детали может быть своя поза (pose): руль вездехода крутится вокруг
+      // наклонной колонки, а не качается, как ручка (js/models/cockpit.rover.js).
+      const sp = cp.stick.pose ? cp.stick.pose(y) : null;
+      const tp = cp.throttle.pose ? cp.throttle.pose(y) : null;
+      if (sp) partMatrix(cp.stick.pivot, sp[0], sp[1], sp[2], this.mStick);
+      else partMatrix(cp.stick.pivot, -y.pitch, -y.roll, y.yaw, this.mStick);
+      if (tp) partMatrix(cp.throttle.pivot, tp[0], tp[1], tp[2], this.mThrottle);
+      else partMatrix(cp.throttle.pivot, y.throttle || 0, 0, 0, this.mThrottle);
       parts.push([this.parts.shell, IDENT], [this.parts.stick, this.mStick], [this.parts.throttle, this.mThrottle]);
     }
     // Корпус в карту теней: у поста «Челленджера» — свой (в осях глаза), у
@@ -1380,8 +1416,140 @@ export class CabinView {
         this.draws++; this.interDraws++; this.interTris += R.crate.count / 3;
       }
     }
+    // Плита платформы — пока она в корпусе: в трюме и в колодце её светит
+    // трюм. Ниже днища она снаружи, и рисует её сцена при солнце
+    // (js/gl/scene.js, drawHatchesOf). Шлюзы — того корабля, чьи помещения.
+    const air = this._air || (game.frame && game.frame.air) || I.air;
+    for (const bx of (air && air.bays) || []) {
+      const b = bx.b, part = R.bay && R.bay[bx.id];
+      if (!part || !vis.includes(bx.room) || b.deck - bx.travel < b.belly) continue;
+      const lo = [b.x[0] - O.x, b.deck - bx.travel - b.plate - O.y, b.z[0] - O.z];
+      const hi = [b.x[1] - O.x, b.deck - bx.travel + 1.3 - O.y, b.z[1] - O.z];
+      if (!boxInView(this.pv, lo, hi)) continue;
+      M[0] = 1; M[1] = 0; M[2] = 0; M[3] = 0;
+      M[4] = 0; M[5] = 1; M[6] = 0; M[7] = 0;
+      M[8] = 0; M[9] = 0; M[10] = 1; M[11] = 0;
+      M[12] = -O.x; M[13] = -bx.travel - O.y; M[14] = -O.z; M[15] = 1;
+      gl.uniformMatrix4fv(pc.loc('uModel'), false, M);
+      gl.bindVertexArray(part.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, part.count);
+      this.draws++; this.interDraws++; this.interTris += part.count / 3;
+    }
+    this.drawHangar(game, pc, air, vis);
     gl.uniformMatrix4fv(pc.loc('uModel'), false, IDENT);
     this.evictRooms();
+  }
+
+  /**
+   * Вездеход в формате кабины (м), собирается раз: кузов без панели двери,
+   * сама панель (её не рисуют, пока дверь открыта: вместо неё — створка и
+   * проём) и колесо.
+   */
+  roverParts() {
+    if (this._rover !== undefined) return this._rover;
+    const H = hullOf('rover');
+    // Панель двери — утопленная грань левого борта (js/models/rover.js).
+    const D = RV.door;
+    const isDoor = (fc, V) => fc.n.x < -0.9 && fc.v.every((i) => Math.abs(V[i].x * 1000 + D.inset) < 1e-6
+      && V[i].z * 1000 > D.z[0] - 1e-6 && V[i].z * 1000 < D.z[1] + 1e-6);
+    this._rover = H ? {
+      body: upload(this.gl, cabinArrays(hullInCabinMesh(H.mesh, (fc, V) => !isDoor(fc, V)), null)),
+      door: upload(this.gl, cabinArrays(hullInCabinMesh(H.mesh, isDoor), null)),
+      wheel: upload(this.gl, cabinArrays(hullInCabinMesh(H.wheel), null)),
+      air: new Map(),
+    } : null;
+    return this._rover;
+  }
+
+  /** Створка люка и трап вездехода в формате кабины — по его люку (раз на вид). */
+  roverAirPart(hx, stair) {
+    const P = this._rover, key = stair ? 's:' + hx.design.n + ':' + hx.design.r.toFixed(4) : 'h:' + hx.id;
+    let part = P.air.get(key);
+    if (!part) {
+      part = upload(this.gl, cabinArrays(hullInCabinMesh(stair ? buildStairMesh(hx.design) : buildHatchMesh(hx.h)), null));
+      P.air.set(key, part);
+    }
+    return part;
+  }
+
+  /**
+   * Вездеходы в трюме этого корабля (game.hangarSeen, js/main.js): кузов и
+   * шесть колёс — в свете трюма, там, где машина стоит на плите или палубе.
+   * Снаружи трюма (плита у грунта) их же рисует сцена при солнце.
+   */
+  drawHangar(game, pc, air, vis) {
+    const seen = game.hangarSeen;
+    if (!seen || !seen.length || !air) return;
+    const P = this.roverParts();
+    if (!P) return;
+    const gl = this.gl, O = this.org, M = this.mPart, W = RV.wheel;
+    for (const it of seen) {
+      // Тот, в котором глаз, изнутри уже нарисован своими помещениями.
+      if (it.air !== air || it.V === game.frame || !vis.includes(it.room)) continue;
+      const hg = it.hg, c = Math.cos(hg.yaw), s = Math.sin(hg.yaw);
+      const tx = hg.x - O.x, ty = hg.y - O.y, tz = hg.z - O.z;
+      if (!boxInView(this.pv, [tx - 4, ty, tz - 4], [tx + 4, ty + 3.3, tz + 4])) continue;
+      // Оси машины в осях кабины: поворот по курсу вокруг «вверх».
+      M[0] = c; M[1] = 0; M[2] = -s; M[3] = 0;
+      M[4] = 0; M[5] = 1; M[6] = 0; M[7] = 0;
+      M[8] = s; M[9] = 0; M[10] = c; M[11] = 0;
+      M[12] = tx; M[13] = ty; M[14] = tz; M[15] = 1;
+      gl.uniformMatrix4fv(pc.loc('uModel'), false, M);
+      const hx = it.rAir && it.rAir.hatches[0];
+      const open = !!hx && hx.open > 0;
+      for (const part of open ? [P.body] : [P.body, P.door]) {
+        gl.bindVertexArray(part.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, part.count);
+        this.draws++; this.interDraws++; this.interTris += part.count / 3;
+      }
+      // Дверь открыта: створка отъехала, трап выдвинут — как у люка корабля
+      // снаружи (js/gl/scene.js, drawHatchesOf), только в свете трюма.
+      const rot = (v) => [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+      const place = (part, o, ex, ey, ez) => {
+        const p = rot(o), X = rot(ex), Y = rot(ey), Z = rot(ez);
+        M[0] = X[0]; M[1] = X[1]; M[2] = X[2]; M[3] = 0;
+        M[4] = Y[0]; M[5] = Y[1]; M[6] = Y[2]; M[7] = 0;
+        M[8] = Z[0]; M[9] = Z[1]; M[10] = Z[2]; M[11] = 0;
+        M[12] = tx + p[0]; M[13] = ty + p[1]; M[14] = tz + p[2]; M[15] = 1;
+        gl.uniformMatrix4fv(pc.loc('uModel'), false, M);
+        gl.bindVertexArray(part.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, part.count);
+        this.draws++; this.interDraws++; this.interTris += part.count / 3;
+      };
+      if (open) {
+        place(this.roverAirPart(hx, false), hatchPanelAt(hx, this._hp || (this._hp = [0, 0, 0])), [1, 0, 0], [0, 1, 0], [0, 0, 1]);
+        if (hx.stair > 0) {
+          const sp = stairPose(hx, hx.stair, this._sp || (this._sp = { o: [0, 0, 0], ex: [0, 0, 0], ey: [0, 0, 0], ez: [0, 0, 0] }));
+          place(this.roverAirPart(hx, true), sp.o, sp.ex, sp.ey, sp.ez);
+        }
+      }
+      // Колёса: поворот рулём и вращение — как у сцены (drawWheelsOf);
+      // левые развёрнуты, чтобы ступица смотрела наружу.
+      let i = 0;
+      for (const z of W.z) {
+        for (const side of [-1, 1]) {
+          const w = it.wheels && it.wheels[i];
+          i++;
+          const st = w ? w.steer : 0, phi = w ? w.spin : 0;
+          const cs = Math.cos(st), ss = Math.sin(st), cp = Math.cos(phi), sp = Math.sin(phi);
+          const a = [cs * side, 0, -ss * side];
+          const f0 = [ss, 0, cs];
+          const up = [f0[0] * sp, cp, f0[2] * sp];
+          const fw = [f0[0] * cp * side, -sp * side, f0[2] * cp * side];
+          // В оси кабины: сперва в оси машины (поворот по курсу), затем сдвиг.
+          const rot = (v) => [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+          const A = rot(a), U = rot(up), F = rot(fw), p = rot([side * W.x, W.r, z]);
+          M[0] = A[0]; M[1] = A[1]; M[2] = A[2]; M[3] = 0;
+          M[4] = U[0]; M[5] = U[1]; M[6] = U[2]; M[7] = 0;
+          M[8] = F[0]; M[9] = F[1]; M[10] = F[2]; M[11] = 0;
+          M[12] = tx + p[0]; M[13] = ty + p[1]; M[14] = tz + p[2]; M[15] = 1;
+          gl.uniformMatrix4fv(pc.loc('uModel'), false, M);
+          gl.bindVertexArray(P.wheel.vao);
+          gl.drawArrays(gl.TRIANGLES, 0, P.wheel.count);
+          this.draws++; this.interDraws++; this.interTris += P.wheel.count / 3;
+        }
+      }
+    }
   }
 
   /** Видимые комнаты: где глаз, и куда из неё видно. */
@@ -1438,7 +1606,9 @@ export class CabinView {
         out.push({
           pos, dir: l.dir, cos: l.cos, range: l.range,
           color: [lc[0] * k, lc[1] * k, lc[2] * k],
-          lo: [room.lo[0] - O.x - 0.15, room.lo[1] - O.y - 0.15, room.lo[2] - O.z - 0.15],
+          // Комната с платформой светится и в колодце, под полом (lightLo).
+          lo: [room.lo[0] - O.x - 0.15, Math.min(room.lo[1], (I.lightLo && I.lightLo[l.room]) || Infinity) - O.y - 0.15,
+            room.lo[2] - O.z - 0.15],
           hi: [room.hi[0] - O.x + 0.15, room.hi[1] - O.y + 0.15, room.hi[2] - O.z + 0.15],
           d: Math.hypot(pos[0] - e[0], pos[1] - e[1], pos[2] - e[2]) / l.range,
         });
@@ -1460,12 +1630,17 @@ export class CabinView {
    *
    * @returns сколько вызовов отрисовки ушло
    */
-  drawLocksOutside(game, cam, size, sunPos, logFC, ship = game.ship, air = game.interior && game.interior.air) {
+  drawLocksOutside(game, cam, size, sunPos, logFC, ship = game.ship, air = game.interior && game.interior.air,
+    rooms = null) {
     const I = (air && air.I) || game.interior;
     if (!air || !ship || !I) return 0;
     this.deck = !game.cockpit || !I.pod;
-    const vis = [];
+    // Комнаты — заданные (трюм вокруг вездехода, что в нём стоит) или те,
+    // что видны сквозь открытые люки и опущенную платформу.
+    const vis = rooms ? rooms.slice() : [];
     for (const hx of air.hatches) if (hx.open > 0.01 && !vis.includes(hx.lock)) vis.push(hx.lock);
+    // Опущенная платформа — проём в днище: сквозь него виден трюм.
+    for (const bx of air.bays || []) if (bx.travel > 0.01 && !vis.includes(bx.room)) vis.push(bx.room);
     if (!vis.length) return 0;
     const gl = this.gl;
     if (this.interOf !== I) this.buildInterior(I);

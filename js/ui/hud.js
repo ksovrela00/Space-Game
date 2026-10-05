@@ -18,6 +18,7 @@ import { npcFade, npcGear, hullName } from '../game/npc.js';
 import { Q } from '../core/quality.js';
 import { L, fmtNum } from '../core/lang.js';
 import { STICK } from '../game/mousefly.js';
+import { roverHeading, roverTilt, roverHomeInfo } from '../game/rovernav.js';
 // Палитра живёт отдельно (js/ui/theme.js): её делят угловые панели
 // (здесь) и мониторы приборной доски кабины (js/ui/panels.js).
 const TAU = Math.PI * 2;
@@ -178,10 +179,15 @@ export function drawHud(r, game) {
   // только у корпуса с фонарём: на мостике «Прометея» рамы — сами окна
   // мостика (js/game/hull.js, canopy).
   if (state.view === 'cockpit' && !game.cockpit && HULL.canopy) drawCockpitFrame(ctx, w, h);
-  drawReticle(ctx, cam, ship);
-  if (game.stick && game.stick.on) drawStick(ctx, w, h, game.stick);
-  drawVelocityMarker(ctx, cam, ship);
-  drawWarpAim(ctx, cam, game);
+  // У вездехода нет ни прицела, ни пушки, ни прыжков: перекрестье посреди
+  // кадра висело бы над крышей машины и ни на что не указывало.
+  const ground = HULL.ground;
+  if (!ground) {
+    drawReticle(ctx, cam, ship);
+    if (game.stick && game.stick.on) drawStick(ctx, w, h, game.stick);
+    drawVelocityMarker(ctx, cam, ship);
+    drawWarpAim(ctx, cam, game);
+  }
   // После удара корабль какое-то время летит сам по себе — об этом надо
   // сказать, иначе непонятно, почему он не слушается.
   if (ship.stun > 0) {
@@ -195,8 +201,11 @@ export function drawHud(r, game) {
   // рамкой.
   drawTargetList(ctx, cam, game, target);
   drawPeerMarks(ctx, cam, game);
-  drawGunAim(ctx, cam, game);
-  drawAimedLabel(ctx, cam, game, target);
+  // Подпись «что под прицелом» — тоже прицельная: у вездехода её нет.
+  if (!ground) {
+    drawGunAim(ctx, cam, game);
+    drawAimedLabel(ctx, cam, game, target);
+  }
   if (target) drawTargetMarker(ctx, cam, target);
 
   // Приборы подхода включаются в гравитационном захвате и берут на себя
@@ -229,9 +238,15 @@ export function drawHud(r, game) {
     };
     // Колонка растёт ВВЕРХ от нижнего края, поэтому ей даётся точка низа,
     // а не верха: её высота зависит от того, что в ней сейчас есть.
-    corner(22, h - 22, () => drawShipColumn(ctx, 0, 0, game, approach));
-    corner(w - 22 - CARD_W * k, h - CARD_H * k - 22,
-      () => drawTargetCard(ctx, 0, 0, game, target, q));
+    if (ground) {
+      // Вездеход: слева — ход, курс и наклон, справа — свой корабль.
+      corner(22, h - 22, () => drawRoverColumn(ctx, 0, 0, game));
+      corner(w - 22 - CARD_W * k, h - CARD_H * k - 22, () => drawHomeCard(ctx, 0, 0, game));
+    } else {
+      corner(22, h - 22, () => drawShipColumn(ctx, 0, 0, game, approach));
+      corner(w - 22 - CARD_W * k, h - CARD_H * k - 22,
+        () => drawTargetCard(ctx, 0, 0, game, target, q));
+    }
     corner(w / 2, h - 78 * k, () => drawScanner(ctx, 0, 0, game));
   }
 
@@ -258,7 +273,7 @@ export function drawHud(r, game) {
   // В центре остаётся только то, что читается ВМЕСТЕ С ПРИЦЕЛОМ: отметка
   // грунта под кораблём и створ порта. Створ — НАД прицелом, по той же
   // причине: под ним корпус.
-  if (approach) drawGroundMark(ctx, cam, game);
+  if (approach && !ground) drawGroundMark(ctx, cam, game);
   if (game.dockAssist) drawDockAssist(ctx, w / 2, h / 2 - sc(150), game.dockAssist);
 
   // --- сообщения ---
@@ -815,6 +830,144 @@ function drawShipColumn(ctx, px, py, game, approach) {
     }
     y += H[r.kind];
   }
+}
+
+/**
+ * ЛЕВАЯ КОЛОНКА ВЕЗДЕХОДА: тот же прибор, что у кораблей (черта слева,
+ * крупный ход сверху вниз), но про машину на грунте. Ход — в км/ч: у
+ * машины на шестидесяти км/ч «0.02 км/с» не читается. Ни тяги, ни
+ * форсажа, ни бака у неё нет — их строк нет. Курс и наклон — те же, что
+ * на мониторах поста (js/game/rovernav.js).
+ */
+function drawRoverColumn(ctx, px, py, game) {
+  const ship = game.ship, rv = game.rover;
+  if (!rv) return;
+  const rows = [];
+  const v = rv.v || 0;
+  if (game.capture) rows.push({ kind: 'rule', label: game.capture.name.toUpperCase().slice(0, 18) });
+  rows.push({ kind: 'big', label: v < -0.3 ? L('ХОД НАЗАД') : L('ХОД'), value: Math.round(Math.abs(v) * 3.6) + ' ' + L('км/ч') });
+  const t = roverTilt(rv);
+  const lim = SHIP.slopeMax || 34;
+  const tilt = Math.max(Math.abs(t.pitch), Math.abs(t.roll));
+  rows.push({ kind: 'pair',
+    a: [L('КУРС'), String(Math.round(roverHeading(rv)) % 360).padStart(3, '0') + '°', INK],
+    b: [L('УКЛОН'), Math.round(tilt) + '°', tilt > lim ? RED : tilt > lim * 0.7 ? AMBER : GREEN] });
+  rows.push({ kind: 'gauge', label: L('КОРПУС'), frac: ship.hull / (SHIP.maxHull || 100),
+    color: ship.hull / (SHIP.maxHull || 100) > 0.4 ? GREEN : RED });
+  if (rv.air) rows.push({ kind: 'note', text: L('В ВОЗДУХЕ'), color: AMBER });
+  else if (rv.slip) rows.push({ kind: 'note', text: L('СКОЛЬЗИТ'), color: RED });
+  if (rv.hold || (rv.brake > 0 && Math.abs(v) < 0.3)) rows.push({ kind: 'note', text: L('СТОЯНКА'), color: AMBER });
+  else if (rv.brake > 0) rows.push({ kind: 'note', text: L('ТОРМОЗ'), color: AMBER });
+  if (ship.lights) rows.push({ kind: 'note', text: L('ФАРЫ'), color: '#ffe9a8' });
+
+  const H = { big: 46, pair: 34, gauge: 22, rule: 18, note: 20 };
+  let total = 0;
+  for (const r of rows) total += H[r.kind];
+  let y = py - total;
+  const W = COL_W;
+  ctx.fillStyle = 'rgba(79,179,224,0.30)';
+  ctx.fillRect(px, y + 4, 2, total - 4);
+  for (const r of rows) {
+    const x = px + 12;
+    if (r.kind === 'big') {
+      ctx.textAlign = 'left';
+      ctx.font = '11px Consolas, monospace';
+      ctx.fillStyle = CY;
+      ctx.fillText(r.label, x, y + 12);
+      ctx.font = '28px Consolas, monospace';
+      ctx.fillStyle = INK;
+      ctx.fillText(r.value, x, y + 40);
+    } else if (r.kind === 'pair') {
+      for (const [i, cell] of [r.a, r.b].entries()) {
+        const cx = x + i * (W / 2 - 6);
+        ctx.textAlign = 'left';
+        ctx.font = '10px Consolas, monospace';
+        ctx.fillStyle = CY;
+        ctx.fillText(cell[0], cx, y + 11);
+        ctx.font = '16px Consolas, monospace';
+        ctx.fillStyle = cell[2];
+        ctx.fillText(cell[1], cx, y + 29);
+      }
+    } else if (r.kind === 'gauge') {
+      ctx.textAlign = 'left';
+      ctx.font = '10px Consolas, monospace';
+      ctx.fillStyle = CY;
+      ctx.fillText(r.label, x, y + 14);
+      segments(ctx, x + 62, y + 6, W - 74, 9, r.frac, r.color);
+    } else if (r.kind === 'rule') {
+      ctx.strokeStyle = 'rgba(79,179,224,0.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y + 9);
+      ctx.lineTo(px + W, y + 9);
+      ctx.stroke();
+      ctx.textAlign = 'left';
+      ctx.font = '10px Consolas, monospace';
+      ctx.fillStyle = 'rgba(2,10,18,0.95)';
+      ctx.fillRect(x + 4, y + 2, r.label.length * 6.2 + 8, 12);
+      ctx.fillStyle = AMBER;
+      ctx.fillText(r.label, x + 8, y + 12);
+    } else if (r.kind === 'note') {
+      ctx.textAlign = 'left';
+      ctx.font = '11px Consolas, monospace';
+      ctx.fillStyle = r.color;
+      ctx.fillText(r.text, x, y + 13);
+    }
+    y += H[r.kind];
+  }
+}
+
+/**
+ * ПРАВАЯ КАРТОЧКА ВЕЗДЕХОДА: свой корабль — куда к нему ехать. Цель
+ * кораблей здесь ни к чему: до станции на орбите вездеход не доедет, а
+ * назад к носителю ему ехать всегда. Стрелка — куда повернуть.
+ */
+function drawHomeCard(ctx, px, py, game) {
+  const W = CARD_W;
+  const home = roverHomeInfo(game);
+  ctx.textAlign = 'left';
+  ctx.font = '11px Consolas, monospace';
+  ctx.fillStyle = CY;
+  ctx.fillText(L('КОРАБЛЬ'), px + 12, py + 14);
+  ctx.strokeStyle = 'rgba(79,179,224,0.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px + W - 26, py);
+  ctx.lineTo(px + W, py);
+  ctx.lineTo(px + W, py + 26);
+  ctx.moveTo(px, py + 52);
+  ctx.lineTo(px + W, py + 52);
+  ctx.stroke();
+  ctx.font = '22px Consolas, monospace';
+  if (!home) {
+    ctx.fillStyle = CY_DIM;
+    ctx.fillText(L('НЕТ СВЯЗИ'), px + 12, py + 42);
+    return;
+  }
+  ctx.fillStyle = AMBER;
+  ctx.fillText(String(home.name || L('НОСИТЕЛЬ')).slice(0, 18), px + 12, py + 42);
+  ctx.font = '18px Consolas, monospace';
+  ctx.fillStyle = INK;
+  ctx.fillText(fmtDist(home.dist), px + 12, py + 76);
+  ctx.font = '12px Consolas, monospace';
+  const turn = home.turn;
+  ctx.fillStyle = Math.abs(turn) < 10 ? GREEN : AMBER;
+  ctx.fillText(Math.abs(turn) < 3 ? L('ПРЯМО')
+    : (turn < 0 ? '◄ ' : '') + Math.round(Math.abs(turn)) + '°' + (turn > 0 ? ' ►' : ''), px + 12, py + 96);
+  // Стрелка курса к кораблю — в круге, нос машины вверх.
+  const cx = px + W - 44, cy = py + 84, r = 30, a = turn * Math.PI / 180;
+  ctx.strokeStyle = CY_DIM;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+  ctx.fillStyle = Math.abs(turn) < 10 ? GREEN : AMBER;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.sin(a) * r * 0.9, cy - Math.cos(a) * r * 0.9);
+  ctx.lineTo(cx + Math.sin(a + 2.6) * r * 0.5, cy - Math.cos(a + 2.6) * r * 0.5);
+  ctx.lineTo(cx + Math.sin(a - 2.6) * r * 0.5, cy - Math.cos(a - 2.6) * r * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = '12px Consolas, monospace';
+  ctx.fillStyle = CY_DIM;
+  ctx.fillText(L('M — КАРТА'), px + 12, py + 118);
 }
 
 /**

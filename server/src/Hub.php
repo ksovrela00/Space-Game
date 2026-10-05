@@ -952,7 +952,9 @@ final class Hub
             return false;
         }
         if ($me['st'] !== 'out') {
-            return $me['s'] === $shipId;
+            // Вездеход в трюме и его носитель — один борт: из трюма к двери
+            // вездехода подходят пешком, а с его порога сходят в трюм.
+            return $me['s'] === $shipId || Players::sameHold((int) $me['s'], $shipId);
         }
         if ($at === null || $me['b'] !== $at['body']) {
             return false;
@@ -1396,7 +1398,9 @@ final class Hub
      * кто из хозяев в игре, решает shipsOf на каждый снимок.
      *
      * В порту спящих не показываем: корабль в доке стоит внутри станции,
-     * рисовать его снаружи некуда.
+     * рисовать его снаружи некуда. Вездеход в трюме — с отметкой носителя
+     * (cr): место у него — место носителя (Players::carryAlong), а где он в
+     * трюме, ставит игра — на плиту платформы (js/game/hangar.js).
      */
     private function dormOf(int $sys, float $now): array
     {
@@ -1428,6 +1432,9 @@ final class Hub
                 'ty' => (string) $r['type_code'],
                 'pilot' => null,
             ];
+            if ((int) $r['stowed'] === 1 && $r['carrier_id'] !== null) {
+                $row['cr'] = (int) $r['carrier_id'];
+            }
             $pose = $r['landed_body'] !== null ? json_decode((string) $r['landed_pose'], true) : null;
             $anchor = $r['anchor_body'] !== null ? json_decode((string) $r['anchor_pose'], true) : null;
             if (is_array($pose) && is_array($pose['dir'] ?? null) && is_numeric($pose['radius'] ?? null)

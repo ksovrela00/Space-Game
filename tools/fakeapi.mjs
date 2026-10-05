@@ -83,7 +83,8 @@ export function makeFakeServer({ specs, station = 4, system = 0 } = {}) {
         { at: '2026-10-04 06:03:00', label: 'СТЫКОВОЧНЫЙ СБОР', amount: -285, balance_after: 2115, ref: 'dock' },
       ],
       fleet: [{ id: 1, name: '', type: 'challenger', typeName: 'Challenger', active: true, systemId: system,
-        where: 'docked', body: station, systemName: 'Lave', bodyName: null, point: null, pos: null }],
+        where: 'docked', body: station, systemName: 'Lave', bodyName: null, point: null, pos: null,
+        carrier: null, stowed: false }],
     },
   };
 
@@ -158,8 +159,11 @@ export function makeFakeServer({ specs, station = 4, system = 0 } = {}) {
     'outfit.list': () => ({ open: true, resale: 0.6, balance: st.player.balance, slots: [] }),
     'shipyard.list': () => ({ open: true, tech: 5,
       here: [{ id: st.ship.id, active: true, typeName: 'Challenger', title: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ' }],
-      hulls: specs.shipTypes.map((t) => ({ code: t.code, name: t.name, title: t.title, price: t.price, sold: true,
-        tech: 4, lengthM: 65, widthM: 67, heightM: 19, massT: 1682 })) }),
+      // Наземный тип верфь не продаёт — так и настоящий сервер (Shipyard::offer).
+      hulls: specs.shipTypes.filter((t) => !(t.spec && t.spec.ground)).map((t) => ({ code: t.code, name: t.name, title: t.title, price: t.price, sold: true,
+        tech: 4, lengthM: 65, widthM: 67, heightM: 19, massT: 1682 })),
+      // Ангар корабля, которым командуют: вездеход в трюм (Shipyard::offer, hangar).
+      hangar: { code: 'rover', name: 'Rover', title: 'ВЕЗДЕХОД', price: 24000, for: st.ship.id, have: null, sold: true } }),
     // Города системы игра собирает сама; без списка в ответе она его не
     // трогает (js/main.js, syncCities).
     'galaxy.system': () => ({}),

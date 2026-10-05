@@ -16,7 +16,8 @@
                 "fuelReserve": 1.2,
                 "hitRadius": 0.035,
                 "gunMounts": 1,
-                "npcWeight": 1
+                "npcWeight": 1,
+                "hangar": "rover"
             }
         },
         {
@@ -35,6 +36,37 @@
                 "hitRadius": 0.1,
                 "gunMounts": 5,
                 "npcWeight": 0.15
+            }
+        },
+        {
+            "code": "rover",
+            "name": "Rover",
+            "title": "ВЕЗДЕХОД",
+            "price": 24000,
+            "spec": {
+                "ground": true,
+                "driveSpeed": 16,
+                "reverseSpeed": 4,
+                "driveAccel": 2.6,
+                "brake": 6,
+                "roll": 0.35,
+                "steerMax": 30,
+                "steerRate": 60,
+                "steerFade": 0.45,
+                "grip": 5,
+                "slopeMax": 34,
+                "travel": 0.22,
+                "spring": 9,
+                "maxHull": 60,
+                "fuelMax": 0,
+                "fuelReserve": 0,
+                "hitRadius": 0.004,
+                "gunMounts": 0,
+                "npcWeight": 0,
+                "stunMin": 0.35,
+                "stunMax": 1.4,
+                "tumbleDamp": 0.6,
+                "thrustK": 0
             }
         }
     ],

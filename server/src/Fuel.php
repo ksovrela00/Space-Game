@@ -314,6 +314,11 @@ final class Fuel
             if ((int) $p['aboard_ship'] !== $shipId) {
                 throw ApiError::denied('not_aboard', 'буксир вызывают с борта своего корабля');
             }
+            // Вездеход на буксире в порт не тянут: бака у него нет, и в порту
+            // ему стоять негде — он живёт в трюме своего корабля.
+            if (Specs::isGround((string) $ship['type_code'])) {
+                throw ApiError::denied('ground', 'буксир за вездеходом не прилетает: он ездит на батареях');
+            }
 
             $sys = $ship['system_id'] === null ? null : (int) $ship['system_id'];
             $dest = null;
@@ -350,6 +355,7 @@ final class Fuel
                 'basis' => null,
                 'hatches' => null,
             ], '`id`=?', [$shipId]);
+            Players::carryAlong($shipId);
             Db::update('player', [
                 'last_station' => $dest['local_id'],
                 'last_seen_at' => Db::now(),

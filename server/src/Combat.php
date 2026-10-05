@@ -278,6 +278,27 @@ final class Combat
                 return;
             }
             $ownerId = (int) $ship['owner_id'];
+            // Вездеход, приписанный к трюму, страховка возвращает не в порт,
+            // а в трюм его корабля — туда, где он и выдаётся. Хозяин — в его
+            // кресло: в трюме, рядом со своим кораблём.
+            if ($ship['carrier_id'] !== null) {
+                Players::restow($shipId);
+                $sys = Db::one('SELECT `system_id` FROM `ship` WHERE `id`=?', [$shipId]);
+                $p = Db::row('SELECT `crashes` FROM `player` WHERE `id`=? FOR UPDATE', [$ownerId]);
+                Db::update('player', [
+                    'system_id' => $sys,
+                    'aboard_ship' => $shipId,
+                    'ship_id' => $shipId,
+                    'seated' => 1,
+                    'walk_pose' => null,
+                    'out_body' => null,
+                    'out_pose' => null,
+                    'crashes' => (int) ($p['crashes'] ?? 0) + 1,
+                ], '`id`=?', [$ownerId]);
+                Db::run('UPDATE `player` SET `system_id`=?, `seated`=0, `walk_pose`=NULL
+                         WHERE `aboard_ship`=? AND `id`<>?', [$sys, $shipId, $ownerId]);
+                return;
+            }
             $p = Db::row('SELECT `id`,`last_station`,`crashes` FROM `player` WHERE `id`=? FOR UPDATE',
                 [$ownerId]);
             if ($p === null) {
@@ -318,6 +339,11 @@ final class Combat
             // чём можно выйти из дока. Больше не доливает: иначе разбиться
             // было бы дешевле, чем заправиться.
             Fuel::topUpReserve($shipId);
+            // Вездеход этого корабля — снова в его трюме, где бы ни стоял:
+            // корабль новый, и выдаётся он с вездеходом (Players::ensureHangar).
+            foreach (Db::all('SELECT `id` FROM `ship` WHERE `carrier_id`=?', [$shipId]) as $r) {
+                Players::restow((int) $r['id']);
+            }
 
             Db::update('player', [
                 'system_id' => $where['system_id'],

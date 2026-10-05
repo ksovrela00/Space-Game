@@ -133,6 +133,10 @@ function record(id) {
       pilot: null,
       body: null,
       sys: null,
+      // Вездеход в трюме: номер корабля-носителя (cr снимка). Место такого
+      // — место носителя, а на плиту его ставит игра (js/game/hangar.js).
+      carrier: null,
+      carried: false,
     },
   };
 }
@@ -193,6 +197,7 @@ export function ingestPeers(store, list, now) {
     o.radius = ts && ts.hitRadius > 0 ? ts.hitRadius : SHIP.hitRadius;
     o.pilot = num(p.pilot);
     o.body = local ? b : null;
+    o.carrier = num(p.cr);
     r.seen = now;
     r.samples.push(local ? {
       t: now, b, x: lx, y: ly, z: lz,

@@ -172,8 +172,9 @@ globalThis.window = {
   addEventListener(type, fn) { (winListeners[type] ||= []).push(fn); },
   removeEventListener() {},
 };
-// Явно просим Canvas-2D-рендер: WebGL здесь не подменить, его путь
-// проверяется отдельно в tools/gl.mjs через мок GL-контекста.
+// Сцены здесь нет: WebGL2 в Node не подменить, и игра идёт без неё
+// (логика и приборы те же). Путь WebGL проверяется отдельно в
+// tools/gl.mjs через мок GL-контекста.
 // touch=1 — принудительно мобильный профиль: касаний в Node нет, а
 // сенсорные органы проверять надо (js/core/quality.js).
 // Сервера здесь нет, а игра без него не идёт: его голос даёт поддельный
@@ -181,7 +182,7 @@ globalThis.window = {
 // груз, задания, ответы на сохранение. Сетевой запуск как таковой (вход,
 // обрыв, «нет связи») проверяется отдельно — tools/net.mjs.
 globalThis.location = {
-  search: '?renderer=2d&touch=1',
+  search: '?touch=1',
   origin: 'http://localhost',
   pathname: '/space_game/index.html',
   replace(url) { this.replaced = url; },
@@ -347,23 +348,6 @@ await step('нажатие ВЗЛЁТ -> полёт', () => {
   for (const fn of nodes.bootBtn.listeners.click || []) fn();
   if (game.state.mode !== 'flight') throw new Error('режим ' + game.state.mode);
   frames(5);
-});
-
-await step('станция в кадре, полигоны рисуются', () => {
-  // После вылета корабль смотрит от станции (как и должно быть), поэтому
-  // для проверки разворачиваем нос на неё.
-  const st = game.ship.dockedAt || game.lastStation;
-  const b = game.ship.basis;
-  b.fwd = { x: -st.basis.fwd.x, y: -st.basis.fwd.y, z: -st.basis.fwd.z };
-  b.right = { ...st.basis.right };
-  b.up = {
-    x: b.fwd.y * b.right.z - b.fwd.z * b.right.y,
-    y: b.fwd.z * b.right.x - b.fwd.x * b.right.z,
-    z: b.fwd.x * b.right.y - b.fwd.y * b.right.x,
-  };
-  frames(10);
-  if (!(game.renderStats.polys > 0)) throw new Error('нарисовано 0 полигонов рядом со станцией');
-  if (!(calls.fill > 100)) throw new Error('слишком мало заливок: ' + calls.fill);
 });
 
 // Английский язык целиком: приборы, меню, карта и справка. Проверка
@@ -1199,6 +1183,556 @@ await step('шлюз: сели на мир с атмосферой, E — люк
   }
 });
 
+// Грузовая платформа — весь путь в настоящем кадре игры: пульт на плите,
+// спуск с пилотом на ней до грунта, шаг с края на грунт и обратно на
+// плиту, подъём, пульт вызова на переборке, заслон вокруг проёма и
+// посадка в кресло, которая поднимает платформу сама.
+await step('грузовая платформа: E на плите — вниз с пилотом, на грунт и обратно, наверх, вызов с палубы, кресло её поднимает', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const S = await import('../js/game/surface.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const said = (s) => game.state.messages.some((m) => m.text.indexOf(s) >= 0);
+  const hint = (s) => { texts = []; frames(2); const seen = texts.map((t) => t.s); texts = null; return seen.some((x) => x.indexOf(s) >= 0); };
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    let d = null;
+    for (let i = 0; i < 3000 && !d; i++) {
+      const u = -0.5 + (i / 2999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const q = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      if (!S.waterAt(b, q) && S.slopeAt(b, q) < 0.03 && S.groundRadius(b, q) - b.radius > 0.05) d = q;
+    }
+    if (!d) throw new Error('на океаническом мире не нашлось ровной суши');
+    S.worldPoint(b, d, S.groundRadius(b, d) + 0.02, sh.pos);
+    const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const fv = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+    const fl = Math.hypot(fv.x, fv.y, fv.z);
+    lookAlong(sh.basis, { x: fv.x / fl, y: fv.y / fl, z: fv.z / fl }, up);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    frames(2);
+    if (!game.landHere() || game.state.mode !== 'landed') throw new Error('не сели: ' + game.state.mode);
+    frames(2);
+
+    key('KeyY'); frames(60);
+    const w = game.walk, I = game.interior, air = I.air;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    const bx = air.bays[0], B = bx.b;
+    const top = () => B.deck - bx.travel;
+    const until = (cond, sec) => { for (let i = 0; i < sec * 60 && !cond(); i++) frames(1); return cond(); };
+
+    // 1. К пульту на плите — подсказка и E: вниз, с пилотом на ней.
+    w.pos = [B.panel[0] + 0.3, B.deck, B.panel[1] + 0.85]; w.room = I.roomById.hold; w.yaw = Math.PI; w.pitch = 0;
+    frames(3);
+    if (!hint('ПЛАТФОРМА ВНИЗ')) throw new Error('у пульта на плите нет подсказки «платформа вниз»');
+    key('KeyE'); frames(1);
+    if (!bx.want) throw new Error('E у пульта платформу не позвал вниз');
+    let off = 0;
+    const down = until(() => { off = Math.max(off, Math.abs(w.pos[1] - top())); return bx.dir === 0 && bx.travel > 1; }, 14);
+    if (!down || !bx.floor || !bx.exitOk || Math.abs(bx.travel - bx.reach) > 0.3) {
+      throw new Error(`платформа не легла на грунт: ход ${bx.travel.toFixed(2)} из ${bx.reach.toFixed(2)}, легла ${bx.floor}, сойти ${bx.exitOk}`);
+    }
+    if (off > 0.03 || w.out) throw new Error(`пилота на плите не везло: ноги разошлись с ней на ${off.toFixed(3)} м`);
+    if (!said('ПЛАТФОРМА НА ГРУНТЕ')) throw new Error('об остановке на грунте не сказано');
+    if (!(Math.abs(air.rooms.hold.p - air.pOut) < 0.02 && air.rooms.hold.leak)) {
+      throw new Error('трюм с опущенной платформой не открыт забортному: ' + air.rooms.hold.p.toFixed(2));
+    }
+
+    // 2. С края на грунт — оси грунта.
+    w.pos = [B.x[1] - 0.6, top(), (B.z[0] + B.z[1]) / 2]; w.yaw = Math.PI / 2;
+    frames(2);
+    holdDown('KeyW');
+    const stepped = until(() => !!w.out, 4);
+    frames(40); release('KeyW'); frames(20);
+    if (!stepped || !w.out || !w.ground) throw new Error('с края платформы на грунт не сошли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
+
+    // 3. Обратно на плиту — снова в осях корабля, на её верху.
+    w.yaw += Math.PI;
+    holdDown('KeyW');
+    const back = until(() => !w.out, 6);
+    frames(20); release('KeyW'); frames(10);
+    if (!back || w.out || !w.room || w.room.id !== 'hold' || Math.abs(w.pos[1] - top()) > 0.03) {
+      throw new Error('с грунта на плиту не ступили: ' + (w.out ? 'за бортом' : (w.room && w.room.id) + ' на ' + w.pos[1].toFixed(2)));
+    }
+
+    // 4. Наверх — с пульта на плите.
+    w.pos = [B.panel[0] + 0.3, top(), B.panel[1] + 0.85]; w.yaw = Math.PI;
+    frames(3);
+    if (!hint('ПЛАТФОРМА НАВЕРХ')) throw new Error('у пульта внизу нет подсказки «платформа наверх»');
+    key('KeyE'); frames(1);
+    off = 0;
+    const upDone = until(() => { off = Math.max(off, Math.abs(w.pos[1] - top())); return bx.dir === 0 && bx.travel === 0; }, 14);
+    if (!upDone || off > 0.03 || Math.abs(w.pos[1] - B.deck) > 0.01) {
+      throw new Error(`наверх не поднялись: ход ${bx.travel.toFixed(3)}, пилот на ${w.pos[1].toFixed(3)} (пол ${B.deck})`);
+    }
+
+    // 5. Пульт вызова на переборке: отправить вниз; в проём с палубы не
+    // шагнуть — заслон.
+    w.pos = [B.call[0] + 0.3, B.deck, B.call[1] + 0.5]; w.yaw = Math.PI; w.pitch = 0;
+    frames(3);
+    if (!hint('ОТПРАВИТЬ ПЛАТФОРМУ ВНИЗ')) throw new Error('у пульта вызова нет подсказки «отправить вниз»');
+    key('KeyE'); frames(1);
+    until(() => bx.travel > 1.0, 6);
+    w.pos = [0, B.deck, B.z[0] - 0.6]; w.yaw = 0;
+    frames(2);
+    holdDown('KeyW'); frames(90); release('KeyW'); frames(10);
+    if (w.pos[1] < B.deck - 0.05 || w.pos[2] > B.z[0]) {
+      throw new Error('с палубы шагнули в проём: ' + w.pos.map((v) => v.toFixed(2)).join(','));
+    }
+
+    // 6. Сел в кресло — платформа поднимается сама.
+    w.pos = I.seat.stand.slice(); w.room = I.roomById.bridge;
+    frames(2); key('KeyE'); frames(60);
+    if (game.walk.on || bx.want || !said('ПЛАТФОРМА ПОДНИМАЕТСЯ')) {
+      throw new Error('в кресле платформа не поднимается: на ногах ' + game.walk.on + ', просьба ' + bx.want);
+    }
+    until(() => bx.travel === 0, 14);
+    if (bx.travel !== 0) throw new Error('платформа не поднялась: ' + bx.travel.toFixed(2));
+  } finally {
+    if (game.walk.on) {
+      game.walk.out = null;
+      game.walk.pos = game.interior.seat.stand.slice(); game.walk.room = game.interior.roomById.bridge;
+      frames(2); key('KeyE'); frames(50);
+    }
+    if (game.interior && game.interior.air) {
+      for (const x of game.interior.air.bays || []) { x.want = false; x.travel = 0; x.dir = 0; x.vel = 0; x.open = 0; x.dy = 0; }
+      for (const r of Object.values(game.interior.air.rooms)) { r.p = 1; r.leak = false; }
+    }
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(2);
+  }
+});
+
+// Вездеход в трюме — весь путь руками, как у игрока (так решено с автором
+// игры: ничего само): пешком по трюму к машине — кузов твёрдый, E у её
+// двери — люк, по трапу внутрь и обратно в трюм, минуя грунт. Потом
+// командование вездеходом: газ в трюме — до стены; платформа у грунта (её
+// опускает сам пилот) — съезд на грунт, и обратно на плиту.
+await step('вездеход в трюме: пешком к нему, E — дверь, внутрь и обратно в трюм; за рулём — из двери в трюм и назад, до стены, с плиты на грунт, дверь на грунте, обратно на плиту и наверх', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const A = await import('../js/game/airlock.js');
+  const Vs = await import('../js/game/vessels.js');
+  const S = await import('../js/game/surface.js');
+  const Sp = await import('../js/game/specs.js');
+  const Hg = await import('../js/game/hangar.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    id: sh.id, pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const sys0 = game.sys.id;
+  const until = (cond, sec) => { for (let i = 0; i < sec * 60 && !cond(); i++) frames(1); return cond(); };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  let net0 = null;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (game.state.mode !== 'flight') { key('Space'); frames(4); }
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    let d = null;
+    for (let i = 0; i < 3000 && !d; i++) {
+      const u = -0.5 + (i / 2999), a = i * 2.399963, s = Math.sqrt(1 - u * u);
+      const q = { x: s * Math.cos(a), y: u, z: s * Math.sin(a) };
+      if (!S.waterAt(b, q) && S.slopeAt(b, q) < 0.03 && S.groundRadius(b, q) - b.radius > 0.05) d = q;
+    }
+    if (!d) throw new Error('на океаническом мире не нашлось ровной суши');
+    S.worldPoint(b, d, S.groundRadius(b, d) + 0.02, sh.pos);
+    const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+    const ul = Math.hypot(up.x, up.y, up.z);
+    up.x /= ul; up.y /= ul; up.z /= ul;
+    const hz = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+    const fv = { x: hz.y * up.z - hz.z * up.y, y: hz.z * up.x - hz.x * up.z, z: hz.x * up.y - hz.y * up.x };
+    const fl = Math.hypot(fv.x, fv.y, fv.z);
+    lookAlong(sh.basis, { x: fv.x / fl, y: fv.y / fl, z: fv.z / fl }, up);
+    sh.vel.x = sh.vel.y = sh.vel.z = 0; sh.speed = 0; sh.throttle = 0;
+    frames(2);
+    if (!game.landHere() || game.state.mode !== 'landed') throw new Error('не сели: ' + game.state.mode);
+    frames(2);
+    const P = sh.landedPose;
+    const mine = sh.id;
+    const air = game.interior.air, bx = air.bays[0], B = bx.b;
+
+    // Вездеход в трюме — спящий свой с отметкой носителя, как его шлёт хаб.
+    let doorOpen = false, carrierAsPeer = false;
+    const rover = () => ({ id: 950, by: 1, name: 'ДЖЕЙМСОН', dorm: 1, sys: sys0, mode: 'landed', g: 1, ty: 'rover',
+      h: doorOpen ? ['rdoor'] : [], cr: mine, b: b.id, lx: P.dir.x * P.radius, ly: P.dir.y * P.radius, lz: P.dir.z * P.radius,
+      lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z });
+    let bayWanted = false;
+    const carrier = () => ({ id: mine, by: 1, name: 'ДЖЕЙМСОН', dorm: 1, sys: sys0, mode: 'landed', g: 1, ty: 'challenger',
+      h: bayWanted ? ['bay'] : [], b: b.id, lx: P.dir.x * P.radius, ly: P.dir.y * P.radius, lz: P.dir.z * P.radius,
+      lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z });
+    net0 = net.peers;
+    const tickNet = () => { net.peers = carrierAsPeer ? [carrier()] : [rover()]; net.people = []; net.rev++; };
+    let R = null;
+    for (let i = 0; i < 300 && !(R && R.air && R.carried); i++) {
+      tickNet(); frames(1); await settle();
+      R = game.peers.find((p) => p.id === 950);
+    }
+    if (!R || !R.carried || !R.air) throw new Error('вездеход в трюме не принят: ' + (R ? 'шлюзов ' + !!R.air + ', в трюме ' + R.carried : 'нет'));
+    const m = Hg.bayCenter(bx);
+    const at = Vs.worldToVessel(sh, R.pos);
+    if (Math.abs(at[0] - m.x) > 1e-6 || Math.abs(at[2] - m.z) > 1e-6 || Math.abs(at[1] - B.deck) > 1e-6) {
+      throw new Error('вездеход не на середине плиты: ' + at.map((v) => v.toFixed(2)).join(','));
+    }
+    if (!game.hangarSeen.some((it) => it.V === R && it.room === 'hold')) throw new Error('кабине вездеход в трюме не передан');
+
+    // 1. Встали — к машине справа: кузов твёрдый, сквозь него не пройти.
+    key('KeyY');
+    for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    const w = game.walk;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    w.pos = [m.x + 3.2, B.deck, m.z]; w.room = game.interior.roomById.hold; w.yaw = -Math.PI / 2; w.pitch = 0;
+    holdDown('KeyW');
+    for (let i = 0; i < 120; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    release('KeyW'); frames(5);
+    if (w.pos[0] < m.x + 1.86 + 0.24) throw new Error('прошли сквозь вездеход: x ' + w.pos[0].toFixed(2));
+
+    // 2. К двери на левом борту: E — люк вездехода (просьба за свой спящий
+    // уходит хабу; хаб переставляет люк — снимок приходит открытым).
+    const D = R.air.hatches[0].h;
+    w.pos = [m.x - 2.75, B.deck, m.z + (D.z[0] + D.z[1]) / 2]; w.yaw = Math.PI / 2;
+    for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
+    if (game.walkHatchShip !== R || !game.walkHatch) throw new Error('у двери вездехода E его люк не берёт');
+    key('KeyE'); frames(1);
+    doorOpen = true;
+    const hx = A.hatchById(R.air, 'rdoor');
+    if (!until(() => { tickNet(); return hx.open === 1 && hx.stair === 1; }, 12)) {
+      throw new Error(`дверь вездехода не открылась: створка ${hx.open.toFixed(2)}, трап ${hx.stair.toFixed(2)}`);
+    }
+    // 3. По трапу — в дверь: на борту вездехода, в его шлюзе.
+    holdDown('KeyW');
+    const inside = until(() => { tickNet(); return w.vessel === R; }, 6);
+    frames(30); release('KeyW'); frames(5);
+    if (!inside || !w.room || w.room.id !== 'rlock' || w.out) {
+      throw new Error('в дверь вездехода не вошли: ' + (w.vessel === R ? 'на борту, ' + (w.room && w.room.id) : 'не на борту') + (w.out ? ', за бортом' : ''));
+    }
+    // 4. Обратно с порога — в трюм, а не на грунт.
+    w.yaw = -Math.PI / 2;
+    holdDown('KeyW');
+    const back = until(() => { tickNet(); return w.vessel !== R; }, 6);
+    frames(40); release('KeyW'); frames(5);
+    if (!back || w.out || !w.room || w.room.id !== 'hold' || Math.abs(w.pos[1] - B.deck) > 0.05) {
+      throw new Error('с порога вездехода не в трюм: ' + (w.out ? 'за бортом' : (w.room && w.room.id) + ' на ' + w.pos[1].toFixed(2)));
+    }
+
+    // 5. За рулём: командование — вездеходом в трюме (как его отдаёт
+    // сервер: тип, носитель, «в трюме»); носитель — спящий сосед.
+    if (Sp.useShipType('rover') !== 'rover') throw new Error('на вездеход не пересесть');
+    game.syncHull();
+    // Пост рисует проход кабины WebGL2; здесь Canvas 2D — модель поста
+    // подставляется руками (без неё нет и помещений), как в шаге «Прометея».
+    game.cockpit = (await import('../js/models/cockpit.rover.js')).buildRoverCockpit();
+    game.walk.on = false; game.walk.phase = 'seated'; game.walk.vessel = null; game.frame = game.ownVessel;
+    sh.id = 950;
+    // 4а. Сервер сказал «в трюме», а носителя не видно (хаб его ещё не
+    // прислал, помещения не собраны): вездеход ждёт там, где его поставил
+    // сервер, — в осях тела — и не виден. Мировую точку он держал, а
+    // планета уезжала: после входа он падал с высоты корабля под грунт.
+    {
+      game.roverLink = { carrier: 777, stowed: true, fresh: true };
+      game.state.mode = 'flight';
+      frames(2);
+      const d0 = S.localDir(b, sh.pos, { x: 0, y: 0, z: 0 }), a0 = S.altitudeOf(b, sh.pos).alt;
+      for (let i = 0; i < 120; i++) { tickNet(); frames(1); }
+      const d1 = S.localDir(b, sh.pos, { x: 0, y: 0, z: 0 }), a1 = S.altitudeOf(b, sh.pos).alt;
+      const slide = Math.hypot(d1.x - d0.x, d1.y - d0.y, d1.z - d0.z) * b.radius * 1000, sink = (a1 - a0) * 1000;
+      if (slide > 0.01 || Math.abs(sink) > 0.01 || game.rover.mode !== 'hangar') {
+        throw new Error(`вездеход, ждущий носителя, уехал с места: по грунту ${slide.toFixed(2)} м, по высоте ${sink.toFixed(2)} м за две секунды, ${game.rover.mode}`);
+      }
+      if (!sh.hidden) throw new Error('вездеход, ждущий носителя, виден — висит в середине ещё не пришедшего корабля');
+    }
+    carrierAsPeer = true;
+    game.roverLink = { carrier: mine, stowed: true, fresh: true };
+    game.state.mode = 'flight';
+    for (let i = 0; i < 300 && !game.peers.some((p) => p.id === mine && p.air); i++) { tickNet(); frames(1); await settle(); }
+    await game.loadInterior();
+    for (let i = 0; i < 10; i++) { tickNet(); frames(1); }
+    const rv = game.rover;
+    if (rv.mode !== 'hangar') throw new Error('вездеход не в трюме: ' + rv.mode);
+    if (sh.hidden) throw new Error('носитель пришёл, а вездеход в его трюме так и не виден');
+    // Стоянки у вездехода нет: отметка стоянки носителя, с которой он
+    // пришёл, уходила в сохранение, и при входе он падал с высоты корабля.
+    if (sh.landedAt || sh.landedPose) throw new Error('у вездехода осталась стоянка носителя: ' + (sh.landedAt && sh.landedAt.name));
+    const C = () => game.peers.find((p) => p.id === mine);
+    const cbx = () => C().air.bays[0];
+    // 5а. Командуя вездеходом, встал и вышел в его дверь — в трюм носителя
+    // (своего спящего корабля), а не в пустоту под его полом.
+    {
+      key('KeyY');
+      for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const wr = game.walk, Ir = game.interior;
+      const ra = Ir.air, rhx = ra.hatches[0];
+      if (!wr.on || wr.vessel && wr.vessel !== game.ownVessel) throw new Error('в вездеходе не встали');
+      wr.pos = [-0.7, Ir.seat.stand[1], (rhx.h.z[0] + rhx.h.z[1]) / 2]; wr.room = Ir.roomById.rlock; wr.yaw = -Math.PI / 2; wr.pitch = 0;
+      for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
+      if (game.walkHatch !== rhx) throw new Error('у своей двери вездехода E её не берёт');
+      key('KeyE'); frames(1);
+      if (!until(() => { tickNet(); return rhx.open === 1 && rhx.stair === 1; }, 20)) {
+        throw new Error(`своя дверь вездехода в трюме не открылась: створка ${rhx.open.toFixed(2)}, трап ${rhx.stair.toFixed(2)}, выход ${rhx.exitOk}`);
+      }
+      holdDown('KeyW');
+      const out = until(() => { tickNet(); return wr.vessel && wr.vessel.id === mine; }, 6);
+      for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      for (let i = 0; i < 20; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const deck = C().air.bays[0].b.deck;
+      if (!out || wr.out || !wr.room || wr.room.id !== 'hold' || Math.abs(wr.pos[1] - deck) > 0.05) {
+        throw new Error('из своего вездехода не в трюм: ' + (wr.out ? 'за бортом' : (wr.vessel ? 'борт ' + wr.vessel.id : 'свой борт'))
+          + ', ' + (wr.room && wr.room.id) + ', y ' + wr.pos[1].toFixed(2) + ' (палуба ' + deck + '), выход ' + rhx.exitOk);
+      }
+      // И обратно в кресло: к двери, внутрь, к креслу, E.
+      wr.yaw = Math.PI / 2;
+      holdDown('KeyW');
+      const backIn = until(() => { tickNet(); return wr.vessel === game.ownVessel || !wr.vessel; }, 6);
+      frames(20); release('KeyW');
+      if (!backIn) {
+        const pw = Vs.vesselPoint(wr.vessel || game.ownVessel, wr.pos);
+        const pr = Vs.worldToVessel(game.ownVessel, pw);
+        throw new Error('в свою дверь вездехода из трюма не вошли: в осях вездехода ' + pr.map((v) => v.toFixed(2)).join(',')
+          + ', тоннель ' + !!A.tunnelAt(ra, ra.I, pr) + ', борт ' + (wr.vessel ? wr.vessel.id : '—') + ', створка ' + rhx.open.toFixed(2) + ', трап ' + rhx.stair.toFixed(2)
+          + ', твёрдого вездехода ' + (wr.props || []).length + ', у ног: ' + (wr.props || []).filter((s) => s.hi[0] > wr.pos[0] - 0.6 && s.lo[0] < wr.pos[0] + 0.6 && s.hi[2] > wr.pos[2] - 0.4 && s.lo[2] < wr.pos[2] + 0.4).map((s) => '[' + s.lo.map((v) => v.toFixed(2)) + ' / ' + s.hi.map((v) => v.toFixed(2)) + ']').join(' ')
+          + ', пешеход ' + wr.pos.map((v) => v.toFixed(2)).join(',')
+          + ', выход ' + rhx.exitOk + ', зазор ' + rhx.footGap + ', доворот ' + rhx.swing.toFixed(3)
+          + ', трап в осях вездехода: ' + (rhx.solids || []).slice(0, 3).map((s) => '[' + s.lo.map((v) => v.toFixed(2)) + ' / ' + s.hi.map((v) => v.toFixed(2)) + ']').join(' ')
+          + ', в трюме: ' + (wr.props || []).filter((s) => s.src && s.src.stair).slice(0, 2).map((s) => '[' + s.lo.map((v) => v.toFixed(2)) + ' / ' + s.hi.map((v) => v.toFixed(2)) + ']').join(' '));
+      }
+      wr.pos = Ir.seat.stand.slice(); wr.room = Ir.roomById.rcab;
+      frames(2); key('KeyE'); frames(60);
+      if (game.walk.on) throw new Error('в кресло вездехода не сели');
+    }
+    holdDown('KeyW');
+    for (let i = 0; i < 360; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    release('KeyW');
+    for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    const room = game.peers.find((p) => p.id === mine).air.I.roomById.hold;
+    if (rv.mode !== 'hangar' || Math.abs(rv.v) > 0.01 || rv.hg.z + 2.2 + 1.7 > room.hi[2] + 0.05 || rv.hg.z < m.z + 0.5) {
+      throw new Error(`газ в трюме: не упёрся в переборку — нос на ${(rv.hg.z + 3.9).toFixed(2)} (стена ${room.hi[2]}), ход ${rv.v.toFixed(2)}, ${rv.mode}`);
+    }
+    // 6. Платформу опускает сам пилот (здесь — её просьба в снимке носителя):
+    // плита у грунта — с неё съезжают назад, на грунт.
+    bayWanted = true;
+    if (!until(() => { tickNet(); return Hg.bayDown(cbx()); }, 20)) {
+      throw new Error(`платформа носителя не легла: ход ${cbx().travel.toFixed(2)}, легла ${cbx().floor}`);
+    }
+    if (Math.abs(rv.hg.y - A.bayTop(cbx())) > 1e-6) throw new Error('вездеход не поехал вниз с плитой: ' + rv.hg.y.toFixed(2));
+    holdDown('KeyS');
+    const off = until(() => { tickNet(); return rv.mode === 'ground'; }, 12);
+    for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    release('KeyS');
+    if (!off) throw new Error('с плиты у грунта не съехали: ' + rv.mode + ', z ' + rv.hg.z.toFixed(2));
+    if (!game.state.messages || rv.air) throw new Error('съехал — и повис: в воздухе');
+    // 6б. На грунте: встал, вышел в дверь на грунт, по трапу — обратно внутрь.
+    {
+      holdDown('Space');
+      for (let i = 0; i < 120; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('Space');
+      key('KeyY');
+      for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const wr = game.walk, Ir = game.interior, ra = Ir.air, rhx = ra.hatches[0];
+      if (!wr.on) throw new Error('на грунте в вездеходе не встали');
+      wr.pos = [-0.7, Ir.seat.stand[1], (rhx.h.z[0] + rhx.h.z[1]) / 2]; wr.room = Ir.roomById.rlock; wr.yaw = -Math.PI / 2; wr.pitch = 0;
+      for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
+      if (!rhx.want) { key('KeyE'); frames(1); }
+      if (!until(() => { tickNet(); return rhx.open === 1 && rhx.stair === 1 && rhx.exitOk; }, 20)) {
+        throw new Error(`на грунте дверь вездехода не открылась: ${rhx.open.toFixed(2)}/${rhx.stair.toFixed(2)}, выход ${rhx.exitOk}, зазор ${rhx.footGap}`);
+      }
+      const where = () => (wr.out ? 'за бортом' : (wr.vessel ? (wr.vessel.own ? 'свой ' : 'борт ' + wr.vessel.id + ' ') : 'свой ') + (wr.room && wr.room.id))
+        + ' y ' + wr.pos[1].toFixed(2) + (wr.ground ? ' на опоре' : ' в воздухе');
+      holdDown('KeyW');
+      const outG = until(() => { tickNet(); return !!wr.out; }, 6);
+      for (let i = 0; i < 70; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      if (!outG || !wr.out || !wr.ground) throw new Error('из вездехода на грунт не сошли: ' + where());
+      // Обратно: лицом к машине, по трапу — в дверь.
+      wr.yaw += Math.PI;
+      holdDown('KeyW');
+      const inG = until(() => { tickNet(); return !wr.out; }, 8);
+      for (let i = 0; i < 40; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      if (!inG || wr.out || !wr.room || Math.abs(wr.pos[1] - Ir.seat.stand[1]) > 0.05 || !wr.ground) {
+        throw new Error('по трапу с грунта в вездеход не вошли: ' + where());
+      }
+      // Так ходит человек, а не проверка: к двери не точно по оси, а под
+      // углом и чуть сбоку — и всё равно входит.
+      const O = await import('../js/game/outside.js');
+      const hz = (rhx.h.z[0] + rhx.h.z[1]) / 2;
+      // dz — откуда (сбоку от оси, м), turn — не довернул на столько до двери (рад).
+      for (const [dz, turn] of [[0.25, 0], [-0.25, 0], [0.6, 0.06], [-0.6, -0.06], [0.9, 0]]) {
+        wr.pos = [-0.6, Ir.seat.stand[1], hz]; wr.room = Ir.roomById.rlock; wr.yaw = -Math.PI / 2; wr.pitch = 0;
+        holdDown('KeyW');
+        until(() => { tickNet(); return !!wr.out; }, 6);
+        for (let i = 0; i < 70; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+        release('KeyW');
+        for (let i = 0; i < 20; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+        if (!wr.out) throw new Error('из вездехода не вышли (заход ' + dz + ')');
+        // Встать у пяты трапа сбоку от оси и идти к двери под углом.
+        const foot = Vs.vesselPoint(game.ownVessel, [-2.9, 0, hz + dz]);
+        wr.pos = O.worldToGround(wr.out, foot);
+        // На дверь: из точки сбоку — под углом к борту, как идёт человек.
+        const aim = Math.atan2(-dz, 2.9 - 1.25) + turn;
+        const toDoor = O.worldDirToGround(wr.out, Vs.vesselDir(game.ownVessel, [Math.cos(aim), 0, Math.sin(aim)]));
+        wr.yaw = Math.atan2(toDoor[0], toDoor[2]);
+        for (let i = 0; i < 10; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+        holdDown('KeyW');
+        const inA = until(() => { tickNet(); return !wr.out; }, 8);
+        for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+        release('KeyW');
+        if (!inA || wr.out) {
+          const pr = Vs.worldToVessel(game.ownVessel, O.groundToWorld(wr.out, wr.pos));
+          throw new Error(`под углом ${turn} рад и в ${dz} м сбоку от оси в дверь не вошли: в осях вездехода ${pr.map((v) => v.toFixed(2)).join(',')}, рост ${wr.height.toFixed(2)}`);
+        }
+      }
+      wr.pos = Ir.seat.stand.slice(); wr.room = Ir.roomById.rcab;
+      frames(2); key('KeyE'); frames(60);
+      if (game.walk.on) throw new Error('в кресло вездехода на грунте не сели');
+    }
+    // 7. Обратно на плиту — снова в трюме. Съезжая задом, машина может
+    // задеть стойку шасси и уйти вбок: водитель подруливает к середине плиты.
+    for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    holdDown('KeyW');
+    let turn = null;
+    const onto = until(() => {
+      tickNet();
+      const q = Hg.worldToHangar(C(), sh.pos, sh.basis.fwd, {});
+      const want = Math.max(-1, Math.min(1, -q.x * 0.5 - q.yaw * 3));
+      const k = want > 0.2 ? 'KeyD' : want < -0.2 ? 'KeyA' : null;
+      if (k !== turn) { if (turn) release(turn); if (k) holdDown(k); turn = k; }
+      return rv.mode === 'hangar';
+    }, 20);
+    if (turn) release(turn);
+    // Заехал — и до середины плиты: машина целиком на ней.
+    until(() => { tickNet(); return rv.mode !== 'hangar' || rv.hg.z > 6.6; }, 6);
+    release('KeyW');
+    // 8. Вернулся и встал на плите: вышел в дверь — на плиту (оси носителя),
+    // с края — на грунт и обратно, к пульту на плите — E: наверх, и машина,
+    // и пилот едут с плитой и остаются в трюме.
+    if (rv.mode === 'hangar') {
+      holdDown('Space');
+      for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('Space');
+      key('KeyY');
+      for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const wr = game.walk, Ir = game.interior, ra = Ir.air, rhx = ra.hatches[0];
+      if (!wr.on) throw new Error('на плите у грунта в вездеходе не встали');
+      wr.pos = [-0.7, Ir.seat.stand[1], (rhx.h.z[0] + rhx.h.z[1]) / 2]; wr.room = Ir.roomById.rlock; wr.yaw = -Math.PI / 2; wr.pitch = 0;
+      for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
+      if (!rhx.want) { key('KeyE'); frames(1); }
+      if (!until(() => { tickNet(); return rhx.open === 1 && rhx.stair === 1; }, 20)) {
+        throw new Error(`на плите у грунта дверь не открылась: ${rhx.open.toFixed(2)}/${rhx.stair.toFixed(2)}, выход ${rhx.exitOk}`);
+      }
+      const where = () => (wr.out ? 'за бортом ' : (wr.vessel ? 'борт ' + wr.vessel.id + ' ' : 'свой ') + (wr.room && wr.room.id))
+        + ' y ' + wr.pos[1].toFixed(2);
+      // Плита у грунта: из двери — наружу, как с любого трапа, а не в оси
+      // корабля, где грунта нет: трап у края плиты ставил ногу в пустоту.
+      holdDown('KeyW');
+      const outP = until(() => { tickNet(); return !!wr.out; }, 6);
+      for (let i = 0; i < 50; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      for (let i = 0; i < 40; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const O = await import('../js/game/outside.js');
+      const Wd = wr.out ? game.outsideFrame() : null;
+      const gy = Wd ? Wd.ground(wr.pos[0], wr.pos[2]) : null;
+      if (!outP || !wr.out || !wr.ground || gy === null || Math.abs(wr.pos[1] - gy) > 0.6) {
+        throw new Error('из вездехода на плите у грунта — не на грунт: ' + where() + ', грунт ' + (gy === null ? '—' : gy.toFixed(2)));
+      }
+      // На плиту — за машиной, с левого края, с прыжком: край у склона бывает
+      // выше шага (зазор до 0.66 м).
+      const Bq = cbx().b;
+      const side = Vs.vesselPoint(C(), [Bq.x[0] - 0.7, A.bayTop(cbx()), Bq.z[0] + 0.8]);
+      wr.pos = O.worldToGround(wr.out, side);
+      const toPlate = O.worldDirToGround(wr.out, Vs.vesselDir(C(), [1, 0, 0]));
+      wr.yaw = Math.atan2(toPlate[0], toPlate[2]);
+      for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      holdDown('KeyW');
+      let jumped = 0;
+      const back = until(() => { tickNet(); if (++jumped % 20 === 0) key('Space'); return !wr.out; }, 8);
+      for (let i = 0; i < 20; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      if (!back || wr.out || Math.abs(wr.pos[1] - A.bayTop(cbx())) > 0.05) {
+        const O = await import('../js/game/outside.js');
+        const pw = wr.out ? O.groundToWorld(wr.out, wr.pos) : Vs.vesselPoint(wr.vessel || game.ownVessel, wr.pos);
+        const pc = Vs.worldToVessel(C(), pw), pr = Vs.worldToVessel(game.ownVessel, pw);
+        const q = cbx();
+        throw new Error('с грунта на плиту не ступили: ' + where() + ', в осях носителя ' + pc.map((v) => v.toFixed(2)).join(',')
+          + ' (плита x ' + q.b.x.join('…') + ', z ' + q.b.z.join('…') + ', верх ' + A.bayTop(q).toFixed(2) + ', сойти ' + q.exitOk + ', зазор ' + q.gap.toFixed(2)
+          + '), в осях вездехода ' + pr.map((v) => v.toFixed(2)).join(',') + ', вездеход ' + rv.mode + ' x ' + rv.hg.x.toFixed(2) + ' z ' + rv.hg.z.toFixed(2));
+      }
+      // К пульту на плите — E: наверх (просьба за свой спящий корабль — хабу;
+      // хаб переставляет платформу — снимок приходит без неё).
+      const Bc = cbx().b;
+      wr.pos = [Bc.panel[0] + 0.3, A.bayTop(cbx()), Bc.panel[1] + 0.85]; wr.yaw = Math.PI;
+      for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
+      if (!game.walkBay) throw new Error('у пульта на плите — не пульт: ' + where() + ', вездеход z ' + rv.hg.z.toFixed(2));
+      key('KeyE'); frames(1);
+      bayWanted = false;
+      let worst = 0;
+      const upDone = until(() => { tickNet(); worst = Math.min(worst, wr.pos[1] - A.bayTop(cbx())); return cbx().travel === 0 && cbx().dir === 0; }, 20);
+      for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      const deck = cbx().b.deck;
+      if (!upDone || wr.out || Math.abs(wr.pos[1] - deck) > 0.05 || worst < -0.1) {
+        throw new Error('наверх с плитой не поднялись: ' + where() + ', палуба ' + deck + ', ход ' + cbx().travel.toFixed(2) + ', отставал на ' + worst.toFixed(2));
+      }
+      if (rv.mode !== 'hangar' || Math.abs(rv.hg.y - deck) > 1e-6) throw new Error('вездеход не поднялся с плитой: ' + rv.mode + ', y ' + rv.hg.y.toFixed(2));
+      // По трюму — к кормовой переборке и вдоль неё: пол под ногами.
+      wr.pos = [-0.9, deck, 4.0]; wr.yaw = Math.PI;
+      holdDown('KeyW');
+      for (let i = 0; i < 120; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      release('KeyW');
+      if (wr.out || Math.abs(wr.pos[1] - deck) > 0.05) throw new Error('по трюму у кормы провалились: ' + where());
+    }
+    if (!onto) {
+      const hgT = Hg.worldToHangar(C(), sh.pos, sh.basis.fwd, {});
+      throw new Error(`на плиту у грунта не заехали: ${rv.mode}, место в осях носителя ${hgT.x.toFixed(2)}, ${hgT.y.toFixed(2)}, ${hgT.z.toFixed(2)} (верх плиты ${A.bayTop(cbx()).toFixed(2)}, плита z ${cbx().b.z.join('…')}), ход ${rv.v.toFixed(2)}, удар ${rv.bump.toFixed(2)}`);
+    }
+  } finally {
+    if (net0 !== null) { net.peers = []; net.people = []; net.rev++; }
+    game.roverLink = { carrier: null, stowed: false, fresh: false };
+    game.rover.mode = 'ground';
+    sh.id = keep.id;
+    if (game.walk.on) { game.walk.on = false; game.walk.phase = 'seated'; game.walk.out = null; game.walk.vessel = null; }
+    game.frame = game.ownVessel;
+    Sp.useShipType('challenger');
+    game.syncHull();
+    const I = game.interior;
+    if (I && I.air) {
+      for (const x of I.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const x of I.air.bays || []) { x.want = false; x.travel = 0; x.dir = 0; x.vel = 0; x.open = 0; x.dy = 0; }
+      for (const q of Object.values(I.air.rooms)) { q.p = 1; q.leak = false; }
+    }
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(4);
+  }
+});
+
 // Шлюзы среднего корпуса «Прометея» — палуба 11, порог в 19.5 м над
 // грунтом. Трап у них в 97 ступеней, 23 м по горизонтали. Раньше трапа не
 // было вовсе (шлюз «в пустоту»): на стоянке люк открывался, а проём
@@ -1651,14 +2185,13 @@ await step('к соседу на борт: по его трапу, чужое к
   }
 });
 
-await step('вид от 3-го лица (V) рисует свой корабль', () => {
-  const before = calls.fill;
+await step('вид от 3-го лица (V) и обратно', () => {
   key('KeyV');
   frames(10);
   if (game.state.view !== 'chase') throw new Error('вид ' + game.state.view);
-  if (!(calls.fill > before)) throw new Error('в chase-виде ничего не нарисовано');
   key('KeyV');
   frames(5);
+  if (game.state.view !== 'cockpit') throw new Error('обратно не вернулись: вид ' + game.state.view);
 });
 
 await step('камера из-за спины догоняет корабль, а не сидит на нём', () => {

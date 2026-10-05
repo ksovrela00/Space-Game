@@ -66,12 +66,37 @@ final class Shipyard
         return $info;
     }
 
+    /**
+     * Купить вездеход в трюм своего корабля. Встаёт в его ангар и
+     * приписан к нему: после гибели вездеход возвращается сюда же
+     * (Combat::respawnShip). Второй в тот же трюм не встаёт.
+     */
+    private static function buyRover(int $playerId, array $ship, array $type): array
+    {
+        $shipId = (int) $ship['id'];
+        if (Specs::hangarOf((string) $ship['type_code']) !== $type['code']) {
+            throw ApiError::denied('no_hangar', 'в трюме ' . $ship['type_name'] . ' вездеходу не встать: ангара нет');
+        }
+        if (Players::roverOf($shipId) !== null) {
+            throw ApiError::denied('have_rover', 'вездеход у этого корабля уже есть: он в трюме');
+        }
+        Ledger::require($playerId, (int) $type['price']);
+        $roverId = Players::ensureHangar($shipId);
+        Ledger::add($playerId, 'ВЕРФЬ · ВЕЗДЕХОД: ' . $type['name'], -(int) $type['price'],
+            'rover:' . $shipId . ':' . $roverId);
+        $state = Players::state($playerId);
+        $state['bought'] = $roverId;
+        return $state;
+    }
+
     /** Свои корабли в этом доке: на них пересаживаются. */
+    // Вездеход в трюме — не «свой корабль в доке»: пересесть в него в порту
+    // нельзя (водят его по грунту, Players::command), и в списке он лишний.
     private static function here(int $playerId, array $port, int $activeId): array
     {
         $rows = Db::all('SELECT s.`id`, s.`name`, t.`code`, t.`name` AS `type_name`, t.`title`
             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
-            WHERE s.`owner_id`=? AND s.`system_id`=? AND s.`docked_body`=? ORDER BY s.`id`',
+            WHERE s.`owner_id`=? AND s.`system_id`=? AND s.`docked_body`=? AND s.`carrier_id` IS NULL ORDER BY s.`id`',
             [$playerId, $port['system_id'], $port['local_id']]);
         $out = [];
         foreach ($rows as $r) {
@@ -79,6 +104,24 @@ final class Shipyard
                 'typeName' => $r['type_name'], 'title' => $r['title'], 'active' => (int) $r['id'] === $activeId];
         }
         return $out;
+    }
+
+    /**
+     * Ангар корабля, которым пилот командует: какой вездеход в него
+     * встаёт, почём, и есть ли он уже. У корабля без ангара — null.
+     */
+    private static function hangarOffer(array $ship, bool $open): ?array
+    {
+        $code = Specs::hangarOf((string) $ship['type_code']);
+        $type = $code === null ? null : Db::row('SELECT * FROM `ship_type` WHERE `code`=?', [$code]);
+        if ($type === null) {
+            return null;
+        }
+        $have = Players::roverOf((int) $ship['id']);
+        return [
+            'code' => $code, 'name' => $type['name'], 'title' => $type['title'], 'price' => (int) $type['price'],
+            'for' => (int) $ship['id'], 'have' => $have, 'sold' => $open && $have === null,
+        ];
     }
 
     /** Что продаёт верфь этого порта и какие свои корабли стоят здесь. */
@@ -89,6 +132,10 @@ final class Shipyard
         $open = !empty($info['services']['outfit']);
         $hulls = [];
         foreach (Db::all('SELECT * FROM `ship_type` ORDER BY `id`') as $t) {
+            // Вездеход верфь не продаёт: его выдаёт ангар корабля.
+            if (Specs::isGround($t['code'])) {
+                continue;
+            }
             $tech = self::tech($t['code']);
             $hulls[] = [
                 'code' => $t['code'], 'name' => $t['name'], 'title' => $t['title'],
@@ -103,6 +150,7 @@ final class Shipyard
             'open' => $open,
             'tech' => (int) $info['tech'],
             'hulls' => $hulls,
+            'hangar' => self::hangarOffer($port['ship'], $open),
             'here' => self::here($playerId, $port, (int) $port['ship']['id']),
         ];
     }
@@ -123,6 +171,11 @@ final class Shipyard
             $type = Db::row('SELECT * FROM `ship_type` WHERE `code`=?', [$code]);
             if ($type === null) {
                 throw ApiError::notFound('нет такого корпуса: ' . $code);
+            }
+            // Вездеход — не корабль в док, а машина в трюм того корабля, которым
+            // пилот командует: в его ангар (hangar) и приписан к нему.
+            if (Specs::isGround($code)) {
+                return self::buyRover($playerId, $port['ship'], $type);
             }
             $tech = self::tech($code);
             if ($tech > (int) $info['tech']) {

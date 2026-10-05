@@ -197,6 +197,7 @@ export function drawWalkHud(r, game, hint = {}) {
   if (hint.lift) tips.push(hint.lift);
   if (hint.plan) tips.push([hint.plan, CY]);
   if (hint.hatch) tips.push(hint.hatch);
+  if (hint.bay) tips.push(hint.bay);
   if (hint.seat) tips.push([hint.seat, GREEN]);
   if (hint.mouse) tips.push([hint.mouse, AMBER]);
   if (hint.intro) tips.push([hint.intro, CY]);

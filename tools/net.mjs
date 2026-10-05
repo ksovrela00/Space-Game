@@ -101,7 +101,7 @@ globalThis.localStorage = {
 globalThis.location = {
   origin: 'http://localhost',
   pathname: '/space_game/index.html',
-  search: '?renderer=2d',
+  search: '',
   replaced: null,
   replace(url) { this.replaced = url; },
 };
@@ -169,7 +169,7 @@ const SERVER_STATE = {
 // за штурвалом. Корабль при этом стоит там, где его оставили.
 const { systemById } = await import('../js/game/galaxy.js');
 const { makeSystem } = await import('../js/game/world.js');
-const { isLandable } = await import('../js/game/surface.js');
+const { isLandable, groundRadius } = await import('../js/game/surface.js');
 const landOn = (sysId) => makeSystem(systemById(sysId)).bodies.find((b) => isLandable(b) && b.kind !== 'moon');
 const poseOn = (R, dx = 0) => {
   const l = Math.hypot(dx, R);
@@ -190,8 +190,14 @@ if (CASE === 'onfoot') {
     walk: { pos: DECK, yaw: 0.7, pitch: -0.1 } };
 }
 if (CASE === 'outside') {
+  // Записан он на грунте (в сорока сантиметрах над ним), а не на уровне
+  // моря: под рельефом не стоят (js/game/walker.js), и пилота с такой
+  // записи поднимает на грунт — на Lave I здесь это четырнадцать с
+  // половиной километров.
+  const q = { x: 0.03, y: HOME_LAND.radius, z: 0.02 }, ql = Math.hypot(q.x, q.y, q.z);
+  const at = groundRadius(HOME_LAND, { x: q.x / ql, y: q.y / ql, z: q.z / ql }) + 0.0004;
   SERVER_STATE.me = { systemId: 0, aboard: null, seated: false, walk: null,
-    out: { body: HOME_LAND.id, o: { x: 0.03, y: HOME_LAND.radius + 0.0004, z: 0.02 },
+    out: { body: HOME_LAND.id, o: { x: q.x / ql * at, y: q.y / ql * at, z: q.z / ql * at },
       f: { x: 1, y: 0, z: 0 }, pitch: 0.2 } };
 }
 const RIDE_SYS = 2;

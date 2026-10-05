@@ -66,6 +66,10 @@ export function fleetMarks(fleet, world, sysId, own, cache = new Map(), out = []
       systemId: sysId, where: 'flight', body: null });
   }
   for (const f of list) {
+    // Вездеход в трюме — внутри своего корабля: значок у него один, носителя
+    // (место у них общее, server/src/Players.php, carryAlong). Командуешь им —
+    // значок живой, как у любого своего.
+    if (f.stowed && !f.active && !(own && own.id !== null && f.id === own.id)) continue;
     const key = f.id === null || f.id === undefined ? 'own' : f.id;
     let m = cache.get(key);
     if (!m) {

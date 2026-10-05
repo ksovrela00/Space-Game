@@ -64,8 +64,14 @@ final class Schema
      *     Корабль ушедшего из мира пропадает вместе с ним, и стоять на
      *     его борту нельзя: по этому столбцу сервер не пускает туда и
      *     возвращает таких пассажиров на их корабли (Players::sendHome).
+     * 12 — вездеход и ангар. `ship.carrier_id` — корабль, к трюму которого
+     *     вездеход приписан (тип с hangar, server/data/specs.php):
+     *     выдаётся вместе с ним и возвращается в его трюм после гибели.
+     *     `ship.stowed` — стоит ли он сейчас в этом трюме: тогда его место
+     *     — место носителя (Players::carryAlong), а хаб не показывает его
+     *     отдельным кораблём.
      */
-    public const VERSION = 11;
+    public const VERSION = 12;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -383,8 +389,13 @@ final class Schema
                 -- щит возвращался бы даром при следующем входе, а кроны за
                 -- него оставались бы у пилота.
                 `bare` TEXT NULL,
+                -- Вездеход: к чьему трюму приписан и стоит ли в нём
+                -- (версия 12, Players::ensureHangar).
+                `carrier_id` INT NULL,
+                `stowed` TINYINT(1) NOT NULL DEFAULT 0,
                 `created_at` DATETIME NOT NULL,
                 KEY `owner` (`owner_id`),
+                KEY `carrier` (`carrier_id`),
                 KEY `in_system` (`system_id`),
                 CONSTRAINT `ship_type` FOREIGN KEY (`type_id`)
                     REFERENCES `ship_type` (`id`),
@@ -539,6 +550,9 @@ final class Schema
                 'anchor_body' => 'INT NULL',
                 'anchor_pose' => 'TEXT NULL',
                 'hatches' => 'TEXT NULL',
+                // Версия 12: вездеход в трюме носителя.
+                'carrier_id' => 'INT NULL',
+                'stowed' => 'TINYINT(1) NOT NULL DEFAULT 0',
             ],
             // Версия 10: место человека.
             'player' => [

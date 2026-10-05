@@ -226,6 +226,13 @@ export function stationAct(game, act, arg = {}) {
       () => L('КУПЛЕН КОРАБЛЬ: ') + (arg.name || arg.code) + ' · −' + kr(+arg.price) + L(' · ОН В ЭТОМ ДОКЕ'));
     return true;
   }
+  if (act === 'rover') {
+    // Вездеход покупают тем же вызовом верфи, что корабль (Shipyard::buy):
+    // встаёт он не в док, а в трюм того корабля, которым командуют.
+    run(game, () => buyHull(arg.code),
+      () => L('КУПЛЕН ВЕЗДЕХОД: ') + (arg.name || arg.code) + ' · −' + kr(+arg.price) + L(' · ОН В ТРЮМЕ'));
+    return true;
+  }
   if (act === 'board') {
     // Пересесть — не сделка, а смена корабля: её ведёт игра (js/main.js),
     // и она же забывает ответы о прежнем корабле (forgetPort). Кнопки на
@@ -412,8 +419,23 @@ function shipsTab(game) {
     return `<tr><td>${esc(h.name)}<div class="dim">${esc(L(h.title) + guns)}</div></td>
       <td class="v">${esc(dims)}</td><td class="acts">${act}</td></tr>`;
   }).join('');
+  // Ангар корабля, которым командуют: вездеход в трюм (у корабля без
+  // ангара строки нет). Приписан он к этому кораблю: после гибели
+  // возвращается в его трюм.
+  const H = o.hangar;
+  let hangar = '';
+  if (H) {
+    let act;
+    if (H.have) act = `<span class="dim">${esc(L('В ТРЮМЕ'))}</span>`;
+    else if (!o.open) act = '';
+    else act = btn(L('КУПИТЬ · ') + kr(H.price), 'rover', { code: H.code, name: H.name, price: H.price }, 'small',
+      s.busy || money < H.price);
+    hangar = `<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('АНГАР КОРАБЛЯ'))}</td></tr>
+      <tr><td>${esc(H.name)}<div class="dim">${esc(L(H.title) + ' · ' + L('в трюм корабля №') + H.for)}</div></td>
+      <td class="v"></td><td class="acts">${act}</td></tr></table>`;
+  }
   return `<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('В ЭТОМ ДОКЕ'))}</td></tr>${here}</table>
-    ${head}<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('ВЕРФЬ КОРАБЛЕЙ'))}</td></tr>${hulls}</table>`;
+    ${head}<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('ВЕРФЬ КОРАБЛЕЙ'))}</td></tr>${hulls}</table>${hangar}`;
 }
 
 function fuelTab(game) {

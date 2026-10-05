@@ -3316,6 +3316,25 @@ console.log('\n== мок GL: путь отрисовки ==');
     'кабина, тень кабины, стекло фонаря)');
 
   const world = makeSystem(0x1a7e);
+  // Грунт для ног и колёс не зависит от того, сколько плиток уже пришло:
+  // нарисованный идёт за самым подробным из пришедших уровней и после
+  // входа прыгал на сотни метров — пилот оставался под землёй.
+  {
+    const { TILE_MAX_LEVEL } = await import('../js/gl/quadtree.js');
+    const keep = scene.tiles, b = world.home;
+    // Точка на суше Lave II, где пилот и остался под землёй.
+    const d = normalize(v3(-477.194, -212.332, -4167.548));
+    const drawn = [], settled = [];
+    for (let lv = 1; lv <= TILE_MAX_LEVEL; lv++) {
+      scene.tiles = { finestLevel: lv };
+      drawn.push(scene.drawnGround(b, d)); settled.push(scene.settledGround(b, d));
+    }
+    scene.tiles = keep;
+    const span = (a) => (Math.max(...a) - Math.min(...a)) * 1000;
+    ok(scene.tilesOn && span(settled) === 0 && span(drawn) > 1 && settled[0] === drawn[drawn.length - 1],
+      `грунт для ног — один на все уровни плиток (разброс ${span(settled).toFixed(3)} м), а нарисованный гуляет на ` +
+      `${span(drawn).toFixed(1)} м, пока плитки приходят; догрузились — совпали`);
+  }
   const ship = makeShip();
   const game = {
     world, ship,
@@ -3841,6 +3860,33 @@ console.log('\n== мок GL: путь отрисовки ==');
     scene.render(game);
     const empty = scene.cabin.interDraws;
     ok(with10 - empty === 10, `10 т в трюме — 10 ящиков в кадре (${with10} вызовов против ${empty} в пустом)`);
+    // Вездеход в трюме (js/game/hangar.js, js/main.js — hangarSeen): его
+    // рисует проход кабины светом трюма — кузов, панель двери и шесть колёс.
+    // Дверь открыта — вместо панели створка и трап.
+    {
+      const A2 = await import('../js/game/airlock.js');
+      const { ROVER_PLAN } = await import('../js/models/interior.rover.js');
+      const { buildRover } = await import('../js/models/rover.js');
+      const { GEAR_CLEAR: GC } = await import('../js/models/ships.js');
+      if (!game.interior.air) A2.makeAirlocks(game.interior, GC);
+      const bx = game.interior.air.bays[0];
+      const rAir = A2.makeAir(buildInterior(buildRover(), ROVER_PLAN), 0);
+      const item = { V: {}, air: game.interior.air, room: 'hold', hg: { x: 0, y: bx.b.deck, z: 7.2, yaw: 0.1 },
+        wheels: null, rAir };
+      game.hangarSeen = [item];
+      const nanR = state.nan;
+      scene.render(game);
+      const closed = scene.cabin.interDraws;
+      rAir.hatches[0].open = 1; rAir.hatches[0].stair = 1;
+      scene.render(game);
+      const open = scene.cabin.interDraws;
+      game.hangarSeen = null;
+      scene.render(game);
+      const none = scene.cabin.interDraws;
+      ok(closed - none === 8 && open - none === 9 && state.nan === nanR,
+        `вездеход в трюме — проходом кабины: закрытый ${closed - none} вызовов (кузов, дверь, шесть колёс), ` +
+        `с открытой дверью ${open - none} (створка и трап вместо панели), без NaN`);
+    }
     // Дверь в кают-компанию из машинного, закрытая. Рама стоит на стене
     // кают-компании (комнаты a), а та за закрытой дверью не рисуется: раму с
     // этой стороны рисуют отдельно — иначе вокруг створки светилась щель в
@@ -3946,6 +3992,28 @@ console.log('\n== мок GL: путь отрисовки ==');
       const nearSeat = scene.proj[14];
       ok(Math.abs(nearWalk) < 2e-4 && Math.abs(nearSeat) > 7e-3,
         `ближняя плоскость: на ногах ${(Math.abs(nearWalk) / 2 * 1e5).toFixed(0)} см, в кресле ${(Math.abs(nearSeat) / 2 * 1000).toFixed(0)} м`);
+      // Грузовая платформа снаружи (js/game/airlock.js, «платформа»):
+      // опущена до грунта — днище вырезано по её проёму (плюс коробки
+      // помещений: сквозь проём виден трюм, а не изнанка обшивки), плита и
+      // четыре троса — сетки мира, трюм — проходом кабины в общей глубине.
+      {
+        A.resetAirlocks(air);
+        state.intsMax = {};
+        scene.render(game);
+        const up = { draws: scene.draws, carve: state.intsMax.uCarveN ?? 0 };
+        const bx = air.bays[0];
+        A.toggleBay(air, bx);
+        bx.snap = true;
+        A.updateAirlocks(air, { pOut: 0, block: null, ground: () => -GEAR_CLEAR * 1000, occupied: () => false }, 1 / 60);
+        state.intsMax = {};
+        scene.render(game);
+        const down = { draws: scene.draws, carve: state.intsMax.uCarveN, locks: scene.cabin.interDraws };
+        state.intsMax = maxWas;
+        ok(bx.travel > 4 && up.carve === 0 && down.carve === 1 + game.interior.carve.length && down.locks >= 1
+          && down.draws >= up.draws + 5 + down.locks && state.nan === nan0,
+          `платформа на грунте: днище вырезано по ${down.carve} коробкам (поднята — по ${up.carve}), плита и четыре троса — ` +
+          `пять сеток, трюм сквозь проём — ${down.locks} вызовов; всего ${up.draws} → ${down.draws}`);
+      }
       A.resetAirlocks(air);
       game.state.view = 'cockpit';
     }

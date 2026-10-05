@@ -68,6 +68,30 @@ final class Specs
         return $out;
     }
 
+    /** Числа корпуса типа code из файла (spec), или пустой набор. */
+    public static function typeSpec(string $code): array
+    {
+        foreach (self::source()['shipTypes'] as $t) {
+            if ($t['code'] === $code) {
+                return $t['spec'] ?? [];
+            }
+        }
+        return [];
+    }
+
+    /** Наземный ли тип (вездеход): модулей корабля у него нет, на верфи его не продают. */
+    public static function isGround(string $code): bool
+    {
+        return !empty(self::typeSpec($code)['ground']);
+    }
+
+    /** Какой наземный корабль живёт в трюме типа code (ангар), или null. */
+    public static function hangarOf(string $code): ?string
+    {
+        $h = self::typeSpec($code)['hangar'] ?? null;
+        return is_string($h) && $h !== '' ? $h : null;
+    }
+
     /**
      * Сколько предметов держит гнездо. Умолчание — один.
      *
@@ -332,10 +356,14 @@ final class Specs
                 'spec' => ['flight' => $m['flight'] ?? []],
             ];
         }
-        $want = array_keys(self::mergeFlight(
+        // Только ЧИСЛА: свойства типа строкой (hangar — какой вездеход живёт
+        // в трюме, у «Челленджера» он есть, у «Прометея» нет) — не числа
+        // лётной модели, и без них никто на NaN не полетит. Пока их
+        // сверяли наравне, «Прометей» и вездеход «отставали от кода» навсегда.
+        $want = array_keys(array_filter(self::mergeFlight(
             self::source()['shipTypes'][0]['spec'],
             $srcMods
-        ));
+        ), static fn($v): bool => is_int($v) || is_float($v)));
         foreach ($ships as $ship) {
             $have = array_keys(self::mergeFlight($ship['spec'], $modules));
             $lack = array_values(array_diff($want, $have));

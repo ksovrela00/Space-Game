@@ -71,6 +71,8 @@ export const warpRange = (ship) =>
  *   'ok'
  */
 export function fuelLevel(ship) {
+  // Бака нет вовсе (вездеход на батареях) — топливо не кончается.
+  if (!(fuelCap() > 0)) return 'ok';
   if (!(ship.fuel > 0)) return 'dry';
   if (ship.fuel <= fuelReserve() + 1e-9) return 'reserve';
   if (ship.fuel < fuelCap() * 0.25) return 'low';

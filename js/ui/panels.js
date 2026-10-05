@@ -31,6 +31,10 @@ import { hullName } from '../game/npc.js';
 import { gearLabel } from '../game/landing.js';
 import { fuelCap, fuelReserve, fuelLevel } from '../game/fuel.js';
 import { L } from '../core/lang.js';
+import { lockStatus } from '../game/airlock.js';
+import { bodyLocal } from '../game/vessels.js';
+import { roverFrame, bearingOf, roverTilt, latLon, roverHomeInfo } from '../game/rovernav.js';
+import { RV } from '../models/rover.js';
 
 const TAU = Math.PI * 2;
 const FONT = 'Consolas, "Courier New", monospace';
@@ -45,11 +49,13 @@ export const NOMINAL = {
   comms: [800, 80],
   annL: [600, 80],
   annR: [600, 80],
+  rann: [800, 80],
 };
 
 /** Сколько раз в секунду экран перерисовывается (на телефоне — вдвое реже). */
 export const SCREEN_RATE = {
   scope: 30, flight: 30, target: 15, map: 6, systems: 4, comms: 10, annL: 8, annR: 8,
+  rnav: 6, rdrive: 30, rsys: 4, rann: 8,
 };
 
 // Страницы в меню по верхней кромке — в порядке мониторов на доске.
@@ -59,9 +65,10 @@ const PAGES = [
 
 /**
  * Корпус страницы: фон, сетка, меню страниц сверху и подписи кнопок
- * снизу. Возвращает рабочее поле между ними.
+ * снизу. Возвращает рабочее поле между ними. pages — свой набор страниц
+ * (у вездехода их три); по умолчанию — корабельные.
  */
-function chrome(ctx, W, H, page, keys) {
+function chrome(ctx, W, H, page, keys, pages = PAGES) {
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
   // Сетка подложки: по ней видно и границы экрана, и его наклон.
@@ -75,9 +82,10 @@ function chrome(ctx, W, H, page, keys) {
   // Меню страниц — против пяти верхних кнопок рамки.
   ctx.font = f(16);
   ctx.textAlign = 'center';
-  for (let i = 0; i < 5; i++) {
-    const x = (i + 0.5) * W / 5;
-    const on = PAGES[i][0] === page;
+  const np = pages.length;
+  for (let i = 0; i < np; i++) {
+    const x = (i + 0.5) * W / np;
+    const on = pages[i][0] === page;
     if (on) {
       ctx.fillStyle = CY;
       ctx.fillRect(x - 44, 3, 88, 22);
@@ -85,7 +93,7 @@ function chrome(ctx, W, H, page, keys) {
     } else {
       ctx.fillStyle = DIM;
     }
-    ctx.fillText(L(PAGES[i][1]), x, 20);
+    ctx.fillText(L(pages[i][1]), x, 20);
     // Метка кнопки у самой кромки.
     ctx.fillStyle = on ? CY : 'rgba(79,179,224,0.35)';
     ctx.fillRect(x - 1, 0, 2, 3);
@@ -744,9 +752,350 @@ function commsStrip(ctx, W, H, game) {
   }
 }
 
+// --- ВЕЗДЕХОД -------------------------------------------------------------------------
+//
+// Три монитора и табло поста водителя (js/models/cockpit.rover.js). Тот
+// же вид, что у мониторов кораблей, — меню страниц сверху, подписи кнопок
+// снизу, крупное главное, — но страниц три, и они про машину на грунте:
+// куда ехать, как едет, что с ней. Числа хода — у типа (SHIP: driveSpeed,
+// steerMax, slopeMax — server/data/specs.php), состояние — game.rover
+// (js/game/rover.js), курс и куда до корабля — js/game/rovernav.js.
+
+const ROVER_PAGES = [['rnav', 'НАВ'], ['rdrive', 'ХОД'], ['rsys', 'СИСТ']];
+const DEG = 180 / Math.PI;
+
+/**
+ * Куда ехать: свой корабль-носитель (roverHomeInfo) и прочие корабли рядом
+ * — в осях тела, км. Без игры (проверки) — пусто.
+ */
+function roverMarks(game) {
+  const rv = game.rover, body = rv && rv.body;
+  if (!body) return { home: null, list: [] };
+  const home = roverHomeInfo(game);
+  const list = [];
+  for (const V of game.peers || []) {
+    if (!V || !V.pos || (home && V === home.vessel)) continue;
+    list.push({ l: bodyLocal(body, V.pos), npc: !!V.npc });
+  }
+  return { home, list };
+}
+
+/**
+ * НАВИГАЦИЯ. Слева — карта вокруг машины курсом вверх: роза с делениями,
+ * масштаб сам подбирается так, чтобы корабль-носитель был на карте; за
+ * краем он — ромбом на ободе, по направлению. Справа — курс, до корабля
+ * и куда к нему повернуть, широта и долгота.
+ */
+function roverNavScreen(ctx, W, H, game) {
+  chrome(ctx, W, H, 'rnav', ['', '', '', '', L('M — КАРТА')], ROVER_PAGES);
+  const rv = game.rover;
+  if (!rv || !rv.body) return;
+  const F = roverFrame(rv.lp);
+  const head = bearingOf(F, rv.lb.fwd);
+  const marks = roverMarks(game);
+  const cx = 146, cy = 180, R = 112;
+  const homeD = marks.home ? marks.home.dist : null, homeB = marks.home ? marks.home.bearing : 0;
+  // Масштаб — круглый: 100 м, 200, 500, 1 км…, чтобы корабль был внутри.
+  const want = Math.max(0.1, (homeD || 0) * 1.15);
+  let span = 0.1;
+  for (const s of [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50]) { span = s; if (s >= want) break; }
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.clip();
+  ctx.fillStyle = 'rgba(79,179,224,0.05)';
+  ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+  ctx.strokeStyle = 'rgba(79,179,224,0.18)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, R / 2, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+  // Точка карты: курс вверх — направление поворачивается на −курс.
+  const at = (l) => {
+    const d = { x: l.x - rv.lp.x, y: l.y - rv.lp.y, z: l.z - rv.lp.z };
+    const dist = Math.hypot(d.x, d.y, d.z);
+    const a = (bearingOf(F, d) - head) / DEG;
+    const r = Math.min(dist / span, 1.2) * R;
+    return { x: cx + Math.sin(a) * r, y: cy - Math.cos(a) * r, out: dist > span };
+  };
+  for (const m of marks.list) {
+    const p = at(m.l);
+    if (p.out) continue;
+    ctx.fillStyle = m.npc ? 'rgba(227,214,160,0.85)' : PEER;
+    ctx.fillRect(p.x - 5, p.y - 5, 10, 10);
+  }
+  ctx.restore();
+  // Роза: обод, деления через 10°, буквы сторон света.
+  ctx.strokeStyle = 'rgba(79,179,224,0.55)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+  ctx.beginPath();
+  for (let g = 0; g < 360; g += 10) {
+    const a = (g - head) / DEG, c = Math.sin(a), s = -Math.cos(a);
+    const r0 = g % 30 === 0 ? R - 13 : R - 7;
+    ctx.moveTo(cx + c * r0, cy + s * r0); ctx.lineTo(cx + c * R, cy + s * R);
+  }
+  ctx.stroke();
+  ctx.font = f(22);
+  ctx.textAlign = 'center';
+  for (const [g, s] of [[0, 'С'], [90, 'В'], [180, 'Ю'], [270, 'З']]) {
+    const a = (g - head) / DEG;
+    ctx.fillStyle = g === 0 ? AMBER : CY;
+    ctx.fillText(L(s), cx + Math.sin(a) * (R - 30), cy - Math.cos(a) * (R - 30) + 8);
+  }
+  // Корабль-носитель: на карте — квадрат с ободком; за краем — ромб на ободе.
+  if (marks.home) {
+    const p = at(marks.home.l);
+    ctx.fillStyle = GREEN;
+    if (p.out) {
+      const a = (homeB - head) / DEG, x = cx + Math.sin(a) * R, y = cy - Math.cos(a) * R;
+      ctx.beginPath(); ctx.moveTo(x, y - 11); ctx.lineTo(x + 9, y); ctx.lineTo(x, y + 11); ctx.lineTo(x - 9, y); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.strokeStyle = GREEN;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(p.x - 9, p.y - 9, 18, 18);
+      ctx.fillRect(p.x - 4, p.y - 4, 8, 8);
+    }
+  }
+  // Сама машина — треугольник носом вверх.
+  ctx.fillStyle = INK;
+  ctx.beginPath(); ctx.moveTo(cx, cy - 13); ctx.lineTo(cx + 8, cy + 9); ctx.lineTo(cx - 8, cy + 9); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = DIM;
+  ctx.font = f(18);
+  ctx.textAlign = 'left';
+  ctx.fillText(fmtDist(span), cx + R - 30, cy + R - 2);
+
+  // Справа: курс, корабль, координаты.
+  const x0 = 284;
+  ctx.textAlign = 'left';
+  ctx.font = f(20);
+  ctx.fillStyle = CY;
+  ctx.fillText(L('КУРС'), x0, 62);
+  ctx.font = f(48);
+  ctx.fillStyle = INK;
+  ctx.fillText(String(Math.round(head) % 360).padStart(3, '0') + '°', x0, 108);
+  ctx.font = f(20);
+  ctx.fillStyle = CY;
+  ctx.fillText(L('КОРАБЛЬ'), x0, 150);
+  if (homeD !== null) {
+    ctx.font = f(34);
+    ctx.fillStyle = GREEN;
+    ctx.fillText(fmtDist(homeD), x0, 188);
+    // Куда повернуть: влево или вправо и на сколько.
+    const turn = marks.home.turn;
+    ctx.font = f(24);
+    ctx.fillStyle = Math.abs(turn) < 10 ? GREEN : AMBER;
+    ctx.fillText(Math.abs(turn) < 3 ? L('ПРЯМО') : (turn < 0 ? '◄ ' : '') + Math.round(Math.abs(turn)) + '°' + (turn > 0 ? ' ►' : ''),
+      x0, 220);
+  } else {
+    ctx.font = f(24);
+    ctx.fillStyle = DIM;
+    ctx.fillText(L('НЕТ СВЯЗИ'), x0, 188);
+  }
+  const { lat, lon } = latLon(rv.lp);
+  ctx.font = f(20);
+  ctx.fillStyle = DIM;
+  ctx.fillText(Math.abs(lat).toFixed(2) + '° ' + (lat >= 0 ? L('с.ш.') : L('ю.ш.')), x0, 262);
+  ctx.fillText(Math.abs(lon).toFixed(2) + '° ' + (lon >= 0 ? L('в.д.') : L('з.д.')), x0, 288);
+}
+
+/**
+ * ХОД. Слева — скорость дугой в км/ч и ход словом (вперёд, задний, накат,
+ * стоянка), под ней — руль: куда повёрнуты колёса. Справа — наклон машиной сзади и сбоку и шесть колёс сверху: как
+ * поджата подвеска и какие в воздухе.
+ */
+function roverDriveScreen(ctx, W, H, game) {
+  chrome(ctx, W, H, 'rdrive', ['', '', '', '', L('ФАРЫ')], ROVER_PAGES);
+  const rv = game.rover;
+  if (!rv) return;
+  const vmax = SHIP.driveSpeed || 1, vrev = SHIP.reverseSpeed || 0;
+  const cx = 140, cy = 170, r = 100;
+  const a0 = Math.PI * 0.75, span = Math.PI * 1.5;
+  // Шкала: назад — короткий янтарный участок слева от нуля, вперёд — голубой.
+  const zero = vrev / (vmax + vrev);
+  const at = (v) => a0 + span * clamp(zero + v / (vmax + vrev), 0, 1);
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = 'rgba(255,204,102,0.35)';
+  ctx.beginPath(); ctx.arc(cx, cy, r, at(-vrev), at(0)); ctx.stroke();
+  ctx.strokeStyle = 'rgba(79,179,224,0.25)';
+  ctx.beginPath(); ctx.arc(cx, cy, r, at(0), at(vmax)); ctx.stroke();
+  // Деления — через 10 км/ч.
+  ctx.strokeStyle = DIM;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let k = 0; k <= vmax * 3.6 + 1e-6; k += 10) {
+    const a = at(k / 3.6), c = Math.cos(a), s = Math.sin(a);
+    const r0 = k % 20 === 0 ? r - 20 : r - 12;
+    ctx.moveTo(cx + c * r0, cy + s * r0); ctx.lineTo(cx + c * (r - 5), cy + s * (r - 5));
+  }
+  ctx.stroke();
+  const v = rv.v || 0;
+  ctx.lineWidth = 13;
+  ctx.strokeStyle = v < 0 ? AMBER : CY;
+  ctx.beginPath();
+  if (v >= 0) ctx.arc(cx, cy, r - 11, at(0), at(v)); else ctx.arc(cx, cy, r - 11, at(v), at(0));
+  ctx.stroke();
+  const a = at(v);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = INK;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(a) * (r - 36), cy + Math.sin(a) * (r - 36));
+  ctx.lineTo(cx + Math.cos(a) * (r + 2), cy + Math.sin(a) * (r + 2));
+  ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = INK;
+  ctx.font = f(56);
+  ctx.fillText(String(Math.round(Math.abs(v) * 3.6)), cx, cy + 14);
+  ctx.fillStyle = DIM;
+  ctx.font = f(20);
+  ctx.fillText(L('км/ч'), cx, cy + 42);
+  // Ход — словом над числом: стоит на тормозе, едет вперёд, назад или
+  // катится без газа.
+  const parked = rv.hold || (rv.brake > 0 && Math.abs(v) < 0.3);
+  const gear = parked ? 'СТОЯНКА' : rv.pedal < 0 || v < -0.3 ? 'ЗАДНИЙ' : rv.pedal > 0 || v > 0.3 ? 'ВПЕРЁД' : 'НАКАТ';
+  ctx.font = f(24);
+  ctx.fillStyle = gear === 'ВПЕРЁД' ? GREEN : gear === 'НАКАТ' ? DIM : AMBER;
+  ctx.fillText(L(gear), cx, cy - 40);
+  // Руль: шкала от упора до упора, метка — где колёса; на ходу упор
+  // ближе (steerFade) — это видно по светлой части шкалы.
+  const sMax = (SHIP.steerMax || 30) / DEG;
+  const fade = 1 - (1 - (SHIP.steerFade ?? 1)) * Math.min(1, Math.abs(v) / Math.max(1, vmax));
+  const bx = cx, by = 284, bw = 110;
+  ctx.fillStyle = 'rgba(79,179,224,0.18)';
+  ctx.fillRect(bx - bw, by - 5, bw * 2, 10);
+  ctx.fillStyle = 'rgba(79,179,224,0.40)';
+  ctx.fillRect(bx - bw * fade, by - 5, bw * fade * 2, 10);
+  ctx.fillStyle = INK;
+  ctx.fillRect(bx - 1, by - 10, 2, 20);
+  const sx = bx + clamp((rv.steer || 0) / sMax, -1, 1) * bw;
+  ctx.fillStyle = AMBER;
+  ctx.beginPath(); ctx.moveTo(sx, by - 6); ctx.lineTo(sx + 8, by - 16); ctx.lineTo(sx - 8, by - 16); ctx.closePath(); ctx.fill();
+  ctx.fillRect(sx - 2, by - 6, 4, 12);
+
+  // Наклон: машина сзади (крен) и сбоку (тангаж) на линии горизонта.
+  const t = roverTilt(rv);
+  const lim = SHIP.slopeMax || 34;
+  const tc = (deg) => (Math.abs(deg) > lim ? RED : Math.abs(deg) > lim * 0.7 ? AMBER : GREEN);
+  const tiltIcon = (x, y, deg, side) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.strokeStyle = 'rgba(79,179,224,0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-46, 0); ctx.lineTo(46, 0); ctx.stroke();
+    ctx.rotate(side ? -deg / DEG : deg / DEG);
+    ctx.fillStyle = tc(deg);
+    if (side) {
+      // Сбоку: кузов, лоб скошен, три колеса.
+      ctx.beginPath(); ctx.moveTo(-34, -6); ctx.lineTo(-34, -30); ctx.lineTo(14, -30); ctx.lineTo(34, -14); ctx.lineTo(34, -6); ctx.closePath(); ctx.fill();
+      for (const wx of [-24, 2, 25]) { ctx.beginPath(); ctx.arc(wx, -5, 6, 0, TAU); ctx.fill(); }
+    } else {
+      // Сзади: кузов с фасками и два колеса.
+      ctx.beginPath(); ctx.moveTo(-20, -6); ctx.lineTo(-20, -24); ctx.lineTo(-14, -32); ctx.lineTo(14, -32); ctx.lineTo(20, -24); ctx.lineTo(20, -6); ctx.closePath(); ctx.fill();
+      ctx.fillRect(-29, -14, 7, 14); ctx.fillRect(22, -14, 7, 14);
+    }
+    ctx.restore();
+  };
+  tiltIcon(320, 104, t.roll, false);
+  tiltIcon(432, 104, t.pitch, true);
+  ctx.font = f(20);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = CY;
+  ctx.fillText(L('КРЕН'), 320, 136);
+  ctx.fillText(L('ТАНГАЖ'), 432, 136);
+  ctx.font = f(24);
+  ctx.fillStyle = tc(t.roll);
+  ctx.fillText(Math.round(t.roll) + '°', 320, 64);
+  ctx.fillStyle = tc(t.pitch);
+  ctx.fillText(Math.round(t.pitch) + '°', 432, 64);
+
+  // Колёса сверху: прямоугольник — колесо, поворот — как у колеса, цвет —
+  // ход подвески (в воздухе — серый), полоска рядом — насколько поджато.
+  const wx0 = 376, wy0 = 222, kx = 34, kz = 15;
+  const travel = SHIP.travel || 0.2;
+  ctx.strokeStyle = 'rgba(79,179,224,0.35)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(wx0 - 26, wy0 - 52, 52, 104);
+  const WS = rv.wheels || [];
+  for (let i = 0; i < WS.length; i++) {
+    const w = WS[i], side = i % 2 ? 1 : -1, z = RV.wheel.z[Math.floor(i / 2)] ?? 0;
+    const x = wx0 + side * kx, y = wy0 - z * kz;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(w.steer || 0);
+    ctx.fillStyle = !w.touch ? 'rgba(159,217,255,0.25)' : Math.abs(w.drop) > travel * 0.85 ? AMBER : GREEN;
+    ctx.fillRect(-6, -13, 12, 26);
+    ctx.restore();
+    const k = clamp(-(w.drop || 0) / travel, -1, 1);
+    ctx.fillStyle = 'rgba(216,242,255,0.7)';
+    ctx.fillRect(x + side * 13 - 3, y - k * 12 - 1, 6, 2);
+  }
+  ctx.textAlign = 'left';
+  ctx.font = f(20);
+  ctx.fillStyle = rv.air ? AMBER : rv.slip ? RED : DIM;
+  ctx.fillText(rv.air ? L('В ВОЗДУХЕ') : rv.slip ? L('СКОЛЬЗИТ') : L('КОЛЁСА'), 250, 290);
+}
+
+/**
+ * СИСТЕМЫ. Слева — машина сверху цветом корпуса, справа — корпус, дверь и
+ * воздух кабины (шлюз — вся машина: js/models/interior.rover.js), фары и
+ * тормоз стоянки.
+ */
+function roverSysScreen(ctx, W, H, game) {
+  const ship = game.ship;
+  chrome(ctx, W, H, 'rsys', [L('ДВЕРЬ'), '', '', '', L('ЖУРНАЛ')], ROVER_PAGES);
+  const hullK = clamp(ship.hull / (SHIP.maxHull || 100), 0, 1);
+  const hullC = hullK > 0.6 ? GREEN : (hullK > 0.3 ? AMBER : RED);
+  const polys = hullOutline(game.shipMesh);
+  if (polys) {
+    const img = hullSilhouette(polys, game.shipMesh, hullC, 200);
+    if (img) ctx.drawImage(img, 110 - img.width / 2, 168 - img.height / 2);
+  }
+  const rv = game.rover;
+  const air = game.ownAir ? game.ownAir() : null;
+  const ls = air ? lockStatus(air, 'rlock') : null;
+  let y = 70;
+  const row = (label, value, color) => {
+    ctx.textAlign = 'left';
+    ctx.font = f(20);
+    ctx.fillStyle = CY;
+    ctx.fillText(label, 230, y);
+    ctx.textAlign = 'right';
+    ctx.font = f(24);
+    ctx.fillStyle = color;
+    ctx.fillText(value, W - 16, y);
+    y += 37;
+  };
+  row(L('КОРПУС'), Math.round(hullK * 100) + '%', hullC);
+  if (ls) {
+    const door = ls.open ? L('ОТКРЫТА') : ls.state === 'cycle' || ls.state === 'close' ? L('ЦИКЛ') : L('ЗАДРАЕНА');
+    row(L('ДВЕРЬ'), door, ls.open ? RED : ls.state === 'sealed' ? GREEN : AMBER);
+    const p = ls.p;
+    row(L('КАБИНА'), p.toFixed(2) + L(' бар'), p > 0.9 ? GREEN : p > 0.4 ? AMBER : RED);
+    row(L('ЗАБОРТ'), (ls.out || 0).toFixed(2) + L(' бар'), INK);
+  } else {
+    row(L('ДВЕРЬ'), '—', DIM);
+  }
+  row(L('ФАРЫ'), ship.lights ? L('ВКЛ') : L('ВЫКЛ'), ship.lights ? '#ffe9a8' : DIM);
+  row(L('ТОРМОЗ'), rv && rv.hold ? L('СТОЯНКА') : rv && rv.brake > 0 ? L('ВКЛ') : L('ВЫКЛ'), rv && (rv.hold || rv.brake > 0) ? AMBER : DIM);
+}
+
+/** Табло вездехода: тормоз, уклон, дверь, фары, корпус. */
+function roverAnn(ctx, W, H, game) {
+  const ship = game.ship, rv = game.rover || {};
+  const air = game.ownAir ? game.ownAir() : null;
+  const ls = air ? lockStatus(air, 'rlock') : null;
+  const lim = (SHIP.slopeMax || 34) / DEG;
+  const low = ship.hull / (SHIP.maxHull || 100) < 0.4;
+  annunciators(ctx, W, H, [
+    [L('ТОРМОЗ'), rv.hold || rv.brake > 0 ? AMBER : null, false],
+    [L('УКЛОН'), rv.slip ? RED : (rv.slope || 0) > lim * 0.7 ? AMBER : null, !!rv.slip],
+    [L('ДВЕРЬ'), !ls ? null : ls.open ? RED : ls.state !== 'sealed' ? AMBER : null, !!ls && ls.state === 'cycle'],
+    [L('ФАРЫ'), ship.lights ? '#ffe9a8' : null, false],
+    [L('КОРПУС'), low ? RED : null, true],
+  ], game.now || 0);
+}
+
 const DRAW = {
   flight: flightScreen, scope: scopeScreen, target: targetScreen, map: mapScreen,
   systems: systemsScreen, comms: commsStrip, annL: annLeft, annR: annRight,
+  rnav: roverNavScreen, rdrive: roverDriveScreen, rsys: roverSysScreen, rann: roverAnn,
 };
 
 /**

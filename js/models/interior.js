@@ -348,6 +348,34 @@ export const WINDOWS = [
   { id: 'holdR', room: 'hold', side: 1, c: 9.5, y: 2.35, w: 2.2, h: 0.55 },
 ];
 
+// Грузовая платформа: большая часть пола трюма — лифт до грунта. На ней
+// в трюм будут заезжать наземной машиной, и трюм станет ангаром.
+//
+// Платформа — проход между рядами ящиков, 5.8 × 8.8 м. Ящики стоят вдоль
+// бортов на неподвижном полу: вывозить груз ради платформы незачем, а
+// проход между рядами и так свободен — ровно под машину. У кормовой
+// переборки пол остаётся на полтора метра (там сходит трап и дверь в
+// нижний коридор), у носового шлюза — на метр: пройти, не наступив на
+// платформу.
+//
+// Место под проём найдено замером, а не выбрано: под полом трюма — 0.65 м
+// обшивки до днища (−9.65), и больше ничего, а носовая стойка шасси стоит
+// впереди трюма (z 14.3). Проём не задевает ни её, ни шлюзов. Сколько и
+// как платформа ходит — js/game/airlock.js («платформа»).
+//
+// x, z — площадка в плане; deck — её верх поднятой (пол трюма); belly —
+// низ колодца, чуть ниже днища: платформа под ним уже снаружи корабля;
+// plate — толщина плиты; panel — пульт на самой платформе (x, z), на нём и
+// едут; call — настенный пульт трюма (x, z): им зовут платформу, когда
+// она внизу, а пилот наверху, — иначе с палубы её не вернуть.
+export const BAYS = [{
+  id: 'bay', room: 'hold', name: 'ГРУЗОВАЯ ПЛАТФОРМА',
+  x: [-2.9, 2.9], z: [2.8, 11.6],
+  deck: INT.deck.low, belly: -9.72, plate: 0.22,
+  panel: [-2.3, 3.45],
+  call: [-2.6, 1.75],
+}];
+
 // Дальше этого откос не тянут, м: окно в толще корпуса глубже — бойница.
 const WIN_DEPTH = 2.5;
 
@@ -452,7 +480,7 @@ export function deriveStairs(stairs) {
  * выходе buildInterior; slots() и crate — груз.
  */
 export function makePlan(def) {
-  const P = { links: [], windows: [], openings: [], hatches: [], lifts: [], ...def };
+  const P = { links: [], windows: [], openings: [], hatches: [], lifts: [], bays: [], ...def };
   P.R = Object.fromEntries(P.rooms.map((r) => [r.id, r]));
   deriveStairs(P.stairs);
   // Проходы для воздуха без дверей (js/game/airlock.js): проёмы — с
@@ -504,7 +532,11 @@ function roomFaces(room) {
   const [x0, y0, z0] = room.lo, [x1, y1, z1] = room.hi;
   // Крупность отделки — у комнаты (tile, plain): большим залам «Прометея»
   // хватает плитки покрупнее и гладких стен почаще (см. ROOM_FINISH).
-  const fin = { tile: room.tile || INT.tile, plain: room.plain || 0 };
+  // thin — тонкие стены: ровные панели по граням комнаты вместо деталей
+  // пака. У деталей пака за лицом четверть метра толщины — у корабля она
+  // в толще корпуса, а у вездехода (борт в десяти сантиметрах от стены
+  // шлюза) торчала из кузова наружу: её было видно в открытую дверь.
+  const fin = { tile: room.tile || INT.tile, plain: room.plain || 0, thin: !!room.thin };
   // Пол и подволок могут быть глаже стен (flatPlain — доля гладкой плитки).
   const flat = { ...fin, plain: room.flatPlain !== undefined ? room.flatPlain : fin.plain };
   const wall = (side, ax, at, n, u, uAx) => ({ side, ax, at, n, u, uAx, v: [y0, y1], holes: [], doors: [], ...fin });
@@ -566,6 +598,10 @@ function layoutFaces(P, wins = []) {
       u: [h.z[0], h.z[1]], v: [Math.max(r.lo[1], h.y[0]), Math.min(r.hi[1], h.y[1])], hatch: h.id, to: 'out',
     });
   }
+  // Платформы: проём в полу своей комнаты. Плитку и твёрдое пола вокруг
+  // него раскладывают buildFlat и roomSolids сами — как вокруг проёма в
+  // потолке кают-компании.
+  for (const b of P.bays) faceOf(Fs[b.room], 1, -1).holes.push({ u: b.x, v: b.z, bay: b.id, to: 'out' });
   // Окна: проём в боковой стене (откос и рама — buildWindow).
   for (const w of wins) {
     faceOf(Fs[w.room], w.ax || 0, w.side).holes.push({ u: [w.u0, w.u1], v: [w.v0, w.v1], window: w.id, win: w, to: 'out' });
@@ -632,6 +668,7 @@ function wallPiece(buf, f, name, u, y0, w, h) {
 function fillWall(buf, f, u0, u1, y0, y1, seed) {
   const len = u1 - u0;
   if (len < 0.05) return;
+  if (f.thin) { thinWall(buf, f, u0, u1, y0, y1); return; }
   const rows = Math.max(1, Math.round((y1 - y0) / INT.wallH));
   const h = (y1 - y0) / rows;
   const n = Math.max(1, Math.round(len / INT.wallW));
@@ -646,6 +683,16 @@ function fillWall(buf, f, u0, u1, y0, y1, seed) {
       wallPiece(buf, f, pick, u0 + w * (i + 0.5), y0 + h * r, w, h);
     }
   }
+}
+
+/**
+ * Тонкая стена (комната thin): панель по лицу и янтарная полоса на уровне
+ * поручня — по ней в тесном шлюзе видно, где стена, а где проём.
+ */
+function thinWall(buf, f, u0, u1, y0, y1) {
+  panel(buf, f, u0, u1, y0, y1, C.steel);
+  const yb = y0 + 0.95;
+  if (yb + 0.06 < y1) wallBox(buf, f, u0, u1, yb, yb + 0.06, 0.0, 0.015, C.accent, CMAT.paint);
 }
 
 /** Ровная панель кодом — перемычки над проёмами. */
@@ -902,6 +949,7 @@ function buildWall(ctx, buf, room, f) {
   // Торцы — по готовой стене: сечение её деталей, без заглушек.
   const to = buf.pos.length;
   for (const [ue, side] of ends) {
+    if (f.thin) break;                                              // у тонкой стены торцов нет
     if (ue <= f.u[0] + 0.01 || ue >= f.u[1] - 0.01) continue;     // угол комнаты: торец закрыт соседней стеной
     capEnd(buf, f, from, to, ue, side, y0, y1);
   }
@@ -917,6 +965,12 @@ function buildFlat(buf, f) {
   for (const r of subtract({ u: f.u, v: f.v }, f.holes)) {
     const w = r.u[1] - r.u[0], d = r.v[1] - r.v[0];
     if (w < 0.05 || d < 0.05) continue;
+    if (f.thin) {
+      // Тонкий пол и потолок — одна плита по грани (рифлёный пол).
+      const y = f.at, a = [r.u[0], y, r.v[0]], b = [r.u[1], y, r.v[0]], c = [r.u[1], y, r.v[1]], e = [r.u[0], y, r.v[1]];
+      buf.poly(ceil ? [a, e, c, b] : [a, b, c, e], ceil ? C.steel : C.dark, ceil ? CMAT.paint : CMAT.tread);
+      continue;
+    }
     const nx = Math.max(1, Math.round(w / tile)), nz = Math.max(1, Math.round(d / tile));
     const sx = w / nx / 2, sz = d / nz / 2;
     for (let i = 0; i < nx; i++) {
@@ -1047,6 +1101,92 @@ function lamp(ctx, buf, room, x, z, opts = {}) {
     color: opts.color || [0.95, 0.9, 0.8], range: opts.range || 3.4,
     room: room.id, kind: opts.kind || 'ceiling',
   });
+}
+
+/**
+ * Колодец платформы: стенки проёма сквозь толщу корпуса — от пола до
+ * низа колодца. Без них в опущенную платформу смотрели бы на изнанку
+ * обшивки и внутренние грани модели. Вокруг проёма на полу — кромка
+ * «осторожно»: пол здесь ходит.
+ *
+ * Стенки твёрдые: пока платформа в колодце, сойти с неё вбок некуда.
+ */
+function buildBayWell(ctx, buf, b) {
+  const [x0, x1] = b.x, [z0, z1] = b.z, y0 = b.belly, y1 = b.deck, t = 0.08;
+  buf.poly([[x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1]], C.steel, CMAT.paint);
+  buf.poly([[x1, y0, z1], [x1, y1, z1], [x1, y1, z0], [x1, y0, z0]], C.steel, CMAT.paint);
+  buf.poly([[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]], C.steel, CMAT.paint);
+  buf.poly([[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]], C.steel, CMAT.paint);
+  // Кромка — жёлтая полоса на полу вокруг проёма.
+  const k = 0.12, y = y1 + 0.003;
+  const strip = (a0, a1, c0, c1) => buf.poly([[a0, y, c1], [a1, y, c1], [a1, y, c0], [a0, y, c0]], C.hazard, CMAT.hazard);
+  strip(x0 - k, x1 + k, z0 - k, z0);
+  strip(x0 - k, x1 + k, z1, z1 + k);
+  strip(x0 - k, x0, z0, z1);
+  strip(x1, x1 + k, z0, z1);
+  ctx.solids.push({ lo: [x0 - t, y0, z0 - t], hi: [x0, y1, z1 + t], bayWell: b.id });
+  ctx.solids.push({ lo: [x1, y0, z0 - t], hi: [x1 + t, y1, z1 + t], bayWell: b.id });
+  ctx.solids.push({ lo: [x0, y0, z0 - t], hi: [x1, y1, z0], bayWell: b.id });
+  ctx.solids.push({ lo: [x0, y0, z1], hi: [x1, y1, z1 + t], bayWell: b.id });
+}
+
+/**
+ * Плита платформы в поднятом положении (оси корабля, м): рифлёный стальной
+ * настил вровень с полом, жёлтая кромка по краю и пульт у кормового
+ * левого угла — тот же, что на переборке трюма. Ставит её на высоту хода
+ * рисование: изнутри — проход кабины, снаружи — сцена (js/gl/scene.js).
+ */
+export function bayPlateMesh(b) {
+  const buf = new MeshBuf();
+  const [x0, x1] = b.x, [z0, z1] = b.z, y1 = b.deck, y0 = b.deck - b.plate;
+  buf.box([x0, y0, z0], [x1, y1, z1], C.stair, CMAT.tread);
+  const k = 0.12, y = y1 + 0.003;
+  const strip = (a0, a1, c0, c1) => buf.poly([[a0, y, c1], [a1, y, c1], [a1, y, c0], [a0, y, c0]], C.hazard, CMAT.hazard);
+  strip(x0, x1, z0, z0 + k);
+  strip(x0, x1, z1 - k, z1);
+  strip(x0, x0 + k, z0 + k, z1 - k);
+  strip(x1 - k, x1, z0 + k, z1 - k);
+  // Блоки тросов по углам: в них уходят тросы подъёма.
+  for (const [cx, cz] of bayCorners(b)) buf.box([cx - 0.11, y1, cz - 0.11], [cx + 0.11, y1 + 0.16, cz + 0.11], C.frame, CMAT.metal);
+  buf.part('computerSmall', [b.panel[0], y1, b.panel[1]], [K, 0, 0], [0, K, 0], [0, 0, K]);
+  return buf;
+}
+
+/**
+ * Сетка кабины (метры) -> сетка мира (км, грань на треугольник, цвет и
+ * свечение грани): тот же вид, что у трапа и створки (js/models/airstair.js).
+ */
+function bayWorldMesh(buf) {
+  const verts = [], faces = [];
+  for (let t = 0; t < buf.tris; t++) {
+    const i = t * 3;
+    for (let k = 0; k < 3; k++) {
+      const j = (i + k) * 3;
+      verts.push({ x: buf.pos[j] / 1000, y: buf.pos[j + 1] / 1000, z: buf.pos[j + 2] / 1000 });
+    }
+    const c = (i) * 4;
+    faces.push({
+      v: [i, i + 1, i + 2],
+      c: [buf.col[c], buf.col[c + 1], buf.col[c + 2]],
+      n: { x: buf.nrm[i * 3], y: buf.nrm[i * 3 + 1], z: buf.nrm[i * 3 + 2] },
+      twoSided: false,
+      emissive: buf.col[c + 3],
+    });
+  }
+  return { verts, faces };
+}
+
+/** Углы платформы, где к ней идут тросы (x, z): в двадцати сантиметрах от краёв. */
+export const bayCorners = (b) => [
+  [b.x[0] + 0.2, b.z[0] + 0.2], [b.x[1] - 0.2, b.z[0] + 0.2],
+  [b.x[0] + 0.2, b.z[1] - 0.2], [b.x[1] - 0.2, b.z[1] - 0.2],
+];
+
+/** Пульт на платформе — коробкой (оси корабля, м, плита поднята): им пульт и твёрд. */
+export function bayPanelBox(b) {
+  const [lo, hi] = bounds('computerSmall');
+  return { lo: [b.panel[0] + lo[0] * K, b.deck, b.panel[1] + lo[2] * K],
+    hi: [b.panel[0] + hi[0] * K, b.deck + hi[1] * K, b.panel[1] + hi[2] * K] };
 }
 
 /**
@@ -1452,8 +1592,10 @@ function assemble(P, hullM, faces, target) {
         buildWall(ctx, buf, r, f);
       }
     }
-    // Колонны по углам: стык двух стен пака открыт, колонна его прячет.
-    if (r.kind !== 'shaft') {
+    // Колонны по углам: стык двух стен пака открыт, колонна его прячет. У
+    // тонких стен (thin) стыка деталей нет, а колонна — тоже деталь пака с
+    // глубиной: у вездехода она вылезала из борта у двери.
+    if (r.kind !== 'shaft' && !r.thin) {
       for (const x of [r.lo[0], r.hi[0]]) {
         for (const z of [r.lo[2], r.hi[2]]) column(ctx, buf, 'column', x, r.lo[1], z, r.hi[1] - r.lo[1]);
       }
@@ -1464,6 +1606,7 @@ function assemble(P, hullM, faces, target) {
   if (P.landings) P.landings(ctx, faces, hullM);
   for (const s of P.stairs) buildStair(ctx.meshes[s.room], ctx.solids, s);
   for (const h of P.hatches) buildHatch(ctx, ctx.meshes[h.lock], h);
+  for (const b of P.bays) buildBayWell(ctx, ctx.meshes[b.room], b);
 
   P.furnish(ctx);
 
@@ -1519,6 +1662,7 @@ function finish(P, hullM, faces, wins, ctx) {
   crateMesh.part(CRATE.name, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]);
 
   const R = P.R;
+  const bayMeshes = Object.fromEntries(P.bays.map((b) => [b.id, bayPlateMesh(b)]));
   const out = {
     code: P.code,
     INT: P.INT || INT, rooms: P.rooms, roomById: R, faces, meshes: ctx.meshes, doors, lamps: ctx.lamps, solids: ctx.solids,
@@ -1552,6 +1696,18 @@ function finish(P, hullM, faces, wins, ctx) {
     openings: P.openings,
     // Лифты (js/game/lift.js): кабины по палубам и куда они ходят.
     lifts: P.lifts,
+    // Грузовые платформы (их ход ведёт js/game/airlock.js) и сетка плиты
+    // каждой — в поднятом положении: двигает её рисование.
+    bays: P.bays.map((b) => ({ ...b, panelBox: bayPanelBox(b), corners: bayCorners(b) })),
+    bayMeshes,
+    // Докуда вниз светят лампы комнаты с платформой: до дна колодца.
+    // Лампа светит только в своей комнате, и без этого плита, ушедшая
+    // под пол, была бы чёрной ямой — свет обрывался на полу трюма.
+    lightLo: Object.fromEntries(P.bays.map((b) => [b.room, b.belly - b.plate - 0.1])),
+    // Та же плита сеткой мира (км): ниже днища она снаружи корабля, и
+    // рисует её сцена — при солнце и с тенью корабля. Снята здесь, пока
+    // сетка кабины не упакована: упаковка отпускает её вершины.
+    bayWorld: Object.fromEntries(Object.entries(bayMeshes).map(([id, m]) => [id, bayWorldMesh(m)])),
     roomAt: (p) => roomAtIn(P, p),
     // Сколько ящиков в трюме и как горят реакторы — ставит игра.
     cargo: 0,
@@ -1606,6 +1762,12 @@ function roomAtIn(P, p) {
   if (P.roomAtExtra) {
     const r = P.roomAtExtra(p);
     if (r) return r;
+  }
+  // Платформа ниже пола — часть своей комнаты: стоящий на ней едет в
+  // трюме, и видно из неё трюм над головой.
+  for (const b of P.bays) {
+    if (p[0] >= b.x[0] - 0.05 && p[0] <= b.x[1] + 0.05 && p[2] >= b.z[0] - 0.05 && p[2] <= b.z[1] + 0.05
+      && p[1] < b.deck && p[1] > b.deck - 8) return P.R[b.room];
   }
   // Тоннель люка — часть своего шлюза: от стены до обшивки.
   for (const h of P.hatches) {
@@ -1774,6 +1936,7 @@ export const CHALLENGER = makePlan({
   slots: crateSlots,
   crate: CRATE,
   holdRoom: 'hold',
+  bays: BAYS,
 });
 
 // Детали и сборщики, из которых другие планы собирают своё.

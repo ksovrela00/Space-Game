@@ -76,8 +76,8 @@ import { CabinView, sunVisibility } from './cabin.js';
 import { SuitView } from './spacesuit.js';
 import { seatPlace } from '../models/spacesuit.js';
 import { CARVE_MAX } from './hull.js';
-import { hatchCut, hatchPanelAt, stairPose } from '../game/airlock.js';
-import { buildStairMesh, buildHatchMesh } from '../models/airstair.js';
+import { hatchCut, hatchPanelAt, stairPose, bayCut } from '../game/airlock.js';
+import { buildStairMesh, buildHatchMesh, buildCableMesh } from '../models/airstair.js';
 import { waveSet, waterFrame, makeWaterFrame } from './water.js';
 import { seesOutside, seesHull } from '../models/interior.js';
 
@@ -119,6 +119,12 @@ const NEAR_BRIDGE = 4e-5;          // км
 // безопасны: все проходы с глубиной пишут её логарифмом (LOG_DEPTH_FRAG),
 // а небо и звёзды рисуются без проверки глубины — снимок грунта с такой
 // плоскостью это подтвердил (небо поверх земли не ложится).
+//
+// Она же — у вездехода в виде из кабины. Его глаз в кресле на 2.35 м над
+// грунтом, и с плоскостью в четыре метра грунт пропадал из кадра ЦЕЛИКОМ —
+// с камнями, одно небо (снимок rovercab); с этой — на месте. А вид сзади с
+// ней терял грунт так же (снимок rover) и с четырьмя метрами его видит —
+// там камера не опускается ниже 4.5 м над грунтом (js/game/drivecam.js, over).
 const NEAR_FOOT = 5e-5;            // км
 const FAR_BRIDGE = 0.25;           // км
 const FAR = 2e9;             // с запасом на всю систему
@@ -822,7 +828,8 @@ export class GlScene {
     this.gearDraws = 0;
 
     const aspect = this.canvas.width / this.canvas.height;
-    perspective(cam.fov, aspect, game.walk && game.walk.on ? NEAR_FOOT : NEAR, FAR, this.proj);
+    const foot = (game.walk && game.walk.on) || (HULL.ground && game.state && game.state.view === 'cockpit');
+    perspective(cam.fov, aspect, foot ? NEAR_FOOT : NEAR, FAR, this.proj);
 
     // Досборка геометрии и запекание поверхности — ДО настройки кадра.
     // Проход запекания рисует в свою текстуру: он меняет вьюпорт и
@@ -1149,6 +1156,7 @@ export class GlScene {
         this.drawHullInside(game, sunPos, logFC);
         this.cabinDraws = pre + 1 + this.gearDraws + this.cabin.drawPod(game, this.camera, size, logFC, true);
         this.cabinDraws += this.drawPeopleIn(game, logFC);
+        this.cabinDraws += this.drawHoldAround(game, sunPos, size, logFC);
         this.draws += this.cabinDraws;
         return;
       }
@@ -1180,6 +1188,8 @@ export class GlScene {
     this.cabinDraws = pre + 1 + this.cabin.drawPod(g, this.camera, size, logFC);
     // Люди на этой палубе — в свете её ламп.
     this.cabinDraws += this.drawPeopleIn(game, logFC);
+    // Вездеход в трюме: за его стёклами — трюм носителя, а не улица.
+    this.cabinDraws += this.drawHoldAround(game, sunPos, size, logFC);
     this.draws += this.cabinDraws;
     this.tris += this.cabin.parts
       ? (this.cabin.parts.shell.count + this.cabin.parts.glass.count) / 3 : 0;
@@ -1207,6 +1217,16 @@ export class GlScene {
     if (air) {
       const cuts = this._cuts || (this._cuts = air.hatches.map(() => ({ lo: [0, 0, 0], hi: [0, 0, 0] })));
       air.hatches.forEach((hx, i) => { if (hx.open > 0) { open = true; list.push(hatchCut(hx, cuts[i])); } });
+      // Опущенная платформа — проём в днище: сквозь него снаружи виден
+      // трюм, а из трюма — грунт под кораблём.
+      const bc = this._bayCuts || (this._bayCuts = new Map());
+      for (const bx of air.bays || []) {
+        if (bx.travel <= 0.005) continue;
+        open = true;
+        let c = bc.get(bx.id);
+        if (!c) bc.set(bx.id, c = { lo: [0, 0, 0], hi: [0, 0, 0] });
+        list.push(bayCut(bx, c));
+      }
     }
     // Планировка — того корабля, чьи это шлюзы (у другого типа своя).
     if (air && air.I) I = air.I;
@@ -1248,7 +1268,7 @@ export class GlScene {
   /** Створки и трапы корабля ship по его шлюзам air. */
   drawHatchesOf(prog, ship, air, sunPos) {
     if (!air || !ship) return;
-    const b = ship.basis;
+    const b = ship.basis, b0 = b;
     const meshes = this._airMeshes || (this._airMeshes = new Map());
     const at = (p, out) => {
       out.x = ship.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
@@ -1278,6 +1298,31 @@ export class GlScene {
       dir(pose.ex, bs.right); dir(pose.ey, bs.up); dir(pose.ez, bs.fwd);
       this.drawObject(prog, this.glMeshFor(sm), at(pose.o, this.tmpPos), bs, 1, sunPos);
     }
+    // Грузовая платформа (js/game/airlock.js): плита — когда она ниже
+    // днища, то есть снаружи корабля (выше — в трюме, и там её рисует
+    // проход кабины светом трюма); тросы — от верха колодца к её углам.
+    const I = air.I;
+    for (const bx of air.bays || []) {
+      if (bx.travel <= 0.02) continue;
+      const b = bx.b, top = b.deck - bx.travel;
+      const wm = I && I.bayWorld && I.bayWorld[bx.id];
+      if (wm && top < b.belly) {
+        hp[0] = 0; hp[1] = -bx.travel; hp[2] = 0;
+        this.drawObject(prog, this.glMeshFor(wm), at(hp, this.tmpPos), b0, 1, sunPos);
+      }
+      const len = (b.deck - 0.12) - (top + 0.16);
+      if (len < 0.05 || !b.corners) continue;
+      let cm = meshes.get('cable');
+      if (!cm) meshes.set('cable', cm = buildCableMesh());
+      const cb = this._cableBasis || (this._cableBasis = makeBasis());
+      cb.right.x = b0.right.x; cb.right.y = b0.right.y; cb.right.z = b0.right.z;
+      cb.fwd.x = b0.fwd.x; cb.fwd.y = b0.fwd.y; cb.fwd.z = b0.fwd.z;
+      cb.up.x = b0.up.x * len; cb.up.y = b0.up.y * len; cb.up.z = b0.up.z * len;
+      for (const [cx, cz] of b.corners) {
+        hp[0] = cx; hp[1] = b.deck - 0.12; hp[2] = cz;
+        this.drawObject(prog, this.glMeshFor(cm), at(hp, this.tmpPos), cb, 1, sunPos);
+      }
+    }
   }
 
   /**
@@ -1289,7 +1334,7 @@ export class GlScene {
     if (!this.cabin || !own) return;
     const size = [this.canvas.width, this.canvas.height];
     // Свой — от третьего лица, с грунта и с палубы чужого корабля.
-    if (game.state.mode !== 'docked' && !game.ship.away
+    if (game.state.mode !== 'docked' && !game.ship.away && !game.ship.hidden
       && (game.state.view === 'chase' || walkingOut(game) || inForeign(game))) {
       const n = this.cabin.drawLocksOutside(game, this.camera, size, sunPos, this.logFC, game.ship, own);
       this.draws += n;
@@ -1301,7 +1346,7 @@ export class GlScene {
     for (const V of game.peers || []) {
       if (!V.air || V === game.frame && inForeign(game)) continue;
       if (Math.hypot(V.pos.x - cam.pos.x, V.pos.y - cam.pos.y, V.pos.z - cam.pos.z) > 0.4) continue;
-      if (!V.air.hatches.some((hx) => hx.open > 0.01)) continue;
+      if (!V.air.hatches.some((hx) => hx.open > 0.01) && !(V.air.bays || []).some((bx) => bx.travel > 0.01)) continue;
       const n = this.cabin.drawLocksOutside(game, cam, size, sunPos, this.logFC, V, V.air);
       this.draws += n;
       this.cabinDraws += n;
@@ -1610,6 +1655,26 @@ export class GlScene {
     const cell = this.surfaceCell(body);
     const det = cell > 0 ? t.detailForCell(cell) : null;
     return body.radius * (1 + t.displace(dir.x, dir.y, dir.z, det));
+  }
+
+  /**
+   * Грунт для ног, колёс, трапа и плиты: тот, что будет нарисован под
+   * камерой, когда плитки догрузятся, — с подробностью самого мелкого
+   * уровня. Не drawnGround: тот идёт за самым подробным из УЖЕ
+   * нарисованных уровней, а после входа плитки приходят от грубых к
+   * мелким, и грунт под ногами за секунды прыгал на сотни метров (в одной
+   * точке Lave II: +650 м, −103 м, +6 м, и только с двенадцатого уровня —
+   * в пределах двадцати сантиметров от полного). Пешеход проваливался, а
+   * когда грунт поднимался обратно выше ступени — оставался под ним.
+   * Под камерой у грунта плитки доходят до мелкого уровня, и с картинкой
+   * этот грунт расходится на сантиметры; камера берёт нарисованный.
+   * Заплатки (?surface=clipmap) — как рисуются: там подробность своя.
+   */
+  settledGround(body, dir) {
+    if (!this.tilesOn) return this.drawnGround(body, dir);
+    const t = terrainOf(body);
+    if (t.isFlat) return body.radius;
+    return body.radius * (1 + t.displace(dir.x, dir.y, dir.z, t.detailForCell(tileCellAngle(TILE_MAX_LEVEL))));
   }
 
   /**
@@ -2130,7 +2195,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uSkyK'), skyK);
     // Пилот за бортом (на трапе, на грунте) видит свой корабль снаружи —
     // так же, как камера от третьего лица.
-    if (game.state.mode !== 'docked' && !game.ship.away
+    if (game.state.mode !== 'docked' && !game.ship.away && !game.ship.hidden
       && (game.state.view === 'chase' || walkingOut(game) || inForeign(game))) {
       const ship = game.ship;
       // Вес держат подъёмные только у тела: в пустоте сопла холодные.
@@ -2249,6 +2314,28 @@ export class GlScene {
    *
    * @returns сколько вызовов отрисовки ушло
    */
+  /**
+   * Трюм вокруг вездехода, в котором глаз (js/game/hangar.js): его комнаты
+   * в свете его ламп, той же глубиной, что кабина. Без этого сквозь лобовое
+   * стекло машины в закрытом трюме было бы видно улицу.
+   */
+  drawHoldAround(game, sunPos, size, logFC) {
+    if (!this.cabin) return 0;
+    const back = this.cabin.interOf;
+    let n = 0;
+    const H = game.hangarAround ? game.hangarAround() : null;
+    if (H) n += this.cabin.drawLocksOutside(game, this.camera, size, sunPos, logFC, H.V, H.air, [H.room]);
+    // Из трюма — в открытую дверь вездехода, что в нём стоит: его шлюз.
+    for (const it of game.hangarSeen || []) {
+      if (it.V === game.frame || !it.rAir || !it.rAir.hatches.some((hx) => hx.open > 0.01)) continue;
+      if (H || it.V.pos === undefined) continue;
+      n += this.cabin.drawLocksOutside(game, this.camera, size, sunPos, logFC, it.V, it.rAir);
+    }
+    // Помещения кабины — снова свои: по ним следующий кадр и люди.
+    if (back && this.cabin.interOf !== back) this.cabin.buildInterior(back);
+    return n;
+  }
+
   drawPeopleIn(game, logFC) {
     const V = game.frame || game.ship, list = game.people, I = game.interior, cab = this.cabin;
     if (!V || !list || !list.length || !I || !cab || !this.suit) return 0;
@@ -2514,7 +2601,7 @@ export class GlScene {
    * js/game/peers.js), у своего и у соседа без типа — свои.
    */
   hullFor(game, ship) {
-    if (!ship || ship === game.ship || ship.own) return { mesh: game.shipMesh, gear: game.gearMesh, code: HULL.code };
+    if (!ship || ship === game.ship || ship.own) return { mesh: game.shipMesh, gear: game.gearMesh, code: HULL.code, wheel: HULL.wheel };
     return hullOf(ship.type || ROOMS_TYPE) || { mesh: game.shipMesh, gear: game.gearMesh, code: HULL.code };
   }
 
@@ -2524,7 +2611,9 @@ export class GlScene {
    * на свою долю хода, а не растягивается, и пята остаётся пятой.
    */
   drawGearOf(prog, game, ship, sunPos) {
-    const G = this.hullFor(game, ship).gear;
+    const H = this.hullFor(game, ship), G = H.gear;
+    // Вездеход — на колёсах, а не на стойках.
+    if (G && G.wheels) { this.drawWheelsOf(prog, H, ship, sunPos); return; }
     if (!G || !ship.gear || ship.gear.t < 0.01) return;
     const b = ship.basis;
     G.hardpoints.forEach((hp, i) => {
@@ -2538,6 +2627,46 @@ export class GlScene {
         this.drawObject(prog, this.glMeshFor(part.mesh), this.tmpPos, b, 1, sunPos);
         this.gearDraws++;
       }
+    });
+  }
+
+  /**
+   * Колёса вездехода (js/models/rover.js): сетка одна на все шесть, каждое
+   * со своим поворотом (steer, рад; плюс — вправо), вращением (spin, рад) и
+   * ходом подвески (drop, м; плюс — вниз) — их ведёт js/game/rover.js
+   * (ship.wheels). У чужого вездехода этого нет — колёса стоят.
+   *
+   * Левые колёса — правые, повёрнутые на пол-оборота вокруг вертикали, а
+   * не зеркало: зеркало вывернуло бы грани наизнанку. Вращение у всех одно
+   * и то же в мире — верх колеса идёт вперёд, когда машина едет вперёд.
+   */
+  drawWheelsOf(prog, H, ship, sunPos) {
+    const G = H.gear, mesh = H.wheel;
+    if (!mesh) return;
+    const b = ship.basis, st = ship.wheels || null;
+    const wb = this._wheelBasis || (this._wheelBasis = makeBasis());
+    G.hardpoints.forEach((hp, i) => {
+      const w = st && st[i];
+      const s = w ? w.steer : 0, phi = w ? w.spin : 0, drop = w ? w.drop / 1000 : 0;
+      const cs = Math.cos(s), ss = Math.sin(s), cp = Math.cos(phi), sp = Math.sin(phi);
+      // Оси колеса в осях корабля: ось вращения a, вперёд f (после поворота).
+      const a = [cs, 0, -ss], f = [ss, 0, cs];
+      const up = [f[0] * sp, cp, f[2] * sp];
+      const fw = [f[0] * cp, -sp, f[2] * cp];
+      const side = hp.x < 0 ? -1 : 1;
+      const R = [a[0] * side, a[1] * side, a[2] * side], F = [fw[0] * side, fw[1] * side, fw[2] * side];
+      const put = (v, out) => {
+        out.x = b.right.x * v[0] + b.up.x * v[1] + b.fwd.x * v[2];
+        out.y = b.right.y * v[0] + b.up.y * v[1] + b.fwd.y * v[2];
+        out.z = b.right.z * v[0] + b.up.z * v[1] + b.fwd.z * v[2];
+      };
+      put(R, wb.right); put(up, wb.up); put(F, wb.fwd);
+      const y = hp.y - drop;
+      this.tmpPos.x = ship.pos.x + b.right.x * hp.x + b.up.x * y + b.fwd.x * hp.z;
+      this.tmpPos.y = ship.pos.y + b.right.y * hp.x + b.up.y * y + b.fwd.y * hp.z;
+      this.tmpPos.z = ship.pos.z + b.right.z * hp.x + b.up.z * y + b.fwd.z * hp.z;
+      this.drawObject(prog, this.glMeshFor(mesh), this.tmpPos, wb, 1, sunPos);
+      this.gearDraws++;
     });
   }
 
@@ -2571,7 +2700,7 @@ export class GlScene {
       if (r === undefined) { r = hullRadius(mesh) + SHIP_SHADOW.pad; R.set(mesh, r); }
       return r;
     };
-    if (!ship.away && game.shipMesh) casters.push({ kind: 'own', pos: ship.pos, basis: ship.basis, r: radius(game.shipMesh) });
+    if (!ship.away && !ship.hidden && game.shipMesh) casters.push({ kind: 'own', pos: ship.pos, basis: ship.basis, r: radius(game.shipMesh) });
     // Чужие — ближайшие к глазу.
     const near = [];
     for (const p of game.peers || []) {
@@ -3056,7 +3185,7 @@ export class GlScene {
     // Факелы двигателей и огни своего корабля — в обоих видах: из рубки их
     // видно, стоит обернуться.
     const ship = game.ship;
-    const own = game.state.mode !== 'docked' && !ship.away;
+    const own = game.state.mode !== 'docked' && !ship.away && !ship.hidden;
     if (own && ship.throttle > 0.03 && game.shipMesh.exhausts) {
       modelView(cam.basis, cam.pos, ship.basis, ship.pos, 1, this.mv, null);
       for (const e of game.shipMesh.exhausts) {

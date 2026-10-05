@@ -234,11 +234,11 @@ globalThis.window = {
   addEventListener(t, fn) { (winL[t] ||= []).push(fn); }, removeEventListener() {},
 };
 // Игра без сервера не идёт: его голос даёт поддельный сервер в памяти
-// (tools/fakeapi.mjs) — пилот в порту родной станции. Canvas-2D-рендер —
-// потому что WebGL здесь не подменить, его путь проверяется отдельно в
-// tools/gl.mjs через мок GL-контекста.
+// (tools/fakeapi.mjs) — пилот в порту родной станции. Снимок — слоя
+// приборов: сцена рисуется в WebGL2, а его в Node не подменить (его путь
+// проверяется в tools/gl.mjs, картинка — tools/screen.mjs).
 globalThis.location = {
-  search: '?renderer=2d',
+  search: '',
   // Адрес страницы: по нему игра находит API (js/net/api.js, base).
   origin: 'http://localhost',
   pathname: '/space_game/index.html',
@@ -288,8 +288,7 @@ frames(3);
 const show = (title) => {
   grid = new Float32Array(COLS * ROWS);
   frames(1);
-  console.log('[инфо] режим=' + game.state.mode + ' вид=' + game.state.view +
-    ' полигонов=' + game.renderer.polys + ' итемов=' + game.renderer.items.length);
+  console.log('[инфо] режим=' + game.state.mode + ' вид=' + game.state.view);
   const lines = [];
   for (let r = 0; r < ROWS; r++) {
     let s = '';

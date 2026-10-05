@@ -13,6 +13,8 @@ import { buildCobra, buildGear } from './ships.js';
 import { buildPrometheus, buildPrometheusGear } from './prometheus.js';
 import { buildCockpit } from './cockpit.js';
 import { buildPromCockpit } from './cockpit.prom.js';
+import { buildRover, buildRoverGear, buildWheel } from './rover.js';
+import { buildRoverCockpit } from './cockpit.rover.js';
 
 // cockpit — есть ли пост пилота с экранами (podOf), canopy — фонарь
 // истребителя с переплётом (его стойки штрихами рисует худ на запасном
@@ -20,19 +22,27 @@ import { buildPromCockpit } from './cockpit.prom.js';
 // трапы (js/models/interior.js; план «Прометея» — js/models/interior.prom.js).
 // Посты у типов разные: у «Челленджера» — доска под фонарём
 // (js/models/cockpit.js), у «Прометея» — кресло командира на мостике
-// (js/models/cockpit.prom.js).
+// (js/models/cockpit.prom.js), у вездехода — руль и три монитора
+// (js/models/cockpit.rover.js).
 const BUILD = {
   challenger: () => ({ code: 'challenger', mesh: buildCobra(), gear: buildGear(), cockpit: true, canopy: true, rooms: true }),
   prometheus: () => {
     const mesh = buildPrometheus();
     return { code: 'prometheus', mesh, gear: buildPrometheusGear(mesh), cockpit: true, canopy: false, rooms: true };
   },
+  // Вездеход (js/models/rover.js): вместо стоек — колёса (wheel — сетка
+  // одного колеса, его крутит и поворачивает рисование), ground — наземный.
+  rover: () => ({
+    code: 'rover', mesh: buildRover(), gear: buildRoverGear(), wheel: buildWheel(),
+    cockpit: true, canopy: false, rooms: true, ground: true,
+  }),
 };
 
 // Пост пилота типа: модель по его корпусу.
 const POD = {
   challenger: (mesh) => buildCockpit(mesh),
   prometheus: (mesh) => buildPromCockpit(mesh),
+  rover: () => buildRoverCockpit(),
 };
 
 /**

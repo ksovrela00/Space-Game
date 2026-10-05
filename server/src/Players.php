@@ -48,6 +48,19 @@ final class Players
      */
     public const BOARD_KM = 0.5;
 
+    /**
+     * Как близко к носителю вездеход встаёт в его трюм и съезжает из него,
+     * км. Платформа трюма «Челленджера» — в девяти метрах от середины
+     * корабля (js/models/interior.js, BAYS), машина на ней — ещё в трёх;
+     * двадцать пять метров — с запасом на стоянку на склоне. Дальше —
+     * значит, не с платформы: в трюм за километр не заезжают.
+     */
+    public const STOW_KM = 0.025;
+
+    /** Поля места корабля: у вездехода в трюме они те же, что у носителя. */
+    private const PLACE = ['system_id', 'pos_x', 'pos_y', 'pos_z', 'basis', 'docked_body', 'landed_body',
+        'landed_pose', 'landed_secured', 'anchor_body', 'anchor_pose'];
+
     /** Палуба корабля, м: дальше этого от центра точки на борту нет. */
     public const DECK_M = 60.0;
 
@@ -256,6 +269,13 @@ final class Players
      */
     public static function ensureStock(int $shipId): void
     {
+        // Наземному кораблю (вездеходу) модулей корабля не положено: ни
+        // двигателя, ни привода, ни щита у него нет — он ездит на колёсах.
+        $code = Db::one('SELECT t.`code` FROM `ship` sh JOIN `ship_type` t ON t.`id`=sh.`type_id` WHERE sh.`id`=?',
+            [$shipId]);
+        if ($code !== null && Specs::isGround((string) $code)) {
+            return;
+        }
         // Заняты ли гнёзда. Занятое НЕ ТРОГАЕМ: что в нём стоит, решает не
         // эта функция — пилот мог купить другой двигатель, а хозяин
         // сервера поставить руками что угодно.
@@ -312,7 +332,150 @@ final class Players
         }
     }
 
-    /** Гнёзда, которые пилот опустошил сам (ship.bare). */
+    /** Вездеход, приписанный к трюму корабля, — его номер или null. */
+    public static function roverOf(int $shipId): ?int
+    {
+        $id = Db::one('SELECT `id` FROM `ship` WHERE `carrier_id`=? ORDER BY `id` LIMIT 1', [$shipId]);
+        return $id === null ? null : (int) $id;
+    }
+
+    /**
+     * Поставить в трюм корабля вездеход его ангара (Specs::hangarOf) — так
+     * кончается покупка вездехода на верфи (Shipyard::buy). Приписан он к
+     * этому кораблю навсегда: после гибели возвращается в его трюм (restow).
+     * Уже есть приписанный — второго не ставит.
+     *
+     * @return int|null номер вездехода, или null — у типа нет ангара
+     */
+    public static function ensureHangar(int $shipId): ?int
+    {
+        $ship = Db::row('SELECT sh.*, t.`code` AS `type_code` FROM `ship` sh
+             JOIN `ship_type` t ON t.`id`=sh.`type_id` WHERE sh.`id`=?', [$shipId]);
+        if ($ship === null) {
+            return null;
+        }
+        $code = Specs::hangarOf((string) $ship['type_code']);
+        if ($code === null) {
+            return null;
+        }
+        $have = Db::one('SELECT `id` FROM `ship` WHERE `carrier_id`=? ORDER BY `id` LIMIT 1', [$shipId]);
+        if ($have !== null) {
+            return (int) $have;
+        }
+        $type = Db::row('SELECT * FROM `ship_type` WHERE `code`=?', [$code]);
+        if ($type === null) {
+            return null;                        // каталог залит без вездехода
+        }
+        return Db::insert('ship', [
+            'type_id' => $type['id'],
+            'owner_id' => (int) $ship['owner_id'],
+            'name' => '',
+            'hull' => $type['hull_max'],
+            'shield' => 0,
+            'fuel_t' => $type['fuel_t'],
+            'carrier_id' => $shipId,
+            'stowed' => 1,
+            'created_at' => Db::now(),
+        ] + self::placeFields($ship));
+    }
+
+    /**
+     * Один ли это борт: вездеход стоит в трюме другого корабля (в любую
+     * сторону). Из трюма к двери вездехода подходят пешком, и с его порога
+     * сходят в трюм — пилот «рядом» с обоими (Hub, просьбы о люках).
+     */
+    public static function sameHold(int $a, int $b): bool
+    {
+        return (int) Db::one('SELECT COUNT(*) FROM `ship` WHERE `stowed`=1 AND
+            ((`id`=? AND `carrier_id`=?) OR (`id`=? AND `carrier_id`=?))', [$a, $b, $b, $a]) > 0;
+    }
+
+    /** Поля места из строки корабля — чтобы поставить туда же другой. */
+    public static function placeFields(array $row): array
+    {
+        return array_intersect_key($row, array_flip(self::PLACE));
+    }
+
+    /**
+     * Вездеходы в трюме носителя — туда же, где он: стоящий в трюме едет
+     * вместе с кораблём, и место у них одно. Зовут это все, кто двигает
+     * корабль: сохранение, порт, страховка, буксир.
+     */
+    public static function carryAlong(int $carrierId): void
+    {
+        $row = self::shipRow($carrierId);
+        if ($row === null) {
+            return;
+        }
+        Db::update('ship', self::placeFields($row), '`carrier_id`=? AND `stowed`=1', [$carrierId]);
+    }
+
+    /**
+     * Вернуть вездеход в трюм носителя — целым: так кончается его гибель и
+     * гибель носителя (Combat::respawnShip).
+     */
+    public static function restow(int $roverId): void
+    {
+        $row = Db::row('SELECT sh.`carrier_id`, t.`hull_max` FROM `ship` sh
+             JOIN `ship_type` t ON t.`id`=sh.`type_id` WHERE sh.`id`=?', [$roverId]);
+        if ($row === null || $row['carrier_id'] === null) {
+            return;
+        }
+        $carrier = self::shipRow((int) $row['carrier_id']);
+        if ($carrier === null) {
+            return;
+        }
+        Db::update('ship', ['stowed' => 1, 'hull' => $row['hull_max'], 'shield' => 0, 'hit_at' => null,
+            'hatches' => null] + self::placeFields($carrier), '`id`=?', [$roverId]);
+    }
+
+    /**
+     * Сохранение вездехода, приписанного к трюму (save). Своё место у него
+     * есть, только пока он не в трюме; в трюм он встаёт и из него съезжает
+     * у самого носителя (STOW_KM), а носитель для этого стоит на грунте.
+     * От игры — одно слово «в трюме или нет»; верит ему сервер, только если
+     * так и есть по местам обоих.
+     *
+     * @param array $ship  строка вездехода (до сохранения)
+     * @param array $in    что прислала игра за корабль
+     * @param array $set   поля, собранные из него (shipFields)
+     * @return array поля, которые писать
+     */
+    private static function stowSave(array $ship, array $in, array $set): array
+    {
+        $carrier = self::shipRow((int) $ship['carrier_id']);
+        $stowed = (bool) $ship['stowed'];
+        $want = array_key_exists('stowed', $in) ? (bool) $in['stowed'] : $stowed;
+        if ($carrier === null) {
+            return $set + ($stowed ? ['stowed' => 0] : []);
+        }
+        $place = array_intersect_key($set, array_flip(self::PLACE));
+        $at = self::shipPoint(array_merge($ship, $place));
+        $home = self::shipPoint($carrier);
+        $close = $carrier['landed_body'] !== null && self::near($at, $home, self::STOW_KM);
+        $noPlace = static function (array $s): array {
+            foreach (self::PLACE as $k) {
+                unset($s[$k]);
+            }
+            return $s;
+        };
+        if ($stowed && $want) {
+            // Стоит в трюме: место — носителя, своё из сохранения не пишется.
+            return $noPlace($set);
+        }
+        if (!$stowed && $want) {
+            // Въехал: в трюм — только у самого носителя, стоящего на грунте.
+            return $close ? $noPlace($set) + self::placeFields($carrier) + ['stowed' => 1] : $set;
+        }
+        if ($stowed) {
+            // Съезжает: место из сохранения — только рядом с носителем;
+            // дальше — это не съезд с платформы, и места такого не пишем.
+            return $close ? $set + ['stowed' => 0] : $noPlace($set);
+        }
+        return $set;
+    }
+
+    /** Гнёзда, которые пилот опустошил сам (ship.bare). */    /** Гнёзда, которые пилот опустошил сам (ship.bare). */
     public static function bareSlots(int $shipId): array
     {
         $v = json_decode((string) Db::one('SELECT `bare` FROM `ship` WHERE `id`=?', [$shipId]), true);
@@ -557,6 +720,9 @@ final class Players
                 'type' => $r['type_code'],
                 'typeName' => $r['type_name'],
                 'active' => (int) $r['id'] === $activeId,
+                // Вездеход: к чьему трюму приписан и стоит ли в нём.
+                'carrier' => $r['carrier_id'] === null ? null : (int) $r['carrier_id'],
+                'stowed' => (bool) $r['stowed'],
                 'systemId' => $r['system_id'] === null ? null : (int) $r['system_id'],
                 'where' => $r['docked_body'] !== null ? 'docked'
                     : ($r['landed_body'] !== null ? 'landed' : 'flight'),
@@ -669,6 +835,10 @@ final class Players
             'ship' => [
                 'id' => $shipId,
                 'name' => $ship['name'],
+                // Вездеход: носитель и стоит ли в его трюме (тогда место
+                // выше — место носителя, и игра ставит машину в трюм).
+                'carrier' => $ship['carrier_id'] === null ? null : (int) $ship['carrier_id'],
+                'stowed' => (bool) $ship['stowed'],
                 'hull' => (float) $ship['hull'],
                 // Щит считается на СЕЙЧАС: в базе лежит его заряд на
                 // момент последнего попадания, а он с тех пор отрастал.
@@ -808,8 +978,25 @@ final class Players
                 }
                 $sysS = $shipSet['system_id'] ?? $wasSys;
                 $shipSet += self::shipFields($shipIn, $sysS);
+                // Вездеход, приписанный к трюму: в трюме место — носителя.
+                if ($ship['carrier_id'] !== null) {
+                    $shipSet = self::stowSave($ship, $shipIn, $shipSet);
+                }
+                // Наземный корабль вне трюма на стоянку не садится: его место —
+                // точка в осях тела (anchor). Стоянка от игры у него — только
+                // отставшая стоянка носителя, с которой он съехал, и при входе
+                // вездеход вставал в середину корабля над грунтом и падал.
+                if (Specs::isGround((string) $ship['type_code']) && !(int) ($shipSet['stowed'] ?? $ship['stowed'])) {
+                    $shipSet['landed_body'] = null;
+                    $shipSet['landed_pose'] = null;
+                    $shipSet['landed_secured'] = 0;
+                }
                 if ($shipSet) {
                     Db::update('ship', $shipSet, '`id`=?', [$shipId]);
+                }
+                // Корабль сдвинулся — вездеход в его трюме с ним.
+                if (array_intersect_key($shipSet, array_flip(self::PLACE))) {
+                    self::carryAlong($shipId);
                 }
                 // Корабль сменил систему — значит, был варп-прыжок, и за
                 // него платят топливом. Считает сервер по каталогу:
@@ -1214,6 +1401,11 @@ final class Players
             }
             if ((int) $p['aboard_ship'] !== $shipId && !self::sameDock($p, $row)) {
                 throw ApiError::denied('not_aboard', 'командуют из кресла: сначала на борт');
+            }
+            // Вездеход ездит по грунту: из трюма корабля в порту или в полёте
+            // ему некуда съехать, и вести его там нечего.
+            if ((int) $row['stowed'] === 1 && $row['landed_body'] === null) {
+                throw ApiError::denied('not_landed', 'вездеход водят по грунту: сначала посадите корабль');
             }
             Db::update('player', ['ship_id' => $shipId, 'aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null],
                 '`id`=?', [$playerId]);

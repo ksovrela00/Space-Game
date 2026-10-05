@@ -1389,7 +1389,9 @@ Db::update('player', ['aboard_ship' => null, 'seated' => 0, 'out_body' => $L,
 Api::call('pilot.move', ['me' => ['aboard' => $shipA2, 'seated' => true]], $ta);
 $st = Api::call('ship.command', ['id' => $shipA2], $ta);
 $fleet = array_column($st['fleet'], 'active', 'id');
-ok($st['ship']['id'] === $shipA2 && $st['me']['seated'] === true && count($st['fleet']) === 2
+// Вездеходы в трюмах обоих «Челленджеров» — тоже во флоте; кораблей два.
+ok($st['ship']['id'] === $shipA2 && $st['me']['seated'] === true
+    && count(array_filter($st['fleet'], fn($s) => $s['carrier'] === null)) === 2
     && $fleet[$shipA2] === true && $fleet[$shipA1] === false && $st['position']['landedBody'] === $L,
     'пересел во второй свой корабль: им и командует, первый стоит на месте');
 // Место каждого корабля — с точкой: по ней карта ставит значок (js/game/fleet.js).
@@ -1468,7 +1470,8 @@ section('верфь корпусов');
     $after = (int) Db::one('SELECT `balance` FROM `player` WHERE `id`=?', [$pidY]);
     $line = Db::row('SELECT * FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1', [$pidY]);
     ok($newId > 0 && (int) $row['owner_id'] === $pidY && (int) $row['docked_body'] === $top['localId']
-        && (int) $row['system_id'] === 0 && count($st['fleet']) === 2 && $st['ship']['id'] === $yHome
+        && (int) $row['system_id'] === 0 && count(array_filter($st['fleet'], fn($s) => $s['carrier'] === null)) === 2
+        && $st['ship']['id'] === $yHome
         && $before - $after === 1500000 && (int) $line['amount'] === -1500000
         && strpos($line['label'], 'Prometheus') !== false,
         'купил: новый корабль в том же доке, пилот пока в кресле прежнего, в ленте −1 500 000 кр');
@@ -1537,6 +1540,159 @@ section('верфь корпусов');
     $o = Api::call('shipyard.list', [], $tky);
     ok(count($o['here']) === 2 && count(array_filter($o['here'], fn($x) => $x['active'])) === 1,
         'в разделе «Корабли» оба своих корабля этого дока, активный один');
+}
+
+section('вездеход и ангар');
+{
+    // Каталог по сети отвечает при типах без hangar: строка — не число
+    // лётной модели, и сверка «база отстала от кода» её не требует.
+    $specs = Api::call('catalog.specs', []);
+    $codes = array_column($specs['shipTypes'], 'code');
+    ok(in_array('rover', $codes, true) && in_array('prometheus', $codes, true),
+        'каталог по сети отвечает: у «Прометея» и вездехода нет hangar — это не отставание базы');
+
+    $rv = Auth::register('pilot_rv', 'secret', 'ВОДИТЕЛЬ');
+    $tkv = $rv['token'];
+    $pidV = (int) $rv['player_id'];
+    $s = Api::call('player.state', [], $tkv);
+    $home = (int) $s['ship']['id'];
+    ok(array_filter($s['fleet'], fn($x) => $x['carrier'] !== null) === [],
+        'даром вездехода нет: новый «Челленджер» — с пустым ангаром');
+    // Верфь — в порту с верфью: там вездеход и покупают, в трюм своего корабля.
+    $yard = null;
+    foreach (Db::all("SELECT `local_id` FROM `body` WHERE `system_id`=0 AND `kind`='station'") as $b) {
+        $i = Stations::info(0, (int) $b['local_id']);
+        if ($i['services']['outfit'] && $yard === null) $yard = $i;
+    }
+    Db::update('ship', ['system_id' => 0, 'docked_body' => $yard['localId']], '`id`=?', [$home]);
+    $o = Api::call('shipyard.list', [], $tkv);
+    ok(!in_array('rover', array_column($o['hulls'], 'code'), true) && $o['hangar']['code'] === 'rover'
+        && $o['hangar']['price'] === 24000 && $o['hangar']['for'] === $home && $o['hangar']['have'] === null
+        && $o['hangar']['sold'] === true,
+        'на верфи вездеход — не корпус в док, а машина в ангар своего корабля: 24 000 кр');
+    denies('no_funds', fn() => Api::call('shipyard.buy', ['code' => 'rover'], $tkv), 'без 24 000 кр вездехода не купить');
+    Ledger::add($pidV, 'ПРОВЕРКА', 100000, 'test');
+    $st = Api::call('shipyard.buy', ['code' => 'rover'], $tkv);
+    $rid = (int) $st['bought'];
+    $rrow = Players::shipRow($rid);
+    $line = Db::row('SELECT * FROM `ledger` WHERE `player_id`=? ORDER BY `id` DESC LIMIT 1', [$pidV]);
+    $fv = array_column($st['fleet'], null, 'id');
+    ok($rid > 0 && (int) $rrow['carrier_id'] === $home && (int) $rrow['stowed'] === 1
+        && (int) $rrow['docked_body'] === $yard['localId'] && $fv[$rid]['type'] === 'rover'
+        && (int) $line['amount'] === -24000 && $st['ship']['id'] === $home,
+        'купил: вездеход в трюме своего корабля, приписан к нему, в ленте −24 000 кр, пилот в прежнем кресле');
+    ok(count(Loadout::modules($rid)) === 0 && (float) $rrow['hull'] === 60.0,
+        'модулей корабля у вездехода нет (ensureStock их не ставит), корпус — свой, 60');
+    denies('have_rover', fn() => Api::call('shipyard.buy', ['code' => 'rover'], $tkv),
+        'второй вездеход в тот же трюм не встаёт');
+    ok(Api::call('shipyard.list', [], $tkv)['hangar']['have'] === $rid,
+        'и верфь это видит: ангар занят');
+    ok(Players::ensureHangar((int) Db::one("SELECT sh.`id` FROM `ship` sh JOIN `ship_type` t ON t.`id`=sh.`type_id`
+        WHERE t.`code`='prometheus' LIMIT 1") ?: 0) === null,
+        'у «Прометея» ангара нет — и вездехода в нём не будет');
+    ok(count(Api::call('shipyard.list', [], $tkv)['here']) === 1,
+        'в «Кораблях» дока вездеход не числится: пересаживаются в него не в порту');
+    $s = Api::call('player.state', [], $tkv);
+
+    // В порту вездеход не водят.
+    denies('not_landed', fn() => Api::call('ship.command', ['id' => $rid], $tkv),
+        'из трюма корабля в порту вездеход не вывести');
+
+    // Корабль сел — вездеход в трюме с ним.
+    Api::call('station.undock', [], $tkv);
+    Api::call('player.save', ['ship' => ['id' => $home, 'system' => 0, 'gear' => true,
+        'landed' => ['id' => $L, 'pose' => $poseAt(0.4), 'secured' => true]],
+        'me' => ['aboard' => $home, 'seated' => true]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok((int) $rrow['landed_body'] === $L && $rrow['landed_pose'] === Players::shipRow($home)['landed_pose']
+        && $rrow['docked_body'] === null,
+        'корабль сел — вездеход в его трюме там же: место у них одно (carryAlong)');
+
+    // В кресло вездехода — с борта корабля: они рядом.
+    Api::call('pilot.move', ['me' => ['aboard' => $rid, 'seated' => true]], $tkv);
+    $st = Api::call('ship.command', ['id' => $rid], $tkv);
+    ok($st['ship']['id'] === $rid && $st['ship']['type']['code'] === 'rover' && $st['ship']['stowed'] === true
+        && $st['ship']['carrier'] === $home && $st['position']['landedBody'] === $L,
+        'командует вездеходом в трюме: тип rover, носитель и «в трюме» — в состоянии');
+
+    // Стоит в трюме — своё место сохранением не пишется.
+    $far = ['id' => $L, 'pos' => ['x' => 3.0, 'y' => $R, 'z' => 0], 'fwd' => ['x' => 0, 'y' => 0, 'z' => 1],
+        'up' => ['x' => 0, 'y' => 1, 'z' => 0]];
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'anchor' => $far, 'landed' => null]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok((int) $rrow['stowed'] === 1 && (int) $rrow['landed_body'] === $L && $rrow['anchor_body'] === null,
+        'в трюме место вездехода — носителя: точку за три километра сохранение не пишет');
+    // Съезд за три километра от корабля — не съезд с платформы.
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => false, 'anchor' => $far,
+        'landed' => null]], $tkv);
+    ok((int) Players::shipRow($rid)['stowed'] === 1,
+        'съехать из трюма за три километра от корабля нельзя: место не пишется, он в трюме');
+    // Съезд у самого корабля: пятнадцать метров вбок.
+    $near = $far;
+    $near['pos'] = ['x' => 0.4 + 0.015, 'y' => $R + 0.006, 'z' => 0];
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => false, 'anchor' => $near,
+        'landed' => null]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok((int) $rrow['stowed'] === 0 && (int) $rrow['anchor_body'] === $L && $rrow['landed_body'] === null,
+        'съехал у корабля: в трюме его больше нет, место — своё');
+    // Отставшая стоянка носителя от игры у съехавшего вездехода не пишется:
+    // при входе он встал бы в середину корабля над грунтом и упал оттуда.
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'anchor' => $near,
+        'landed' => ['id' => $L, 'pose' => $poseAt(0.4), 'secured' => true]]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok($rrow['landed_body'] === null && (int) $rrow['anchor_body'] === $L,
+        'стоянку вездеход не получает: его место — точка в осях тела, а не стоянка носителя');
+    $st = Api::call('player.state', [], $tkv);
+    $fv = array_column($st['fleet'], null, 'id');
+    ok($st['ship']['stowed'] === false && $fv[$rid]['stowed'] === false && $fv[$rid]['carrier'] === $home,
+        'и в состоянии, и во флоте он на грунте, но приписан к своему кораблю');
+    // Уехал — его место пишется любое, но «в трюм» издалека не встать.
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => true, 'anchor' => $far,
+        'landed' => null]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok((int) $rrow['stowed'] === 0 && abs(json_decode($rrow['anchor_pose'], true)['pos']['x'] - 3.0) < 1e-9,
+        'уехал за три километра: место пишется, а «в трюм» оттуда не встать');
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => true, 'anchor' => $near,
+        'landed' => null]], $tkv);
+    $rrow = Players::shipRow($rid);
+    ok((int) $rrow['stowed'] === 1 && (int) $rrow['landed_body'] === $L && $rrow['anchor_body'] === null,
+        'вернулся к кораблю и встал в трюм: место снова носителя');
+
+    // Порт и буксир — не для вездехода.
+    $port = (int) $s['position']['dockedBody'];
+    denies('ground', fn() => Api::call('station.dock', ['system' => 0, 'station' => $port], $tkv),
+        'вездеход в порт не встаёт');
+    denies('ground', fn() => Api::call('ship.rescue', [], $tkv), 'буксир за вездеходом не прилетает');
+
+    // Гибель вездехода далеко от корабля — снова в трюме, целый, водитель в кресле.
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => false, 'anchor' => $near,
+        'landed' => null]], $tkv);
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'anchor' => $far, 'landed' => null]], $tkv);
+    Db::update('ship', ['hull' => 3], '`id`=?', [$rid]);
+    Combat::respawnShip($rid);
+    $rrow = Players::shipRow($rid);
+    $pv = Players::byId($pidV);
+    ok((int) $rrow['stowed'] === 1 && (float) $rrow['hull'] === 60.0 && (int) $rrow['landed_body'] === $L
+        && (int) $pv['aboard_ship'] === $rid && (int) $pv['ship_id'] === $rid && (int) $pv['seated'] === 1,
+        'вездеход погиб — снова в трюме своего корабля, целый, водитель в его кресле');
+    // Гибель корабля: он в порт, и вездеход, где бы ни стоял, — с ним.
+    Api::call('player.save', ['ship' => ['id' => $rid, 'system' => 0, 'stowed' => false, 'anchor' => $near,
+        'landed' => null]], $tkv);
+    Combat::respawnShip($home);
+    $rrow = Players::shipRow($rid);
+    $hrow = Players::shipRow($home);
+    ok((int) $rrow['stowed'] === 1 && $hrow['docked_body'] !== null
+        && (int) $rrow['docked_body'] === (int) $hrow['docked_body'],
+        'корабль погиб — в порт, и его вездеход снова в трюме, в том же порту');
+
+    // С верфи «Челленджер» — с пустым ангаром: вездеход к нему покупают отдельно.
+    Ledger::add($pidV, 'ПРОВЕРКА', 200000, 'test');
+    Db::update('ship', ['docked_body' => $yard['localId'], 'landed_body' => null], '`id`=?', [$home]);
+    Players::carryAlong($home);
+    $st = Api::call('shipyard.buy', ['code' => 'challenger'], $tkv);
+    $bought = (int) $st['bought'];
+    ok($bought > 0 && Players::roverOf($bought) === null,
+        'купленный «Челленджер» — с пустым ангаром: вездеход к нему покупают отдельно');
 }
 
 // Перенос со схемы 9: место корабля лежало в строке пилота. Живой пилот,

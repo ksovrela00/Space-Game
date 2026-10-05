@@ -198,6 +198,96 @@ const LOCK_SCENE = (hatch, then, pre = '', alt = 0.02) => `
     });
 `;
 
+// Стоянка на ровной суше и грузовая платформа (js/game/airlock.js,
+// «платформа»): та же площадка, что у шлюзов. travel — заморозить ход
+// (м): платформа на полпути, а не у грунта; без него — до грунта сразу.
+// В сцене доступны bx (платформа) и pin() — держать замороженный ход.
+const BAY_SCENE = (then, travel = null) => `
+  liftoff();
+  return Promise.resolve().then(() => standWhere(atmoWorld(),
+    (t, F, b, d) => {
+      if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
+      const g = F.growth(b, t, d.x, d.y, d.z);
+      return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
+    }, 0.02, 30, 60, 0))
+    .then(() => {
+      window.__hold = null;
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      frames(2);
+      GAME.landHere();
+      frames(2);
+      return GAME.loadInterior();
+    })
+    .then(() => {
+      const bx = GAME.interior.air.bays[0];
+      bx.want = true; bx.snap = true;
+      frames(3);
+      const T = ${travel === null ? 'null' : travel};
+      const pin = () => { if (T !== null) { bx.want = T > 0; bx.travel = T; bx.vel = 0; bx.dir = 0; } };
+      pin();
+      frames(2);
+      ${then}
+    });
+`;
+
+// Вездеход в трюме своего «Челленджера»: корабль сел, платформа на высоте
+// travel (0 — поднята), а вездеход — сосед-спящий с отметкой носителя (cr),
+// как его шлёт хаб (server/src/Hub.php). then — где глаз.
+const HOLD_SCENE = (then, travel = 0) => BAY_SCENE(`
+      const P = GAME.ship.landedPose, n = window.NET;
+      const put = () => {
+        n.state = 'live';
+        n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+        n.peers = [{ id: 701, by: 1, name: 'ДЖЕЙМСОН', ty: 'rover', dorm: 1, sys: 0, mode: 'landed', g: 1, h: [],
+          cr: GAME.ship.id, b: GAME.ship.landedAt.id,
+          lx: P.dir.x * P.radius, ly: P.dir.y * P.radius, lz: P.dir.z * P.radius,
+          lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }];
+        n.people = [];
+        n.rev++;
+      };
+      put();
+      // Помещения вездехода грузятся отдельным модулем: ждём их по-настоящему,
+      // а не кадрами подряд — импорт приходит между задачами, не между кадрами.
+      return new Promise((res) => {
+        let i = 0;
+        const tick = () => {
+          put(); frames(1);
+          const V = GAME.peers.find((p) => p.id === 701);
+          if ((V && V.air && V.carried) || ++i > 300) res(V); else setTimeout(tick, 20);
+        };
+        tick();
+      }).then((R) => {
+        ${then}
+      });`, travel);
+
+// Вездеход на ровной суше: корабль садится, игра пересаживается на
+// вездеход прямо в странице (без сервера — как снимки «Прометея»), и
+// машина встаёт на грунт под кораблём. then — что дальше (газ, вид).
+const ROVER_SCENE = (then) => `
+  liftoff();
+  return Promise.resolve().then(() => standWhere(atmoWorld(),
+    (t, F, b, d) => {
+      if (window.__surf.groundRadius(b, d) - b.radius < 0.05) return 0;
+      const g = F.growth(b, t, d.x, d.y, d.z);
+      return g > 0.15 ? 0 : (flat(t, b, d) < 0.02 ? 1 : 0.02);
+    }, 0.02, 30, 60, 0))
+    .then(() => {
+      window.__hold = null;
+      GAME.ship.gear.out = true; GAME.ship.gear.t = 1;
+      frames(2);
+      GAME.landHere();
+      frames(2);
+      return import('./js/game/specs.js');
+    })
+    .then((S) => {
+      S.useShipType('rover');
+      GAME.syncHull();
+      GAME.state.view = 'chase';
+      frames(20);
+      ${then}
+    });
+`;
+
 // Берег: суша не выше пяти метров над морем, у которой в двухстах метрах
 // по какой-нибудь из восьми сторон — вода. Камера — в стороне на off км,
 // на высоте alt, нос опущен на pitch градусов.
@@ -1044,6 +1134,186 @@ const SCENES = {
       w.pitch = -0.15;
       frames(6);`, `return import('./js/game/specs.js').then((S) => { S.useShipType('prometheus'); GAME.syncHull(); });`, 0.04),
   },
+  rover: {
+    url: '&surface=clipmap',
+    title: 'вездеход на грунте: вид от третьего лица',
+    run: ROVER_SCENE(`
+      window.__hold = () => { GAME.driveCam.yaw = 2.4; GAME.driveCam.pitch = 0.22; GAME.driveCam.idle = 0; };
+      window.__hold();
+      frames(6);`),
+  },
+  rovercab: {
+    url: '&surface=clipmap',
+    title: 'вездеход: место водителя — доска, руль, лобовое стекло',
+    run: ROVER_SCENE(`
+      GAME.state.view = 'cockpit';
+      window.__hold = () => { GAME.camOrbit.yaw = 0; GAME.camOrbit.pitch = 0; GAME.rover.steer = 0.25; };
+      window.__hold();
+      frames(30);`),
+  },
+  roverwheel: {
+    url: '&surface=clipmap',
+    title: 'вездеход: руль и мониторы вблизи (голова опущена)',
+    run: ROVER_SCENE(`
+      GAME.state.view = 'cockpit';
+      window.__hold = () => { GAME.camOrbit.yaw = 0; GAME.camOrbit.pitch = -0.42; GAME.rover.steer = 0.25; };
+      window.__hold();
+      frames(30);`),
+  },
+  roverhold: {
+    url: '&surface=clipmap',
+    title: 'вездеход в трюме «Челленджера»: пилот у кормовой переборки смотрит на машину',
+    run: HOLD_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [-3.6, bx.b.deck, 2.0];
+      w.yaw = 0.45;
+      w.pitch = -0.12;
+      window.__hold = () => { pin(); put(); };
+      frames(8);`, 0),
+  },
+  roverholddoor: {
+    url: '&surface=clipmap',
+    title: 'вездеход в трюме: у его двери на левом борту, дверь открыта, трап на плите',
+    run: HOLD_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [-4.0, bx.b.deck, 5.2];
+      w.yaw = 1.2;
+      w.pitch = -0.2;
+      const open = () => { const hx = R.air && R.air.hatches[0]; if (hx) { R.hatches = ['rdoor']; } };
+      window.__hold = () => { pin(); put(); n.peers[0].h = ['rdoor']; n.rev++; open(); };
+      for (let i = 0; i < 90; i++) { window.__hold(); frames(1); }
+      frames(4);`, 0),
+  },
+  roverholdcab: {
+    url: '&surface=clipmap',
+    title: 'в кабине вездехода, что стоит в трюме: за стеклом — трюм, а не улица',
+    run: HOLD_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.vessel = R;
+      w.air = R.air;
+      GAME.frame = R;
+      w.pos = [0.55, 1.15, 0.9];
+      w.room = R.air.I.roomById.rcab;
+      w.yaw = -0.15;
+      w.pitch = -0.1;
+      window.__hold = () => { pin(); put(); };
+      frames(8);`, 0),
+  },
+  roverholdout: {
+    url: '&surface=clipmap',
+    title: 'платформа опущена до грунта, на ней вездеход: вид сбоку от третьего лица',
+    run: HOLD_SCENE(`
+      GAME.state.view = 'chase';
+      window.__hold = () => { pin(); put(); GAME.camOrbit.yaw = -1.25; GAME.camOrbit.pitch = 0.12; };
+      window.__hold();
+      frames(8);`, null),
+  },
+  bayopen: {
+    url: '&surface=clipmap',
+    title: 'грузовая платформа на грунте: вид от третьего лица',
+    run: BAY_SCENE(`
+      GAME.state.view = 'chase';
+      window.__hold = () => { pin(); GAME.camOrbit.yaw = -1.3; GAME.camOrbit.pitch = -0.02; };
+      window.__hold();
+      frames(6);`),
+  },
+  bayhalf: {
+    url: '&surface=clipmap',
+    title: 'грузовая платформа на полпути: снаружи, тросы и проём в днище',
+    run: BAY_SCENE(`
+      GAME.state.view = 'chase';
+      window.__hold = () => { pin(); GAME.camOrbit.yaw = -1.3; GAME.camOrbit.pitch = -0.02; };
+      window.__hold();
+      frames(6);`, 2.2),
+  },
+  bayride: {
+    url: '&surface=clipmap',
+    title: 'на платформе в колодце: пульт, стенки, трюм над головой',
+    run: BAY_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [-1.2, bx.b.deck - bx.travel, 5.2];
+      w.yaw = Math.PI + 0.5;
+      w.pitch = -0.25;
+      window.__hold = () => { pin(); w.pos[1] = bx.b.deck - bx.travel; };
+      frames(6);`, 0.5),
+  },
+  baydown: {
+    url: '&surface=clipmap',
+    title: 'на платформе у грунта: днище над головой, тросы, выход на грунт',
+    run: BAY_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [-1.0, bx.b.deck - bx.travel, 6.5];
+      w.yaw = 0.6;
+      w.pitch = 0.05;
+      window.__hold = () => { pin(); w.pos[1] = bx.b.deck - bx.travel; };
+      frames(6);`),
+  },
+  bayout: {
+    url: '&surface=clipmap',
+    title: 'пилот сошёл с платформы на грунт и смотрит на неё',
+    run: BAY_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      // На край плиты, ногами уже за ним: шаг с края переводит в оси грунта.
+      w.pos = [bx.b.x[1] + 0.12, bx.b.deck - bx.travel, 7.2];
+      w.yaw = Math.PI / 2;
+      frames(3);
+      if (w.out) { w.pos = [w.pos[0] + 7.5, w.pos[1], w.pos[2] - 3.0]; w.yaw = -Math.PI / 2 - 0.35; w.pitch = -0.05; }
+      frames(12);`),
+  },
+  bayhold: {
+    url: '&surface=clipmap',
+    title: 'из трюма в опущенную платформу: проём, кромка, грунт внизу',
+    run: BAY_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [0, bx.b.deck, 1.8];
+      w.yaw = 0;
+      w.pitch = -0.75;
+      window.__hold = () => { pin(); };
+      frames(6);`),
+  },
+  baytop: {
+    url: '&surface=clipmap',
+    title: 'трюм с поднятой платформой: плита вровень с полом, пульт',
+    run: BAY_SCENE(`
+      GAME.state.view = 'cockpit';
+      frames(1);
+      GAME.rise();
+      const w = GAME.walk;
+      w.phase = 'walk';
+      w.pos = [1.6, bx.b.deck, 1.9];
+      w.yaw = -0.35;
+      w.pitch = -0.3;
+      window.__hold = () => { pin(); };
+      frames(6);`, 0),
+  },
   lockdoor: {
     url: '&surface=clipmap',
     title: 'из носового шлюза наружу: проём, трап, грунт',
@@ -1266,6 +1536,59 @@ const SCENES = {
       if (w.out) { w.pos = [12, w.pos[1] - 5.0, 4]; w.vel = [0, -5, 0]; w.yaw = 1.42; w.pitch = 0.06; }
       frames(12);
       return window.__annaAt(GAME.camera, 0.009).then(() => { window.__crew(); frames(6); });`),
+  },
+  roverpeer: {
+    url: '&surface=clipmap',
+    title: 'вездеход соседа на грунте у корабля: кузов, колёса, дверь',
+    run: LOCK_SCENE('sR', `
+      const b = GAME.ship.landedAt, P = GAME.ship.landedPose, S = window.SCENE;
+      // Начало осей вездехода — на грунте: ставим прямо на нарисованный.
+      const x = P.dir.x * P.radius + P.right.x * 0.03 + P.fwd.x * 0.004;
+      const y = P.dir.y * P.radius + P.right.y * 0.03 + P.fwd.y * 0.004;
+      const z = P.dir.z * P.radius + P.right.z * 0.03 + P.fwd.z * 0.004;
+      const l = Math.hypot(x, y, z), d = { x: x / l, y: y / l, z: z / l };
+      const g = S.drawnGround(b, d);
+      const n = window.NET;
+      const put = () => {
+        n.state = 'live';
+        n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+        n.peers = [{ id: 601, by: 9, name: 'АННА', ty: 'rover', dorm: 1, sys: 0, mode: 'landed', g: 1, h: [],
+          b: b.id, lx: d.x * g, ly: d.y * g, lz: d.z * g,
+          lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: d.x, luy: d.y, luz: d.z }];
+        n.people = [];
+        n.rev++;
+      };
+      put();
+      GAME.state.view = 'chase';
+      window.__hold = () => { put(); GAME.camOrbit.yaw = 0.9; GAME.camOrbit.pitch = 0.12; };
+      window.__hold();
+      frames(8);`),
+  },
+  roverpeerdoor: {
+    url: '&surface=clipmap',
+    title: 'вездеход соседа с открытой дверью: створка, трап, шлюз — и ничего лишнего на кузове',
+    run: LOCK_SCENE('sR', `
+      const b = GAME.ship.landedAt, P = GAME.ship.landedPose, S = window.SCENE;
+      const x = P.dir.x * P.radius + P.right.x * 0.03 + P.fwd.x * 0.004;
+      const y = P.dir.y * P.radius + P.right.y * 0.03 + P.fwd.y * 0.004;
+      const z = P.dir.z * P.radius + P.right.z * 0.03 + P.fwd.z * 0.004;
+      const l = Math.hypot(x, y, z), d = { x: x / l, y: y / l, z: z / l };
+      const g = S.drawnGround(b, d);
+      const n = window.NET;
+      const put = () => {
+        n.state = 'live';
+        n.you = { id: 1, name: 'ДЖЕЙМСОН', sys: 0 };
+        n.peers = [{ id: 601, by: 9, name: 'АННА', ty: 'rover', dorm: 1, sys: 0, mode: 'landed', g: 1, h: ['rdoor'],
+          b: b.id, lx: d.x * g, ly: d.y * g, lz: d.z * g,
+          lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: d.x, luy: d.y, luz: d.z }];
+        n.people = [];
+        n.rev++;
+      };
+      put();
+      GAME.state.view = 'chase';
+      window.__hold = () => { put(); GAME.camOrbit.yaw = 1.5; GAME.camOrbit.pitch = 0.05; };
+      for (let i = 0; i < 120; i++) { window.__hold(); frames(1); }
+      frames(8);`),
   },
   crewin: {
     url: '&surface=clipmap',
@@ -1881,7 +2204,12 @@ try {
   `);
 
   if (scene.run) await run(cdp, HELPERS + scene.run + '\nframes(8);');
-  if (extra) await run(cdp, HELPERS + extra + '\nframes(8);');
+  // Правка может и спросить: строку, которую она вернёт, печатаем — так
+  // по снимку и числам сразу видно, что было в странице.
+  if (extra) {
+    const said = await run(cdp, HELPERS + extra + '\nframes(8);');
+    if (typeof said === 'string') console.log('--do: ' + said);
+  }
   // Пауза перед снимком — чтобы досчитались плитки поверхности и тени:
   // они собираются в потоках и по таймерам, а не в кадре. Ход игры при
   // этом НЕ возобновляем: сцена должна остаться той, которую поставили,
