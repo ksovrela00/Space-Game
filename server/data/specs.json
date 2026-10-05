@@ -127,7 +127,7 @@
             "slot": "engine",
             "spec": {
                 "flight": {
-                    "exhaust": 20000,
+                    "exhaust": 40000,
                     "maxSpeed": 1.2,
                     "accel": 0.45,
                     "brake": 0.75,
@@ -146,7 +146,7 @@
             "slot": "engine",
             "spec": {
                 "flight": {
-                    "exhaust": 14500,
+                    "exhaust": 29000,
                     "maxSpeed": 1.8,
                     "accel": 0.62,
                     "brake": 0.95,
@@ -169,7 +169,7 @@
                     "tipAccel": 4.9,
                     "rotRamp": 1.4,
                     "rcsLag": 0.25,
-                    "rcsExhaust": 12000
+                    "rcsExhaust": 24000
                 }
             },
             "price": 6000,
@@ -186,7 +186,7 @@
                     "tipAccel": 7,
                     "rotRamp": 1.1,
                     "rcsLag": 0.2,
-                    "rcsExhaust": 10000
+                    "rcsExhaust": 20000
                 }
             },
             "price": 16000,
@@ -201,7 +201,7 @@
                 "flight": {
                     "liftTWR": 3,
                     "liftMin": 0.004,
-                    "liftExhaust": 16000
+                    "liftExhaust": 32000
                 }
             },
             "price": 5000,
@@ -262,7 +262,7 @@
                 "minSpeed": 1.2,
                 "flight": {
                     "quantumSpeed": 60000,
-                    "quantumFuel": 0.2
+                    "quantumFuel": 0.1
                 }
             },
             "price": 26000,
@@ -289,7 +289,7 @@
                 "minSpeed": 1.2,
                 "flight": {
                     "quantumSpeed": 90000,
-                    "quantumFuel": 0.15
+                    "quantumFuel": 0.075
                 }
             },
             "price": 58000,
@@ -316,7 +316,7 @@
                 "minSpeed": 1.2,
                 "flight": {
                     "quantumSpeed": 140000,
-                    "quantumFuel": 2
+                    "quantumFuel": 1
                 },
                 "hulls": [
                     "prometheus"

@@ -1513,7 +1513,9 @@ await step('к соседу на борт: по его трапу, чужое к
       lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z }, extra);
     let pin = entry();
     // Хаб шлёт спящий корабль каждым тиком: так его и держим.
-    const tickNet = () => { net.peers = pin ? [pin] : []; net.people = []; net.rev++; };
+    // Второй сосед нужен только на один опыт — корабль ДРУГОГО типа рядом.
+    let prom = null;
+    const tickNet = () => { net.peers = [pin, prom].filter(Boolean); net.people = []; net.rev++; };
     tickNet(); frames(3);
     let V = game.peers.find((p) => p.id === 900);
     if (!V || !V.air || V.own) throw new Error('спящий сосед не принят: ' + game.peers.length);
@@ -1542,6 +1544,38 @@ await step('к соседу на борт: по его трапу, чужое к
     w.yaw = Math.atan2(g[0], g[2]); w.pitch = 0;
     frames(3);
     if (!w.out) throw new Error('пилот не за бортом');
+
+    // Рядом садится корабль ДРУГОГО типа. Шлюзы игра заводит всем, кто
+    // ближе 150 м (и соседям, и NPC), а планировка у каждого типа своя:
+    // шаг за борт считал чужие тоннели по НАШИМ помещениям и ронял кадр
+    // целиком (TypeError в tunnelAt: комнаты с таким именем у нас нет).
+    // Довольно было встать на грунт рядом с «Прометеем».
+    {
+      // В 120 м ВПЕРЕДИ от соседа, у чьего трапа стоит пилот: ближе 150 м
+      // (OUT_NEAR), иначе корабль в список рядом стоящих не попадёт вовсе
+      // и опыт окажется пустым — так и вышло с первой попытки.
+      const off = (k) => P.dir[k] * R + P.right[k] * 0.07 + P.fwd[k] * 0.12;
+      const qx = off('x'), qy = off('y'), qz = off('z');
+      const ql = Math.hypot(qx, qy, qz), qn = { x: qx / ql, y: qy / ql, z: qz / ql };
+      const qr = S.groundRadius(b, qn) + (R - S.groundRadius(b, P.dir));
+      prom = { id: 901, by: 78, name: 'КРЕЙСЕР', dorm: 1, sys: sys0, mode: 'landed', ty: 'prometheus',
+        g: 1, h: [], b: b.id, lx: qn.x * qr, ly: qn.y * qr, lz: qn.z * qr,
+        lfx: P.fwd.x, lfy: P.fwd.y, lfz: P.fwd.z, lux: P.up.x, luy: P.up.y, luz: P.up.z };
+      let W = null;
+      for (let i = 0; i < 80; i++) {
+        tickNet(); frames(1);
+        await new Promise((r) => setTimeout(r, 0));
+        W = game.peers.find((q) => q.id === 901);
+        if (W && W.air) break;
+      }
+      if (!W || !W.air) throw new Error('«Прометей» рядом не принят: шлюзы не завелись');
+      if (W.air.I === game.interior) throw new Error('у соседа та же планировка, что у нас — опыт ничего не стоит');
+      // Вот эти кадры старый код и не переживал.
+      for (let i = 0; i < 20; i++) { tickNet(); frames(1); }
+      if (!w.out) throw new Error('пилота унесло с грунта чужим кораблём');
+      prom = null;
+      tickNet(); frames(2);
+    }
     // Вверх по чужому трапу — в чужой шлюз.
     holdDown('KeyW');
     const trace = [];

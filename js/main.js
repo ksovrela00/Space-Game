@@ -1678,16 +1678,23 @@ function crossThreshold() {
   for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
     const air = V.own ? I.air : V.air;
     if (!air) continue;
+    // Планировка — ТОГО корабля, в чей тоннель шагаем (air.I), а не того,
+    // с чьей палубы пилот сошёл. Снаружи I — это всегда свой корабль, и у
+    // соседа другого типа комнат с такими именами нет вовсе: tunnelAt
+    // искал его люк в НАШИХ помещениях (roomById[h.lock] — undefined) и
+    // ронял кадр целиком. Хватало встать на грунт рядом с «Прометеем» —
+    // хоть соседа, хоть NPC: шлюзы заводятся всем, кто рядом.
+    const J = air.I;
     shipToGround(w.out, V, _outT);
     const p = groundPointToShip(_outT, w.pos, [0, 0, 0]);
-    if (!tunnelAt(air, I, p)) continue;
-    const at = standAt(deckWorld(w, I, air), p, w.height);
+    if (!tunnelAt(air, J, p)) continue;
+    const at = standAt(deckWorld(w, J, air), p, w.height);
     if (!at) continue;
     reframe(w, groundDirToShip);
     w.pos = at.pos;
     w.height = at.height;
     boardVessel(V);
-    w.room = I.roomAt(p);
+    w.room = J.roomAt(p);
     game.walkRoomT = 2.6;
     if (!V.own) say(game.state, L('НА БОРТУ: КОРАБЛЬ ') + (V.name || L('ПИЛОТА')), '#9fd9ff', 3);
     placePilot();

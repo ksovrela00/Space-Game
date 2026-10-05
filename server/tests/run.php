@@ -932,9 +932,9 @@ ok(abs($fm['cap'] - 12) < 1e-9 && abs($fm['reserve'] - 1.2) < 1e-9
     . $fm['reserve'] . ' т, струя ' . $fm['exhaust'] . ' км/с');
 
 // Формула — масса · Δv / струя. Сверяем с рукой: разогнаться до предела
-// и остановиться (2 × 1.2 км/с) стоит 1682 · 2.4 / 20 000 ≈ 0.2 т.
+// и остановиться (2 × 1.2 км/с) стоит 1682 · 2.4 / 40 000 ≈ 0.1 т.
 $trip = Fuel::thrustTons($fm, 2.4, 0, 0);
-ok(abs($trip - $massT * 2.4 / $fm['exhaust']) < 1e-9 && $trip > 0.15 && $trip < 0.25,
+ok(abs($trip - $massT * 2.4 / $fm['exhaust']) < 1e-9 && $trip > 0.08 && $trip < 0.13,
     'разгон до предела и остановка стоят ' . round($trip, 3) . ' т');
 ok(abs(Fuel::quantumTons($fm, 5e6) - 5 * $fm['quantumFuel']) < 1e-9,
     'квантовый ход в 5 млн км стоит ' . Fuel::quantumTons($fm, 5e6) . ' т');
@@ -1128,7 +1128,7 @@ $state = Api::call('player.state', [], $token);
 $engines = array_values(array_filter($state['ship']['equipment'], fn($e) => $e['slot'] === 'engine'));
 ok(count($engines) === 1 && $engines[0]['code'] === 'engine_x'
     && abs(Loadout::flight($shipId)['maxSpeed'] - 1.8) < 1e-9
-    && abs(Fuel::model($shipId)['exhaust'] - 14500) < 1e-9,
+    && abs(Fuel::model($shipId)['exhaust'] - 29000) < 1e-9,
     'в гнезде один двигатель — новый, и корабль летит и тратит по его числам');
 denies('installed', fn() => Api::call('outfit.buy', ['code' => 'engine_x'], $token),
     'второй раз тот же модуль не ставят');
