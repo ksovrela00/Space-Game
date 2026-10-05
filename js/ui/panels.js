@@ -568,6 +568,47 @@ function hullOutline(mesh) {
   return polys;
 }
 
+/**
+ * Контуры силуэта — в путь. БЕЗ closePath: fill() закрывает каждый
+ * подпуть сам, а closePath в длинном пути Chrome дорожает с каждым
+ * многоугольником, и весь путь выходит квадратичным. У «Прометея» их
+ * три с половиной тысячи, и одна перерисовка экрана стоила 60–70 мс —
+ * четыре раза в секунду: кадр терял по три такта, и в кабине было
+ * пятьдесят кадров вместо шестидесяти. Без closePath путь строится за
+ * десятую миллисекунды.
+ */
+function tracePolys(ctx, polys, cx, cy, S) {
+  for (const p of polys) {
+    ctx.moveTo(cx + p[0][0] * S, cy + p[0][1] * S);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(cx + p[i][0] * S, cy + p[i][1] * S);
+  }
+}
+
+/**
+ * Силуэт — готовой картинкой: один раз на корпус и цвет (цвет меняется
+ * только на порогах корпуса). Экран перерисовывается четыре раза в
+ * секунду, и заливать тысячи граней каждый раз незачем. Нет холста
+ * (проверки в Node) — null, и силуэт рисуется путём.
+ */
+const _sil = { mesh: null, color: '', img: null };
+function hullSilhouette(polys, mesh, color, S) {
+  if (_sil.mesh === mesh && _sil.color === color && _sil.img) return _sil.img;
+  const side = Math.ceil(S) + 4;
+  let c = null;
+  if (typeof OffscreenCanvas !== 'undefined') c = new OffscreenCanvas(side, side);
+  else if (typeof document !== 'undefined' && document.createElement) c = document.createElement('canvas');
+  const g = c && c.getContext ? c.getContext('2d') : null;
+  if (!g) return null;
+  c.width = side; c.height = side;
+  g.fillStyle = color;
+  g.globalAlpha = 0.55;
+  g.beginPath();
+  tracePolys(g, polys, side / 2, side / 2, S);
+  g.fill();
+  _sil.mesh = mesh; _sil.color = color; _sil.img = c;
+  return c;
+}
+
 function systemsScreen(ctx, W, H, game) {
   const ship = game.ship;
   const q = game.quantum;
@@ -585,16 +626,17 @@ function systemsScreen(ctx, W, H, game) {
     ctx.beginPath(); ctx.ellipse(cx, cy, 70, 118, 0, 0, TAU); ctx.stroke();
   }
   if (polys) {
-    ctx.fillStyle = hullC;
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    for (const p of polys) {
-      ctx.moveTo(cx + p[0][0] * S, cy + p[0][1] * S);
-      for (let i = 1; i < p.length; i++) ctx.lineTo(cx + p[i][0] * S, cy + p[i][1] * S);
-      ctx.closePath();
+    const img = hullSilhouette(polys, game.shipMesh, hullC, S);
+    if (img) {
+      ctx.drawImage(img, cx - img.width / 2, cy - img.height / 2);
+    } else {
+      ctx.fillStyle = hullC;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      tracePolys(ctx, polys, cx, cy, S);
+      ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    ctx.fill();
-    ctx.globalAlpha = 1;
   }
 
   let y = 70;

@@ -6693,6 +6693,72 @@ console.log("\n== пилот: кроны, трюм, задания ==");
 // половины угла, а не сам угол: тогда середина кадра растёт ровно во
 // столько раз, сколько написано.
 {
+  // Экран «СИСТ»: силуэт корпуса сверху. У «Прометея» в нём 3 407
+  // многоугольников, и каждый закрывался closePath — в Chrome это
+  // квадратично по длине пути: 60–70 мс на перерисовку, четыре раза в
+  // секунду, и кабина «Прометея» шла на пятидесяти кадрах (замер на RTX
+  // 5060). fill() закрывает подпути сам. В браузере силуэт к тому же
+  // рисуется один раз в картинку (js/ui/panels.js, hullSilhouette); здесь
+  // холста нет, и проверяется путь.
+  // Ключ плитки — число (js/gl/quadtree.js): строка на каждый ключ
+  // стоила миллисекунду процессора за кадр. Число обязано быть таким же
+  // однозначным, как строка: две разные плитки — два разных ключа, и
+  // на самом глубоком уровне в том числе.
+  console.log('\n== ключи плиток ==');
+  {
+    const { tileKey, TILE_MAX_LEVEL: ML } = await import('../js/gl/quadtree.js');
+    const seen = new Set();
+    let n = 0, exact = true;
+    const top = (1 << ML) - 1;
+    for (let f = 0; f < 6; f++) {
+      for (let lv = 0; lv <= ML; lv++) {
+        const m = (1 << lv) - 1;
+        for (const [x, y] of [[0, 0], [m, 0], [0, m], [m, m], [m >> 1, (m >> 1) + (m ? 1 : 0)]]) {
+          const k = tileKey(f, lv, x, y);
+          exact = exact && Number.isSafeInteger(k);
+          seen.add(k); n++;
+        }
+      }
+    }
+    // Пять углов на уровне 0 совпадают (одна плитка): уникальных
+    // на каждой грани меньше на четыре.
+    const distinct = new Set();
+    for (let f = 0; f < 6; f++) for (let lv = 0; lv <= ML; lv++) {
+      const m = (1 << lv) - 1;
+      for (const [x, y] of [[0, 0], [m, 0], [0, m], [m, m], [m >> 1, (m >> 1) + (m ? 1 : 0)]]) distinct.add(f + '/' + lv + '/' + x + '/' + y);
+    }
+    ok(exact && seen.size === distinct.size && ML <= 20
+      && tileKey(5, ML, top, top) !== tileKey(5, ML, top, top - 1)
+      && tileKey(0, 1, 0, 0) !== tileKey(0, 0, 0, 0),
+    'ключ плитки — точное целое и однозначен: ' + seen.size + ' разных плиток на шести гранях до уровня ' + ML + ' — столько же разных ключей');
+  }
+
+  console.log('\n== экран «СИСТ» ==');
+  {
+    const { drawScreen } = await import('../js/ui/panels.js');
+    const P = buildPrometheus();
+    const calls = { closePath: 0, lineTo: 0 };
+    const any = () => ({ width: 10, addColorStop() {} });
+    const ctx = new Proxy({}, {
+      get(t, k) {
+        if (k in t) return t[k];
+        if (k === 'closePath' || k === 'lineTo') return () => { calls[k]++; };
+        return any;
+      },
+      set(t, k, v) { t[k] = v; return true; },
+    });
+    const g = {
+      ship: { hull: 100, shield: 0, fuel: 10, gear: { out: false, t: 0 }, damp: true, landing: null },
+      quantum: { phase: 'idle' }, capture: null, shipMesh: P,
+    };
+    const t0 = performance.now();
+    drawScreen('systems', ctx, 512, 512, g);
+    const ms = performance.now() - t0;
+    ok(calls.lineTo > 3000 && calls.closePath < 50,
+      'экран «СИСТ» с «Прометеем»: силуэт — ' + calls.lineTo + ' отрезков без closePath на каждый многоугольник ('
+      + calls.closePath + '), ' + ms.toFixed(1) + ' мс в Node');
+  }
+
   console.log('\n== управление мышью ==');
   {
     const M = await import('../js/game/mousefly.js');

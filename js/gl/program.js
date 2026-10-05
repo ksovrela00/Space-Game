@@ -40,7 +40,10 @@ export function buildProgram(gl, name, vsSrc, fsSrc) {
     use() { gl.useProgram(prog); },
     // getUniformLocation — не бесплатный вызов, поэтому кэшируем.
     loc(uniform) {
-      if (cache.has(uniform)) return cache.get(uniform);
+      // Один поиск в кэше, а не два (has + get): loc зовётся тысячи раз
+      // за кадр. Отсутствующий uniform кэшируется как null, не undefined.
+      const hit = cache.get(uniform);
+      if (hit !== undefined) return hit;
       const l = gl.getUniformLocation(prog, uniform);
       cache.set(uniform, l);
       return l;

@@ -64,5 +64,19 @@ export function L(ru) {
  */
 export const numLocale = () => (lang === 'ru' ? 'ru-RU' : 'en-US');
 
+/**
+ * Число с разрядами — то же, что toLocaleString(numLocale()), но
+ * форматтер один на язык. toLocaleString собирает Intl.NumberFormat
+ * заново на каждый вызов, а метки расстояний на экране форматируются
+ * каждый кадр: это было заметно в профиле кадра.
+ */
+const _nf = new Map();
+export function fmtNum(n) {
+  const loc = numLocale();
+  let f = _nf.get(loc);
+  if (!f) { f = new Intl.NumberFormat(loc); _nf.set(loc, f); }
+  return f.format(n);
+}
+
 /** Есть ли перевод — для проверок. */
 export const hasEn = (ru) => Object.prototype.hasOwnProperty.call(EN, ru);

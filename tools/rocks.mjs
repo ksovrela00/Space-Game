@@ -59,6 +59,11 @@ const MODELS = [
 // 320 на каждый — это 170 тысяч на поле у самой земли: меньше, чем одна
 // десятая грунта в кадре. Меньше 200 круглый валун уже гранится.
 const TRIS = 320;
+// Дальняя форма — для камня, который на экране меньше пары градусов
+// (js/gl/rocks.js, ROCKS.nearK): там грани уже не различить, а вершин
+// впятеро меньше. Без неё поле в полёте пересобиралось по 8 МБ трижды в
+// секунду (замер на RTX 5060: до 1.2 мс на кадр и пики по 8–14 мс).
+const TRIS_FAR = 60;
 
 // Фактура поверхности камня.
 const SURF = { slug: 'rock_boulder_dry', maps: ['Diffuse', 'nor_gl', 'Displacement'] };
@@ -375,7 +380,7 @@ function simplify(pos, idx, target) {
  * огранка на трёхстах треугольниках читалась бы той же пирамидой. UV —
  * по граням куба: ось, к которой грань повёрнута сильнее, выбрасывается.
  */
-function finish(m) {
+function finish(m, frame = null) {
   const n = m.pos.length / 3;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
   for (let i = 0; i < n; i++) {
@@ -383,6 +388,9 @@ function finish(m) {
     y0 = Math.min(y0, m.pos[i * 3 + 1]); y1 = Math.max(y1, m.pos[i * 3 + 1]);
     z0 = Math.min(z0, m.pos[i * 3 + 2]); z1 = Math.max(z1, m.pos[i * 3 + 2]);
   }
+  // Дальняя форма — в осях ближней: иначе при смене формы камень
+  // прыгал бы на разницу их рамок.
+  if (frame) ({ x0, x1, y0, y1, z0, z1 } = frame);
   const half = Math.max(x1 - x0, z1 - z0) / 2;
   const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
   const p = new Float64Array(n * 3);
@@ -427,7 +435,7 @@ function finish(m) {
       idx.push(j);
     }
   }
-  return { pos, nrm, uv, idx, height: (y1 - y0) / half, sizeM: half * 2 };
+  return { pos, nrm, uv, idx, height: (y1 - y0) / half, sizeM: half * 2, frame: { x0, x1, y0, y1, z0, z1 } };
 }
 
 // --- фактура -----------------------------------------------------------------
@@ -527,8 +535,9 @@ if (process.argv.includes('--clean')) {
     const welded = weld(raw.pos, raw.idx);
     const low = simplify(welded.pos, welded.idx, TRIS);
     const f = finish(low);
+    f.far = finish(simplify(welded.pos, welded.idx, TRIS_FAR), f.frame);
     const author = Object.keys(info.authors).join(', ');
-    console.log(`${slug}: ${raw.idx.length / 3} -> ${f.idx.length / 3} треугольников за ${Date.now() - t0} мс, ` +
+    console.log(`${slug}: ${raw.idx.length / 3} -> ${f.idx.length / 3} (вдали ${f.far.idx.length / 3}) треугольников за ${Date.now() - t0} мс, ` +
       `${f.sizeM.toFixed(2)} м в поперечнике, высота ${f.height.toFixed(2)} полуширины, ${f.pos.length / 3} вершин`);
     shapes.push({ slug, author, f });
   }
@@ -567,6 +576,9 @@ if (process.argv.includes('--clean')) {
     lines.push(`    nrm: [${f.nrm.map(num).join(',')}],`);
     lines.push(`    uv: [${f.uv.map(num).join(',')}],`);
     lines.push(`    idx: [${f.idx.join(',')}],`);
+    lines.push('    // Дальняя форма: для камня меньше пары градусов на экране.');
+    lines.push(`    far: { pos: [${f.far.pos.map(num).join(',')}], nrm: [${f.far.nrm.map(num).join(',')}], `
+      + `uv: [${f.far.uv.map(num).join(',')}], idx: [${f.far.idx.join(',')}] },`);
     lines.push('  },');
   }
   lines.push('];', '');

@@ -47,7 +47,7 @@ import { patchPlan, patchBuilder, PATCH } from '../js/gl/patches.js';
 import { cubeLookup } from '../js/gl/bake.js';
 import {
   faceDir, tileBounds, tileChildren, TILE_GRID, tileTexelAngle, tileCellAngle,
-  selectTiles, TILE_MAX_LEVEL,
+  selectTiles, TILE_MAX_LEVEL, tileKey,
 } from '../js/gl/quadtree.js';
 import { tileBuilder, TILE_TEXEL_TOL } from '../js/gl/tiles.js';
 import { planetGeometry } from '../js/gl/planetmesh.js';
@@ -971,6 +971,18 @@ console.log('\n== растительность ==');
         if (lo < -0.02) sunk++;
         if (hi > r.size * 1000 * 0.3) stands++;
       }
+      // Дальняя форма: камень меньше двух градусов на экране — 60
+      // треугольников вместо 320. С высоты 165 м (так висел пилот, у
+      // которого поле в полёте пересобиралось по 8 МБ) поле выходит в
+      // разы легче, а у самой земли — то же, что было.
+      const farOk = SHAPES.every((s) => s.far && s.far.idx.length / 3 >= 40 && s.far.idx.length / 3 <= 80
+        && s.far.uv.length === s.far.pos.length / 3 * 2);
+      const c0 = { x: spot.x, y: spot.y, z: spot.z };
+      const high = buildRockGeometry(sea, rocks, null, null, c0, 0.165);
+      const low = buildRockGeometry(sea, rocks, null, null, c0, 0.002);
+      ok(farOk && high.verts < geo2.verts * 0.4 && low.verts > high.verts * 1.5,
+        'камни вдали — дальней формой (60 треугольников): с высоты 165 м поле в ' + (geo2.verts / high.verts).toFixed(1)
+        + ' раза легче (' + high.verts + ' вершин против ' + geo2.verts + '), у самой земли — ' + low.verts);
       ok(rocks.length > 20 && sunk === rocks.length && stands === rocks.length && uvMax > 0.5 && uvMax < 50
         && existsSync(new URL('../' + GROUND.rock.file, import.meta.url)),
         'в поле ' + rocks.length + ' камней: каждый низом в грунте и верхом над ним; фактура '
@@ -4157,7 +4169,7 @@ console.log('\n== мок GL: путь отрисовки ==');
     // Ни одной дырки: всё, что выбрано к отрисовке, готово.
     let holes = 0;
     for (const t of scene.tiles.draw) {
-      const e = scene.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`);
+      const e = scene.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
       if (!e || !e.mesh) holes++;
     }
     ok(holes === 0, `в списке отрисовки нет незаготовленных плиток (${holes})`);
@@ -4174,7 +4186,7 @@ console.log('\n== мок GL: путь отрисовки ==');
       };
       scene.render(game);
       scene.drawObject = draw0;
-      const meshes = new Set(scene.tiles.draw.map((t) => scene.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`).mesh));
+      const meshes = new Set(scene.tiles.draw.map((t) => scene.tiles.get(tileKey(t.face, t.level, t.tx, t.ty)).mesh));
       const tiles = seen.filter((s) => meshes.has(s.mesh));
       const nearest = Math.min(...tiles.map((s) => s.d));
       const shift = state.vecName.uLocalShift;
@@ -4367,7 +4379,7 @@ console.log('\n== мок GL: путь отрисовки ==');
 
       let holes = 0;
       for (const t of scene2.tiles.draw) {
-        const e = scene2.tiles.get(`${t.face}/${t.level}/${t.tx}/${t.ty}`);
+        const e = scene2.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
         if (!e || !e.mesh) holes++;
       }
       ok(holes === 0, `в наборе из потоков нет незаготовленных плиток (${holes})`);

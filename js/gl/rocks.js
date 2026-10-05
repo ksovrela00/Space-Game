@@ -44,6 +44,13 @@ export const ROCKS = {
   // примерно вдвое ниже этого числа. Мельче полуметра ставить бессмысленно:
   // с высоты в пару десятков метров такой камень не виден, а считать его
   // приходится наравне с остальными.
+  // Камень, который виден с глаза меньше чем под этим углом (поперечник
+  // к расстоянию, рад), получает дальнюю форму — 60 треугольников вместо
+  // 320 (tools/rocks.mjs). 0.02 — это два градуса без малого: двухметровый
+  // камень дальше ста метров. Граней там уже не различить, а с высоты в
+  // полторы сотни метров дальними выходят все камни поля — и поле в
+  // полёте собирается и выгружается впятеро легче.
+  nearK: 0.02,
   sizeMin: 0.0007,     // км — 70 см
   sizeMax: 0.0030,     // км — 3 м
   max: Q.rocks,        // предел на поле: дальше растёт только цена
@@ -174,7 +181,7 @@ function rockLook(gi, gj, face) {
  * Порциями, потому что на каждый камень приходится выборка рельефа:
  * поле целиком — это десяток миллисекунд, а кадр длится шестнадцать.
  */
-export function rockBuilder(body, rocks, sun = null, detail = null, center = null) {
+export function rockBuilder(body, rocks, sun = null, detail = null, center = null, eyeAlt = null) {
   const terrain = terrainOf(body);
   const R = body.radius;
   let origin = [0, 0, 0];
@@ -184,10 +191,21 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
   }
   const [ox, oy, oz] = origin;
   const n = rocks.length;
+  // Форма каждого камня — ближняя или дальняя, по углу, под которым он
+  // виден с глаза (ROCKS.nearK). Глаз — над серединой поля на высоте
+  // eyeAlt; без них (проверки) все камни ближние.
+  const form = rocks.map((r) => {
+    const s = SHAPES[r.shape] || SHAPES[0];
+    // null >= 0 в JS — истина: «высоты нет» проверяется отдельно.
+    if (!center || eyeAlt === null || !(eyeAlt >= 0) || !s.far) return s;
+    const c = r.dir.x * center.x + r.dir.y * center.y + r.dir.z * center.z;
+    const along = Math.acos(Math.max(-1, Math.min(1, c))) * R;
+    const dist = Math.hypot(along, eyeAlt);
+    return 2 * r.size > ROCKS.nearK * dist ? s : s.far;
+  });
   // Вершин и индексов у форм разное число: считаем по камням поля.
   let total = 0, totalIdx = 0;
-  for (const r of rocks) {
-    const s = SHAPES[r.shape] || SHAPES[0];
+  for (const s of form) {
     total += s.pos.length / 3 + SHADOW_VERTS;
     totalIdx += s.idx.length + SHADOW_VERTS;
   }
@@ -252,7 +270,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     }
   };
 
-  const one = (r) => {
+  const one = (r, i) => {
     const d = r.dir;
     // Высота грунта под камнем — с ТОЙ ЖЕ детализацией, с какой грунт
     // РИСУЕТСЯ. Полная высота не годится: сетка передаёт рельеф с
@@ -281,6 +299,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     const sz = r.size / R;                     // размер в единичном радиусе
 
     const shape = SHAPES[r.shape] || SHAPES[0];
+    const geo = form[i];
     const [qx, qy, qz] = r.squash || [1, 1, 1];
     const sink = SINK * shape.height;
     // Фактура: координата формы (в полуширинах) -> метры -> куски
@@ -290,7 +309,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     const [u0, v0] = r.uvAt || [0, 0];
     const top = (shape.height - sink) * qy;
     const base = o;
-    const P = shape.pos, N = shape.nrm, U = shape.uv;
+    const P = geo.pos, N = geo.nrm, U = geo.uv;
     for (let i = 0; i < P.length / 3; i++) {
       const lx = P[i * 3] * qx, ly = (P[i * 3 + 1] - sink) * qy, lz = P[i * 3 + 2] * qz;
       const px = (lx * cs - lz * sn) * sz;
@@ -321,7 +340,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
       uv[o * 2 + 1] = U[i * 2 + 1] * uk + v0;
       o++;
     }
-    for (const j of shape.idx) indices[oi++] = base + j;
+    for (const j of geo.idx) indices[oi++] = base + j;
     shadow(r, d, h, tx, ty, tz, bx, by, bz, sz, top * sz, rgb);
   };
 
@@ -330,7 +349,7 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
     get done() { return at >= n; },
     step(count = ROCKS.chunk) {
       const end = Math.min(n, at + count);
-      for (; at < end; at++) one(rocks[at]);
+      for (; at < end; at++) one(rocks[at], at);
       if (at < n) return false;
       result = { positions, normals, colors, uv, indices, faces: oi / 3, verts: o, count: n, origin };
       return true;
@@ -340,8 +359,8 @@ export function rockBuilder(body, rocks, sun = null, detail = null, center = nul
 }
 
 /** Поле целиком, одним заходом. Этим пользуются проверки. */
-export function buildRockGeometry(body, rocks, sun = null, detail = null, center = null) {
-  const b = rockBuilder(body, rocks, sun, detail, center);
+export function buildRockGeometry(body, rocks, sun = null, detail = null, center = null, eyeAlt = null) {
+  const b = rockBuilder(body, rocks, sun, detail, center, eyeAlt);
   while (!b.step(1e9)) { /* один заход */ }
   return b.result;
 }
@@ -401,7 +420,7 @@ export class RockField {
           radius,
           cell,
           builder: rockBuilder(body, scatterRocks(body, dir, radius), sun,
-            cell > 0 ? terrainOf(body).detailForCell(cell) : null, dir),
+            cell > 0 ? terrainOf(body).detailForCell(cell) : null, dir, alt),
         };
       }
     }

@@ -16,7 +16,7 @@ import { altitudeOf, worldPoint } from '../game/surface.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK, NPC_COLOR } from './theme.js';
 import { npcFade, npcGear, hullName } from '../game/npc.js';
 import { Q } from '../core/quality.js';
-import { L, numLocale } from '../core/lang.js';
+import { L, fmtNum } from '../core/lang.js';
 import { STICK } from '../game/mousefly.js';
 // Палитра живёт отдельно (js/ui/theme.js): её делят угловые панели
 // (здесь) и мониторы приборной доски кабины (js/ui/panels.js).
@@ -69,7 +69,7 @@ export const fmtDist = (km) => {
   if (!isFinite(km)) return '—';
   if (km < 1) return (km * 1000).toFixed(0) + L(' м');
   if (km < 1000) return km.toFixed(1) + L(' км');
-  if (km < 1e6) return Math.round(km).toLocaleString(numLocale()) + L(' км');
+  if (km < 1e6) return fmtNum(Math.round(km)) + L(' км');
   return (km / 1e6).toFixed(2) + L(' млн км');
 };
 

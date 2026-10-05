@@ -43,7 +43,12 @@ export function tileBounds(level, tx, ty) {
   return { u0: -1 + tx * step, u1: -1 + (tx + 1) * step, v0: -1 + ty * step, v1: -1 + (ty + 1) * step };
 }
 
-export const tileKey = (face, level, tx, ty) => `${face}/${level}/${tx}/${ty}`;
+// Ключ плитки — число, а не строка «грань/уровень/x/y». Ключ берётся
+// десятки тысяч раз за кадр (обход дерева, удержание предков и соседей),
+// и строка на каждый — это 1.1 мс процессора за кадр на одни ключи
+// (замер: 180 плиток у земли). По 20 бит на координату и 5 на уровень —
+// 48 бит, точное целое в double до TILE_MAX_LEVEL = 20.
+export const tileKey = (face, level, tx, ty) => ((face * 32 + level) * 1048576 + tx) * 1048576 + ty;
 
 /** Центр плитки (направление) и её угловой радиус. */
 export function tileCenter(face, level, tx, ty, out = { x: 0, y: 0, z: 0 }) {
@@ -209,7 +214,7 @@ export function selectTiles(ctx, out = []) {
         // единственный вид смены набора, который глаз читает как рывок
         // на ровном месте. Его и записываем поимённо.
         if (limit < 1 && diag.collapses && diag.collapses.length < 8) {
-          diag.collapses.push({ key: tileKey(t.face, t.level, t.tx, t.ty), err, limit });
+          diag.collapses.push({ key: `${t.face}/${t.level}/${t.tx}/${t.ty}`, err, limit });
         }
       }
       if (ctx.ready(t)) out.push(t);

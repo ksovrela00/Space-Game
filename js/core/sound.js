@@ -75,6 +75,22 @@ const clampRate = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const NOISE_SEC = 2;
 const MAX_VOICES = 12;      // разовых звуков одновременно
 
+// Плавно к цели — но только если цель сдвинулась. Постоянные голоса
+// обновляются каждый кадр, и двадцать setTargetAtTime в кадр с той же
+// целью — это двадцать событий автоматизации: главный поток их
+// отправляет, звуковой разбирает, а слышно ровно то же (замер: 0.14 мс
+// процессора на кадр). Сдвиг меньше тысячной на слух не отличить: это
+// меньше двух центов по тону и сотая децибела по громкости. Сравнение —
+// с последней ОТПРАВЛЕННОЙ целью, так что медленный дрейф не теряется:
+// он уходит, как только наберёт тысячную.
+const GLIDE_EPS = 1e-3;
+function glide(param, value, t, tau) {
+  const last = param._to;
+  if (last !== undefined && Math.abs(value - last) <= GLIDE_EPS * Math.max(Math.abs(last), 1e-3)) return;
+  param._to = value;
+  param.setTargetAtTime(value, t, tau);
+}
+
 export class Sound {
   constructor() {
     this.ctx = null;
@@ -364,26 +380,26 @@ export class Sound {
       const s = this.v.sample;
       // Скорость воспроизведения — это и есть «обороты»: рокот тянется
       // вверх вместе с тягой ровно так же, как тянулся бы генератор.
-      s.low.src.playbackRate.setTargetAtTime(0.72 + 0.62 * pitch, t, 0.1);
-      s.low.gain.gain.setTargetAtTime(0.5 * level, t, 0.08);
+      glide(s.low.src.playbackRate, 0.72 + 0.62 * pitch, t, 0.1);
+      glide(s.low.gain.gain, 0.5 * level, t, 0.08);
       if (s.mid) {
-        s.mid.src.playbackRate.setTargetAtTime(0.8 + 0.75 * pitch, t, 0.1);
+        glide(s.mid.src.playbackRate, 0.8 + 0.75 * pitch, t, 0.1);
         // Машинный слой приходит с оборотами: на холостых его почти нет.
-        s.mid.gain.gain.setTargetAtTime(0.36 * level * (0.25 + 0.75 * pitch), t, 0.08);
+        glide(s.mid.gain.gain, 0.36 * level * (0.25 + 0.75 * pitch), t, 0.08);
       }
-      s.exhaust.src.playbackRate.setTargetAtTime(0.85 + 0.5 * pitch, t, 0.1);
-      s.exhaust.flt.frequency.setTargetAtTime(900 + 5200 * pitch, t, 0.1);
-      s.exhaust.gain.gain.setTargetAtTime(0.34 * roar, t, 0.08);
+      glide(s.exhaust.src.playbackRate, 0.85 + 0.5 * pitch, t, 0.1);
+      glide(s.exhaust.flt.frequency, 900 + 5200 * pitch, t, 0.1);
+      glide(s.exhaust.gain.gain, 0.34 * roar, t, 0.08);
       return;
     }
     const v = this.v.engine;
     const f = 38 + 96 * pitch;
-    for (const { o, mul } of v.osc) o.frequency.setTargetAtTime(f * mul, t, 0.08);
-    v.lp.frequency.setTargetAtTime(190 + 1500 * pitch, t, 0.08);
-    v.gain.gain.setTargetAtTime(0.16 * level, t, 0.07);
+    for (const { o, mul } of v.osc) glide(o.frequency, f * mul, t, 0.08);
+    glide(v.lp.frequency, 190 + 1500 * pitch, t, 0.08);
+    glide(v.gain.gain, 0.16 * level, t, 0.07);
     const ex = this.v.exhaust;
-    ex.bp.frequency.setTargetAtTime(380 + 1100 * pitch, t, 0.08);
-    ex.gain.gain.setTargetAtTime(0.09 * roar, t, 0.07);
+    glide(ex.bp.frequency, 380 + 1100 * pitch, t, 0.08);
+    glide(ex.gain.gain, 0.09 * roar, t, 0.07);
   }
 
   /**
@@ -395,7 +411,7 @@ export class Sound {
     if (!this.ok) return;
     const t = this.ctx.currentTime;
     if (this.sampled && this.v.sample.station) {
-      this.v.sample.station.gain.gain.setTargetAtTime(0.4 * level, t, 0.25);
+      glide(this.v.sample.station.gain.gain, 0.4 * level, t, 0.25);
     }
   }
 
@@ -407,16 +423,16 @@ export class Sound {
       const d = this.v.sample.drive;
       // Ступени идут через десять крат, поэтому и тон берём по степени:
       // линейная шкала на верхних ступенях уже не различается на слух.
-      d.src.playbackRate.setTargetAtTime(0.62 * Math.pow(2, 1.35 * pitch), t, 0.15);
-      d.gain.gain.setTargetAtTime(0.3 * level, t, 0.12);
+      glide(d.src.playbackRate, 0.62 * Math.pow(2, 1.35 * pitch), t, 0.15);
+      glide(d.gain.gain, 0.3 * level, t, 0.12);
       return;
     }
     const v = this.v.drive;
     const f = 105 * Math.pow(2, 2.7 * pitch);
-    for (const { o, mul } of v.osc) o.frequency.setTargetAtTime(f * mul, t, 0.12);
-    v.lfo.frequency.setTargetAtTime(5 + 26 * pitch, t, 0.12);
-    v.depth.gain.setTargetAtTime(0.35 * level * 0.07, t, 0.12);
-    v.gain.gain.setTargetAtTime(0.07 * level, t, 0.1);
+    for (const { o, mul } of v.osc) glide(o.frequency, f * mul, t, 0.12);
+    glide(v.lfo.frequency, 5 + 26 * pitch, t, 0.12);
+    glide(v.depth.gain, 0.35 * level * 0.07, t, 0.12);
+    glide(v.gain.gain, 0.07 * level, t, 0.1);
   }
 
   /** Подъёмные движки: pitch 0..1, вверх звонче, чем вниз. */
@@ -425,14 +441,14 @@ export class Sound {
     const t = this.ctx.currentTime;
     if (this.sampled && this.v.sample.thrust) {
       const s = this.v.sample.thrust;
-      s.src.playbackRate.setTargetAtTime(0.8 + 0.5 * pitch, t, 0.06);
-      s.flt.frequency.setTargetAtTime(700 + 900 * pitch, t, 0.06);
-      s.gain.gain.setTargetAtTime(0.42 * level, t, 0.05);
+      glide(s.src.playbackRate, 0.8 + 0.5 * pitch, t, 0.06);
+      glide(s.flt.frequency, 700 + 900 * pitch, t, 0.06);
+      glide(s.gain.gain, 0.42 * level, t, 0.05);
       return;
     }
     const v = this.v.thrust;
-    v.bp.frequency.setTargetAtTime(620 + 700 * pitch, t, 0.05);
-    v.gain.gain.setTargetAtTime(0.1 * level, t, 0.05);
+    glide(v.bp.frequency, 620 + 700 * pitch, t, 0.05);
+    glide(v.gain.gain, 0.1 * level, t, 0.05);
   }
 
   // --- разовые звуки ----------------------------------------------------------
