@@ -126,7 +126,7 @@ const _p = { x: 0, y: 0, z: 0 };
  *
  * @param rv    состояние (makeRover)
  * @param ctl   { throttle: −1..1 (газ вперёд — плюс), steer: −1..1 (вправо — плюс), brake: 0..1 }
- * @param spec  числа типа (SHIP: driveSpeed, reverseSpeed, driveAccel, brake, roll,
+ * @param spec  числа типа (SHIP: driveSpeed, reverseSpeed, driveAccel, driveBrake, roll,
  *              steerMax, steerRate, steerFade, grip, slopeMax, travel, spring)
  * @param env   { g: м/с², ground(p) -> радиус грунта (км) по направлению точки p
  *              (оси тела) или null, water(p) -> вода ли там, obstacles: [{ p, r }] —
@@ -296,7 +296,7 @@ function steerTo(rv, ctl, spec, dt) {
  */
 function speedTo(v, th, brk, spec, dt) {
   const vmax = spec.driveSpeed || 0, vrev = spec.reverseSpeed || 0;
-  const acc = spec.driveAccel || 0, brake = spec.brake || 0, roll = spec.roll || 0;
+  const acc = spec.driveAccel || 0, brake = spec.driveBrake || 0, roll = spec.roll || 0;
   if (brk > 0) return toward(v, 0, brake * brk * dt);
   if (th > 0) {
     return v < -0.3 ? toward(v, 0, brake * dt)
@@ -332,7 +332,7 @@ function speedTo(v, th, brk, spec, dt) {
  */
 export function stepHangar(rv, ctl, spec, env, dt) {
   rv.bump = 0; rv.landed = 0; rv.air = false; rv.slip = false; rv.slope = 0;
-  rv.vs = 0; rv.vy = 0;
+  rv.vs = 0;
   steerTo(rv, ctl, spec, dt);
   const th = clamp(ctl.throttle || 0, -1, 1);
   const brk = clamp(ctl.brake || 0, 0, 1);
@@ -340,12 +340,30 @@ export function stepHangar(rv, ctl, spec, env, dt) {
   if (th === 0 && Math.abs(rv.v) < 0.05) rv.v = 0;
   rv.pedal = th; rv.brake = brk; rv.hold = th === 0 && Math.abs(rv.v) < 0.3;
   const H = rv.hg;
+  const x0 = H.x, z0 = H.z;
   if (Math.abs(rv.steer) > 1e-6) H.yaw += rv.v * Math.tan(rv.steer) / ARM * dt;
   H.x += Math.sin(H.yaw) * rv.v * dt;
   H.z += Math.cos(H.yaw) * rv.v * dt;
-  H.y = env.floor(H.x, H.z);
   hangarPush(rv, env.solids || []);
-  H.y = env.floor(H.x, H.z);
+  // Пол впереди выше, чем колесо берёт (край палубы над плитой в колодце), —
+  // это стена, а не новый пол: машина упирается, а не взлетает на палубу.
+  if (env.floor(H.x, H.z) > H.y + HANGAR_STEP) {
+    H.x = x0; H.z = z0;
+    rv.bump = Math.max(rv.bump, Math.abs(rv.v));
+    rv.v = 0;
+  }
+  // Пол ушёл вниз больше, чем на ход плиты за шаг (въехал в открытый
+  // колодец), — машина падает с тяжестью тела, а не переставляется на дно
+  // за кадр. Невидимого края у проёма нет (так решил автор игры).
+  const fl = env.floor(H.x, H.z);
+  if (fl < H.y - 0.05 || rv.vy > 0) {
+    rv.vy -= (env.g || 9.81) * dt;
+    H.y += rv.vy * dt;
+    if (H.y <= fl) { rv.landed = Math.max(0, -rv.vy); H.y = fl; rv.vy = 0; } else rv.air = true;
+  } else {
+    H.y = fl;
+    rv.vy = 0;
+  }
   for (let i = 0; i < WHEELS.length; i++) {
     const w = WHEELS[i], st = rv.wheels[i];
     st.steer = rv.steer * w.steer;
@@ -356,45 +374,63 @@ export function stepHangar(rv, ctl, spec, env, dt) {
   return rv;
 }
 
+// Кузов в трюме — прямоугольник по самой машине с колёсами (полуширина и
+// полудлина, м), а не круги: круги кузова (HULL_CIRCLES — между стойками
+// шасси на грунте) торчат за нос и корму на 0.9 м, и в трюме машина
+// вставала в 0.9 м от стены, а «целиком на плите» (onBayEdge) было бы
+// окном в ±0.5 м на плите в 8.8 м.
+export const HULL_BOX = { w: RV.wheel.x + RV.wheel.w / 2, l: Math.max(-RV.body.z0, RV.body.z1) };
+
+// Дальше этого за проход толкалка не двигает, м. Упереться в стену — это
+// сантиметры за шаг; больше — значит, коробка оказалась внутри кузова сама
+// (появилась, машину поставили), и выталкивать её разом — бросок на метр
+// за кадр. Так и было: заслон колодца, появившийся под свешенным кузовом,
+// выбрасывал машину на 0.9–1.75 м (tools/smoke.mjs, «швы переходов»).
+const PUSH_MAX = 0.2;
+
+// Выше этого пол впереди для колеса в трюме — стена, м (колесо — 0.55 м).
+const HANGAR_STEP = 0.45;
+
 /**
- * Кузов — из коробок трюма: каждый круг кузова выталкивается из коробок,
- * которые он задевает по высоте кузова (от тридцати сантиметров над полом
- * до крыши), а скорость в стену гаснет — машина упирается.
+ * Кузов — из коробок трюма: прямоугольник кузова выталкивается из коробок,
+ * которые он задевает по высоте (от тридцати сантиметров над полом до
+ * крыши), по оси наименьшего перекрытия, а скорость в стену гаснет —
+ * машина упирается.
  */
 export function hangarPush(rv, solids) {
-  const H = rv.hg;
-  const sy = Math.sin(H.yaw), cy = Math.cos(H.yaw);
+  const H = rv.hg, W = HULL_BOX.w, L = HULL_BOX.l;
   const y0 = H.y + 0.3, y1 = H.y + RV.roofBar;
   for (let pass = 0; pass < 3; pass++) {
     let moved = false;
-    for (const c of HULL_CIRCLES) {
-      const cx = H.x + sy * c.z, cz = H.z + cy * c.z;
-      for (const s of solids) {
-        if (s.hi[1] <= y0 || s.lo[1] >= y1) continue;
-        const px = clamp(cx, s.lo[0], s.hi[0]), pz = clamp(cz, s.lo[2], s.hi[2]);
-        let dx = cx - px, dz = cz - pz;
-        let d = Math.hypot(dx, dz);
-        if (d >= c.r) continue;
-        if (d < 1e-6) {
-          // Центр круга внутри коробки — наружу по ближней грани.
-          const e = [cx - s.lo[0], s.hi[0] - cx, cz - s.lo[2], s.hi[2] - cz];
-          const k = e.indexOf(Math.min(...e));
-          dx = k === 0 ? -1 : k === 1 ? 1 : 0; dz = k === 2 ? -1 : k === 3 ? 1 : 0;
-          d = 0;
-          H.x += dx * (e[k] + c.r); H.z += dz * (e[k] + c.r);
-        } else {
-          dx /= d; dz /= d;
-          H.x += dx * (c.r - d); H.z += dz * (c.r - d);
-        }
-        // Едет в стену — встаёт; задел вскользь — теряет ход по косинусу.
-        // Боком машина не ездит, и «скользить вдоль стены» ей нечем.
-        const k = sy * dx + cy * dz;
-        if (k * rv.v < 0) {
-          rv.bump = Math.max(rv.bump, Math.abs(k * rv.v));
-          rv.v *= Math.abs(k) > 0.5 ? 0 : 1 - Math.abs(k);
-        }
-        moved = true;
+    const sy = Math.sin(H.yaw), cy = Math.cos(H.yaw);
+    // Оси кузова в плане: вперёд (sy, cy), вправо (cy, −sy).
+    for (const s of solids) {
+      if (s.hi[1] <= y0 || s.lo[1] >= y1) continue;
+      const bx = (s.lo[0] + s.hi[0]) / 2, bz = (s.lo[2] + s.hi[2]) / 2;
+      const hx = (s.hi[0] - s.lo[0]) / 2, hz = (s.hi[2] - s.lo[2]) / 2;
+      const dx = bx - H.x, dz = bz - H.z;
+      // Разделяющие оси: две коробки и две кузова. Перекрытие по каждой —
+      // сумма проекций минус расстояние между серединами.
+      let best = Infinity, nx = 0, nz = 0;
+      for (const [ax, az] of [[1, 0], [0, 1], [cy, -sy], [sy, cy]]) {
+        const rr = W * Math.abs(cy * ax - sy * az) + L * Math.abs(sy * ax + cy * az);
+        const rb = hx * Math.abs(ax) + hz * Math.abs(az);
+        const d = dx * ax + dz * az;
+        const over = rr + rb - Math.abs(d);
+        if (over <= 0) { best = 0; break; }
+        if (over < best) { best = over; const sg = d > 0 ? -1 : 1; nx = ax * sg; nz = az * sg; }
       }
+      if (!(best > 1e-9)) continue;
+      const step = Math.min(best, PUSH_MAX);
+      H.x += nx * step; H.z += nz * step;
+      // Едет в стену — встаёт; задел вскользь — теряет ход по косинусу.
+      // Боком машина не ездит, и «скользить вдоль стены» ей нечем.
+      const k = sy * nx + cy * nz;
+      if (k * rv.v < 0) {
+        rv.bump = Math.max(rv.bump, Math.abs(k * rv.v));
+        rv.v *= Math.abs(k) > 0.5 ? 0 : 1 - Math.abs(k);
+      }
+      moved = true;
     }
     if (!moved) break;
   }

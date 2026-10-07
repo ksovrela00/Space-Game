@@ -73,7 +73,11 @@ export const BAY = {
   accel: 0.6,          // м/с² — разгон и торможение: платформа с грузом не дёргается
   extra: 0.6,          // м — ход сверх «до грунта на ровной стоянке»: на склоне грунт под ней ниже
   seal: 0.03,          // м — с какого хода между плитой и полом щель: трюм открыт забортному
-  guard: 0.6,          // м — заслон: выше шага (WALK.step, 0.42), перешагнуть нельзя
+  // м — насколько середина стоящего может быть за краем плиты, а он всё
+  // равно на ней (полуширина тела, WALK.half): подошва в полметра стоит на
+  // кромке. Было 5 см, и стоящего на кромке плита не везла — уходила из-под
+  // ног, и он падал под днище, где в осях корабля грунта нет.
+  feet: 0.25,
   near: 1.3,           // м — дотянуться до пульта
 };
 
@@ -283,6 +287,9 @@ export function resetAirlocks(air) {
  *   ground(x, z) — высота грунта под точкой в осях корабля, м, или null —
  *                  грунта рядом нет (пустота, порт),
  *   occupied(hx) — стоит ли человек в проёме или на трапе этого люка,
+ *   below(bx) — есть ли кто под платформой (вниз она тогда не идёт),
+ *   load(bx) — кто стоит на кромке платформы: 'car' — машина, 'person' —
+ *              человек, иначе null (на кромке кто-то — она никуда не идёт),
  * }
  * @returns события: [{ kind: 'hatch'|'stair'|'cycle'|'sealed'|'forced', id, dir }]
  *   и { kind: 'rush', id — дверь, dp — бар }: открылась дверь между
@@ -583,10 +590,15 @@ function settleStair(hx, env, dt) {
 }
 
 /**
- * Твёрдое люков и трапов в осях корабля: панель закрытого люка (или
- * заслон, если сойти некуда), ступени, поручни и заслон у пяты, когда до
- * земли далеко. Ступени — ровные коробки: на довороте ±15° их наклон
- * меньше, чем ступня чувствует.
+ * Твёрдое люков и трапов в осях корабля: панель люка, пока она не открыта
+ * до конца, ступени и поручни. Ступени — ровные коробки: на довороте ±15°
+ * их наклон меньше, чем ступня чувствует.
+ *
+ * НЕВИДИМОГО НЕТ (так решил автор игры): ни заслона по бокам от трапа на
+ * пороге, ни калитки у пяты, когда до земли далеко, ни стенки в открытом
+ * проёме без трапа. Шагнул мимо трапа или с его конца — падаешь, на грунт с
+ * любой высоты (js/main.js, outsideHull), а в пустоте за бортом — плывёшь.
+ * Вернуться на борт — дело того, кто шагнул.
  */
 export function airSolids(air, out = []) {
   out.length = 0;
@@ -597,34 +609,18 @@ export function airSolids(air, out = []) {
     const x0 = sd * (h.skin - 0.12), x1 = sd * (h.skin + 0.35);
     const xlo = Math.min(x0, x1), xhi = Math.max(x0, x1);
     const y0 = h.y[0], y1 = h.y[1] + 0.4;
-    if (!hx.exitOk) {
-      // Люк закрыт, трап не выдвинут, или снаружи не на что встать —
-      // проём перекрыт целиком.
+    if (hx.open < 1) {
+      // Створка закрыта или ещё едет — проём перекрыт ею.
       out.push({ lo: [xlo, y0 - 0.3, h.z[0]], hi: [xhi, y1, h.z[1]], hatch: hx.id });
       continue;
     }
-    // Сходят только на трап: по бокам от него проём перекрыт заслоном. Он
-    // невидим и стоит лишь там, где поручней ещё нет, — от тоннеля до
-    // обшивки (поручни ступеней начинаются от самой петли), — и только чуть
-    // выше шага: перешагнуть его нельзя, а большего от него не нужно. Раньше
-    // он был во весь проём и на 35 см за обшивку, и на склоне (тангаж до
-    // 20°) стенка в четыре метра наклонялась к проходу на полметра: пилот
-    // упирался в пустоту у верха трапа и в носовом люке, где над головой
-    // три метра.
-    const gx0 = sd * (h.skin - 0.12), gx1 = sd * (h.skin + 0.05);
-    const glo = Math.min(gx0, gx1), ghi = Math.max(gx0, gx1), gy = y0 + GUARD;
-    out.push({ lo: [glo, y0 - 0.3, h.z[0]], hi: [ghi, gy, hx.zc - AIR.half], hatch: hx.id });
-    out.push({ lo: [glo, y0 - 0.3, hx.zc + AIR.half], hi: [ghi, gy, h.z[1]], hatch: hx.id });
-    const key = hx.swing.toFixed(4) + ':' + (hx.footGap > AIR.drop ? 1 : 0);
+    if (hx.stair < 1) continue;                 // трап не выдвинут — проём открыт в никуда
+    const key = hx.swing.toFixed(4);
     if (hx.solidsKey !== key || !hx.solids) { hx.solids = stairSolids(hx); hx.solidsKey = key; }
     for (const s of hx.solids) out.push(s);
   }
   return out;
 }
-
-// Высота невидимого заслона по бокам от трапа на пороге, м: выше шага
-// (WALK.step, 0.42), чтобы на него не наступить.
-const GUARD = 0.6;
 
 function stairSolids(hx) {
   const d = hx.design, out = [];
@@ -651,14 +647,6 @@ function stairSolids(hx) {
       out.push({ lo: [xl, top, Math.min(z0, z1)], hi: [xh, top + AIR.rail, Math.max(z0, z1)], stair: hx.id, tag: 'rail' });
     }
   }
-  // До земли далеко — у пяты заслон: дальше прыжок, а не шаг.
-  if (hx.footGap > AIR.drop) {
-    const x = (d.n - 1) * d.t;
-    stairPoint(hx, 1, [x, -(d.n - 1) * d.r, 0], a);
-    stairPoint(hx, 1, [x + 0.12, -(d.n - 1) * d.r, 0], b);
-    out.push({ lo: [Math.min(a[0], b[0]), a[1], hx.zc - AIR.half], hi: [Math.max(a[0], b[0]), a[1] + AIR.rail, hx.zc + AIR.half],
-      stair: hx.id, tag: 'gate' });
-  }
   return out;
 }
 
@@ -675,11 +663,10 @@ function stairSolids(hx) {
 // и она укорачивается сама: предел хода считается каждый шаг.
 //
 // ЧТО ЗА ЕЁ КРАЕМ. Пока плита в колодце, вбок не сойти — стенки колодца
-// твёрдые. Ниже днища по краю плиты стоит заслон, пока сойти некуда: она
-// едет, висит выше AIR.drop над грунтом (то же правило, что у пяты трапа)
-// или ещё не легла. Вокруг проёма в полу трюма — свой заслон, пока
-// платформы в нём нет: шаг с палубы в колодец был бы падением на пять
-// метров. Звать её наверх с палубы — пультом на переборке трюма.
+// твёрдые (их видно: это толща корпуса). Ниже днища — ничего: с края
+// сходят или спрыгивают, а в открытый колодец с палубы падают. Невидимых
+// заслонов нет (так решил автор игры). Звать её наверх с палубы — пультом
+// на переборке трюма.
 //
 // КТО НА НЕЙ — ЕДЕТ. Стоящего на плите везёт игра (js/main.js, carryBay):
 // плита — твёрдое мира ходьбы, и без переноса она проходила бы сквозь
@@ -766,8 +753,18 @@ function stepBay(bx, env, dt, ev) {
   // воздух уходил из него без конца.
   if (Math.abs(target - bx.travel) <= 1e-4) bx.travel = target;
   const d = target - bx.travel;
-  // Вниз — только если под плитой никого.
-  const held = d > 0 && !!env.below && env.below(bx);
+  // Вниз — только если под плитой никого. И никуда — пока на её кромке
+  // машина или человек (env.load — кто): вниз свешенный нос лёг бы на
+  // палубу, наверх плита поддела бы машину снизу; человек одной ногой на
+  // палубе остался бы в заслоне колодца, а одной ногой на грунте — без
+  // плиты под другой. Так стоит и лифт, пока в дверях груз.
+  const under = d > 0 && !!env.below && env.below(bx);
+  const edge = !under && Math.abs(d) > 1e-4 && env.load ? env.load(bx) || null : null;
+  const held = under || !!edge;
+  // Сказать один раз, когда встала из-за груза на краю, — в том числе если
+  // и не трогалась: молча не поехавшая плита выглядит поломкой.
+  if (edge && !bx.loadHeld && bx.dir === 0) ev.push({ kind: 'bayStop', id: bx.id, at: 'load', who: edge });
+  bx.loadHeld = edge;
   if (Math.abs(d) > 1e-4 && !held) {
     const dir = Math.sign(d);
     if (dir !== bx.dir) {
@@ -784,7 +781,7 @@ function stepBay(bx, env, dt, ev) {
     bx.travel += dir * Math.min(Math.abs(d), bx.vel * dt);
   } else {
     if (bx.dir !== 0) {
-      ev.push({ kind: 'bayStop', id: bx.id, at: held ? 'held' : bx.travel < 0.01 ? 'top' : bx.floor ? 'ground' : 'air' });
+      ev.push({ kind: 'bayStop', id: bx.id, at: under ? 'held' : edge ? 'load' : bx.travel < 0.01 ? 'top' : bx.floor ? 'ground' : 'air', who: edge });
       bx.dir = 0;
     }
     bx.vel = 0;
@@ -802,28 +799,21 @@ function stepBay(bx, env, dt, ev) {
 }
 
 /**
- * Твёрдое платформы (оси корабля, м): плита и пульт на ней — всегда (плита
- * поднятая и есть пол трюма), заслон вокруг проёма — пока её в нём нет,
- * заслон по краю плиты — пока сойти нельзя. Оба заслона — СНАРУЖИ края:
- * стоящий на плите не оказывается внутри них, когда они появляются.
+ * Твёрдое платформы (оси корабля, м): плита и пульт на ней (плита поднятая
+ * и есть пол трюма). Заслонов нет (так решил автор игры): ни вокруг проёма
+ * в полу, ни по краю плиты. С едущей плиты запрыгивают на палубу, если
+ * хватает прыжка, с висящей — спрыгивают, в открытый колодец — падают. Что
+ * держит по-настоящему — стенки колодца в толще корпуса (js/models/interior.js).
  */
 export function baySolids(bx) {
-  const key = bx.travel.toFixed(4) + ':' + (bx.exitOk ? 1 : 0);
+  const key = bx.travel.toFixed(4);
   if (bx.solids && bx.solidsKey === key) return bx.solids;
   const b = bx.b, out = [];
-  const [x0, x1] = b.x, [z0, z1] = b.z, t = 0.06;
+  const [x0, x1] = b.x, [z0, z1] = b.z;
   const top = bayTop(bx);
   out.push({ lo: [x0, top - b.plate, z0], hi: [x1, top, z1], bay: bx.id, plate: true });
   const pb = bx.panelBox || (bx.panelBox = b.panelBox || null);
   if (pb) out.push({ lo: [pb.lo[0], pb.lo[1] - bx.travel, pb.lo[2]], hi: [pb.hi[0], pb.hi[1] - bx.travel, pb.hi[2]], bay: bx.id, panel: true });
-  const ring = (y0, y1, tag) => {
-    out.push({ lo: [x0 - t, y0, z0 - t], hi: [x0, y1, z1 + t], bay: bx.id, guard: tag });
-    out.push({ lo: [x1, y0, z0 - t], hi: [x1 + t, y1, z1 + t], bay: bx.id, guard: tag });
-    out.push({ lo: [x0, y0, z0 - t], hi: [x1, y1, z0], bay: bx.id, guard: tag });
-    out.push({ lo: [x0, y0, z1], hi: [x1, y1, z1 + t], bay: bx.id, guard: tag });
-  };
-  if (bx.travel > 0.02) ring(b.deck, b.deck + BAY.guard, 'deck');
-  if (bx.travel > 0.02 && !bx.exitOk && top < b.belly) ring(top, top + BAY.guard, 'edge');
   bx.solids = out;
   bx.solidsKey = key;
   return out;
@@ -846,8 +836,8 @@ export function onBay(bx, p, tol = 0.06) {
 export function bayCarry(air, p) {
   for (const bx of (air && air.bays) || []) {
     if (!bx.dy) continue;
-    const b = bx.b, was = bayTop(bx) + bx.dy;
-    if (p[0] < b.x[0] - 0.05 || p[0] > b.x[1] + 0.05 || p[2] < b.z[0] - 0.05 || p[2] > b.z[1] + 0.05) continue;
+    const b = bx.b, was = bayTop(bx) + bx.dy, m = BAY.feet;
+    if (p[0] < b.x[0] - m || p[0] > b.x[1] + m || p[2] < b.z[0] - m || p[2] > b.z[1] + m) continue;
     if (Math.abs(p[1] - was) <= 0.08) return bx.dy;
   }
   return 0;
@@ -945,15 +935,19 @@ export function pastSkin(air, p) {
   return null;
 }
 
-/** На трапе ли точка (оси корабля): над его ступенями, в пределах поручней. */
-export function onStair(hx, p) {
+/**
+ * На трапе ли точка (оси корабля): над его ступенями, в пределах поручней
+ * (m — запас вокруг, м: чтобы, сойдя с трапа, не перескакивать у его края
+ * из осей в оси туда-обратно).
+ */
+export function onStair(hx, p, m = 0) {
   if (hx.stair < 1) return false;
   const d = hx.design, a = [0, 0, 0], b = [0, 0, 0];
   stairPoint(hx, 1, [0, 0, 0], a);
-  stairPoint(hx, 1, [d.foot[0] + 0.3, d.foot[1], 0], b);
-  const xl = Math.min(a[0], b[0]), xh = Math.max(a[0], b[0]);
-  return p[0] >= xl && p[0] <= xh && Math.abs(p[2] - hx.zc) <= AIR.half + 0.1
-    && p[1] >= Math.min(a[1], b[1]) - 0.6 && p[1] <= a[1] + 2.2;
+  stairPoint(hx, 1, [d.foot[0] + 0.3 + m, d.foot[1], 0], b);
+  const xl = Math.min(a[0], b[0]) - m, xh = Math.max(a[0], b[0]) + m;
+  return p[0] >= xl && p[0] <= xh && Math.abs(p[2] - hx.zc) <= AIR.half + 0.1 + m
+    && p[1] >= Math.min(a[1], b[1]) - 0.6 - m && p[1] <= a[1] + 2.2;
 }
 
 /**

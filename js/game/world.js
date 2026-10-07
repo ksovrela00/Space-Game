@@ -654,17 +654,29 @@ export function updateWorld(world, dt) {
     }
   };
 
+  // Сутки — от времени мира, как и орбиты, а не прибавкой шага. Прибавкой
+  // поворот копился, и время, которое СТАВЯТ (applyState: world.time = 0 и
+  // шаг на всё общее время — вход, пересадка, страховка), прибавляло его к
+  // уже повёрнутому телу ещё раз: планета разом поворачивалась под солнцем
+  // на случайный угол. Так у автора игры при пересадке из «Челленджера» в
+  // вездеход на дневной стороне сразу наступала ночь. Фаза при рождении
+  // мира (spin0) запоминается на первом шаге — makeSystem делает его с
+  // нулевым временем.
+  const spun = (b, rate) => {
+    if (b.spin0 === undefined) b.spin0 = b.spinPhase;
+    b.spinPhase = (b.spin0 + rate * t) % TAU;
+  };
   for (const p of world.planets) {
     place(p);
-    p.spinPhase = (p.spinPhase + p.spin * dt) % TAU;
+    spun(p, p.spin);
     for (const m of p.moons) {
       place(m);
-      m.spinPhase = (m.spinPhase + m.spin * dt) % TAU;
+      spun(m, m.spin);
     }
     if (p.station) {
       const s = p.station;
       place(s);
-      s.spinPhase = (s.spinPhase + s.spinRate * dt) % TAU;
+      spun(s, s.spinRate);
       // Ось порта — наружу от планеты; right/up катятся вокруг неё.
       // Оси вращения берём перпендикулярными оси порта: нормаль орбиты
       // (Q) и направление по орбите (P). Оси самой орбитальной плоскости

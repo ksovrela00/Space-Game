@@ -67,6 +67,23 @@ export function makeGroundFrame(body, feet, fwd) {
   return { body, o, r, u, f };
 }
 
+/**
+ * Оси трапа корабля V: начало — ноги (feet, мир, км), оси — самого корабля,
+ * в осях тела. Трап — часть корабля, и на его ступенях пешеход стоит по
+ * «вверх» корабля, а не тела: машина на склоне наклонена, и тело пешехода
+ * по отвесу в её дверь (0.9 × 1.6 м) не помещалось — оставалось снаружи,
+ * пригнувшись. В остальном это те же оси грунта (поле trap — чей трап):
+ * пешеход снаружи, корабль рисуется снаружи, грунт и вода — те же.
+ */
+export function makeVesselFrame(body, feet, V) {
+  const B = frameOf(body), b = V.basis;
+  const o = toLocal(B, feet.x - body.pos.x, feet.y - body.pos.y, feet.z - body.pos.z, [0, 0, 0]);
+  const r = toLocal(B, b.right.x, b.right.y, b.right.z, [0, 0, 0]);
+  const u = toLocal(B, b.up.x, b.up.y, b.up.z, [0, 0, 0]);
+  const f = toLocal(B, b.fwd.x, b.fwd.y, b.fwd.z, [0, 0, 0]);
+  return { body, o, r: norm(r), u: norm(u), f: norm(f), trap: V };
+}
+
 const _l = [0, 0, 0];
 
 /** Точка в осях грунта (м) -> мир (км). */

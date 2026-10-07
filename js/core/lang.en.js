@@ -471,6 +471,8 @@ export const EN = {
   'ПЛАТФОРМА ВЫПУЩЕНА · ДО ГРУНТА ': 'PLATFORM OUT · GROUND ',
   'ПЛАТФОРМА ВЫПУЩЕНА · ПОД НЕЙ ПУСТО': 'PLATFORM OUT · NOTHING BELOW',
   'ПОД ПЛАТФОРМОЙ ЧЕЛОВЕК · СПУСК ЖДЁТ': 'SOMEONE UNDER THE PLATFORM · LOWERING ON HOLD',
+  'МАШИНА НА КРАЮ ПЛАТФОРМЫ · ХОД ЖДЁТ': 'VEHICLE ON THE PLATFORM EDGE · MOVE ON HOLD',
+  'НА КРАЮ ПЛАТФОРМЫ ЧЕЛОВЕК · ХОД ЖДЁТ': 'SOMEONE ON THE PLATFORM EDGE · MOVE ON HOLD',
   'ПЛАТФОРМА ЗАПЕРТА · ': 'PLATFORM LOCKED · ',
   'В ПОРТУ ПЛАТФОРМУ НЕ ОПУСТИТЬ': 'THE PLATFORM CANNOT BE LOWERED IN PORT',
   'ПЛАТФОРМА ЗАБЛОКИРОВАНА: ВАРП': 'PLATFORM LOCKED: WARP',

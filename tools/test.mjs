@@ -21,7 +21,7 @@ import {
 } from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
-  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM,
+  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed,
 } from '../js/game/quantum.js';
 import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
@@ -119,7 +119,7 @@ import { lookAlong } from '../js/core/basis.js';
 import { box, prismZ, loft } from '../js/models/geometry.js';
 import { L, setLang, getLang, hasEn, LANGS } from '../js/core/lang.js';
 import { loadSpecsFromDisk } from './specs.mjs';
-import { applySpecs, useShipType } from '../js/game/specs.js';
+import { applySpecs, useShipType, useShipEquipment } from '../js/game/specs.js';
 import { HULL } from '../js/game/hull.js';
 import { modules, applyModuleSpecs, applyShipEquipment, flightModel, SCANNER_STEPS, moduleSpec }
   from '../js/game/loadout.js';
@@ -149,6 +149,36 @@ const world = makeSystem(0x1a7e);
 updateWorld(world, 1);
 ok(world.planets.length === 9, 'планет: ' + world.planets.length);
 ok(world.stations.length === 4, 'станций: ' + world.stations.length);
+
+// Сутки тел — от времени мира, как орбиты: время, которое СТАВЯТ (вход,
+// пересадка, страховка — applyState: world.time = 0 и шаг на всё общее
+// время), не поворачивает тела ещё раз. Раньше поворот копился прибавкой,
+// и при пересадке в вездеход на дневной стороне сразу наступала ночь.
+{
+  const T = 1224294.5;
+  const ran = makeSystem(0x1a7e);
+  for (let t = 0; t < 600; t++) updateWorld(ran, t === 0 ? T - 599 : 1);   // игра шла кадрами
+  ran.time = 0; updateWorld(ran, T);                                        // и время поставили заново
+  const fresh = makeSystem(0x1a7e);
+  updateWorld(fresh, T);
+  const bodies = (w) => w.planets.flatMap((p) => [p, ...p.moons, ...(p.station ? [p.station] : [])]);
+  const b0 = bodies(ran), b1 = bodies(fresh);
+  let worst = 0, sun = 0;
+  for (let i = 0; i < b0.length; i++) {
+    const d = Math.abs(((b0[i].spinPhase - b1[i].spinPhase) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI);
+    worst = Math.max(worst, d);
+  }
+  // Солнце над точкой экватора планеты Lave III — то же, что у свежего мира.
+  const elev = (w) => {
+    const p = w.planets[2], f = bodyBasis(p, makeBasis());
+    const q = { x: p.pos.x + f.right.x * p.radius, y: p.pos.y + f.right.y * p.radius, z: p.pos.z + f.right.z * p.radius };
+    const s = { x: w.star.pos.x - q.x, y: w.star.pos.y - q.y, z: w.star.pos.z - q.z };
+    return Math.asin((f.right.x * s.x + f.right.y * s.y + f.right.z * s.z) / Math.hypot(s.x, s.y, s.z)) * 180 / Math.PI;
+  };
+  sun = Math.abs(elev(ran) - elev(fresh));
+  ok(worst < 1e-6 && sun < 1e-4,
+    `время мира поставили заново — тела не повернулись ещё раз: расхождение фазы суток ${worst.toExponential(1)} рад, солнца над экватором ${sun.toExponential(1)}°`);
+}
 
 // Номер планеты — это её место по расстоянию от звезды, и ничто другое.
 // Проверка нужна ровно потому, что список макета пишется руками: вставить
@@ -7211,6 +7241,22 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     // вовсе, он берёт её из лётной модели.
     ok(QUANTUM.speed === SHIP.quantumSpeed && drive.spec.quantumSpeed === undefined,
       'скорость прыжка взята у корпуса: ' + QUANTUM.speed + ' км/с');
+    // Корабль игра создаёт до того, как сервер скажет, что стоит в гнёздах
+    // (main.js: makeShip при разборе, снаряжение — в serverToSave). Поставил
+    // привод II — прыгает на его скорости, а не на заводской. Раньше
+    // скорость копировалась в корабль при создании, и «Челленджер» с
+    // приводом II прыгал на 60 тысячах вместо 90.
+    {
+      const sh = makeShip();
+      const stock = doc.modules.filter((m) => m.installed);
+      const fast = doc.modules.find((m) => m.code === 'quantum_x');
+      useShipEquipment(stock.map((m) => (m.slot === 'drive' ? fast : m)));
+      const got = quantumSpeed(sh);
+      useShipEquipment(stock);
+      ok(got === fast.spec.flight.quantumSpeed && quantumSpeed(sh) === drive.spec.flight.quantumSpeed,
+        `привод II поставлен после создания корабля — прыжок на ${got} км/с (у привода ${fast.spec.flight.quantumSpeed}); `
+        + `вернули заводской — на ${quantumSpeed(sh)}`);
+    }
     // Алгоритмические числа остались в коде, и это не упущение: резка
     // трассы на куски — приём расчёта, а не свойство привода.
     ok(QUANTUM.segs === 12 && QUANTUM.relief === 0.02,
@@ -8756,20 +8802,22 @@ console.log('\n== наземный город ==');
       'в прыжке люк не открывается («' + refuse + '»), а открытый закрывается сам');
     run(flatEnv, 6);
   }
-  // Сойти можно, только если есть куда: в пустоте проём перекрыт, над
-  // высоким грунтом у пяты трапа заслон.
+  // Невидимых стенок нет (так решил автор игры): проём перекрывает только
+  // створка, пока она не открыта; в пустоте и над высоким грунтом открытый
+  // люк открыт — шагнувший за борт падает (или плывёт), а у пяты трапа
+  // калитки нет и над пропастью.
   {
     const hx = A.hatchById(air, 'nR');
     A.toggleHatch(air, hx);
+    run({ ...flatEnv, ground: () => null }, 0.3);
+    const closing = A.airSolids(air).filter((s) => s.hatch === 'nR').length;
     run({ ...flatEnv, ground: () => null }, 8);
-    const plug = A.airSolids(air).filter((s) => s.hatch === 'nR');
-    const vacuum = !hx.exitOk && plug.length === 1 && Math.abs(plug[0].hi[2] - plug[0].lo[2] - (hx.h.z[1] - hx.h.z[0])) < 1e-9;
+    const vacuum = !hx.exitOk && hx.open === 1 && A.airSolids(air).every((s) => s.hatch !== 'nR');
     run({ ...flatEnv, ground: () => -gear - 12 }, 3);
-    const gate = A.airSolids(air).some((s) => s.stair === 'nR' && s.tag === 'gate');
+    const noGateHigh = hx.footGap > A.AIR.drop && !A.airSolids(air).some((s) => s.stair === 'nR' && s.tag === 'gate');
     run(flatEnv, 3);
-    const noGate = !A.airSolids(air).some((s) => s.stair === 'nR' && s.tag === 'gate');
-    ok(vacuum && gate && noGate && hx.exitOk,
-      'в пустоте проём перекрыт целиком; корабль висит высоко — у пяты трапа заслон; сел — заслона нет');
+    ok(closing === 1 && vacuum && noGateHigh && hx.exitOk,
+      'проём перекрыт только створкой, пока она едет; открыт — открыт и в пустоте; у пяты над пропастью калитки нет');
     // Трап доворачивается к грунту: площадка на метр выше — трап положе.
     run({ ...flatEnv, ground: () => -gear + 1 }, 3);
     ok(hx.swing > 0.05 && Math.abs(hx.footGap) < 0.02,
@@ -9037,6 +9085,83 @@ console.log('\n== наземный город ==');
     const want = Wk.jumpSpeed() ** 2 / (2 * g);
     ok(Math.abs(peak - want) / want < 0.03 && wj.ground,
       `на ${icy ? icy.name : 'лёгком теле'} (${g.toFixed(2)} м/с²) прыгают на ${peak.toFixed(2)} м, а не на ${Wk.WALK.jump} — толчок тот же`);
+    // Остановился посреди шага — голова не прыгает на весь размах качания:
+    // оно стихает, а не щёлкает (так глаз дёргался на кадр «в воздухе» —
+    // на краю ступени и на пороге).
+    {
+      const wb = Wk.makeWalker();
+      Wk.standUp(wb, In); wb.phase = 'walk'; wb.out = { test: true }; wb.pos = [0, 0, 0]; wb.yaw = 0;
+      const Wf = Wk.outsideWorld([], () => 0, null, 9.81);
+      for (let i = 0; i < 90; i++) Wk.updateWalker(wb, In, { fwd: 1 }, 1 / 60, Wf);
+      wb.bobPhase = Math.PI / 2;
+      const e0 = Wk.walkerEye(wb, In)[1];
+      wb.vel = [0, 0, 0];
+      Wk.updateWalker(wb, In, {}, 1 / 60, Wf);
+      const jolt = Math.abs(Wk.walkerEye(wb, In)[1] - e0);
+      ok(jolt < 0.006, `встал посреди шага — глаз сдвинулся за кадр на ${(jolt * 100).toFixed(2)} см, а не на весь размах (${(Wk.WALK.bob * 100).toFixed(1)} см)`);
+    }
+    // В пустоте за бортом (w.float) тяжести нет: палубная — только в
+    // корабле. Шагнул в открытый люк без трапа — плывёт, а не падает без
+    // конца в осях корабля.
+    {
+      const wf = Wk.makeWalker();
+      Wk.standUp(wf, In); wf.phase = 'walk'; wf.out = { test: true }; wf.pos = [0, 10, 0]; wf.yaw = 0;
+      wf.ground = false; wf.vel = [0, 0.2, 0]; wf.float = true;
+      const Wv = Wk.outsideWorld([], () => -1e6, null, 9.81);
+      for (let i = 0; i < 60; i++) Wk.updateWalker(wf, In, {}, 1 / 60, Wv);
+      ok(Math.abs(wf.pos[1] - 10.2) < 0.01 && Math.abs(wf.vel[1] - 0.2) < 1e-9,
+        `за бортом в пустоте пешеход плывёт: за секунду — ${(wf.pos[1] - 10).toFixed(2)} м вверх, как толкнулся, а не вниз`);
+    }
+    // Застрял — выручают (unstick). Плита трюма легла на грунт поверх
+    // стоящего под ней — так было у автора игры: толща плиты 22 см, ноги в
+    // ней на 14 см ниже верха, и ни шагнуть, ни прыгнуть — вмурован, пока не
+    // вынут из базы руками.
+    {
+      const mk = (p) => {
+        const wq = Wk.makeWalker();
+        Wk.standUp(wq, In); wq.phase = 'walk'; wq.out = { test: true }; wq.yaw = 0;
+        wq.pos = p.slice(); wq.vel = [0, 0, 0]; wq.ground = true;
+        return wq;
+      };
+      const run = (wq, Wq, ctl, sec) => {
+        for (let i = 0; i < sec * 60; i++) {
+          const e = Wk.updateWalker(wq, In, ctl, 1 / 60, Wq);
+          if (e.unstuck) return { ...e.unstuck, t: (i + 1) / 60 };
+        }
+        return null;
+      };
+      const flat = () => 0;
+      // 1. В толще плиты — на её верх, тут же, а не куда-то: ближайшее место.
+      const a = mk([-1.95, 0, 0.5]);
+      const ua = run(a, Wk.outsideWorld([{ lo: [-2.9, -0.08, -4], hi: [2.9, 0.14, 4] }], flat, null, 9.81), {}, 2);
+      ok(ua && ua.why === 'inside' && ua.t >= 0.6 && Math.abs(a.pos[1] - 0.14) < 1e-6 && Math.hypot(a.pos[0] + 1.95, a.pos[2] - 0.5) < 1e-6,
+        `плита легла поверх стоящего — через ${ua ? ua.t.toFixed(2) : '—'} с он на её верху: ` + a.pos.map((v) => v.toFixed(2)).join(', '));
+      // 2. Зажат со всех сторон в колодце выше, чем достать: его ведут, а
+      // шагнуть некуда — через секунду вбок, за стенку, на ближайшее место.
+      const walls = [
+        { lo: [-0.5, -1, -0.5], hi: [-0.3, 3, 0.5] }, { lo: [0.3, -1, -0.5], hi: [0.5, 3, 0.5] },
+        { lo: [-0.5, -1, -0.5], hi: [0.5, 3, -0.3] }, { lo: [-0.5, -1, 0.3], hi: [0.5, 3, 0.5] },
+      ];
+      const b = mk([0, 0, 0]);
+      const ub = run(b, Wk.outsideWorld(walls, flat, null, 9.81), { fwd: 1 }, 3);
+      const rb = Math.hypot(b.pos[0], b.pos[2]);
+      ok(ub && ub.why === 'boxed' && ub.t >= 1 && rb >= 0.75 && rb <= 1.01 && b.pos[1] === 0,
+        `зажат в колодце 0.6 м — через ${ub ? ub.t.toFixed(2) : '—'} с за стенкой, в ${rb.toFixed(2)} м от места`);
+      // 3. Рядом встать негде (глыба 12 × 12 м, выше, чем достать) — туда,
+      // где недавно свободно стоял.
+      const c = mk([-7, 0, 0]);
+      const Wc0 = Wk.outsideWorld([], flat, null, 9.81);
+      for (let i = 0; i < 10; i++) Wk.updateWalker(c, In, {}, 1 / 60, Wc0);
+      c.pos = [0, 0, 0];
+      const uc = run(c, Wk.outsideWorld([{ lo: [-6, -1, -6], hi: [6, 3, 6] }], flat, null, 9.81), {}, 2);
+      ok(uc && uc.why === 'inside' && Math.hypot(c.pos[0] + 7, c.pos[1], c.pos[2]) < 1e-6,
+        `вокруг на ${4} м только твёрдое — обратно на последнее свободное место: ` + c.pos.map((v) => v.toFixed(2)).join(', '));
+      // 4. Упереться в стену — не застрять: три секунды в стену, и никуда не перенесён.
+      const d = mk([0, 0, 0]);
+      const ud = run(d, Wk.outsideWorld([{ lo: [-5, -1, 1], hi: [5, 3, 1.2] }], flat, null, 9.81), { fwd: 1 }, 3);
+      ok(!ud && d.pos[2] < 0.76 && d.pos[2] > 0.7,
+        `в стену три секунды — стоит у неё (z ${d.pos[2].toFixed(2)}), не перенесён` + (ud ? ': перенесён в ' + ud.to.map((v) => v.toFixed(2)).join(', ') : ''));
+    }
     // Под грунтом глубже ступени — встаёт на него и идёт. Так пилот
     // оставался под землёй после входа: место записано по одному грунту, а
     // грунт сменил подробность и поднялся на 2.3 м; подъём был не выше
@@ -9249,8 +9374,16 @@ console.log('\n== наземный город ==');
     const mid = [(b.x[0] + b.x[1]) / 2, b.deck, (b.z[0] + b.z[1]) / 2];
     const floor = In.solids.filter((s) => !s.bayWell && s.hi[1] >= b.deck - 0.01 && s.lo[1] < b.deck - 0.01
       && s.lo[0] < mid[0] && s.hi[0] > mid[0] && s.lo[2] < mid[2] && s.hi[2] > mid[2]);
-    ok(floor.length === 0 && In.solids.filter((s) => s.bayWell).length === 4,
-      'в полу трюма проём под платформу, вокруг — четыре твёрдые стенки колодца');
+    // Стенки колодца — кусками по краю, и низ каждого — на самой обшивке над
+    // ним, а не на дне колодца (b.belly, оно ниже днища для выреза): стенки
+    // торчали из корпуса вниз невидимой ступенькой, и вездеход упирался в неё
+    // крышей.
+    const well = In.solids.filter((s) => s.bayWell);
+    const run2 = well.reduce((sum, s) => sum + Math.max(s.hi[0] - s.lo[0], s.hi[2] - s.lo[2]), 0);
+    const per = 2 * ((b.x[1] - b.x[0]) + (b.z[1] - b.z[0]));
+    ok(floor.length === 0 && well.length > 4 && Math.abs(run2 - per) < 0.5 && well.every((s) => s.lo[1] > b.belly + 0.05 && s.hi[1] === b.deck),
+      `в полу трюма проём под платформу, вокруг — стенки колодца (${well.length} кусков по ${per.toFixed(1)} м края), низ — по обшивке: `
+      + `от ${Math.min(...well.map((s) => s.lo[1])).toFixed(2)} до ${Math.max(...well.map((s) => s.lo[1])).toFixed(2)} м, ниже дна колодца ${b.belly} нет`);
     const p = Wk.makeWalker();
     Wk.standUp(p, In);
     p.phase = 'walk'; p.pos = mid.slice(); p.room = Hd;
@@ -9316,10 +9449,9 @@ console.log('\n== наземный город ==');
     const bx = air.bays[0];
     A.toggleBay(air, bx);
     ride(air, env({ ground: null }));
-    const edge = A.baySolids(bx).filter((s) => s.guard === 'edge').length;
-    const deck = A.baySolids(bx).filter((s) => s.guard === 'deck').length;
-    ok(Math.abs(bx.travel - bx.stroke) < 1e-6 && !bx.floor && !bx.exitOk && edge === 4 && deck === 4,
-      `в полёте — на весь ход, ${bx.stroke.toFixed(2)} м; по краю плиты и вокруг проёма в полу — заслоны`);
+    const guards = A.baySolids(bx).filter((s) => s.guard).length;
+    ok(Math.abs(bx.travel - bx.stroke) < 1e-6 && !bx.floor && !bx.exitOk && guards === 0 && A.baySolids(bx).length <= 2,
+      `в полёте — на весь ход, ${bx.stroke.toFixed(2)} м; невидимых заслонов ни по краю плиты, ни вокруг проёма — только плита и пульт`);
     // Корабль садится на опущенную платформу: грунт её поднимает сразу.
     A.updateAirlocks(air, env({ ground: () => ground + 2.0 }), dt);
     ok(Math.abs(bx.travel - (bx.reach - 2.0)) < 1e-6,
@@ -9356,6 +9488,48 @@ console.log('\n== наземный город ==');
       for (const e of A.updateAirlocks(air, env({ below: () => true }), dt)) if (e.kind === 'bayStop' && e.at === 'held') held = true;
     }
     ok(bx.travel - at < 0.01 && held, `под платформой человек — она встала на ${bx.travel.toFixed(2)} м и ждёт`);
+  }
+  {
+    // На кромке машина или человек — плита никуда не идёт, ни вниз, ни
+    // наверх, и говорит, кто там, — даже не тронувшись. Ушли — пошла.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.toggleBay(air, bx);
+    const said = [];
+    for (let t = 0; t < 2; t += dt) {
+      for (const e of A.updateAirlocks(air, env({ load: () => 'car' }), dt)) if (e.kind === 'bayStop' && e.at === 'load') said.push(e.who);
+    }
+    const stillDown = bx.travel;
+    for (let t = 0; t < 2; t += dt) A.updateAirlocks(air, env(), dt);
+    const moved = bx.travel;
+    ride(air, env());
+    A.toggleBay(air, bx);
+    const sit = bx.travel;
+    for (let t = 0; t < 2; t += dt) {
+      for (const e of A.updateAirlocks(air, env({ load: () => 'person' }), dt)) if (e.kind === 'bayStop' && e.at === 'load') said.push(e.who);
+    }
+    ok(stillDown === 0 && moved > 0.1 && Math.abs(bx.travel - sit) < 1e-9 && said.join(',') === 'car,person',
+      `на кромке машина — вниз не пошла (ход ${stillDown}), ушла — пошла (${moved.toFixed(2)} м); на кромке человек — `
+      + `наверх не пошла; сказано один раз за каждого: ${said.join(', ')}`);
+  }
+  {
+    // Стоящего на кромке — серединой на 20 см за краем, подошвой на плите —
+    // она везёт: раньше везла лишь тех, у кого середина над ней (5 см), и
+    // стоящий на кромке падал под днище, где в осях корабля грунта нет.
+    const air = A.makeAir(In, GEAR_CLEAR);
+    const bx = air.bays[0];
+    A.toggleBay(air, bx);
+    ride(air, env());
+    const p = [b.x[1] + 0.2, A.bayTop(bx), 7];
+    A.toggleBay(air, bx);
+    let off = 0;
+    for (let t = 0; t < 14; t += dt) {
+      A.updateAirlocks(air, env(), dt);
+      p[1] -= A.bayCarry(air, p);
+      off = Math.max(off, Math.abs(p[1] - A.bayTop(bx)));
+      if (bx.dir === 0 && t > 0.5) break;
+    }
+    ok(bx.travel === 0 && off < 0.01, `стоящего на кромке плита везёт наверх: ноги от неё не дальше ${(off * 100).toFixed(1)} см`);
   }
   {
     // Загрузка игры с опущенной платформой — сразу на грунте, без хода.
@@ -9395,10 +9569,13 @@ console.log('\n== наземный город ==');
     ok(upRide.off < 0.02 && Math.abs(p.pos[1] - b.deck) < 0.005,
       `наверх — тоже: пилот снова на палубе трюма, ${p.pos[1].toFixed(3)} м`);
     // Проверка кусается: без переноса плита на подъёме проходит сквозь ноги.
+    // Вынимает их оттуда только выручка застрявшего (unstick), и не раньше
+    // чем через 0.6 с, — за это время плита уходит на десятки сантиметров,
+    // а везущая держит ноги в 2 см.
     const p2 = p.pos.slice();
     go(true, true);
     const noCarry = go(false, false);
-    ok(noCarry.off > 1.0, `без переноса плита уходит из-под ног или сквозь них: разошлись на ${noCarry.off.toFixed(2)} м`);
+    ok(noCarry.off > 0.2, `без переноса плита уходит из-под ног или сквозь них: разошлись на ${noCarry.off.toFixed(2)} м`);
     p.pos = p2;
     In.air = null;
   }
@@ -10311,6 +10488,38 @@ console.log('\n== вездеход: пост водителя ==');
   }
 }
 
+console.log('\n== вездеход: тормозной путь ==');
+// Тормоз вездехода — его собственное число, а не лётное. Машину собираем
+// так же, как игра при пересадке (useShipType: корпус, лётная модель,
+// модули), и гасим полный ход пробелом и задним ходом (S). Раньше число
+// звалось brake, как тормоз корабля в полёте, и applyShipSpec множил его на
+// 1/k³ корпуса: 6 м/с² становились 2145, и машина вставала за 7 мс, на 6 см.
+{
+  const R = await import('../js/game/rover.js');
+  const want = roverSpec().driveBrake;
+  useShipType('rover');
+  const Rg = 100;                                  // км: тело, на 20 м — плоское
+  const env = { g: 9.81, ground: () => Rg, obstacles: [] };
+  const stop = (ctl) => {
+    const rv = R.makeRover();
+    R.placeRover(rv, {}, { x: 0, y: Rg, z: 0 }, { x: 0, y: 0, z: 1 }, env.ground);
+    for (let i = 0; i < 60 * 12 && rv.v < SHIP.driveSpeed * 0.98; i++) R.stepRover(rv, { throttle: 1, steer: 0, brake: 0 }, SHIP, env, 1 / 60);
+    const v0 = rv.v, p0 = { ...rv.lp };
+    let t = 0;
+    while (rv.v > 0.05 && t < 20) { R.stepRover(rv, ctl, SHIP, env, 1 / 60); t += 1 / 60; }
+    return { v0, t, d: Math.hypot(rv.lp.x - p0.x, rv.lp.y - p0.y, rv.lp.z - p0.z) * 1000 };
+  };
+  const sp = stop({ throttle: 0, steer: 0, brake: 1 }), bk = stop({ throttle: -1, steer: 0, brake: 0 });
+  const fair = (r) => {
+    const d = r.v0 * r.v0 / 2 / want, t = r.v0 / want;
+    return r.v0 > 10 && Math.abs(r.d - d) < 0.15 * d && Math.abs(r.t - t) < 0.15 * t;
+  };
+  ok(SHIP.driveBrake === want && fair(sp) && fair(bk),
+    `с полного хода (${sp.v0.toFixed(1)} м/с) тормоз ${want} м/с² из specs.php: пробелом — ${sp.d.toFixed(1)} м за ${sp.t.toFixed(1)} с, `
+    + `задним ходом (S) — ${bk.d.toFixed(1)} м за ${bk.t.toFixed(1)} с (в игре тормоз ${SHIP.driveBrake})`);
+  useShipType('challenger');
+}
+
 console.log('\n== вездеход: ход в трюме ==');
 {
   const R = await import('../js/game/rover.js');
@@ -10324,16 +10533,48 @@ console.log('\n== вездеход: ход в трюме ==');
   const env = { floor: () => -6, solids: walls };
   let bump = 0;
   for (let i = 0; i < 300; i++) { R.stepHangar(rv, { throttle: 1, steer: 0, brake: 0 }, spec, env, 1 / 60); bump = Math.max(bump, rv.bump); }
-  const nose = rv.hg.z + 2.2 + 1.7;
+  // Нос — настоящий: кузов в трюме — прямоугольник по машине (HULL_BOX),
+  // а не круги, что торчали за нос на 0.9 м, и машина вставала поодаль.
+  const nose = rv.hg.z + R.HULL_BOX.l;
   ok(Math.abs(nose - 12.6) < 0.01 && rv.v === 0 && bump > 1,
     `тронулся в трюме — упёрся носом в переборку (${nose.toFixed(2)} м, стена 12.6) и встал; удар ${bump.toFixed(1)} м/с`);
+  // Коробка оказалась внутри кузова сама (появилась, машину поставили) —
+  // выталкивает не разом, а не дальше 0.2 м за проход: раньше заслон
+  // колодца, появившийся под кузовом, выбрасывал машину на 0.9–1.75 м за кадр.
+  {
+    const rq = R.makeRover();
+    rq.mode = 'hangar';
+    rq.hg = { x: 0, y: -6, z: 7.2, yaw: 0 };
+    const thin = [{ lo: [-3, -6, 7.17], hi: [3, -5.4, 7.23] }];
+    R.stepHangar(rq, { throttle: 0, steer: 0, brake: 1 }, spec, { floor: () => -6, solids: thin }, 1 / 60);
+    const moved = Math.hypot(rq.hg.x, rq.hg.z - 7.2);
+    let n = 1;
+    while (n < 60) {
+      R.stepHangar(rq, { throttle: 0, steer: 0, brake: 1 }, spec, { floor: () => -6, solids: thin }, 1 / 60);
+      n++;
+      if (Math.abs(rq.hg.z - 7.2) > R.HULL_BOX.l + 0.02) break;
+    }
+    ok(moved <= 0.6 + 1e-9 && moved > 0.1 && Math.abs(rq.hg.z - 7.2) > R.HULL_BOX.l,
+      `коробка внутри кузова — машина выходит из неё за ${n} шагов, не дальше ${moved.toFixed(2)} м за шаг, а не броском`);
+  }
   for (let i = 0; i < 240; i++) R.stepHangar(rv, { throttle: -1, steer: 1, brake: 0 }, spec, env, 1 / 60);
   ok(rv.hg.z < 7 && rv.hg.yaw < -0.2 && rv.hg.y === -6,
     `назад с рулём вправо — нос уходит влево, как у машины (курс ${(rv.hg.yaw * 57.3).toFixed(0)}°), колёса на полу`);
-  // Пол — плита: плита ушла вниз — и машина с ней.
-  env.floor = () => -9.5;
+  // Пол — плита: плита едет вниз — и машина с ней, шаг в шаг.
+  let floorY = -6, off = 0;
+  env.floor = () => floorY;
+  for (let i = 0; i < 60; i++) { floorY -= 1.0 / 60; R.stepHangar(rv, { throttle: 0, steer: 0, brake: 1 }, spec, env, 1 / 60); off = Math.max(off, Math.abs(rv.hg.y - floorY)); }
+  // А пол провалился разом (въехал в открытый колодец) — машина падает с
+  // тяжестью, а не переносится на дно за кадр: невидимого края нет.
+  const drop0 = rv.hg.y;
+  env.floor = () => drop0 - 4;
+  env.g = 9.81;
   R.stepHangar(rv, { throttle: 0, steer: 0, brake: 1 }, spec, env, 1 / 60);
-  ok(rv.hg.y === -9.5, 'плита ушла вниз — машина на ней');
+  const first = drop0 - rv.hg.y;
+  let t = 1 / 60;
+  while (rv.hg.y > drop0 - 4 && t < 3) { R.stepHangar(rv, { throttle: 0, steer: 0, brake: 1 }, spec, env, 1 / 60); t += 1 / 60; }
+  ok(off < 1e-9 && first < 0.01 && rv.hg.y === drop0 - 4 && Math.abs(t - Math.sqrt(8 / 9.81)) < 0.06 && rv.landed > 8,
+    `плита едет вниз — машина на ней шаг в шаг; пол провалился на 4 м — падает ${t.toFixed(2)} с (по тяжести ${Math.sqrt(8 / 9.81).toFixed(2)}), первый кадр — ${(first * 100).toFixed(1)} см, приземлилась на ${rv.landed.toFixed(1)} м/с`);
 }
 
 console.log('\n== вездеход: ангар ==');
@@ -10393,6 +10634,39 @@ console.log('\n== вездеход: ангар ==');
   });
   ok(inside && env.solids.length > 10,
     `десять секунд газа с рулём в настоящем трюме «Челленджера» — машина в его стенах (${env.solids.length} коробок трюма)`);
+  // Плита легла на бугор: до днища над ней — на 2 см больше машины с балкой
+  // огней. Съезжает задом и не упирается: стенки колодца кончаются у самой
+  // обшивки. Так было у автора игры на луне: до днища 3.18 м при машине в
+  // 3.20, стенки торчали из корпуса до дна колодца — невидимой ступенькой.
+  {
+    const ab = makeAir(In, SHIP.gearClear), bq = ab.bays[0];
+    const hullLow = Math.min(...In.solids.filter((s) => s.bayWell && s.lo[2] <= bq.b.z[0] + 1e-6 && s.hi[2] <= bq.b.z[0] + 0.1).map((s) => s.lo[1]));
+    bq.travel = bq.b.deck - (hullLow - RV.roofBar - 0.02);
+    bq.dir = 0; bq.floor = true;
+    const rr = R.makeRover();
+    const mm = Hg.bayCenter(bq);
+    rr.hg = { x: mm.x, y: bayTop(bq), z: mm.z, yaw: 0 };
+    const eq = { floor: (x, z) => Hg.hangarFloor(bq, x, z), solids: Hg.hangarSolids(In, ab) };
+    // До края, где колесо сходит с плиты: там игра переводит машину на
+    // грунт (js/main.js, hangarStep), и дальше её ведёт грунт.
+    let maxBump = 0, n = 0;
+    for (; n < 600 && Hg.wheelsOnBay(bq, rr.hg); n++) {
+      R.stepHangar(rr, { throttle: -1, steer: 0, brake: 0 }, spec, eq, 1 / 60);
+      maxBump = Math.max(maxBump, rr.bump);
+    }
+    // Край палубы над плитой в колодце — стена для колеса, а не новый пол:
+    // машина упирается, а не взлетает на палубу за кадр.
+    {
+      const rl = R.makeRover();
+      rl.hg = { x: 0, y: -7, z: 8, yaw: 0 };
+      const el = { floor: (x, z) => (z < 5 ? -6 : -7), solids: [] };
+      for (let i = 0; i < 240; i++) R.stepHangar(rl, { throttle: -1, steer: 0, brake: 0 }, spec, el, 1 / 60);
+      ok(rl.hg.y === -7 && rl.hg.z >= 5 && rl.v === 0,
+        `на плите в колодце задом к краю палубы на метр выше — упёрлась (z ${rl.hg.z.toFixed(2)}, пол ${rl.hg.y}), а не взлетела`);
+    }
+    ok(!Hg.wheelsOnBay(bq, rr.hg) && maxBump === 0,
+      `плита на бугре, до днища ${(hullLow - bayTop(bq)).toFixed(2)} м при машине в ${RV.roofBar} — задом до края плиты, не упёршись (${(n / 60).toFixed(1)} с)`);
+  }
 }
 
 console.log('\n== вездеход: навигация и приборы ==');

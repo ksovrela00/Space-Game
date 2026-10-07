@@ -396,6 +396,37 @@ function fitHeight(W, p, h) {
 }
 
 /**
+ * Где оказаться на пороге в точке p этого мира: встать (standAt) — а в
+ * прыжке, когда встать не на что, остаться в воздухе там же, если тело
+ * там помещается. Раньше на пороге требовалась опора, и в открытый люк
+ * нельзя было впрыгнуть: снаружи за проёмом — стена, а в оси корабля не
+ * пускали без опоры — пешеход висел у проёма, как перед стеклом.
+ * @returns {{ pos: number[], height: number, air?: true } | null}
+ */
+export function enterAt(W, p, h, airborne) {
+  // Тело — коробка в осях своего мира, и в новых осях она повёрнута на
+  // наклон корабля: у косяка двери вездехода при 1.3° её верх заходил в
+  // косяк на 3–4 см, и снаружи свободно — а внутри «не встать». Поэтому
+  // если ровно здесь нельзя, — ближайшее место в NUDGE вокруг: ноги
+  // подправятся на сантиметры, а глаз их догонит (w.lag, lagX, lagZ).
+  for (const [dx, dz] of NUDGES) {
+    const q = [p[0] + dx, p[1], p[2] + dz];
+    const at = standAt(W, q, h);
+    if (at) return at;
+    if (!airborne) continue;
+    const f = fitHeight(W, q, h);
+    if (f > 0) return { pos: q, height: f, air: true };
+  }
+  return null;
+}
+// Подправки ног на пороге: сначала никакой, дальше по кольцам до 8 см.
+const NUDGE = 0.08;
+const NUDGES = [[0, 0]];
+for (let r = 0.01; r <= NUDGE + 1e-9; r += 0.01) {
+  for (let k = 0; k < 8; k++) NUDGES.push([r * Math.cos(k * Math.PI / 4), r * Math.sin(k * Math.PI / 4)]);
+}
+
+/**
  * Где встать в точке p этого мира: ноги — на самое высокое твёрдое под ними
  * (не выше ступени и не ниже, чем сходят без прыжка) или на грунт, а тело
  * помещается — во весь рост h или пригнувшись. Иначе null.
@@ -430,7 +461,7 @@ export function standUp(w, interior, look = { yaw: 0, pitch: 0 }) {
   w.from = { yaw: w.yaw, pitch: w.pitch };
   w.ground = true;
   w.height = WALK.height;
-  w.lag = 0;
+  w.lag = 0; w.lagX = 0; w.lagZ = 0; w.lagV = 0; w.lagVX = 0; w.lagVZ = 0; w.eyeH = WALK.height;
   w.out = null;
   w.room = interior.roomById[interior.seat.room || 'bridge'] || interior.rooms.find((r) => r.id === 'bridge');
   return w;
@@ -461,7 +492,7 @@ export function seatNow(w) {
   w.phase = 'seated';
   w.t = 0;
   w.vel = [0, 0, 0];
-  w.lag = 0;
+  w.lag = 0; w.lagX = 0; w.lagZ = 0; w.lagV = 0; w.lagVX = 0; w.lagVZ = 0; w.eyeH = WALK.height;
   return w;
 }
 
@@ -471,9 +502,13 @@ const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 /** Глаз пилота в осях корабля, м (и сидя, и в переходе, и на ногах). */
 export function walkerEye(w, interior, out = [0, 0, 0]) {
   const seat = interior.seat.eye;
-  // Пригнулся — глаз ниже ровно настолько же.
-  const duck = WALK.height - (w.height || WALK.height);
-  const standEye = (p) => [p[0], p[1] + WALK.eye - duck - w.lag + Math.sin(w.bobPhase) * WALK.bob * bobK(w), p[2]];
+  // Пригнулся — глаз ниже ровно настолько же (duckEye ниже).
+  // Голова — по глазному росту (eyeH): он пригибается заранее и плавно, и
+  // ниже тела не прижат: тело — коробка в полметра, и пригибается оно,
+  // когда притолоки коснулся её передний край, а глаз — посередине, ещё
+  // в 25 см перед ней. Пока глаз дойдёт до притолоки, он уже внизу.
+  const duckEye = WALK.height - (w.eyeH || w.height || WALK.height);
+  const standEye = (p) => [p[0] - (w.lagX || 0), p[1] + WALK.eye - duckEye - w.lag + Math.sin(w.bobPhase) * WALK.bob * (w.bobA ?? bobK(w)), p[2] - (w.lagZ || 0)];
   if (w.phase === 'rise' || w.phase === 'sit') {
     const k = w.phase === 'rise' ? smooth(w.t / WALK.rise) : 1 - smooth(w.t / WALK.sit);
     const s = standEye(w.phase === 'rise' ? w.pos : w.from.pos);
@@ -484,6 +519,50 @@ export function walkerEye(w, interior, out = [0, 0, 0]) {
   const e = standEye(w.pos);
   out[0] = e[0]; out[1] = e[1]; out[2] = e[2];
   return out;
+}
+
+// Глаз за телом — пружиной без перерегулирования (критическое затухание):
+// трогается плавно и не перелетает. Было по экспоненте, и треть пути
+// голова проходила в первом же кадре — 4–5 см рывка после каждой ступени
+// (tools/smoke.mjs, «швы переходов»).
+const EYE_W = 14;
+const EYE_KEYS = [['lag', 'lagV'], ['lagX', 'lagVX'], ['lagZ', 'lagVZ']];
+function eyeSpring(w, dt) {
+  const e = Math.exp(-EYE_W * dt);
+  for (const [x, v] of EYE_KEYS) {
+    const x0 = w[x] || 0, v0 = w[v] || 0;
+    if (!x0 && !v0) continue;
+    // Точное решение x'' = −k²x − 2kx' на шаг dt: устойчиво при любом dt.
+    const c = v0 + EYE_W * x0;
+    w[x] = (x0 + c * dt) * e;
+    w[v] = (v0 - EYE_W * c * dt) * e;
+    if (Math.abs(w[x]) < 1e-4 && Math.abs(w[v]) < 1e-3) { w[x] = 0; w[v] = 0; }
+  }
+}
+
+// Голова пригибается заранее: впереди по ходу (на DUCK_AHEAD секунд пути)
+// притолока ниже роста — глаз опускается к ней плавно, со скоростью
+// DUCK_RATE; пригнулось тело — глаз за ним с той же скоростью. Тело
+// пригибается сразу (иначе голова прошла бы сквозь притолоку), и глаз с
+// ним проваливался на 21 см за кадр.
+const DUCK_AHEAD = 0.35, DUCK_RATE = 1.6;
+function duckAhead(w, W, dt) {
+  const h = w.height || WALK.height;
+  let want = h;
+  if (Math.hypot(w.vel[0], w.vel[2]) > 0.1) {
+    // Там, где придётся стоять: на ступени трапа голова выше, чем у ног
+    // сейчас, и пригибаться надо ей, а не тому, кто остался внизу. По
+    // шагам — до первой стены: за ней (кузов за дверью) стоять нельзя, и
+    // одна дальняя точка не видела притолоки перед ней.
+    for (const k of [0.2, 0.45, 0.7, 1]) {
+      const t = DUCK_AHEAD * k;
+      const at = standAt(W, [w.pos[0] + w.vel[0] * t, w.pos[1], w.pos[2] + w.vel[2] * t], WALK.height);
+      if (!at) break;
+      if (at.height < want) want = at.height;
+    }
+  }
+  const eh = w.eyeH || h;
+  w.eyeH = want < eh ? Math.max(want, eh - DUCK_RATE * dt) : Math.min(want, eh + WALK.unduck * dt);
 }
 
 /** Насколько качается голова: только на полу и по скорости шага. */
@@ -536,6 +615,7 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
   w.pitch = Math.max(-WALK.pitchMax, Math.min(WALK.pitchMax, w.pitch + (ctl.lookY || 0)));
 
   const W = w.out ? outside : makeWorld(w, interior);
+  const p0 = [w.pos[0], w.pos[1], w.pos[2]];
   let left = Math.min(dt, 0.1);
   let jump = !!ctl.jump;
   while (left > 1e-6) {
@@ -544,10 +624,19 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
     stepBody(w, W, ctl, h, jump);
     jump = false;
   }
+  // Оси, в которых записано последнее свободное место: грунт, чужой борт
+  // (помещения у кораблей одного типа одни, а оси — у каждого свои) или свой.
+  unstick(w, W, ctl, dt, p0, w.out || w.vessel || interior, ev);
   // Глаз догоняет тело после ступени: на трапе голова не прыгает
-  // ступенями, а едет — как у человека, у которого гнутся колени.
-  w.lag *= Math.exp(-dt * 14);
-  if (Math.abs(w.lag) < 1e-4) w.lag = 0;
+  // ступенями, а едет — как у человека, у которого гнутся колени. И вбок —
+  // после подправки ног на пороге (enterAt).
+  eyeSpring(w, dt);
+  duckAhead(w, W, dt);
+  // Качание головы нарастает и стихает, а не щёлкает: на кадр «в воздухе»
+  // (край ступени, порог, камень) оно пропадало целиком, и глаз дёргался на
+  // весь размах шага.
+  const bk = bobK(w);
+  w.bobA = (w.bobA ?? bk) + (bk - (w.bobA ?? bk)) * (1 - Math.exp(-dt * 8));
   const v = Math.hypot(w.vel[0], w.vel[2]);
   // Шаг — половина периода качания головы: нога встаёт, голова в низшей
   // точке. Отсюда и звук шагов (ev.step): он идёт ровно в такт с тем,
@@ -576,7 +665,11 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
 }
 
 // Насколько вбок тело ищет проход, когда упёрлось плечом в кромку, м.
-const SLIP = 0.15;
+// Полметра тела в двери в 0.9 м — по 0.2 м зазора с боков: с 0.25 в дверь
+// доскальзывают, идя на полметра в стороне от её оси. Было 0.15, и снаружи
+// проём делали шире двери, чтобы до неё дотянуться, — а внутри косяки
+// стоят где стоят, и пешеход застревал на пороге между двумя мирами.
+const SLIP = 0.25;
 
 /**
  * Сдвиг вбок, с которым шаг q (из p по оси ax) проходит: ближайший из
@@ -616,7 +709,8 @@ function stepBody(w, W, ctl, dt, jump) {
   // Толчок ногами один и тот же, а высота прыжка — по тяжести: на
   // ледяной луне человек прыгает на два метра.
   if (jump && w.ground) { v[1] = jumpSpeed(); w.ground = false; w.jumped = true; }
-  v[1] -= (W.g || WALK.g) * dt;
+  // За бортом в пустоте (w.float) тяжести нет: палубная — только в корабле.
+  v[1] -= (w.float ? 0 : (W.g || WALK.g)) * dt;
 
   const wasGround = w.ground;
   // Рост: пригнулся под притолокой — выпрямляется, как только над головой
@@ -646,7 +740,7 @@ function stepBody(w, W, ctl, dt, jump) {
     // записано по другому грунту), так под ним и оставался: грунт вокруг —
     // уступ, а уступ — стена. Уступ — это грунт ВПЕРЕДИ, по ходу (ниже).
     const gy = G(p[0], p[2]);
-    if (gy > p[1]) p[1] = gy;
+    if (gy > p[1]) { w.lag += gy - p[1]; p[1] = gy; }
   }
   // По плану — по осям, с подъёмом на порог.
   for (const ax of [0, 2]) {
@@ -669,7 +763,11 @@ function stepBody(w, W, ctl, dt, jump) {
     // Порог: тело поднимается ровно на высоту того, во что упёрлось, а не
     // на весь допуск сразу, — иначе под низким потолком (трап уходит в
     // проём) голова цепляла бы кромку там, где ноге хватает и ступени.
-    if (wasGround) {
+    // И в прыжке — тоже: долетел до кромки, не дотянув ногами, — подтянулся,
+    // как человек, что схватился руками. Невидимых заслонов нет (так решил
+    // автор игры), и с опускающейся плиты на палубу запрыгивают, а прыжок
+    // ногами не достаёт до кромки и в полуметре — 0.43 м против 0.47.
+    if (wasGround || !w.ground) {
       const s = support(W, [q[0], q[1] + WALK.step, q[2]], WALK.step + 0.01);
       if (s > q[1] + 1e-4 && s <= q[1] + WALK.step) {
         const up = [q[0], s, q[2]];
@@ -704,6 +802,9 @@ function stepBody(w, W, ctl, dt, jump) {
     w.ground = false;
   } else if (v[1] < 0) {
     if (!wasGround) w.landed = Math.max(w.landed || 0, -v[1]);
+    // Пришёл на ноги — глаз по инерции ещё проседает и выпрямляется (колени
+    // гнутся), а не встаёт за кадр как вкопанный.
+    if (!wasGround) w.lagV = (w.lagV || 0) + Math.min(5, -v[1]);
     const s = support(W, [p[0], p[1], p[2]], p[1] - y1 + 0.01);
     if (s > -Infinity) p[1] = s;
     v[1] = 0;
@@ -730,6 +831,92 @@ function stepBody(w, W, ctl, dt, jump) {
       w.ground = true;
     }
   }
+}
+
+// --- застрял ------------------------------------------------------------------
+//
+// Тело может оказаться внутри твёрдого не своим шагом: плита опустилась на
+// стоящего под ней, грунт сменил подробность, место записано по другому
+// миру. Шаг такое не разрешает — из твёрдого любой шаг тоже упирается, и
+// пешеход стоит вмурованным, пока его не вынут руками из базы. Так было у
+// автора игры: плита трюма легла на грунт поверх него.
+//
+// Застрял — значит одно из двух, и не на миг, а дольше STUCK_T:
+//   - тело в твёрдом: не помещается ни во весь рост, ни пригнувшись;
+//   - его ведут, а он ни на сантиметр, и шагнуть на 10 см некуда ни в одну
+//     из восьми сторон. Упереться в стену — не застрять: от стены есть
+//     куда отойти, и это не проверяется вовсе, пока шаг идёт.
+// Тогда — на ближайшее место, где встать (standAt): вверх, на то, во что
+// вмяло, или вбок, по кольцам до RESCUE_R. Рядом негде — туда, где недавно
+// свободно стоял (w.safe, в тех же осях). Переносом, а не шагом: шагом
+// отсюда не выйти, на то и застрял.
+const STUCK_T = { inside: 0.6, boxed: 1.0 };   // с
+const RESCUE_R = 4;                            // м — вбок не дальше
+const RESCUE_UP = 2.5;                         // м — вверх не дальше
+const BOX_STEP = 0.1;                          // м — «шагнуть некуда»
+// Куда искать: вверх и по кольцам вбок, ближние — первыми.
+const RESCUE = [];
+for (let dy = 0.05; dy <= RESCUE_UP + 1e-9; dy += 0.05) RESCUE.push([0, dy, 0]);
+for (let r = 0.25; r <= RESCUE_R + 1e-9; r += 0.25) {
+  for (let k = 0; k < 16; k++) RESCUE.push([r * Math.cos(k * Math.PI / 8), 0, r * Math.sin(k * Math.PI / 8)]);
+}
+RESCUE.sort((a, b) => Math.hypot(...a) - Math.hypot(...b));
+
+/** Шагнуть на BOX_STEP некуда ни в одну из восьми сторон (ни прямо, ни на ступень). */
+function boxedIn(W, p, H) {
+  for (let k = 0; k < 8; k++) {
+    const q = [p[0] + BOX_STEP * Math.cos(k * Math.PI / 4), p[1], p[2] + BOX_STEP * Math.sin(k * Math.PI / 4)];
+    if (fitHeight(W, q, H) > 0 || standAt(W, q, H)) return false;
+  }
+  return true;
+}
+
+/** Ближайшее место, где встать, рядом с p; рядом нет — у последнего свободного. Или null. */
+function rescueSpot(w, W, frame) {
+  const p = w.pos, G = W.ground || null;
+  for (const [dx, dy, dz] of RESCUE) {
+    const x = p[0] + dx, z = p[2] + dz;
+    // Вбок за бортом — на грунт той точки: он под ногами бывает и ниже, и выше ступени.
+    const y = dy === 0 && G ? G(x, z) : p[1] + dy;
+    const at = standAt(W, [x, y, z]);
+    // То же место, что и сейчас, — не выход (зажат — стоять тут он и так может).
+    if (at && Math.hypot(at.pos[0] - p[0], at.pos[1] - p[1], at.pos[2] - p[2]) > 0.05) return at;
+  }
+  const s = w.safe;
+  if (s && s.at === frame) {
+    const at = standAt(W, s.p);
+    if (at && Math.hypot(at.pos[0] - p[0], at.pos[1] - p[1], at.pos[2] - p[2]) > 0.05) return at;
+  }
+  return null;
+}
+
+function unstick(w, W, ctl, dt, p0, frame, ev) {
+  const p = w.pos, H = w.height || WALK.height;
+  const inside = !(fitHeight(W, p, H) > 0);
+  const moved = Math.hypot(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]);
+  const wants = !!(ctl.fwd || ctl.side || ctl.jump);
+  const why = inside ? 'inside' : (wants && moved < 0.01 && boxedIn(W, p, H) ? 'boxed' : null);
+  if (!why) {
+    w.stuckT = 0;
+    // Последнее свободное место — на опоре, в тех же осях, что и сейчас.
+    if (w.ground) {
+      if (!w.safe) w.safe = { p: [0, 0, 0], at: null };
+      w.safe.p[0] = p[0]; w.safe.p[1] = p[1]; w.safe.p[2] = p[2]; w.safe.at = frame;
+    }
+    return;
+  }
+  w.stuckT = (w.stuckT || 0) + dt;
+  if (w.stuckT < STUCK_T[why]) return;
+  w.stuckT = 0;
+  const at = rescueSpot(w, W, frame);
+  if (!at) return;
+  ev.unstuck = { why, from: p.slice(), to: at.pos.slice() };
+  // Вверх глаз догоняет, как на ступени; вбок — переносом.
+  w.lag += at.pos[1] - p[1];
+  p[0] = at.pos[0]; p[1] = at.pos[1]; p[2] = at.pos[2];
+  w.height = at.height;
+  w.vel[0] = 0; w.vel[1] = 0; w.vel[2] = 0;
+  w.ground = true; w.jumped = false;
 }
 
 // --- двери --------------------------------------------------------------------

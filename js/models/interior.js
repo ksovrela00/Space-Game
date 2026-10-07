@@ -1104,19 +1104,75 @@ function lamp(ctx, buf, room, x, z, opts = {}) {
 }
 
 /**
+ * Низ обшивки над точкой (x, z), м: самая низкая точка корпуса над ней, или
+ * null — корпуса над ней нет.
+ */
+function hullBottomAt(hullM, x, z) {
+  let lo = Infinity;
+  const V = hullM.verts;
+  for (const f of hullM.faces) {
+    for (let k = 1; k + 1 < f.v.length; k++) {
+      const a = V[f.v[0]], p = V[f.v[k]], q = V[f.v[k + 1]];
+      const area = (p.x - a.x) * (q.z - a.z) - (p.z - a.z) * (q.x - a.x);
+      if (Math.abs(area) < 1e-9) continue;
+      const w1 = ((p.x - x) * (q.z - z) - (p.z - z) * (q.x - x)) / area;
+      const w2 = ((q.x - x) * (a.z - z) - (q.z - z) * (a.x - x)) / area;
+      const w3 = 1 - w1 - w2;
+      if (w1 < 0 || w2 < 0 || w3 < 0) continue;
+      lo = Math.min(lo, w1 * a.y + w2 * p.y + w3 * q.y);
+    }
+  }
+  return isFinite(lo) ? lo : null;
+}
+
+// Стенки колодца режутся по длине на куски не длиннее этого, м: у каждого
+// куска свой низ — по обшивке над ним.
+const WELL_PIECE = 0.5;
+
+/**
  * Колодец платформы: стенки проёма сквозь толщу корпуса — от пола до
- * низа колодца. Без них в опущенную платформу смотрели бы на изнанку
- * обшивки и внутренние грани модели. Вокруг проёма на полу — кромка
- * «осторожно»: пол здесь ходит.
+ * днища. Без них в опущенную платформу смотрели бы на изнанку обшивки и
+ * внутренние грани модели. Вокруг проёма на полу — кромка «осторожно»: пол
+ * здесь ходит.
  *
- * Стенки твёрдые: пока платформа в колодце, сойти с неё вбок некуда.
+ * Стенки твёрдые: пока платформа в колодце, сойти с неё вбок некуда. Низ
+ * стенки — по самой обшивке над ней, кусками по WELL_PIECE, а не по низу
+ * колодца (b.belly, он чуть ниже днища — для выреза в корпусе): стенки
+ * торчали из корпуса вниз на 7–23 см, невидимые снаружи, и вездеход на
+ * плите, легшей на бугор, упирался в них крышей, хотя до днища ему
+ * оставалось 5–21 см.
  */
 function buildBayWell(ctx, buf, b) {
-  const [x0, x1] = b.x, [z0, z1] = b.z, y0 = b.belly, y1 = b.deck, t = 0.08;
-  buf.poly([[x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1]], C.steel, CMAT.paint);
-  buf.poly([[x1, y0, z1], [x1, y1, z1], [x1, y1, z0], [x1, y0, z0]], C.steel, CMAT.paint);
-  buf.poly([[x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0]], C.steel, CMAT.paint);
-  buf.poly([[x0, y0, z1], [x0, y1, z1], [x1, y1, z1], [x1, y0, z1]], C.steel, CMAT.paint);
+  const [x0, x1] = b.x, [z0, z1] = b.z, y1 = b.deck, t = 0.08;
+  // Низ куска стенки вдоль отрезка (u — по длине): самая высокая обшивка
+  // над ним (стенка не опускается ниже корпуса нигде), не ниже b.belly.
+  const bottom = (xa, za, xb, zb) => {
+    let y = b.belly;
+    for (let i = 0; i <= 4; i++) {
+      const k = i / 4, h = ctx.hullM ? hullBottomAt(ctx.hullM, xa + (xb - xa) * k, za + (zb - za) * k) : null;
+      if (h !== null && h < y1) y = Math.max(y, h);
+    }
+    return y;
+  };
+  // Стенка от (xa, za) до (xb, zb), нормалью внутрь колодца — кусками.
+  const wall = (xa, za, xb, zb, ox, oz) => {
+    const len = Math.hypot(xb - xa, zb - za), n = Math.max(1, Math.ceil(len / WELL_PIECE - 1e-9));
+    for (let i = 0; i < n; i++) {
+      const ka = i / n, kb = (i + 1) / n;
+      const pa = [xa + (xb - xa) * ka, za + (zb - za) * ka], pb = [xa + (xb - xa) * kb, za + (zb - za) * kb];
+      // Обшивка — снаружи стенки, в её толще (ox, oz — наружу).
+      const y0 = bottom(pa[0] + ox, pa[1] + oz, pb[0] + ox, pb[1] + oz);
+      buf.poly([[pa[0], y0, pa[1]], [pa[0], y1, pa[1]], [pb[0], y1, pb[1]], [pb[0], y0, pb[1]]], C.steel, CMAT.paint);
+      const lo = [Math.min(pa[0], pb[0], pa[0] + ox * 2), y0, Math.min(pa[1], pb[1], pa[1] + oz * 2)];
+      const hi = [Math.max(pa[0], pb[0], pa[0] + ox * 2), y1, Math.max(pa[1], pb[1], pa[1] + oz * 2)];
+      ctx.solids.push({ lo, hi, bayWell: b.id });
+    }
+  };
+  const o = t / 2;
+  wall(x0, z0, x0, z1, -o, 0);
+  wall(x1, z1, x1, z0, o, 0);
+  wall(x1, z0, x0, z0, 0, -o);
+  wall(x0, z1, x1, z1, 0, o);
   // Кромка — жёлтая полоса на полу вокруг проёма.
   const k = 0.12, y = y1 + 0.003;
   const strip = (a0, a1, c0, c1) => buf.poly([[a0, y, c1], [a1, y, c1], [a1, y, c0], [a0, y, c0]], C.hazard, CMAT.hazard);
@@ -1124,10 +1180,6 @@ function buildBayWell(ctx, buf, b) {
   strip(x0 - k, x1 + k, z1, z1 + k);
   strip(x0 - k, x0, z0, z1);
   strip(x1, x1 + k, z0, z1);
-  ctx.solids.push({ lo: [x0 - t, y0, z0 - t], hi: [x0, y1, z1 + t], bayWell: b.id });
-  ctx.solids.push({ lo: [x1, y0, z0 - t], hi: [x1 + t, y1, z1 + t], bayWell: b.id });
-  ctx.solids.push({ lo: [x0, y0, z0 - t], hi: [x1, y1, z0], bayWell: b.id });
-  ctx.solids.push({ lo: [x0, y0, z1], hi: [x1, y1, z1 + t], bayWell: b.id });
 }
 
 /**

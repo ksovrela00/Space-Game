@@ -279,8 +279,144 @@ const frames = (n, dtMs = 16.7) => {
     rafCb = null;
     if (!cb) throw new Error('кадр не запросил следующий requestAnimationFrame');
     cb(nowMs);
+    if (seamRec) seamTick();
   }
 };
+
+// --- измеритель швов ------------------------------------------------------------
+//
+// Переход из одних осей в другие (грунт ↔ палуба, трюм ↔ дверь вездехода,
+// грунт ↔ плита, съезд и заезд машины) не должен ощущаться: глаз и машина
+// за кадр сдвигаются ровно настолько, насколько их везёт ход. Меряется в
+// осях тела: в мире всё едет вместе с планетой на метры за кадр.
+//
+// Мера — вторая разность места (рывок сверх хода) и поворота (рывок
+// взгляда): шаг, разгон и качание головы дают на ней миллиметры, а
+// перескок на J метров — J. Записывается только там, где проверка ведёт
+// пилота клавишами: её собственные перестановки (w.pos = …) — не швы.
+let seamRec = null;
+const seamRows = [];
+let SV = null;   // js/game/vessels.js — после загрузки игры
+let SO = null;   // js/game/outside.js — тоже
+/**
+ * На сколько ноги пешехода за бортом отошли от порога люка hx корабля V, м —
+ * в осях корабля, по горизонтали. Начало осей грунта мерилом не годится: на
+ * трапе пешеход в осях трапа, а у его пяты оси переходят к нему.
+ */
+function fromSkin(hx, V = globalThis.window.GAME.ownVessel) {
+  const w = globalThis.window.GAME.walk;
+  if (!w.out) return 0;
+  const p = SV.worldToVessel(V, SO.groundToWorld(w.out, w.pos));
+  return Math.hypot(p[0] - hx.h.side * hx.h.skin, p[2] - hx.zc);
+}
+/**
+ * Повернуть пешехода к курсу yaw, как человек: разворот — сразу, поправку
+ * курса — плавно (TURN рад за кадр). Проверка рулит по оси трапа каждый
+ * кадр, а трап крутой (около 40°), и его ось в осях тела и в осях
+ * наклонённого корабля смотрит по курсу на разные 5°: после смены осей у
+ * пяты мгновенная поправка была бы рывком взгляда, какого у игрока с мышью
+ * нет, — и измеритель швов принимал её за шов.
+ */
+const TURN = 0.01, TURN_SNAP = 0.25;
+function turnTo(w, yaw) {
+  let d = yaw - w.yaw;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  w.yaw += Math.abs(d) > TURN_SNAP ? d : Math.max(-TURN, Math.min(TURN, d));
+}
+function seamStart(label, body) { seamRec = { label, body, s: [] }; }
+function seamTick() {
+  const g = globalThis.window.GAME, r = seamRec, b = r.body, w = g.walk, sh = g.ship;
+  const m = (P) => { const l = SV.bodyLocal(b, P); return [l.x * 1000, l.y * 1000, l.z * 1000]; };
+  const d = (v) => { const l = SV.bodyLocalDir(b, v); return [l.x, l.y, l.z]; };
+  const wk = !w.on ? 'кресло' : w.out ? (w.out.trap ? 'трап' : 'грунт') : (w.vessel && !w.vessel.own ? 'борт ' + w.vessel.id : 'свой борт');
+  r.s.push({
+    k: wk + (g.rover ? ' / ' + g.rover.mode : ''),
+    e: m(g.camera.pos), f: d(g.camera.basis.fwd), u: d(g.camera.basis.up),
+    p: m(sh.pos), pr: d(sh.basis.right), pu: d(sh.basis.up), pf: d(sh.basis.fwd),
+    x: process.env.SEAMDBG ? seamWhy(g, m) : '',
+  });
+}
+/** Для разбора: место машины в трюме, ход плиты носителя, сам носитель. */
+function seamWhy(g, m) {
+  const w = g.walk;
+  if (w.on) {
+    return `ноги ${w.pos.map((q) => q.toFixed(3)).join(',')} lag ${(w.lag || 0).toFixed(3)} ${(w.lagX || 0).toFixed(3)} ${(w.lagZ || 0).toFixed(3)}`
+      + ` ${w.ground ? 'на опоре' : 'в воздухе'} рост ${(w.height || 0).toFixed(2)} v ${w.vel.map((q) => q.toFixed(2)).join(',')}`;
+  }
+  const rv = g.rover, C = g.roverLink && g.peers.find((q) => q.id === g.roverLink.carrier);
+  const bx = C && C.air && C.air.bays && C.air.bays[0];
+  if (!rv) return '';
+  return `hg ${rv.hg.x.toFixed(2)},${rv.hg.y.toFixed(2)},${rv.hg.z.toFixed(2)} v ${rv.v.toFixed(2)}`
+    + (bx ? ` плита ${bx.travel.toFixed(2)} dir ${bx.dir} floor ${bx.floor}` : '')
+    + (C ? ' носитель ' + m(C.pos).map((q) => q.toFixed(2)).join(',') : '');
+}
+function seamStop() {
+  const r = seamRec;
+  seamRec = null;
+  if (!r) return;
+  const s = r.s;
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const len = (a) => Math.hypot(a[0], a[1], a[2]);
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const ang = (a, b) => Math.acos(Math.max(-1, Math.min(1, dot(a, b)))) * 180 / Math.PI;
+  const jerk = (i, f) => sub(sub(s[i][f], s[i - 1][f]), sub(s[i - 1][f], s[i - 2][f]));
+  const turn = (i, f) => Math.abs(ang(s[i - 1][f], s[i][f]) - ang(s[i - 2][f], s[i - 1][f]));
+  const at = (i) => ({
+    eye: len(jerk(i, 'e')) * 100,
+    look: Math.max(turn(i, 'f'), turn(i, 'u')),
+    car: len(jerk(i, 'p')) * 100,
+  });
+  const ev = [];
+  for (let i = 1; i < s.length; i++) if (s[i].k !== s[i - 1].k) ev.push(i);
+  const near = (i) => ev.some((e) => i >= e - 1 && i <= e + 3);
+  const base = { eye: 0, look: 0, car: 0 };
+  for (let i = 2; i < s.length; i++) {
+    if (near(i)) continue;
+    const q = at(i);
+    for (const k in base) base[k] = Math.max(base[k], q[k]);
+  }
+  if (process.env.SEAMDBG) {
+    const all = [];
+    for (let i = 2; i < s.length; i++) all.push([i, at(i)]);
+    const top = (k) => all.slice().sort((a, b) => b[1][k] - a[1][k]).slice(0, 4)
+      .map(([i, q]) => `#${i}/${s.length} ${q[k].toFixed(1)} (${s[i - 1].k} → ${s[i].k})`).join('; ');
+    console.log(`    [швы] ${r.label}: глаз — ${top('eye')}`);
+    console.log(`    [швы] ${r.label}: машина — ${top('car')}`);
+    const w0 = all.slice().sort((a, b) => Math.max(b[1].car, b[1].eye) - Math.max(a[1].car, a[1].eye))[0];
+    if (w0 && Math.max(w0[1].car, w0[1].eye) > 8) {
+      for (let i = Math.max(0, w0[0] - 3); i <= Math.min(s.length - 1, w0[0] + 2); i++) {
+        console.log(`      #${i} ${s[i].k} глаз ${s[i].e.map((q) => q.toFixed(3)).join(',')} | ${s[i].x}`);
+      }
+    }
+  }
+  if (!ev.length) seamRows.push({ label: r.label, from: s.length ? s[0].k : '—', to: '(без перехода)', ...base, base, where: '' });
+  for (const e of ev) {
+    const hit = { eye: 0, look: 0, car: 0 };
+    let worst = -1;
+    for (let i = Math.max(2, e); i <= Math.min(s.length - 1, e + 2); i++) {
+      const q = at(i);
+      if (q.car > hit.car) worst = i;
+      for (const k in hit) hit[k] = Math.max(hit[k], q[k]);
+    }
+    // Куда прыгнула машина — в её осях: вперёд, вправо, вверх.
+    let where = '';
+    if (worst >= 2 && hit.car > 5) {
+      const J = jerk(worst, 'p'), q = s[worst];
+      where = `машина: вперёд ${(dot(J, q.pf) * 100).toFixed(0)}, вправо ${(dot(J, q.pr) * 100).toFixed(0)}, вверх ${(dot(J, q.pu) * 100).toFixed(0)} см`;
+    }
+    if (process.env.SEAMDBG && hit.eye > 5) for (let i = Math.max(0, e - 3); i <= Math.min(s.length - 1, e + 3); i++) console.log(`      переход #${i} ${s[i].k} | ${s[i].x}`);
+    seamRows.push({ label: r.label, from: s[e - 1].k, to: s[e].k, ...hit, base, where });
+  }
+}
+function seamReport() {
+  if (!seamRows.length) return;
+  console.log('\n== швы переходов: рывок глаза и машины сверх хода (см), рывок взгляда (°); фон — то же вдали от перехода ==');
+  for (const q of seamRows) {
+    console.log(`  ${q.label}: ${q.from} → ${q.to} | глаз ${q.eye.toFixed(1)} см, взгляд ${q.look.toFixed(2)}°, машина ${q.car.toFixed(1)} см`
+      + ` | фон ${q.base.eye.toFixed(1)} см, ${q.base.look.toFixed(2)}°, ${q.base.car.toFixed(1)} см${q.where ? ' | ' + q.where : ''}`);
+  }
+}
 
 let fails = 0;
 const ok = (cond, msg) => {
@@ -291,6 +427,7 @@ const ok = (cond, msg) => {
 const step = async (label, fn) => {
   try { await fn(); ok(true, label); }
   catch (e) { ok(false, label + ' -> ' + e.message); if (process.env.V) console.log(e.stack); }
+  finally { if (seamRec) seamStop(); }
 };
 
 console.log('\n== smoke: отрисовка и режимы ==');
@@ -312,6 +449,8 @@ loadSpecsFromDisk();
 const mod = await import('../js/main.js');
 const game = globalThis.window.GAME;   // main.js пишет в window, а не в globalThis
 session = (await import('../js/net/session.js')).session;
+SV = await import('../js/game/vessels.js');
+SO = await import('../js/game/outside.js');
 // Игра поднимается, получив состояние у сервера: ждём, пока стартовый
 // экран не будет готов (кнопка ВЗЛЁТ получит обработчик).
 for (let i = 0; i < 100 && !(nodes.bootBtn.listeners.click || []).length; i++) await settle(1);
@@ -1120,9 +1259,11 @@ await step('шлюз: сели на мир с атмосферой, E — люк
     w.pos = [3.3, -9.0, 15.3]; w.room = I.roomById.lockN; w.yaw = Math.PI / 2; w.pitch = 0;
     frames(3);
     // Наружу и по трапу вниз.
+    seamStart('шлюз: по трапу на грунт', b);
     holdDown('KeyW'); frames(60 * 6); release('KeyW'); frames(10);
+    seamStop();
     if (!w.out) throw new Error('за порог не вышли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
-    const away = Math.hypot(w.pos[0], w.pos[2]);
+    const away = fromSkin(hx);
     if (!(away > 6) || !w.ground) throw new Error('по трапу на грунт не сошли: ' + away.toFixed(1) + ' м от порога');
     texts = []; frames(2);
     seen = texts.map((t) => t.s); texts = null;
@@ -1141,12 +1282,44 @@ await step('шлюз: сели на мир с атмосферой, E — люк
     if (!heard.has('metal') || !(heard.has('ground') || heard.has('grass')) || !steps.some((s) => s.endsWith('!'))) {
       throw new Error('шаги не те: ' + [...heard].join(', '));
     }
+    // Влёт в открытый люк в прыжке: ноги на 0.8 м выше порога (выше, чем
+    // нога достаёт до опоры, WALK.snap), тело в проёме помещается — и он уже
+    // на борту, в полёте, а не встав на порог. Раньше на пороге требовалась
+    // опора: в оси корабля не пускали, а снаружи внутри корпуса пусто —
+    // пешеход пролетал проём и падал сквозь корабль.
+    {
+      const Vs = await import('../js/game/vessels.js');
+      const was = { pos: w.pos.slice(), out: w.out, yaw: w.yaw };
+      const h = hx.h;
+      const P = Vs.vesselPoint(game.ownVessel, [h.side * (h.skin + 0.4), h.y[0] + 0.8, (h.z[0] + h.z[1]) / 2]);
+      const O = await import('../js/game/outside.js');
+      w.pos = O.worldToGround(w.out, P);
+      const into = O.worldDirToGround(w.out, Vs.vesselDir(game.ownVessel, [-h.side, 0, 0]));
+      w.yaw = Math.atan2(into[0], into[2]); w.pitch = 0;
+      w.vel = [into[0] * 2.5, 0, into[2] * 2.5]; w.ground = false;
+      let crossed = null;
+      for (let i = 0; i < 60 && crossed === null; i++) { frames(1); if (!w.out) crossed = { y: w.pos[1] - h.y[0], room: w.room && w.room.id }; }
+      frames(40);
+      // Ноги в миг перехода — на высоте прыжка, а не на пороге: без влёта
+      // в полёте пешеход попадал внутрь, лишь опустившись к полу на шаг
+      // ноги (WALK.snap) — пролетев проём насквозь.
+      if (!crossed || crossed.y < 0.5 || w.out || !w.room || w.room.id !== 'lockN') {
+        throw new Error('в открытый люк в прыжке не влетели: ' + (!crossed ? 'остались снаружи' : crossed.y < 0.5
+          ? 'вошли, только опустившись к порогу (ноги в ' + crossed.y.toFixed(2) + ' м над ним)' : 'внутри не там: ' + (w.room && w.room.id)));
+      }
+      // Обратно на грунт, где стоял: дальше проверка поднимается по трапу.
+      w.out = was.out; w.pos = was.pos; w.yaw = was.yaw; w.vel = [0, 0, 0];
+      w.vessel = null; w.air = null; w.room = null; game.frame = game.ownVessel;
+      frames(5);
+    }
     // Обратно: развернуться и вверх по трапу — в тоннель.
     w.yaw += Math.PI;
+    seamStart('шлюз: с грунта по трапу в шлюз', b);
     holdDown('KeyW');
     for (let i = 0; i < 60 * 10 && w.out; i++) frames(1);
     // Дальше от проёма: пока стоишь в нём, люк не закрыть.
     frames(25); release('KeyW'); frames(5);
+    seamStop();
     if (w.out || !w.room || w.room.id !== 'lockN') {
       throw new Error('с трапа в шлюз не вернулись: ' + (w.out ? 'за бортом' : w.room && w.room.id));
     }
@@ -1237,6 +1410,23 @@ await step('грузовая платформа: E на плите — вниз 
     if (!hint('ПЛАТФОРМА ВНИЗ')) throw new Error('у пульта на плите нет подсказки «платформа вниз»');
     key('KeyE'); frames(1);
     if (!bx.want) throw new Error('E у пульта платформу не позвал вниз');
+    // 1а. Плита пошла вниз — с неё запрыгивают обратно на палубу, если
+    // хватает прыжка: невидимого заслона у края проёма нет (так решил автор
+    // игры), держат только настоящие стенки колодца.
+    {
+      until(() => bx.travel > 0.3, 4);
+      w.yaw = -Math.PI / 2;
+      holdDown('KeyW');
+      let jumped = false;
+      until(() => { if (!jumped && w.pos[0] < B.x[0] + 0.45) { key('Space'); jumped = true; } return w.pos[0] < B.x[0] - 0.4 && w.ground; }, 4);
+      release('KeyW'); frames(10);
+      if (w.out || !w.ground || Math.abs(w.pos[1] - B.deck) > 0.03 || w.pos[0] > B.x[0]) {
+        throw new Error('с опускающейся плиты на палубу не запрыгнули: ' + w.pos.map((v) => v.toFixed(2)).join(',') + ' (палуба ' + B.deck + ', плита ' + top().toFixed(2) + ')');
+      }
+      // Обратно на плиту — дальше проверка едет на ней вниз.
+      w.pos = [B.panel[0] + 0.3, top(), B.panel[1] + 0.85]; w.yaw = Math.PI; w.vel = [0, 0, 0];
+      frames(2);
+    }
     let off = 0;
     const down = until(() => { off = Math.max(off, Math.abs(w.pos[1] - top())); return bx.dir === 0 && bx.travel > 1; }, 14);
     if (!down || !bx.floor || !bx.exitOk || Math.abs(bx.travel - bx.reach) > 0.3) {
@@ -1251,18 +1441,80 @@ await step('грузовая платформа: E на плите — вниз 
     // 2. С края на грунт — оси грунта.
     w.pos = [B.x[1] - 0.6, top(), (B.z[0] + B.z[1]) / 2]; w.yaw = Math.PI / 2;
     frames(2);
+    seamStart('плита у грунта: с края на грунт', b);
     holdDown('KeyW');
     const stepped = until(() => !!w.out, 4);
     frames(40); release('KeyW'); frames(20);
+    seamStop();
     if (!stepped || !w.out || !w.ground) throw new Error('с края платформы на грунт не сошли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
 
     // 3. Обратно на плиту — снова в осях корабля, на её верху.
     w.yaw += Math.PI;
+    seamStart('плита у грунта: с грунта на плиту', b);
     holdDown('KeyW');
     const back = until(() => !w.out, 6);
     frames(20); release('KeyW'); frames(10);
+    seamStop();
     if (!back || w.out || !w.room || w.room.id !== 'hold' || Math.abs(w.pos[1] - top()) > 0.03) {
       throw new Error('с грунта на плиту не ступили: ' + (w.out ? 'за бортом' : (w.room && w.room.id) + ' на ' + w.pos[1].toFixed(2)));
+    }
+
+    // 3а-0. Выпал за обшивку высоко над грунтом (люк без трапа, край висящей
+    // плиты) — сразу в оси грунта, а не у самой земли: корабль за бортом
+    // уже не держит, и падает он на грунт с тяжестью тела.
+    {
+      w.pos = [B.x[1] + 2.5, B.deck - 0.5, (B.z[0] + B.z[1]) / 2]; w.vel = [0, 0, 0]; w.ground = false;
+      let hAt = null;
+      for (let i = 0; i < 30 && hAt === null; i++) {
+        frames(1);
+        if (w.out) {
+          const Wd = game.outsideFrame();
+          hAt = w.pos[1] - Wd.ground(w.pos[0], w.pos[2]);
+        }
+      }
+      if (hAt === null || hAt < 2) throw new Error('выпавший за борт высоко над грунтом — не в осях грунта сразу: ' + (hAt === null ? 'всё ещё в осях корабля' : 'перешёл в ' + hAt.toFixed(2) + ' м над грунтом'));
+      for (let i = 0; i < 120 && !w.ground; i++) frames(1);
+      game.walk.out = null; game.walk.vessel = null; game.frame = game.ownVessel;
+      w.pos = [B.panel[0] + 0.3, top(), B.panel[1] + 0.85]; w.vel = [0, 0, 0]; w.room = I.roomById.hold;
+      frames(3);
+    }
+    // 3а. Падение в осях корабля ниже грунта под ним — дальше в осях грунта,
+    // и грунт ловит. Так пилот ушёл на −60 м под пол трюма: плита ушла
+    // из-под ног, а в осях корабля грунта нет, и падение было без конца.
+    // В двух метрах от края плиты: сход с её края (pastBay) тут ни при чём.
+    {
+      w.pos = [B.x[1] + 2.0, top() + 1.5, (B.z[0] + B.z[1]) / 2]; w.vel = [0, 0, 0]; w.ground = false;
+      let low = w.pos[1];
+      for (let i = 0; i < 120; i++) { frames(1); if (!w.out) low = Math.min(low, w.pos[1]); }
+      const Wd = w.out ? game.outsideFrame() : null;
+      const gy = Wd ? Wd.ground(w.pos[0], w.pos[2]) : null;
+      if (!w.out || !w.ground || gy === null || Math.abs(w.pos[1] - gy) > 0.05) {
+        throw new Error('падающий под корабль не пойман грунтом: ' + (w.out ? 'снаружи, ноги ' + w.pos[1].toFixed(2)
+          + ', грунт ' + (gy === null ? '—' : gy.toFixed(2)) : 'в осях корабля на ' + w.pos[1].toFixed(2) + ' (верх плиты ' + top().toFixed(2) + ')'));
+      }
+      // Обратно на плиту — как стоял: дальше проверка ведёт его с неё.
+      game.walk.out = null; game.walk.vessel = null; game.frame = game.ownVessel;
+      w.pos = [B.panel[0] + 0.3, top(), B.panel[1] + 0.85]; w.vel = [0, 0, 0]; w.room = I.roomById.hold;
+      frames(3);
+    }
+
+    // 3б. Человек на кромке плиты (серединой за краем) — плита наверх не
+    // идёт и говорит почему: одной ногой он на грунте, и плита ушла бы
+    // из-под другой. Сошёл на плиту — пошла бы.
+    {
+      // На 4 см за краем: подошва на кромке, а сойти с плиты (pastBay) — с 5 см.
+      w.pos = [B.x[1] + 0.04, top(), (B.z[0] + B.z[1]) / 2]; w.vel = [0, 0, 0]; w.room = I.roomById.hold;
+      frames(3);
+      game.state.messages.length = 0;
+      const t0 = bx.travel;
+      bx.want = false;
+      frames(60);
+      const kept = Math.abs(bx.travel - t0) < 1e-6 && said('НА КРАЮ ПЛАТФОРМЫ ЧЕЛОВЕК');
+      bx.want = true;
+      frames(3);
+      game.state.messages.length = 0;
+      if (w.out) throw new Error('с кромки сошли на грунт — опыт не о том');
+      if (!kept) throw new Error(`плита пошла из-под человека на кромке: ход ${t0.toFixed(2)} → ${bx.travel.toFixed(2)}; сказано: ${game.state.messages.map((m) => m.text).join(' | ')}`);
     }
 
     // 4. Наверх — с пульта на плите.
@@ -1270,14 +1522,17 @@ await step('грузовая платформа: E на плите — вниз 
     frames(3);
     if (!hint('ПЛАТФОРМА НАВЕРХ')) throw new Error('у пульта внизу нет подсказки «платформа наверх»');
     key('KeyE'); frames(1);
+    seamStart('плита: наверх с пилотом', b);
     off = 0;
     const upDone = until(() => { off = Math.max(off, Math.abs(w.pos[1] - top())); return bx.dir === 0 && bx.travel === 0; }, 14);
+    seamStop();
     if (!upDone || off > 0.03 || Math.abs(w.pos[1] - B.deck) > 0.01) {
       throw new Error(`наверх не поднялись: ход ${bx.travel.toFixed(3)}, пилот на ${w.pos[1].toFixed(3)} (пол ${B.deck})`);
     }
 
-    // 5. Пульт вызова на переборке: отправить вниз; в проём с палубы не
-    // шагнуть — заслон.
+    // 5. Пульт вызова на переборке: отправить вниз; в открытый колодец с
+    // палубы — падают (невидимых заслонов нет, так решил автор игры), и
+    // падают на плиту под ним, а не сквозь неё и не под землю.
     w.pos = [B.call[0] + 0.3, B.deck, B.call[1] + 0.5]; w.yaw = Math.PI; w.pitch = 0;
     frames(3);
     if (!hint('ОТПРАВИТЬ ПЛАТФОРМУ ВНИЗ')) throw new Error('у пульта вызова нет подсказки «отправить вниз»');
@@ -1285,10 +1540,15 @@ await step('грузовая платформа: E на плите — вниз 
     until(() => bx.travel > 1.0, 6);
     w.pos = [0, B.deck, B.z[0] - 0.6]; w.yaw = 0;
     frames(2);
-    holdDown('KeyW'); frames(90); release('KeyW'); frames(10);
-    if (w.pos[1] < B.deck - 0.05 || w.pos[2] > B.z[0]) {
-      throw new Error('с палубы шагнули в проём: ' + w.pos.map((v) => v.toFixed(2)).join(','));
+    holdDown('KeyW'); frames(90); release('KeyW');
+    until(() => w.ground && bx.dir === 0, 10);
+    frames(10);
+    if (w.out || w.pos[2] < B.z[0] || !w.ground || Math.abs(w.pos[1] - top()) > 0.05) {
+      throw new Error('с палубы в открытый колодец — не на плиту: ' + (w.out ? 'за бортом ' : '') + w.pos.map((v) => v.toFixed(2)).join(',')
+        + ' (верх плиты ' + top().toFixed(2) + ')');
     }
+    // С плиты в колодце — к креслу: шаг 6 сажает в него пешехода.
+    w.pos = [B.panel[0] + 0.3, top(), B.panel[1] + 0.85]; w.room = I.roomById.hold;
 
     // 6. Сел в кресло — платформа поднимается сама.
     w.pos = I.seat.stand.slice(); w.room = I.roomById.bridge;
@@ -1400,7 +1660,7 @@ await step('вездеход в трюме: пешком к нему, E — дв
     for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
     const w = game.walk;
     if (!w.on || w.phase !== 'walk') throw new Error('не встали');
-    w.pos = [m.x + 3.2, B.deck, m.z]; w.room = game.interior.roomById.hold; w.yaw = -Math.PI / 2; w.pitch = 0;
+    w.pos = [m.x + 2.9, B.deck, m.z]; w.room = game.interior.roomById.hold; w.yaw = -Math.PI / 2; w.pitch = 0;
     holdDown('KeyW');
     for (let i = 0; i < 120; i++) { if (i % 10 === 0) tickNet(); frames(1); }
     release('KeyW'); frames(5);
@@ -1489,10 +1749,12 @@ await step('вездеход в трюме: пешком к нему, E — дв
       if (!until(() => { tickNet(); return rhx.open === 1 && rhx.stair === 1; }, 20)) {
         throw new Error(`своя дверь вездехода в трюме не открылась: створка ${rhx.open.toFixed(2)}, трап ${rhx.stair.toFixed(2)}, выход ${rhx.exitOk}`);
       }
+      seamStart('вездеход в трюме: из двери в трюм', b);
       holdDown('KeyW');
       const out = until(() => { tickNet(); return wr.vessel && wr.vessel.id === mine; }, 6);
       for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
+      seamStop();
       for (let i = 0; i < 20; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       const deck = C().air.bays[0].b.deck;
       if (!out || wr.out || !wr.room || wr.room.id !== 'hold' || Math.abs(wr.pos[1] - deck) > 0.05) {
@@ -1501,9 +1763,11 @@ await step('вездеход в трюме: пешком к нему, E — дв
       }
       // И обратно в кресло: к двери, внутрь, к креслу, E.
       wr.yaw = Math.PI / 2;
+      seamStart('вездеход в трюме: из трюма в дверь', b);
       holdDown('KeyW');
       const backIn = until(() => { tickNet(); return wr.vessel === game.ownVessel || !wr.vessel; }, 6);
       frames(20); release('KeyW');
+      seamStop();
       if (!backIn) {
         const pw = Vs.vesselPoint(wr.vessel || game.ownVessel, wr.pos);
         const pr = Vs.worldToVessel(game.ownVessel, pw);
@@ -1519,25 +1783,46 @@ await step('вездеход в трюме: пешком к нему, E — дв
       frames(2); key('KeyE'); frames(60);
       if (game.walk.on) throw new Error('в кресло вездехода не сели');
     }
+    seamStart('вездеход: газ в трюме до стены', b);
     holdDown('KeyW');
     for (let i = 0; i < 360; i++) { if (i % 10 === 0) tickNet(); frames(1); }
     release('KeyW');
+    seamStop();
     for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
     const room = game.peers.find((p) => p.id === mine).air.I.roomById.hold;
-    if (rv.mode !== 'hangar' || Math.abs(rv.v) > 0.01 || rv.hg.z + 2.2 + 1.7 > room.hi[2] + 0.05 || rv.hg.z < m.z + 0.5) {
-      throw new Error(`газ в трюме: не упёрся в переборку — нос на ${(rv.hg.z + 3.9).toFixed(2)} (стена ${room.hi[2]}), ход ${rv.v.toFixed(2)}, ${rv.mode}`);
+    // Нос — у самой переборки: кузов для стен — прямоугольник по машине
+    // (HULL_BOX), а не круги, что торчали за нос на 0.9 м.
+    const { HULL_BOX } = await import('../js/game/rover.js');
+    const nose = rv.hg.z + HULL_BOX.l;
+    if (rv.mode !== 'hangar' || Math.abs(rv.v) > 0.01 || nose > room.hi[2] + 0.05 || nose < room.hi[2] - 0.25 || rv.hg.z < m.z + 0.5) {
+      throw new Error(`газ в трюме: не упёрся в переборку вплотную — нос на ${nose.toFixed(2)} (стена ${room.hi[2]}), ход ${rv.v.toFixed(2)}, ${rv.mode}`);
     }
-    // 6. Платформу опускает сам пилот (здесь — её просьба в снимке носителя):
-    // плита у грунта — с неё съезжают назад, на грунт.
+    // 6. Платформу опускает сам пилот (здесь — её просьба в снимке носителя).
+    // Машина свешивается за край плиты — плита стоит и говорит почему:
+    // раньше она трогалась, и заслон колодца выбрасывал машину на метр.
+    if (!Hg.onBayEdge(cbx(), rv.hg)) throw new Error('у переборки машина не свешивается за край плиты — опыт ничего не стоит');
     bayWanted = true;
+    for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    if (cbx().travel > 1e-6 || !cbx().loadHeld) throw new Error(`плита пошла с машиной на краю: ход ${cbx().travel.toFixed(3)}`);
+    // Водитель сдаёт назад — на плиту целиком, и плита идёт.
+    holdDown('KeyS');
+    until(() => { tickNet(); return !Hg.onBayEdge(cbx(), rv.hg) && rv.hg.z < m.z + 0.8; }, 6);
+    release('KeyS');
+    holdDown('Space');
+    until(() => { tickNet(); return Math.abs(rv.v) < 0.01; }, 4);
+    release('Space');
+    seamStart('вездеход: плита с ним вниз', b);
     if (!until(() => { tickNet(); return Hg.bayDown(cbx()); }, 20)) {
       throw new Error(`платформа носителя не легла: ход ${cbx().travel.toFixed(2)}, легла ${cbx().floor}`);
     }
+    seamStop();
     if (Math.abs(rv.hg.y - A.bayTop(cbx())) > 1e-6) throw new Error('вездеход не поехал вниз с плитой: ' + rv.hg.y.toFixed(2));
+    seamStart('вездеход: задом с плиты на грунт', b);
     holdDown('KeyS');
     const off = until(() => { tickNet(); return rv.mode === 'ground'; }, 12);
     for (let i = 0; i < 90; i++) { if (i % 10 === 0) tickNet(); frames(1); }
     release('KeyS');
+    seamStop();
     if (!off) throw new Error('с плиты у грунта не съехали: ' + rv.mode + ', z ' + rv.hg.z.toFixed(2));
     if (!game.state.messages || rv.air) throw new Error('съехал — и повис: в воздухе');
     // 6б. На грунте: встал, вышел в дверь на грунт, по трапу — обратно внутрь.
@@ -1557,18 +1842,22 @@ await step('вездеход в трюме: пешком к нему, E — дв
       }
       const where = () => (wr.out ? 'за бортом' : (wr.vessel ? (wr.vessel.own ? 'свой ' : 'борт ' + wr.vessel.id + ' ') : 'свой ') + (wr.room && wr.room.id))
         + ' y ' + wr.pos[1].toFixed(2) + (wr.ground ? ' на опоре' : ' в воздухе');
+      seamStart('вездеход на грунте: из двери по трапу на грунт', b);
       holdDown('KeyW');
       const outG = until(() => { tickNet(); return !!wr.out; }, 6);
       for (let i = 0; i < 70; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
+      seamStop();
       for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       if (!outG || !wr.out || !wr.ground) throw new Error('из вездехода на грунт не сошли: ' + where());
       // Обратно: лицом к машине, по трапу — в дверь.
       wr.yaw += Math.PI;
+      seamStart('вездеход на грунте: с грунта по трапу в дверь', b);
       holdDown('KeyW');
       const inG = until(() => { tickNet(); return !wr.out; }, 8);
       for (let i = 0; i < 40; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
+      seamStop();
       for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       if (!inG || wr.out || !wr.room || Math.abs(wr.pos[1] - Ir.seat.stand[1]) > 0.05 || !wr.ground) {
         throw new Error('по трапу с грунта в вездеход не вошли: ' + where());
@@ -1594,13 +1883,15 @@ await step('вездеход в трюме: пешком к нему, E — дв
         const toDoor = O.worldDirToGround(wr.out, Vs.vesselDir(game.ownVessel, [Math.cos(aim), 0, Math.sin(aim)]));
         wr.yaw = Math.atan2(toDoor[0], toDoor[2]);
         for (let i = 0; i < 10; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+        seamStart(`вездеход на грунте: в дверь сбоку, ${dz} м`, b);
         holdDown('KeyW');
         const inA = until(() => { tickNet(); return !wr.out; }, 8);
         for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
         release('KeyW');
+        seamStop();
         if (!inA || wr.out) {
           const pr = Vs.worldToVessel(game.ownVessel, O.groundToWorld(wr.out, wr.pos));
-          throw new Error(`под углом ${turn} рад и в ${dz} м сбоку от оси в дверь не вошли: в осях вездехода ${pr.map((v) => v.toFixed(2)).join(',')}, рост ${wr.height.toFixed(2)}`);
+          throw new Error(`под углом ${turn} рад и в ${dz} м сбоку от оси в дверь не вошли: в осях вездехода ${pr.map((v) => v.toFixed(2)).join(',')}, рост ${wr.height.toFixed(2)}, вездеход: наклон ${(rv.slope * 57.3).toFixed(1)}°, над плитой ${Hg.bayFoot(cbx(), Hg.worldToHangar(C(), sh.pos, sh.basis.fwd, {}))}, в воздухе ${rv.air}`);
         }
       }
       wr.pos = Ir.seat.stand.slice(); wr.room = Ir.roomById.rcab;
@@ -1610,6 +1901,7 @@ await step('вездеход в трюме: пешком к нему, E — дв
     // 7. Обратно на плиту — снова в трюме. Съезжая задом, машина может
     // задеть стойку шасси и уйти вбок: водитель подруливает к середине плиты.
     for (let i = 0; i < 60; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+    seamStart('вездеход: с грунта на плиту', b);
     holdDown('KeyW');
     let turn = null;
     const onto = until(() => {
@@ -1624,6 +1916,7 @@ await step('вездеход в трюме: пешком к нему, E — дв
     // Заехал — и до середины плиты: машина целиком на ней.
     until(() => { tickNet(); return rv.mode !== 'hangar' || rv.hg.z > 6.6; }, 6);
     release('KeyW');
+    seamStop();
     // 8. Вернулся и встал на плите: вышел в дверь — на плиту (оси носителя),
     // с края — на грунт и обратно, к пульту на плите — E: наверх, и машина,
     // и пилот едут с плитой и остаются в трюме.
@@ -1645,10 +1938,12 @@ await step('вездеход в трюме: пешком к нему, E — дв
         + ' y ' + wr.pos[1].toFixed(2);
       // Плита у грунта: из двери — наружу, как с любого трапа, а не в оси
       // корабля, где грунта нет: трап у края плиты ставил ногу в пустоту.
+      seamStart('вездеход на плите у грунта: из двери на грунт', b);
       holdDown('KeyW');
       const outP = until(() => { tickNet(); return !!wr.out; }, 6);
       for (let i = 0; i < 50; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
+      seamStop();
       for (let i = 0; i < 40; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       const O = await import('../js/game/outside.js');
       const Wd = wr.out ? game.outsideFrame() : null;
@@ -1657,38 +1952,46 @@ await step('вездеход в трюме: пешком к нему, E — дв
         throw new Error('из вездехода на плите у грунта — не на грунт: ' + where() + ', грунт ' + (gy === null ? '—' : gy.toFixed(2)));
       }
       // На плиту — за машиной, с левого края, с прыжком: край у склона бывает
-      // выше шага (зазор до 0.66 м).
+      // выше шага (зазор до 0.66 м). Мимо пульта на плите (он у её переднего
+      // края, z 3.3…3.6): шаг на плиту проверяется здесь, а не обход пульта.
       const Bq = cbx().b;
-      const side = Vs.vesselPoint(C(), [Bq.x[0] - 0.7, A.bayTop(cbx()), Bq.z[0] + 0.8]);
+      const side = Vs.vesselPoint(C(), [Bq.x[0] - 0.7, A.bayTop(cbx()), Bq.z[0] + 1.6]);
       wr.pos = O.worldToGround(wr.out, side);
       const toPlate = O.worldDirToGround(wr.out, Vs.vesselDir(C(), [1, 0, 0]));
       wr.yaw = Math.atan2(toPlate[0], toPlate[2]);
       for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
+      seamStart('с грунта прыжком на плиту', b);
       holdDown('KeyW');
       let jumped = 0;
       const back = until(() => { tickNet(); if (++jumped % 20 === 0) key('Space'); return !wr.out; }, 8);
       for (let i = 0; i < 20; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
+      seamStop();
       for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       if (!back || wr.out || Math.abs(wr.pos[1] - A.bayTop(cbx())) > 0.05) {
         const O = await import('../js/game/outside.js');
         const pw = wr.out ? O.groundToWorld(wr.out, wr.pos) : Vs.vesselPoint(wr.vessel || game.ownVessel, wr.pos);
         const pc = Vs.worldToVessel(C(), pw), pr = Vs.worldToVessel(game.ownVessel, pw);
         const q = cbx();
-        throw new Error('с грунта на плиту не ступили: ' + where() + ', в осях носителя ' + pc.map((v) => v.toFixed(2)).join(',')
+        const Wn = wr.out ? game.outsideFrame() : null;
+        const near = Wn ? Wn.extra.filter((s) => s.hi[0] > wr.pos[0] - 0.8 && s.lo[0] < wr.pos[0] + 0.8 && s.hi[2] > wr.pos[2] - 0.8 && s.lo[2] < wr.pos[2] + 0.8
+          && s.hi[1] > wr.pos[1] && s.lo[1] < wr.pos[1] + 1.8).map((s) => JSON.stringify(Object.fromEntries(Object.entries(s.src || s).filter(([k]) => k !== 'lo' && k !== 'hi'))).slice(0, 60)) : [];
+        throw new Error('с грунта на плиту не ступили: твёрдое рядом ' + near.join(' ') + '; ' + where() + ', в осях носителя ' + pc.map((v) => v.toFixed(2)).join(',')
           + ' (плита x ' + q.b.x.join('…') + ', z ' + q.b.z.join('…') + ', верх ' + A.bayTop(q).toFixed(2) + ', сойти ' + q.exitOk + ', зазор ' + q.gap.toFixed(2)
           + '), в осях вездехода ' + pr.map((v) => v.toFixed(2)).join(',') + ', вездеход ' + rv.mode + ' x ' + rv.hg.x.toFixed(2) + ' z ' + rv.hg.z.toFixed(2));
       }
       // К пульту на плите — E: наверх (просьба за свой спящий корабль — хабу;
       // хаб переставляет платформу — снимок приходит без неё).
       const Bc = cbx().b;
-      wr.pos = [Bc.panel[0] + 0.3, A.bayTop(cbx()), Bc.panel[1] + 0.85]; wr.yaw = Math.PI;
+      wr.pos = [Bc.panel[0], A.bayTop(cbx()), Bc.panel[1] + 0.85]; wr.yaw = Math.PI;
       for (let i = 0; i < 4; i++) { tickNet(); frames(1); }
       if (!game.walkBay) throw new Error('у пульта на плите — не пульт: ' + where() + ', вездеход z ' + rv.hg.z.toFixed(2));
       key('KeyE'); frames(1);
       bayWanted = false;
+      seamStart('плита наверх: пилот и вездеход на ней', b);
       let worst = 0;
       const upDone = until(() => { tickNet(); worst = Math.min(worst, wr.pos[1] - A.bayTop(cbx())); return cbx().travel === 0 && cbx().dir === 0; }, 20);
+      seamStop();
       for (let i = 0; i < 30; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       const deck = cbx().b.deck;
       if (!upDone || wr.out || Math.abs(wr.pos[1] - deck) > 0.05 || worst < -0.1) {
@@ -1696,11 +1999,13 @@ await step('вездеход в трюме: пешком к нему, E — дв
       }
       if (rv.mode !== 'hangar' || Math.abs(rv.hg.y - deck) > 1e-6) throw new Error('вездеход не поднялся с плитой: ' + rv.mode + ', y ' + rv.hg.y.toFixed(2));
       // По трюму — к кормовой переборке и вдоль неё: пол под ногами.
-      wr.pos = [-0.9, deck, 4.0]; wr.yaw = Math.PI;
+      wr.pos = [-2.5, deck, 4.0]; wr.yaw = Math.PI;
+      seamStart('трюм у кормы', b);
       holdDown('KeyW');
       for (let i = 0; i < 120; i++) { if (i % 10 === 0) tickNet(); frames(1); }
       release('KeyW');
       if (wr.out || Math.abs(wr.pos[1] - deck) > 0.05) throw new Error('по трюму у кормы провалились: ' + where());
+      seamStop();
     }
     if (!onto) {
       const hgT = Hg.worldToHangar(C(), sh.pos, sh.basis.fwd, {});
@@ -1738,6 +2043,139 @@ await step('вездеход в трюме: пешком к нему, E — дв
 // было вовсе (шлюз «в пустоту»): на стоянке люк открывался, а проём
 // оставался перекрыт — ни трапа, ни выхода. Здесь весь путь ногами: пульт,
 // цикл, трап, грунт и обратно в шлюз, люк задраен.
+// Вездеход на склоне: кузов стоит с креном и тангажом, а пешеход на грунте —
+// по отвесу. Так пешеход на трапе оставался в осях грунта и в дверь
+// (0.9 × 1.6 м) не помещался: его тело — коробка по отвесу, а проём
+// наклонён вместе с машиной. На трапе он в осях машины — и входит.
+await step('вездеход на склоне: по трапу на грунт и обратно в дверь, крен и тангаж около 10°', async () => {
+  const A = await import('../js/game/airlock.js');
+  const Vs = await import('../js/game/vessels.js');
+  const S = await import('../js/game/surface.js');
+  const Sp = await import('../js/game/specs.js');
+  const O = await import('../js/game/outside.js');
+  const { buildRoverCockpit } = await import('../js/models/cockpit.rover.js');
+  const saved = game.cockpit;
+  const sh = game.ship;
+  const keep = {
+    id: sh.id, pos: { ...sh.pos }, vel: { ...sh.vel }, speed: sh.speed, throttle: sh.throttle,
+    basis: { right: { ...sh.basis.right }, up: { ...sh.basis.up }, fwd: { ...sh.basis.fwd } },
+    gear: { ...sh.gear },
+  };
+  const w = game.walk;
+  const until = (cond, sec) => { for (let i = 0; i < sec * 60 && !cond(); i++) frames(1); return cond(); };
+  try {
+    if (Sp.useShipType('rover') !== 'rover') throw new Error('на вездеход не пересесть');
+    game.syncHull();
+    game.cockpit = buildRoverCockpit();
+    await game.loadInterior();
+    const Ir = game.interior, ra = Ir.air, rhx = ra.hatches[0];
+    const b = game.world.planets.find((p) => p.kind === 'ocean');
+    // Суша с уклоном 9–12°: машина на ней кренится на столько же.
+    let q = null;
+    for (let i = 0; i < 20000 && !q; i++) {
+      const u = -0.8 + 1.6 * (i / 19999), a = i * 2.399963, sn = Math.sqrt(1 - u * u);
+      const d = { x: sn * Math.cos(a), y: u, z: sn * Math.sin(a) };
+      const sl = S.slopeAt(b, d);
+      if (!S.waterAt(b, d) && sl > 0.16 && sl < 0.21 && S.groundRadius(b, d) - b.radius > 0.05) q = d;
+    }
+    if (!q) throw new Error('на океаническом мире не нашлось склона в 9–12°');
+    const dot = (u, v) => u.x * v.x + u.y * v.y + u.z * v.z;
+    const hz = (rhx.h.z[0] + rhx.h.z[1]) / 2;
+    const bad = [], tilts = [];
+    for (const heading of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+      if (w.on) {
+        w.pos = Ir.seat.stand.slice(); w.room = Ir.roomById.rcab; w.out = null; w.vessel = null; game.frame = game.ownVessel;
+        frames(2); key('KeyE'); frames(60);
+      }
+      for (const x of ra.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      game.roverLink = { carrier: null, stowed: false, fresh: true };
+      game.state.mode = 'flight';
+      sh.landedAt = null; sh.landedPose = null;
+      S.worldPoint(b, q, S.groundRadius(b, q) + 0.002, sh.pos);
+      const up = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+      const ul = Math.hypot(up.x, up.y, up.z); up.x /= ul; up.y /= ul; up.z /= ul;
+      const hz0 = Math.abs(up.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+      const f0 = { x: hz0.y * up.z - hz0.z * up.y, y: hz0.z * up.x - hz0.x * up.z, z: hz0.x * up.y - hz0.y * up.x };
+      const fl = Math.hypot(f0.x, f0.y, f0.z); f0.x /= fl; f0.y /= fl; f0.z /= fl;
+      const r = { x: f0.y * up.z - f0.z * up.y, y: f0.z * up.x - f0.x * up.z, z: f0.x * up.y - f0.y * up.x };
+      const c = Math.cos(heading), sn = Math.sin(heading);
+      lookAlong(sh.basis, { x: f0.x * c + r.x * sn, y: f0.y * c + r.y * sn, z: f0.z * c + r.z * sn }, up);
+      sh.vel.x = sh.vel.y = sh.vel.z = 0;
+      holdDown('Space');
+      frames(150);
+      release('Space');
+      const P = { x: sh.pos.x - b.pos.x, y: sh.pos.y - b.pos.y, z: sh.pos.z - b.pos.z };
+      const pl = Math.hypot(P.x, P.y, P.z);
+      const tilt = `крен ${(Math.asin(dot(sh.basis.right, P) / pl) * 180 / Math.PI).toFixed(0)}°, тангаж ${(Math.asin(dot(sh.basis.fwd, P) / pl) * 180 / Math.PI).toFixed(0)}°`;
+      tilts.push(tilt);
+      // Встал, в шлюз, E — дверь.
+      key('KeyY'); frames(60);
+      w.pos = [-0.6, Ir.seat.stand[1], hz]; w.room = Ir.roomById.rlock; w.yaw = -Math.PI / 2; w.pitch = 0; w.vel = [0, 0, 0];
+      frames(4);
+      if (!rhx.want) { key('KeyE'); frames(1); }
+      if (!until(() => rhx.open === 1 && rhx.stair === 1 && rhx.exitOk, 20)) {
+        bad.push(`${tilt}: дверь не открылась (выход ${rhx.exitOk}, зазор ${rhx.footGap})`);
+        continue;
+      }
+      // Наружу — по трапу на грунт.
+      seamStart(`вездеход на склоне (${tilt}): по трапу на грунт`, b);
+      holdDown('KeyW');
+      until(() => !!w.out, 6);
+      for (let i = 0; i < 80; i++) frames(1);
+      release('KeyW'); frames(20);
+      seamStop();
+      if (!w.out || !w.ground) { bad.push(`${tilt}: на грунт не сошли`); continue; }
+      // Обратно — по оси трапа, как идёт игрок, который его видит.
+      const V = game.ownVessel;
+      const toG = (p) => O.worldToGround(w.out, Vs.vesselPoint(V, p));
+      seamStart(`вездеход на склоне (${tilt}): с грунта по трапу в дверь`, b);
+      holdDown('KeyW');
+      const inside = until(() => {
+        if (w.out) {
+          const H = toG(A.stairPoint(rhx, 1, [0, 0, 0]));
+          const F = toG(A.stairPoint(rhx, 1, [rhx.design.foot[0], rhx.design.foot[1], 0]));
+          const ax = H[0] - F[0], az = H[2] - F[2], L = Math.hypot(ax, az);
+          const along = ((w.pos[0] - F[0]) * ax + (w.pos[2] - F[2]) * az) / L;
+          const side = Math.abs((w.pos[0] - F[0]) * az - (w.pos[2] - F[2]) * ax) / L;
+          const k = side > 0.3 && along < 0.5 ? -1.5 : Math.max(0, Math.min(L, along)) + 1;
+          turnTo(w, Math.atan2(F[0] + ax / L * k - w.pos[0], F[2] + az / L * k - w.pos[2]));
+        }
+        return !w.out && w.room && w.room.id === 'rlock';
+      }, 12);
+      frames(20); release('KeyW'); frames(10);
+      seamStop();
+      if (!inside) {
+        const pr = w.out ? Vs.worldToVessel(V, O.groundToWorld(w.out, w.pos)) : w.pos;
+        bad.push(`${tilt}: по трапу в дверь не вошли — ${w.out ? 'снаружи' : 'на борту'}, в осях вездехода ${pr.map((v) => v.toFixed(2)).join(',')}, рост ${(w.height || 0).toFixed(2)}`);
+      }
+    }
+    if (bad.length) throw new Error(bad.join('; ') + ' (наклоны: ' + tilts.join('; ') + ')');
+  } finally {
+    if (w.on) { w.on = false; w.phase = 'seated'; w.out = null; w.vessel = null; }
+    game.frame = game.ownVessel;
+    game.roverLink = { carrier: null, stowed: false, fresh: false };
+    game.rover.mode = 'ground';
+    Sp.useShipType('challenger');
+    game.syncHull();
+    const I = game.interior;
+    if (I && I.air) {
+      for (const x of I.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const x of I.air.bays || []) { x.want = false; x.travel = 0; x.dir = 0; x.vel = 0; x.open = 0; x.dy = 0; }
+      for (const r of Object.values(I.air.rooms)) { r.p = 1; r.leak = false; }
+    }
+    game.cockpit = saved;
+    game.state.mode = 'flight';
+    sh.landedAt = null; sh.landedPose = null;
+    sh.id = keep.id;
+    Object.assign(sh.pos, keep.pos); Object.assign(sh.vel, keep.vel);
+    sh.speed = keep.speed; sh.throttle = keep.throttle;
+    Object.assign(sh.basis.right, keep.basis.right); Object.assign(sh.basis.up, keep.basis.up);
+    Object.assign(sh.basis.fwd, keep.basis.fwd);
+    Object.assign(sh.gear, keep.gear);
+    frames(4);
+  }
+});
+
 await step('«Прометей» на грунте: шлюз палубы 11 — люк, трап в 97 ступеней, на грунт и обратно', async () => {
   const { buildCockpit } = await import('../js/models/cockpit.js');
   const { AIR } = await import('../js/game/airlock.js');
@@ -1807,7 +2245,7 @@ await step('«Прометей» на грунте: шлюз палубы 11 —
     frames(2);
     holdDown('KeyW'); frames(60 * 22); release('KeyW'); frames(10);
     if (!w.out) throw new Error('за порог не вышли: ' + w.pos.map((v) => v.toFixed(2)).join(','));
-    const away = Math.hypot(w.pos[0], w.pos[2]);
+    const away = fromSkin(hx);
     if (!(away > 22) || !w.ground) throw new Error('по трапу на грунт не сошли: ' + away.toFixed(1) + ' м от порога');
     // Обратно: развернуться и вверх по трапу — в шлюз.
     w.yaw += Math.PI;
@@ -1927,7 +2365,7 @@ await step('шлюз на склоне: крен и тангаж до 18°, вс
       const side = Math.abs((w.pos[0] - F[0]) * az - (w.pos[2] - F[2]) * ax) / L;
       // Далеко сбоку — сначала выйти на ось перед пятой, потом вверх.
       const k = side > 0.3 && along < 0.5 ? -1.5 : Math.max(0, Math.min(L, along)) + 1;
-      w.yaw = Math.atan2(F[0] + ax / L * k - w.pos[0], F[2] + az / L * k - w.pos[2]);
+      turnTo(w, Math.atan2(F[0] + ax / L * k - w.pos[0], F[2] + az / L * k - w.pos[2]));
     };
     const tilts = [], bad = [];
     if (!w.on) { key('KeyY'); frames(60); }
@@ -1943,18 +2381,22 @@ await step('шлюз на склоне: крен и тангаж до 18°, вс
         frames(Math.ceil((2 / A.AIR.rate + A.AIR.hatchTime + A.AIR.stairTime) * 60) + 40);
         if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) { bad.push(hx.id + ': люк не открылся'); continue; }
         putIn(hx);
+        seamStart(`склон (${tilts[tilts.length - 1]}): ${hx.id} — по трапу на грунт`, b);
         holdDown('KeyW');
-        for (let i = 0; i < 60 * 8 && !(w.out && w.ground && Math.hypot(w.pos[0], w.pos[2]) > 6.5); i++) frames(1);
+        for (let i = 0; i < 60 * 8 && !(w.out && w.ground && fromSkin(hx) > 6.5); i++) frames(1);
         release('KeyW'); frames(5);
-        if (!w.out || !(Math.hypot(w.pos[0], w.pos[2]) > 6)) {
+        seamStop();
+        if (!w.out || !(fromSkin(hx) > 6)) {
           bad.push(`${hx.id} (${tilts[tilts.length - 1]}): наружу не сошли — ` + (w.out ? 'встали за бортом в ' : 'остались на палубе в ')
             + w.pos.map((v) => v.toFixed(2)).join(', '));
           continue;
         }
+        seamStart(`склон (${tilts[tilts.length - 1]}): ${hx.id} — с грунта в шлюз`, b);
         holdDown('KeyW');
         for (let i = 0; i < 60 * 12 && w.out; i++) { steerUp(hx); frames(1); }
         frames(60);
         release('KeyW'); frames(5);
+        seamStop();
         if (w.out || !w.room || w.room.id !== hx.h.lock) {
           bad.push(`${hx.id} (${tilts[tilts.length - 1]}): с трапа в шлюз не вернулись — ` + (w.out ? 'за бортом в ' : 'на палубе в ')
             + w.pos.map((v) => v.toFixed(2)).join(', '));
@@ -2111,6 +2553,7 @@ await step('к соседу на борт: по его трапу, чужое к
       tickNet(); frames(2);
     }
     // Вверх по чужому трапу — в чужой шлюз.
+    seamStart('сосед: по его трапу в его шлюз', b);
     holdDown('KeyW');
     const trace = [];
     for (let i = 0; i < 60 * 12 && w.out; i++) {
@@ -2120,6 +2563,7 @@ await step('к соседу на борт: по его трапу, чужое к
     }
     globalThis.__trace = trace;
     frames(20); release('KeyW');
+    seamStop();
     for (let i = 0; i < 10; i++) { tickNet(); frames(1); }
     if (w.out || !w.vessel || w.vessel.id !== 900 || w.vessel.own || w.air !== V.air || game.frame !== V) {
       const at = w.out ? Vs.worldToVessel(V, O.groundToWorld(w.out, w.pos)) : w.pos;
@@ -4424,5 +4868,22 @@ await step('сохранение уходит на сервер, местног�
 
 console.log('\nвызовов ctx:', Object.entries(calls)
   .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(' '));
+// Ни одного телепорта на переходах: глаз и машина за кадр — не дальше,
+// чем их везёт ход, с допуском на ступени и подвеску (до 5 см и 1.2° —
+// столько и вдали от переходов). Телепорты были 0.45–13 м и 15°.
+await step('швы переходов: ни одного телепорта — глаз и машина не дальше 6 см сверх хода, взгляд не больше 1.5°', () => {
+  // И пешеход вдали от переходов (фон): ступени, порог, пригнулся у
+  // притолоки — не больше 12 см (было 20: глаз проваливался с телом). Больше
+  // 6 см бывает лишь приземление: на склоне трап кончается над грунтом, и с
+  // его конца падают на 4–5 м/с — удар о землю, а не перенос.
+  const bad = seamRows.filter((q) => (q.to !== '(без перехода)' && (q.eye > 6 || q.car > 6 || q.look > 1.5))
+    || (!q.from.startsWith('кресло') && q.base.eye > 12));
+  if (!seamRows.length) throw new Error('швы не записаны — опыт ничего не стоит');
+  if (bad.length) {
+    throw new Error(bad.map((q) => `${q.label}: ${q.from} → ${q.to} — глаз ${q.eye.toFixed(1)} см, взгляд ${q.look.toFixed(2)}°, машина ${q.car.toFixed(1)} см`).join('; '));
+  }
+});
+
+seamReport();
 console.log(fails === 0 ? 'SMOKE OK' : fails + ' SMOKE FAIL');
 process.exit(fails ? 1 : 0);

@@ -39,7 +39,8 @@ import { makeDust, updateDust } from './game/dust.js';
 import { makeChase, updateChase, placeChase, rotAround } from './game/chase.js';
 import { makeRover, stepRover, placeRover, stepHangar, frameFrom } from './game/rover.js';
 import {
-  hangarBay, bayCenter, overBay, hangarFloor, bayDown, hangarSolids, hangarToWorld, worldToHangar, hangarTransform,
+  hangarBay, bayCenter, overBay, hangarFloor, bayDown, hangarToWorld, worldToHangar, hangarTransform,
+  hangarSolids, onBayEdge, bayFoot, wheelsOnBay, bayOutside,
 } from './game/hangar.js';
 import { RV } from './models/rover.js';
 import { makeDriveCam, stepDriveCam, driveCamLocal, DRIVECAM } from './game/drivecam.js';
@@ -74,7 +75,7 @@ import { nextZoom, zoomFov, lookScale } from './game/zoom.js';
 import { makeStick, moveStick, centerStick, stickControls, STICK } from './game/mousefly.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
-  standAt, deckWorld,
+  standAt, deckWorld, enterAt,
   crateSolids, stepDoors, WALK,
 } from './game/walker.js';
 import { drawWalkHud } from './ui/walkhud.js';
@@ -88,10 +89,10 @@ import { routeTo, deckOf } from './game/route.js';
 import { makeDeckMap, openDeckMap, deckMapKeys, deckMapClick, deckMapHover, drawDeckMap, roomName, DECKMAP_CLOSE } from './ui/deckmap.js';
 import {
   vesselPoint, vesselDir, worldToVessel, nearVessels, bodyLocal, bodyLocalDir, bodyWorld, bodyWorldDir,
-  personPlace,
+  personPlace, vesselDist,
 } from './game/vessels.js';
 import {
-  makeGroundFrame, groundToWorld, groundDirToWorld, worldToGround, groundY, waterUnder,
+  makeGroundFrame, makeVesselFrame, groundToWorld, groundDirToWorld, worldToGround, worldDirToGround, groundY, waterUnder,
   shipToGround, shipPointToGround, groundPointToShip, boxToGround, RECENTER, hullUnderside, undersideBoxes,
 } from './game/outside.js';
 import {
@@ -203,6 +204,7 @@ const game = {
   world, ship, shipMesh, stationMesh, gearMesh,
   cockpit: cockpitModel,   // модель кабины: геометрия, ручка и РУД, экраны
   displays: cockpitScreens, // холсты экранов кабины (js/ui/displays.js)
+  camera,                // глаз кадра: по нему проверки меряют швы переходов
   renderStats: { polys: 0, items: 0, backend: scene ? 'WebGL' : L('нет WebGL2') },
   nav: makeNav(world),
   map: makeMap(),        // состояние карты системы: масштаб, центр, выбор
@@ -1217,6 +1219,7 @@ function walkFrame(dt) {
     game.walkEye = w.out ? null : walkerEye(w, I, _eyeM);
     return;
   }
+  if (w.upFrom) { w.upT += dt / UP_BLEND; if (w.upT >= 1) w.upFrom = null; }
   syncCargo();
   // Реакторы машинного горят по работе движков: на стоянке — дежурно. У
   // чужого корабля — по тому, как работают его подъёмные (снимок сокета).
@@ -1247,6 +1250,12 @@ function walkFrame(dt) {
   };
   // В трюме с вездеходом — его кузов и трап твёрдые (js/game/hangar.js).
   w.props = w.out ? _noProps : hangarProps(aboardVessel());
+  // В пустоте за бортом тяжести нет: палубная — только в корабле. Шагнул в
+  // открытый люк без трапа — плывёт, куда толкнулся, и подруливает.
+  {
+    const airV = !w.out ? (V.own ? ownAir() : V.air) : null;
+    w.float = !!airV && !vesselBody(V) && outsideHull(airV, w.pos);
+  }
   const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
   // Лифт в пути: двери закрылись — кабина пошла; приехали — пилот уже в
@@ -1419,6 +1428,26 @@ function groundUnder(V, x, z) {
 const groundShip = (x, z) => groundUnder(ownVessel, x, z);
 
 /**
+ * Вне ли корпуса точка p (оси корабля, м; air — его шлюзы): не в помещении,
+ * не в тоннеле люка и не над плитой платформы. Невидимых стенок нет (так
+ * решил автор игры), и за борт попадают — шагнув в открытый люк без трапа,
+ * спрыгнув с висящей плиты. Там корабль уже не держит: у тела — падение на
+ * грунт (crossThreshold), в пустоте — без тяжести (w.float).
+ */
+function outsideHull(air, p) {
+  const J = air.I;
+  if (J.roomAt(p) || tunnelAt(air, J, p)) return false;
+  for (const bx of air.bays || []) if (overBay(bx, p[0], p[2], -0.5) && p[1] > bayTop(bx) - 1) return false;
+  return true;
+}
+
+/** Ниже ли точка p (оси корабля V, м) грунта под ней: грунта рядом нет — нет. */
+function belowGround(V, p) {
+  const gy = groundUnder(V, p[0], p[2]);
+  return gy !== null && p[1] < gy + 0.05;
+}
+
+/**
  * Стоит ли кто-нибудь в проёме или на трапе этого люка корабля V: сам
  * пилот или другие люди (их видно по сокету). Закрывать его нельзя —
  * трап уехал бы из-под ног, а панель прошла бы сквозь человека.
@@ -1459,9 +1488,53 @@ function bayBelow(bx, V = ownVessel) {
   return false;
 }
 
+/**
+ * Машина на краю платформы корабля V (js/game/hangar.js, onBayEdge) — тогда
+ * плита никуда не идёт. Машины — в его трюме (место в трюме) и рядом на
+ * грунте (место в мире — в его оси): свой вездеход и соседские.
+ */
+const _loadR = [], _loadHg = { x: 0, y: 0, z: 0, yaw: 0 };
+function bayLoad(bx, V) {
+  if (walkerOnBayEdge(bx, V)) return 'person';
+  for (const R of hangarRovers(V, _loadR)) {
+    const hg = R.own ? rover.hg : R.hg;
+    if (hg && onBayEdge(bx, hg)) return 'car';
+  }
+  // На грунте — любая машина над плитой: на краю, под ней или на ней, не
+  // перейдя в оси носителя, — плита на неё легла бы или поддела.
+  const edgeAt = (P, fwd) => vesselDist(V, P) < 0.04 && bayFoot(bx, worldToHangar(V, P, fwd, _loadHg)) > 0;
+  if (HULL.ground && !ship.away && rover.mode === 'ground' && V !== ownVessel && edgeAt(ship.pos, ship.basis.fwd)) return 'car';
+  for (const R of game.peers) {
+    if (R === V || R.carried || !R.pos) continue;
+    const H = hullOf(R.type || ROOMS_TYPE);
+    if (H && H.gear && H.gear.wheels && edgeAt(R.pos, R.basis.fwd)) return 'car';
+  }
+  return null;
+}
+
+/**
+ * Стоит ли пилот на кромке плиты корабля V: ноги на её высоте, подошва (в
+ * полметра) и над плитой, и за краем. Стоящего на ней целиком плита везёт,
+ * а с кромки — нет: одной ногой он на палубе или на грунте.
+ */
+const _edgeP = [0, 0, 0];
+function walkerOnBayEdge(bx, V) {
+  const w = game.walk;
+  if (!w.on || w.phase !== 'walk') return false;
+  let p;
+  if (w.out) p = walkerShipPos(V);
+  else if (aboardVessel() === V) { _edgeP[0] = w.pos[0]; _edgeP[1] = w.pos[1]; _edgeP[2] = w.pos[2]; p = _edgeP; }
+  else return false;
+  const b = bx.b, h = WALK.half, k = WALK.half - 0.05;
+  const over = p[0] > b.x[0] - h && p[0] < b.x[1] + h && p[2] > b.z[0] - h && p[2] < b.z[1] + h;
+  const inside = p[0] > b.x[0] + k && p[0] < b.x[1] - k && p[2] > b.z[0] + k && p[2] < b.z[1] - k;
+  return over && !inside && Math.abs(p[1] - bayTop(bx)) < 0.12;
+}
+
 const _airEnv = { pOut: 0, block: null, bayBlock: null, ground: groundShip,
-  occupied: (hx) => hatchOccupied(hx, ownVessel), below: (bx) => bayBelow(bx, ownVessel) };
-const _airEnvV = { pOut: 0, block: null, bayBlock: null, ground: null, occupied: null, below: null };
+  occupied: (hx) => hatchOccupied(hx, ownVessel), below: (bx) => bayBelow(bx, ownVessel),
+  load: (bx) => bayLoad(bx, ownVessel) };
+const _airEnvV = { pOut: 0, block: null, bayBlock: null, ground: null, occupied: null, below: null, load: null };
 
 const groundZero = () => 0;
 
@@ -1511,8 +1584,13 @@ function airFrame(dt) {
     // Платформу соседа ведёт его игра; здесь она идёт за его просьбой по
     // тем же правилам: до грунта, не на голову, в порту — никуда.
     _airEnvV.below = V._below || (V._below = (bx) => bayBelow(bx, V));
+    _airEnvV.load = V._load || (V._load = (bx) => bayLoad(bx, V));
     _airEnvV.bayBlock = V.mode === 'docked' ? L('В ПОРТУ ПЛАТФОРМУ НЕ ОПУСТИТЬ') : null;
-    airSounds(updateAirlocks(V.air, _airEnvV, dt), V.air, V);
+    const evV = updateAirlocks(V.air, _airEnvV, dt);
+    airSounds(evV, V.air, V);
+    // Пилот на борту соседа (свой спящий корабль, чью плиту он и зовёт) —
+    // слышит, что она встала, как у себя.
+    if (game.walk.on && !game.walk.out && game.walk.vessel === V) baySay(evV, V.air);
   }
 }
 
@@ -1559,6 +1637,9 @@ function baySay(ev, air) {
     if (e.at === 'top') say(st, L('ПЛАТФОРМА ПОДНЯТА'), '#78e08f', 2.5);
     else if (e.at === 'ground') say(st, L('ПЛАТФОРМА НА ГРУНТЕ'), '#78e08f', 2.5);
     else if (e.at === 'held') say(st, L('ПОД ПЛАТФОРМОЙ ЧЕЛОВЕК · СПУСК ЖДЁТ'), '#ffcc66', 3);
+    else if (e.at === 'load') {
+      say(st, e.who === 'person' ? L('НА КРАЮ ПЛАТФОРМЫ ЧЕЛОВЕК · ХОД ЖДЁТ') : L('МАШИНА НА КРАЮ ПЛАТФОРМЫ · ХОД ЖДЁТ'), '#ffcc66', 3);
+    }
     else if (isFinite(bx.gap)) say(st, L('ПЛАТФОРМА ВЫПУЩЕНА · ДО ГРУНТА ') + bx.gap.toFixed(1) + L(' М'), '#ffcc66', 3);
     else say(st, L('ПЛАТФОРМА ВЫПУЩЕНА · ПОД НЕЙ ПУСТО'), '#ffcc66', 3);
   }
@@ -1796,8 +1877,70 @@ function groundDirToShip(d, out) {
   return out;
 }
 
+// --- верх взгляда на пороге -------------------------------------------------------
+//
+// На палубе пешеход стоит по «вверх» корабля, на грунте — по «вверх» тела,
+// а корабль на склоне наклонён до 20°. Ноги на пороге переносятся точно, а
+// верх — мгновенно, и глаз в 1.7 м над ногами пролетал за кадр 45 см, а
+// горизонт поворачивался на 15° (замер — tools/smoke.mjs, «швы переходов»,
+// шлюз на склоне): шаг в шлюз ощущался, как будто куда-то перенесли. Теперь
+// верх взгляда доворачивается от прежнего к новому за UP_BLEND — как
+// человек, шагнувший с косогора на ровный пол, выпрямляется, а не
+// переставляется. Ноги и куда смотрит глаз — точные; меняется только наклон
+// головы и с ним — где глаз над ногами.
+const UP_BLEND = 0.4;
+const _tu = [0, 0, 0], _tv = [0, 0, 0], _to = [0, 0, 0], _eyeT = [0, 0, 0];
+
+/** Верх взгляда в осях кадра: от прежних осей (w.upFrom) к нынешним [0, 1, 0]. */
+function tiltUp(w, out) {
+  if (!w.upFrom) { out[0] = 0; out[1] = 1; out[2] = 0; return out; }
+  const t = Math.min(1, w.upT), k = t * t * (3 - 2 * t), a = w.upFrom;
+  out[0] = a[0] * (1 - k); out[1] = a[1] * (1 - k) + k; out[2] = a[2] * (1 - k);
+  const l = Math.hypot(out[0], out[1], out[2]) || 1;
+  out[0] /= l; out[1] /= l; out[2] /= l;
+  return out;
+}
+
+/** Повернуть v поворотом, что переводит [0, 1, 0] в u (Родриг). */
+function rotFromUp(u, v, out) {
+  const s = Math.hypot(u[0], u[2]), c = u[1];
+  if (s < 1e-9) { out[0] = v[0]; out[1] = v[1]; out[2] = v[2]; return out; }
+  const kx = u[2] / s, kz = -u[0] / s;           // ось: [0, 1, 0] × u
+  const d = kx * v[0] + kz * v[2];
+  const cx = -kz * v[1], cy = kz * v[0] - kx * v[2], cz = kx * v[1];   // k × v
+  out[0] = v[0] * c + cx * s + kx * d * (1 - c);
+  out[1] = v[1] * c + cy * s;
+  out[2] = v[2] * c + cz * s + kz * d * (1 - c);
+  return out;
+}
+
+/** Глаз e и верх взгляда look.up — с недовёрнутым наклоном головы (вокруг ног). */
+function tiltView(w, e, look) {
+  if (!w.upFrom) return;
+  const u = tiltUp(w, _tv);
+  for (let i = 0; i < 3; i++) _to[i] = e[i] - w.pos[i];
+  rotFromUp(u, _to, _to);
+  for (let i = 0; i < 3; i++) e[i] = w.pos[i] + _to[i];
+  rotFromUp(u, look.up, look.up);
+}
+
+/**
+ * Ноги поставлены на пороге не ровно туда, куда пришли (на опору, в
+ * сторону от косяка, enterAt) — глаз остаётся, где был, и догоняет их, как
+ * на ступени: иначе он прыгал на высоту порога и на подправку вбок.
+ */
+function settleAt(w, at, p) {
+  w.lag += at.pos[1] - p[1];
+  w.lagX = (w.lagX || 0) + at.pos[0] - p[0];
+  w.lagZ = (w.lagZ || 0) + at.pos[2] - p[2];
+}
+
 /** Взгляд и скорость — в новые оси (поворотом), чтобы шаг через порог не дёргал голову. */
 function reframe(w, rot) {
+  // Верх, каким его видит глаз сейчас (с недовёрнутым прошлым), — в новые
+  // оси: от него голова и довернётся.
+  w.upFrom = rot(tiltUp(w, _tu), [0, 0, 0]);
+  w.upT = 0;
   walkerLook(w, _wLook);
   const f = rot(_wLook.fwd, [0, 0, 0]);
   w.yaw = Math.atan2(f[0], f[2]);
@@ -1851,15 +1994,28 @@ function crossThreshold() {
     // В трюме — в дверь вездехода, что в нём стоит.
     if (!hx && !bx && stepIntoHangarRover(w, V)) return;
     const body = vesselBody(V);
-    if ((!hx && !bx) || !body) return;
+    // Падает ниже грунта под кораблём — в осях корабля грунта нет вовсе, и
+    // падение было бы без конца: так пилот и оказался на −60 м под полом
+    // трюма (плита ушла из-под ног, а он стоял на её кромке). Дальше — в осях
+    // грунта: грунт его и поймает, на любую высоту (js/game/walker.js).
+    // И падающий за бортом — с любой высоты, а не у самого грунта: люк без
+    // трапа на висящем корабле, край висящей плиты.
+    const fall = !hx && !bx && body && !w.ground && w.vel[1] < 0 && (belowGround(V, w.pos) || outsideHull(air, w.pos));
+    if ((!hx && !bx && !fall) || !body) return;
     vesselPoint(V, w.pos, _feetW);
-    const G = makeGroundFrame(body, _feetW, V.basis.fwd);
-    const at = standAt(outsideFrame(G, _q0), _q0, w.height);
+    // На трап — в его осях, то есть корабля: в проёме ничего не поворачивается
+    // (тело на пороге в тех же осях, что и в шлюзе). В оси тела — у пяты,
+    // на открытом месте (retrap). С плиты и при падении — сразу в оси тела.
+    const G = hx && hx.stair >= 1 ? makeVesselFrame(body, _feetW, V) : makeGroundFrame(body, _feetW, V.basis.fwd);
+    // В прыжке встать не на что — переходят в воздухе, как есть (enterAt).
+    const at = enterAt(outsideFrame(G, _q0), _q0, w.height, !w.ground);
     if (!at && hx && hx.h.side * w.pos[0] < hx.h.skin + SILL_OUT) return;
     shipToGround(G, V, _outT);
     reframe(w, shipDirToGround);
     w.pos = at ? at.pos : worldToGround(G, _feetW);
-    if (at) w.height = at.height;
+    // Ноги в новых осях поставлены на опору — глаз остаётся, где был, и
+    // догоняет их, как на ступени (w.lag): иначе он прыгал на высоту порога.
+    if (at) { w.height = at.height; settleAt(w, at, _q0); }
     w.out = G;
     w.room = null;
     w.vessel = null;
@@ -1871,6 +2027,12 @@ function crossThreshold() {
     return;
   }
   if (!I.air) return;
+  // Встал на трап — в его оси (корабля); сошёл с него — в оси тела. Тело
+  // поворачивается на наклон корабля здесь, у пяты трапа, где над головой
+  // небо, а не в проёме двери, где ему тесно (js/game/outside.js,
+  // makeVesselFrame).
+  const trap = trapUnder(w);
+  if (trap !== (w.out.trap || null) && retrap(w, trap)) return;
   groundToWorld(w.out, w.pos, _feetW);
   for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
     const air = V.own ? I.air : V.air;
@@ -1888,9 +2050,10 @@ function crossThreshold() {
     // она часть корабля, и везёт его наверх уже его палуба.
     const bx = ontoBay(air, p);
     if (bx) {
-      const at = standAt(deckWorld(w, J, air), p, w.height);
+      const at = enterAt(deckWorld(w, J, air), p, w.height, !w.ground);
       if (!at) continue;
       reframe(w, groundDirToShip);
+      settleAt(w, at, p);
       w.pos = at.pos;
       w.height = at.height;
       boardVessel(V);
@@ -1902,9 +2065,10 @@ function crossThreshold() {
       return;
     }
     if (!tunnelAt(air, J, p)) continue;
-    const at = standAt(deckWorld(w, J, air), p, w.height);
+    const at = enterAt(deckWorld(w, J, air), p, w.height, !w.ground);
     if (!at) continue;
     reframe(w, groundDirToShip);
+    settleAt(w, at, p);
     w.pos = at.pos;
     w.height = at.height;
     boardVessel(V);
@@ -1916,13 +2080,58 @@ function crossThreshold() {
     return;
   }
   // Далеко от начала осей — перенести их к пилоту: кривизна тела.
-  if (Math.hypot(w.pos[0], w.pos[2]) > RECENTER) {
+  if (!w.out.trap && Math.hypot(w.pos[0], w.pos[2]) > RECENTER) {
     groundToWorld(w.out, w.pos, _feetW);
     const fw = groundDirToWorld(w.out, [0, 0, 1]);
     const G = makeGroundFrame(w.out.body, _feetW, fw);
     w.pos = worldToGround(G, _feetW);
     w.out = G;
   }
+}
+
+// Трап, на ступенях которого пешеход (его корабль) — или null. Уже стоит на
+// трапе — держится за него с запасом TRAP_KEEP: у края не перескакивать из
+// осей в оси туда-обратно.
+const TRAP_KEEP = 0.4;
+const _trapP = [0, 0, 0], _trapT = { R: new Float64Array(9), t: [0, 0, 0] };
+function trapUnder(w) {
+  groundToWorld(w.out, w.pos, _feetW);
+  const cur = w.out.trap || null;
+  for (const V of nearVessels(vesselsHere(), _feetW, OUT_NEAR, _nearV)) {
+    const air = V.own ? ownAir() : V.air;
+    if (!air) continue;
+    shipToGround(w.out, V, _trapT);
+    groundPointToShip(_trapT, w.pos, _trapP);
+    const m = V === cur ? TRAP_KEEP : 0;
+    for (const hx of air.hatches) if (onStair(hx, _trapP, m)) return V;
+  }
+  return null;
+}
+
+const _rg0 = { G: null }, _rg1 = { G: null }, _rgw = v3();
+/** Направление в одних осях грунта -> в другие (переход на трап и с него). */
+function groundDirAcross(d, out) {
+  groundDirToWorld(_rg0.G, d, _rgw);
+  return worldDirToGround(_rg1.G, _rgw, out);
+}
+
+/**
+ * Перейти в оси трапа корабля V (или, V = null, в оси тела) — там же, где
+ * ноги: точно, а взгляд доворачивается (reframe). Не помещается — остаться.
+ */
+function retrap(w, V) {
+  const G0 = w.out;
+  groundToWorld(G0, w.pos, _feetW);
+  const G = V ? makeVesselFrame(G0.body, _feetW, V) : makeGroundFrame(G0.body, _feetW, groundDirToWorld(G0, [0, 0, 1]));
+  const at = enterAt(outsideFrame(G, _q0), _q0, w.height, !w.ground);
+  if (!at) { outsideFrame(G0, w.pos); return false; }
+  _rg0.G = G0; _rg1.G = G;
+  reframe(w, groundDirAcross);
+  w.pos = at.pos;
+  w.height = at.height;
+  settleAt(w, at, _q0);
+  w.out = G;
+  return true;
 }
 
 /** Проложить путь к помещению id (план палубы, js/ui/deckmap.js). */
@@ -3451,7 +3660,10 @@ const _rd = v3(), _roverPosts = [];
 const _roverIdle = { throttle: 0, steer: 0, brake: 1 };
 const _roverEnv = {
   g: 0,
-  ground: (p) => roverGround(rover.body, p),
+  ground: (p) => {
+    const g = roverGround(rover.body, p), t = plateUnder(p);
+    return t !== null && (g === null || t > g) ? t : g;
+  },
   water: (p) => {
     const l = Math.hypot(p.x, p.y, p.z);
     _rd.x = p.x / l; _rd.y = p.y / l; _rd.z = p.z / l;
@@ -3459,6 +3671,33 @@ const _roverEnv = {
   },
   obstacles: _roverPosts,
 };
+
+// Плита своего носителя — поверхность и для колёс на грунте: колесо над ней
+// стоит на её верху, если она ему по силам — не выше его больше чем на
+// ROVER_STEP (выше — край, о который колесо упирается). Плита ложится на
+// грунт самой высокой точкой, и на склоне её край висит над грунтом (в
+// проверке — на 0.66 м): на такой бортик машина забирается на подвеске, с качком.
+// Раньше колёса шли сквозь плиту, а машину переводили на её верх разом, на
+// 60 см за кадр: ни бордюра, ни въезда — подскок. Носитель и плита — на шаг
+// (groundStep), в осях тела.
+const ROVER_STEP = 0.8;
+let _plateCL = null, _plateBx = null;
+const _pq = { x: 0, y: 0, z: 0 };
+/** Радиус верха плиты под колесом p (км, оси тела) — или null: не над плитой, не по силам. */
+function plateUnder(p) {
+  const CL = _plateCL, bx = _plateBx;
+  if (!CL || !bx) return null;
+  const b = CL.basis;
+  const dx = (p.x - CL.pos.x) * 1000, dy = (p.y - CL.pos.y) * 1000, dz = (p.z - CL.pos.z) * 1000;
+  const x = dx * b.right.x + dy * b.right.y + dz * b.right.z;
+  const y = dx * b.up.x + dy * b.up.y + dz * b.up.z;
+  const z = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
+  if (!overBay(bx, x, z)) return null;
+  const dh = bayTop(bx) - y;
+  if (dh > ROVER_STEP) return null;
+  _pq.x = p.x + b.up.x * dh / 1000; _pq.y = p.y + b.up.y * dh / 1000; _pq.z = p.z + b.up.z * dh / 1000;
+  return Math.hypot(_pq.x, _pq.y, _pq.z);
+}
 
 /** Грунт под точкой p (оси тела, км) — нарисованный, как под ногами пешехода. */
 function roverGround(body, p) {
@@ -3535,7 +3774,14 @@ function groundStep(dt) {
   }
   _roverEnv.g = gravityAt(body, ship.pos) * 1000;
   roverPosts(body, _roverPosts);
+  // Плита носителя — поверхность для колёс (plateUnder), пока она не в трюме.
+  {
+    const c = link.carrier !== null ? carrierOf(link.carrier) : null, bx = c && hangarBay(c.air);
+    _plateBx = bx && bx.travel > 0.02 ? bx : null;
+    _plateCL = _plateBx ? carrierLocal(c, body) : null;
+  }
   stepRover(rover, ctl, SHIP, _roverEnv, dt);
+  _plateCL = null; _plateBx = null;
   roverToWorld();
   // Заехал на плиту своего корабля, опущенную до грунта, — дальше едет по
   // ней, в осях корабля: поднимут плиту — поднимется и он.
@@ -3670,8 +3916,50 @@ game.hangarAround = () => {
   return bx ? { V: c.V, air: c.air, room: bx.room } : null;
 };
 
+// Пол под машиной: над плитой — её верх, иначе палуба. За край опущенной
+// плиты машина в трюме не выезжает: колесо, сошедшее с плиты у грунта,
+// переводит её на грунт (hangarStep), пока середина ещё над плитой.
 const _hgEnv = { bx: null, floor: (x, z) => hangarFloor(_hgEnv.bx, x, z), solids: null };
 const _hgTry = { x: 0, y: 0, z: 0, yaw: 0 };
+
+// --- дерево систем отсчёта: машина и её носитель — в осях тела ----------------------
+//
+// Стоящий корабль, его плита и машина в трюме неподвижны относительно
+// тела, и пересчёт между ними идёт в его осях — без мира и без времени.
+// Через мир было нельзя: шаг вездехода идёт после того, как мир сдвинулся,
+// а место носителя — с прошлого кадра, и за кадр планета уезжает по орбите
+// на метры. Машина прыгала на этот путь: при заезде на плиту — на 2.3 м,
+// при съезде — на 13 (замер — tools/smoke.mjs, «швы переходов»). Мир —
+// только чтобы нарисовать: вся машина переводится в него разом, по телу
+// этого мгновения (roverToWorld).
+
+const _cl = { pos: { x: 0, y: 0, z: 0 }, basis: { right: null, up: null, fwd: null } };
+/**
+ * Место носителя c в осях тела body — { pos (км), basis } — или null, если
+ * он стоит не на этом теле. Свой — по стоянке, сосед — по снимку (его
+ * место приходит в осях тела, js/game/peers.js, local).
+ */
+function carrierLocal(c, body) {
+  if (!c || !body) return null;
+  if (c.V.own) {
+    const p = ship.landedPose;
+    if (ship.landedAt !== body || !p) return null;
+    _cl.pos.x = p.dir.x * p.radius; _cl.pos.y = p.dir.y * p.radius; _cl.pos.z = p.dir.z * p.radius;
+    _cl.basis.right = p.right; _cl.basis.up = p.up; _cl.basis.fwd = p.fwd;
+    return _cl;
+  }
+  return c.V.local && c.V.body === body.id ? c.V.local : null;
+}
+
+const _rl = { pos: null, basis: null };
+/** Машина в трюме -> её место в осях тела (rover.lp, rover.lb), а из него — в мир. */
+function roverFromHangar(CL, body) {
+  if (!rover.lp || typeof rover.lp.x !== 'number') rover.lp = { x: 0, y: 0, z: 0 };
+  _rl.pos = rover.lp; _rl.basis = rover.lb;
+  hangarToWorld(CL, rover.hg, _rl);
+  rover.body = body;
+  roverToWorld();
+}
 
 /** Шаг вездехода в трюме носителя: по его полу, до его стен; съехал с плиты у грунта — на грунт. */
 function hangarStep(ctl, dt, body) {
@@ -3696,29 +3984,42 @@ function hangarStep(ctl, dt, body) {
   if (!rover.hgInit) {
     const s = hangarSpots.get(ship.id);
     if (s) Object.assign(hg, s); else { const m = bayCenter(bx); hg.x = m.x; hg.z = m.z; hg.yaw = 0; }
+    // Сразу на пол, где поставили: падать в трюме машина умеет (въехал в
+    // открытый колодец), и без этого падала бы с середины корабля.
+    hg.y = hangarFloor(bx, hg.x, hg.z);
+    rover.vy = 0;
     rover.hgInit = true;
   }
   _hgEnv.bx = bx;
   _hgEnv.solids = hangarSolids(c.air.I, c.air);
+  _hgEnv.g = gravityAt(body, ship.pos) * 1000;
   stepHangar(rover, ctl, SHIP, _hgEnv, dt);
-  hangarToWorld(c.V, hg, ship);
   const keep = hangarSpots.get(ship.id) || {};
   hangarSpots.set(ship.id, Object.assign(keep, hg));
-  // Курс и наклон для приборов — в осях тела, как на грунте.
-  rover.body = body;
-  rover.lp = bodyLocal(body, ship.pos);
-  frameFrom(bodyLocalDir(body, ship.basis.up), bodyLocalDir(body, ship.basis.fwd), rover.lb);
+  // Место в осях тела — от места носителя в них же (carrierLocal): по нему
+  // и приборы (курс, наклон), и съезд на грунт. Носитель не на этом теле —
+  // по миру, как раньше.
+  const CL = carrierLocal(c, body);
+  if (CL) roverFromHangar(CL, body);
+  else {
+    hangarToWorld(c.V, hg, ship);
+    rover.body = body;
+    rover.lp = bodyLocal(body, ship.pos);
+    frameFrom(bodyLocalDir(body, ship.basis.up), bodyLocalDir(body, ship.basis.fwd), rover.lb);
+  }
   const b = ship.basis;
   ship.vel.x = b.fwd.x * rover.v / 1000; ship.vel.y = b.fwd.y * rover.v / 1000; ship.vel.z = b.fwd.z * rover.v / 1000;
   ship.speed = Math.abs(rover.v) / 1000;
   ship.wheels = rover.wheels;
-  // Съехал с плиты, опущенной до грунта, — дальше по грунту, в осях тела.
-  if (bayDown(bx) && !overBay(bx, hg.x, hg.z)) {
-    const v = rover.v, steer = rover.steer;
+  // Колесо сошло с плиты ниже днища — дальше по грунту, в осях тела, с того
+  // же места и наклона: на грунт машину не ставят разом, её колёса сходят с
+  // края сами (plateUnder), как с бордюра; плита висит над грунтом — машина
+  // падает (stepRover). Раньше её ставили на грунт под серединой — на 60 см
+  // за кадр, а с висящей плиты не пускали вовсе — невидимой стенкой.
+  if ((bayDown(bx) || bayOutside(bx)) && !wheelsOnBay(bx, hg)) {
     rover.mode = 'ground';
-    placeRover(rover, body, rover.lp, bodyLocalDir(body, b.fwd), (p) => roverGround(body, p));
-    rover.v = v;
-    rover.steer = steer;
+    rover.vy = 0;
+    rover.air = false;
     save();
   }
 }
@@ -3727,8 +4028,18 @@ function hangarStep(ctl, dt, body) {
 function enterHangar() {
   const c = carrierOf(game.roverLink.carrier), bx = c && hangarBay(c.air);
   if (!bx || !bayDown(bx)) return;
-  const hg = worldToHangar(c.V, ship.pos, ship.basis.fwd, _hgTry);
-  if (!overBay(bx, hg.x, hg.z, 0.3) || Math.abs(hg.y - bayTop(bx)) > 1.2) return;
+  // В осях тела: машина (rover.lp) и носитель (carrierLocal) — без мира.
+  const CL = carrierLocal(c, rover.body);
+  if (!CL) return;
+  const hg = worldToHangar(CL, rover.lp, rover.lb.fwd, _hgTry);
+  // Все колёса уже на плите и машина на её верху (колёса въехали сами,
+  // plateUnder): дальше — в осях носителя, без рывка ни вбок, ни вверх.
+  if (!wheelsOnBay(bx, hg, 0.05) || bayFoot(bx, hg) !== 2 || Math.abs(hg.y - bayTop(bx)) > 0.15) return;
+  // И кузов успокоился на плите: в трюме он стоит ровно по носителю, а на
+  // грунте — по подвеске, и после бортика ещё качается. Переключиться на
+  // качке — довернуть кабину за кадр (так было: 2.6°, глаз на 11 см).
+  const u = rover.lb.up, cu = CL.basis.up;
+  if (u.x * cu.x + u.y * cu.y + u.z * cu.z < Math.cos(0.3 * Math.PI / 180)) return;
   rover.mode = 'hangar';
   rover.hgInit = true;
   rover.hg.x = hg.x; rover.hg.z = hg.z; rover.hg.yaw = hg.yaw; rover.hg.y = bayTop(bx);
@@ -3739,13 +4050,14 @@ function enterHangar() {
 // проёмом двери на левом борту: в неё входят), колёса и его трап. Коробки
 // — повёрнутые (ob): машина в трюме стоит, как поставили.
 //
-// Проём в коробках — шире двери на четверть метра с каждой стороны, во
-// всю ширину трапа: пешеход шириной в полметра проходил в дверь шириной
-// 0.9 м, только идя точно посередине, а чуть в сторону — упирался в
-// коробку у проёма и войти не мог. Теперь он доскальзывает до двери, а в
-// сам тоннель люка пускает его середина (tunnelAt).
+// Проём в коробках — ровно по двери, как и изнутри: где снаружи в проёме
+// можно стоять, там можно и в шлюзе. Он был шире двери на четверть метра с
+// каждой стороны — чтобы пешеход, идущий в стороне от оси, до двери
+// дотягивался, — и пешеход вставал в проёме там, где изнутри косяк: в оси
+// шлюза его не пускали, снаружи держала стена кузова — «невидимая стена».
+// Теперь к двери доскальзывают по её же косяку (js/game/walker.js, SLIP).
 const RD = RV.door;
-const RZ0 = RD.z[0] - 0.25, RZ1 = RD.z[1] + 0.25;
+const RZ0 = RD.z[0], RZ1 = RD.z[1];
 const ROVER_BOXES = [
   { lo: [-0.95, 0.3, -3.36], hi: [1.27, RV.roofBar, 3.46] },
   { lo: [-1.27, 0.3, -3.36], hi: [-0.95, RV.roofBar, RZ0] },
@@ -3803,10 +4115,11 @@ function stepAcross(w, A, B, airB) {
   // Твёрдое того борта, на который шагаем: в трюме — с вездеходом в нём.
   const keep = w.props;
   w.props = B.own || !hangarOf(B) ? hangarProps(B, []) : [];
-  const at = standAt(deckWorld(w, J, airB), p, w.height);
+  const at = enterAt(deckWorld(w, J, airB), p, w.height, !w.ground);
   if (!at) { w.props = keep; return false; }
   _xFrom.V = A; _xTo.V = B;
   reframe(w, vesselDirAcross);
+  settleAt(w, at, p);
   w.pos = at.pos;
   w.height = at.height;
   boardVessel(B);
@@ -4408,9 +4721,10 @@ function setupCamera() {
   if (game.walk.on && game.walk.out && game.interior) {
     // За бортом: глаз и взгляд — в осях грунта (js/game/outside.js).
     const w = game.walk, G = w.out;
-    const e = walkerEye(w, game.interior, _eyeM);
-    groundToWorld(G, e, cam.pos);
+    const e = walkerEye(w, game.interior, _eyeT);
     walkerLook(w, _wLook);
+    tiltView(w, e, _wLook);
+    groundToWorld(G, e, cam.pos);
     groundDirToWorld(G, _wLook.fwd, _camDir);
     groundDirToWorld(G, _wLook.up, _camUp);
     lookAlong(cam.basis, _camDir, _camUp);
@@ -4420,14 +4734,17 @@ function setupCamera() {
     // Глаз идущего: точка в осях корабля, взгляд — его голова. Корабль —
     // тот, по палубе которого он идёт: свой или чужой.
     const V = aboardVessel();
-    const b = V.basis, e = game.walkEye;
+    walkerLook(game.walk, _wLook);
+    const e = _eyeT;
+    e[0] = game.walkEye[0]; e[1] = game.walkEye[1]; e[2] = game.walkEye[2];
+    tiltView(game.walk, e, _wLook);
+    const b = V.basis;
     cam.pos.x = V.pos.x + (b.right.x * e[0] + b.up.x * e[1] + b.fwd.x * e[2]) / 1000;
     cam.pos.y = V.pos.y + (b.right.y * e[0] + b.up.y * e[1] + b.fwd.y * e[2]) / 1000;
     cam.pos.z = V.pos.z + (b.right.z * e[0] + b.up.z * e[1] + b.fwd.z * e[2]) / 1000;
     cam.basis.right = { ...b.right };
     cam.basis.up = { ...b.up };
     cam.basis.fwd = { ...b.fwd };
-    walkerLook(game.walk, _wLook);
     const f = _wLook.fwd, u = _wLook.up;
     _camDir.x = b.right.x * f[0] + b.up.x * f[1] + b.fwd.x * f[2];
     _camDir.y = b.right.y * f[0] + b.up.y * f[1] + b.fwd.y * f[2];
@@ -4831,7 +5148,10 @@ function frame(now) {
     ship.hidden = false;
     if (HULL.ground && rover.mode === 'hangar') {
       const c = carrierOf(game.roverLink.carrier), bx = c && hangarBay(c.air);
-      if (bx && rover.hgInit) hangarToWorld(c.V, rover.hg, ship);
+      if (bx && rover.hgInit) {
+        const CL = carrierLocal(c, rover.body);
+        if (CL) roverFromHangar(CL, rover.body); else hangarToWorld(c.V, rover.hg, ship);
+      }
       ship.hidden = !bx;
     }
     hangarSeen();

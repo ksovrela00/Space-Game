@@ -48,7 +48,7 @@
                 "driveSpeed": 16,
                 "reverseSpeed": 4,
                 "driveAccel": 2.6,
-                "brake": 6,
+                "driveBrake": 6,
                 "roll": 0.35,
                 "steerMax": 30,
                 "steerRate": 60,

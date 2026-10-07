@@ -300,6 +300,13 @@ function poseAt(r, t, world) {
   o.v = a.v + (b.v - a.v) * kk;
 
   if (body) {
+    // Место в осях тела — как есть, без мира и без времени: от него
+    // считают переходы между кораблями на одном теле (машина в трюм и из
+    // трюма, js/main.js). Мировое — на чей-то момент, и два мировых, взятых
+    // в разные моменты, расходятся на путь планеты за кадр — на метры.
+    const L = o.local || (o.local = { pos: v3(), basis: makeBasis() });
+    set(L.pos, _lp.x, _lp.y, _lp.z);
+    setBasis(L.basis, _lf, _lu);
     // Оси тела — на СЕЙЧАС: тело повернулось, и корабль с ним.
     bodyBasis(body, _B);
     toWorld(_B, body.pos, _lp, o.pos);
@@ -308,6 +315,7 @@ function poseAt(r, t, world) {
     dirToWorld(_B, _lu, _tmpU);
     setBasis(o.basis, _tmpF, _tmpU);
   } else {
+    o.local = null;
     set(o.pos, _lp.x, _lp.y, _lp.z);
     set(o.vel, _lv.x, _lv.y, _lv.z);
     // Оси тянем покомпонентно и ортонормализуем: поворот между снимками

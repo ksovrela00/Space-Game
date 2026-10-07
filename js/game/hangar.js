@@ -21,6 +21,7 @@
 
 import { bayTop, airSolids } from './airlock.js';
 import { crateSolids } from './walker.js';
+import { HULL_BOX, WHEELS } from './rover.js';
 
 /** Платформа трюма носителя (его шлюзы air), или null — у корабля её нет. */
 export const hangarBay = (air) => (air && air.bays && air.bays[0]) || null;
@@ -41,6 +42,12 @@ export function overBay(bx, x, z, m = 0) {
 export function hangarFloor(bx, x, z) {
   return overBay(bx, x, z) ? bayTop(bx) : bx.b.deck;
 }
+
+/**
+ * Плита снаружи корабля — ниже днища: с неё съезжают вбок (на грунт или в
+ * воздух — тогда машина падает), а не упираются в колодец.
+ */
+export const bayOutside = (bx) => bayTop(bx) < bx.b.belly;
 
 /**
  * Плита у грунта: опустилась до конца хода или легла на грунт — и стоит.
@@ -79,6 +86,52 @@ export function hangarSolids(I, air) {
   if (I.cargo > 0) for (const s of crateSolids(I, I.cargo * I.crate.tons)) _hs.push(s);
   for (const s of airSolids(air, _hAir)) _hs.push(s);
   return _hs;
+}
+
+/**
+ * Где кузов с колёсами (прямоугольник HULL_BOX) относительно плиты:
+ * 0 — не над ней, 1 — на краю (и над плитой, и за краем), 2 — целиком над ней.
+ */
+export function bayFoot(bx, hg) {
+  const b = bx.b, sy = Math.sin(hg.yaw), cy = Math.cos(hg.yaw), W = HULL_BOX.w, L = HULL_BOX.l;
+  let inside = 0;
+  for (const [u, v] of [[-W, -L], [W, -L], [W, L], [-W, L]]) {
+    const x = hg.x + cy * u + sy * v, z = hg.z - sy * u + cy * v;
+    if (x > b.x[0] && x < b.x[1] && z > b.z[0] && z < b.z[1]) inside++;
+  }
+  if (inside === 4) return 2;
+  if (inside > 0) return 1;
+  // Ни одного угла кузова над плитой — но угол плиты может быть под кузовом.
+  for (const x of b.x) {
+    for (const z of b.z) {
+      const dx = x - hg.x, dz = z - hg.z;
+      if (Math.abs(dx * cy - dz * sy) < W && Math.abs(dx * sy + dz * cy) < L) return 1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Машина на краю плиты: кузов и над плитой, и за её краем. Так плита не
+ * трогается ни вниз, ни наверх (js/game/airlock.js, load): вниз свешенный
+ * нос лёг бы на палубу, наверх плита поддела бы машину снизу. Раньше она
+ * трогалась, и заслон колодца, появившийся под кузовом, выбрасывал машину
+ * на метр за кадр.
+ */
+export const onBayEdge = (bx, hg) => bayFoot(bx, hg) === 1;
+
+/**
+ * Все шесть колёс над плитой — с запасом m внутрь от края (м). Только тогда
+ * машина на грунте переходит в оси носителя и обратно: колёса до этого
+ * стоят каждое на своём — на грунте или на верху плиты (js/main.js,
+ * plateUnder), и машина въезжает на край, как на бордюр.
+ */
+export function wheelsOnBay(bx, hg, m = 0) {
+  const sy = Math.sin(hg.yaw), cy = Math.cos(hg.yaw);
+  for (const w of WHEELS) {
+    if (!overBay(bx, hg.x + cy * w.x + sy * w.z, hg.z - sy * w.x + cy * w.z, m)) return false;
+  }
+  return true;
 }
 
 /**
