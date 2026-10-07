@@ -39,13 +39,13 @@
     ],
     'core/': [
       'basis', 'input', 'lang.en', 'lang', 'quality', 'rng',
-      'sound', 'vec3'
+      'sound', 'vec3', 'version'
     ],
     'game/': [
       'airlock', 'anchor', 'audio', 'bodyinfo', 'chase', 'clock', 'docking', 'downwash', 'dust',
       'entry', 'fleet', 'flow', 'fuel', 'hull',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'npc', 'peers', 'pilot',
-      'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface',
+      'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface', 'target',
       'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly', 'rover', 'drivecam', 'rovernav', 'hangar', 'mapcam', 'warproute'
     ],
     'gl/': [

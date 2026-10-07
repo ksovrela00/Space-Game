@@ -16,6 +16,7 @@ import { altitudeOf, worldPoint } from '../game/surface.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, PEER, INK, NPC_COLOR } from './theme.js';
 import { npcFade, npcGear, hullName } from '../game/npc.js';
 import { Q } from '../core/quality.js';
+import { galaxy, systemDistance, warpSeconds } from '../game/galaxy.js';
 import { L, fmtNum } from '../core/lang.js';
 import { STICK } from '../game/mousefly.js';
 import { roverHeading, roverTilt, roverHomeInfo } from '../game/rovernav.js';
@@ -147,7 +148,7 @@ export function drawHud(r, game) {
   const { ship, nav, state } = game;
   const q = game.quantum;
   const w = cam.w, h = cam.h;
-  const target = nav.list[nav.index];
+  const target = currentTarget(nav);
 
   ctx.save();
   ctx.textBaseline = 'alphabetic';
@@ -978,6 +979,24 @@ function drawHomeCard(ctx, px, py, game) {
  * планету, в порт или в чужой корабль, — а от этого зависит всё
  * дальнейшее.
  */
+/**
+ * Цель — чужая система: куда, сколько световых лет, через кого и в какую
+ * сторону. Цель одна (js/main.js), и система в ней показывается в той же
+ * карточке, что планета или пилот, — а не отдельной строкой «варп в…».
+ */
+export function warpInfo(game) {
+  const to = game.warpTarget;
+  if (!to || !game.sys) return null;
+  const r = game.warpRoute;
+  const dest = r && r.length > 1 ? galaxy().systems.find((s) => s.id === r[r.length - 1]) || null : null;
+  return {
+    to, name: to.name, ly: systemDistance(game.sys, to), secs: warpSeconds(game.sys, to),
+    dest: dest && dest !== to ? dest : null, hops: r ? r.length - 1 : 1,
+    dir: warpAxis(game.sys, to, _warpInfoDir),
+  };
+}
+const _warpInfoDir = v3();
+
 function drawTargetCard(ctx, px, py, game, target, q) {
   const ship = game.ship;
   const W = CARD_W;
@@ -985,14 +1004,15 @@ function drawTargetCard(ctx, px, py, game, target, q) {
 
   ctx.font = '11px Consolas, monospace';
   ctx.fillStyle = CY;
-  const kind = targetKind(target);
+  const sysT = target ? null : warpInfo(game);
+  const kind = sysT ? 'СИСТЕМА' : targetKind(target);
   // У NPC рядом с видом — корпус: Challenger и Prometheus — разные цели.
   const hull = target && target.npc ? ' · ' + hullName(target.type).toUpperCase() : '';
   ctx.fillText(kind ? L('ЦЕЛЬ') + ' · ' + L(kind) + hull : L('ЦЕЛЬ'), px + 12, py + 14);
 
   ctx.font = '22px Consolas, monospace';
-  ctx.fillStyle = target ? AMBER : CY_DIM;
-  const name = target ? (target.name || targetLabel(target)) : '—';
+  ctx.fillStyle = sysT ? '#c9a8ff' : target ? AMBER : CY_DIM;
+  const name = sysT ? sysT.name : target ? (target.name || targetLabel(target)) : '—';
   ctx.fillText(String(name).slice(0, 18), px + 12, py + 42);
 
   // Скобка в правом верхнем углу карточки: прибор очерчен, но не заперт
@@ -1017,6 +1037,16 @@ function drawTargetCard(ctx, px, py, game, target, q) {
       ctx.fillText(L('лёту ') + fmtTime(game.info.eta), px + 12, py + 94);
     }
     drawCompass(ctx, px + W - 44, py + 84, 34, ship, game.info.dir);
+  } else if (sysT) {
+    ctx.font = '18px Consolas, monospace';
+    ctx.fillStyle = INK;
+    ctx.fillText(sysT.ly.toFixed(1) + L(' св. г.'), px + 12, py + 76);
+    ctx.font = '12px Consolas, monospace';
+    ctx.fillStyle = '#9fd9ff';
+    ctx.fillText(sysT.dest
+      ? (L('маршрут до ') + sysT.dest.name + ' · ' + sysT.hops + L(' прыж.')).slice(0, 26)
+      : L('варп ~') + Math.round(sysT.secs) + L(' с'), px + 12, py + 94);
+    drawCompass(ctx, px + W - 44, py + 84, 34, ship, sysT.dir);
   }
 
   ctx.font = '12px Consolas, monospace';
@@ -1038,6 +1068,10 @@ function drawTargetCard(ctx, px, py, game, target, q) {
   } else if (target) {
     ctx.fillStyle = CY_DIM;
     ctx.fillText(L('J — ПРЫЖОК К ЦЕЛИ'), px + 12, stateY);
+  } else {
+    // Цели нет — сказать, как её взять: пустая карточка читается как сбой.
+    ctx.fillStyle = CY_DIM;
+    ctx.fillText(L('TAB — ВЗЯТЬ В ЦЕЛЬ'), px + 12, stateY);
   }
 }
 

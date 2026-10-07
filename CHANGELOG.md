@@ -11,6 +11,33 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-10-08
+
+### Added
+- The game version is shown in the ship terminal and on the start screen.
+- Backspace clears the target — any target, a star system too.
+- The target card (HUD and cockpit screen) shows a targeted star system:
+  distance in light years, route, warp time and direction.
+- "Target lost" message when a targeted pilot or NPC disappears.
+
+### Changed
+- **One target for everything.** A planet, moon, station, city, marker,
+  pilot, NPC or another star system — picking a new target replaces the
+  old one, and there can be no target at all.
+- One jump key: J (and B, which is now the same key) jumps to whatever is
+  targeted — warp to a star system, quantum drive to anything else.
+- Galaxy map: selecting a system only shows it and the route; Tab, Enter or
+  the card button makes it the target. Tab on the map toggles: on the
+  current target it clears it.
+- Map cards: "Clear target" replaces the dead "Target set" button.
+
+### Fixed
+- A star system picked on the galaxy map could never be un-targeted, and J
+  kept warping there whatever was selected afterwards.
+- B and J led to different places while a star system was selected.
+- When a targeted pilot left, the target silently jumped to whatever came
+  next in the list (and the guns followed it).
+
 ## [0.7.1] — 2026-10-08
 
 First tagged release and the baseline for versioned development. It contains
@@ -77,5 +104,6 @@ Russian, and touch controls for phones.
 - Market: half the buttons were disabled without any explanation.
 - The I key did nothing in port, on the ground or on foot.
 
-[Unreleased]: https://github.com/ksovrela00/Space-Game/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/ksovrela00/Space-Game/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/ksovrela00/Space-Game/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/ksovrela00/Space-Game/releases/tag/v0.7.1

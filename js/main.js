@@ -20,7 +20,7 @@ import {
 } from './game/warp.js';
 import { makeShip, updateShip, readControls, clearControls, placeShip, SHIP } from './game/ship.js';
 import {
-  makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById,
+  makeNav, refreshNav, pickTarget, aimedTarget, currentTarget, navInfo, targetById, clearNavTarget,
   targetLabel,
 } from './game/nav.js';
 import {
@@ -102,6 +102,9 @@ import {
 import { makeMap, drawMap, mapInput, resetMap, mapFrame, mapTouch } from './ui/map.js';
 import { nextHop } from './game/warproute.js';
 import { makeMenu, terminalFrame, terminalKeys } from './ui/terminal.js';
+import {
+  selectTarget as pickInSystem, targetSystem, clearTarget, dropWarpTarget as dropWarp,
+} from './game/target.js';
 import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from './game/player.js';
 import {
   session, start as sessionStart, queueSave, flushOnExit, linkError,
@@ -2501,20 +2504,26 @@ function teleportToTarget() {
   say(st, L('ТЕЛЕПОРТ: ') + t.name + L(', высота ') + fmtDist(alt), '#78e08f');
 }
 
-/**
- * Выбрать цель объектом, а не номером: список целей пересобирается на
- * ходу. Маркер тела, рядом с которым корабль не находится, в список не
- * попадает — тогда встаём на само тело.
- */
-game.selectTarget = (t) => selectTarget(t);
+// --- цель ----------------------------------------------------------------------
+//
+// Цель ОДНА: тело, станция, город, метка, пилот, NPC — или чужая система
+// (js/game/target.js). J (и B — та же клавиша) прыгает к тому, что в
+// цели: к системе — варпом, к остальному — квантовым приводом. Backspace
+// цель снимает. Карта (js/ui/map.js) зовёт эти же три действия.
 
-function selectTarget(t) {
-  if (!t) return;
-  refreshNav(game.nav, world, ship, game.peers);
-  let i = game.nav.list.indexOf(t);
-  if (i < 0 && t.isMarker) i = game.nav.list.indexOf(t.body);
-  if (i >= 0) game.nav.index = i;
-}
+game.selectTarget = (t) => selectTarget(t);
+function selectTarget(t) { return pickInSystem(game, t); }
+
+/** Цель — чужая система: hop — ближайший прыжок, route — весь путь или null. */
+game.targetSystem = (hop, route = null) => targetSystem(game, hop, route);
+
+/** Снять цель — любую. Начатый прыжок не обрывается: это делает J. */
+game.clearTarget = () => {
+  const had = clearTarget(game);
+  say(game.state, had ? L('ЦЕЛЬ СНЯТА') : L('ЦЕЛЬ НЕ ВЫБРАНА'), had ? '#9fd9ff' : '#ffcc66');
+};
+
+function dropWarpTarget() { dropWarp(game); }
 
 // --- сохранение --------------------------------------------------------------
 //
@@ -2687,7 +2696,10 @@ function applyState(s) {
   updateWorld(world, s.time || 0);
   game.stats = Object.assign({ landings: 0 }, s.stats || game.stats);
   if (s.player) loadPlayer(game.player, s.player);
-  selectTarget(targetById(world, s.target));
+  // Цель одна: система, если записана она (в старых сейвах бывали обе, и
+  // J тогда вёл к системе), иначе — то, что было в цели в системе.
+  if (game.warpTarget) clearNavTarget(game.nav);
+  else selectTarget(targetById(world, s.target));
   game.state.view = s.view || 'cockpit';
   // Ноль — это ЧИСЛО, а не «нет значения». Здесь стояло `s.hull || max`, и
   // разбитый корабль (корпус ровно 0) приезжал с сервера целёхоньким: на
@@ -3422,12 +3434,10 @@ function handleKeys(dt) {
       const act = mapInput(game, input) || game.map.touchAct;
       game.map.touchAct = null;
       if (act === 'close') closeMap();
-      else if (act === 'jump' || act === 'warp') {
+      else if (act === 'jump') {
         closeMap();
-        if (st.mode === ST.FLIGHT) {
-          if (act === 'jump') quantumKey();
-          else jumpKey();
-        } else say(st, L('ПРЫЖКИ — ТОЛЬКО В ПОЛЁТЕ'), '#ffcc66');
+        if (st.mode === ST.FLIGHT) jumpKey();
+        else say(st, L('ПРЫЖКИ — ТОЛЬКО В ПОЛЁТЕ'), '#ffcc66');
       }
     }
     return;
@@ -3502,7 +3512,11 @@ function handleKeys(dt) {
   // худший способ выбрать то, что и так видно на экране.
   if (input.pressed('Tab')) {
     const t = pickTarget(game.nav, ship);
-    if (!t) { say(st, L('НАВЕДИ НОС НА ЦЕЛЬ'), '#ffcc66'); return; }
+    if (!t) { say(st, L('НАВЕДИ НОС НА ЦЕЛЬ · BACKSPACE — СНЯТЬ ЦЕЛЬ'), '#ffcc66'); return; }
+    // Взяли цель в системе — система больше не цель (pickTarget уже
+    // переставил номер в списке, остаётся снять варп).
+    dropWarpTarget();
+    game.lastTarget = t;
     say(st, L('ЦЕЛЬ: ') + targetLabel(t));
     // Смена цели на калибровке — это выбор другого маршрута, а не отказ
     // от прыжка: привод просто начинает считать заново.
@@ -3513,6 +3527,9 @@ function handleKeys(dt) {
       say(st, L('ПРЫЖОК СОРВАН — ГАШЕНИЕ ХОДА'), '#ff7a66');
     }
   }
+
+  // Backspace — снять цель: любую, и систему тоже.
+  if (input.pressed('Backspace')) game.clearTarget();
 
   // Вездеход: из полётных клавиш у него только фары. Приводов, стыковки,
   // посадки, шасси, гасителей и оружия на колёсах нет — и клавиши, которые
@@ -3527,9 +3544,9 @@ function handleKeys(dt) {
   // нажатие: очередь задаёт перезарядка, а не скорость пальца.
   if (input.mouse.left && st.mode === ST.FLIGHT) fireNow();
 
-  // B — квантовый привод. Клавиша осталась прежней, но теперь это
-  // синоним: тем же занимается J (см. ниже), и разучиваться не надо.
-  if (input.pressed('KeyB')) quantumKey();
+  // B — то же, что J: прыжок к цели. Раньше B был квантовым приводом, а J
+  // — варпом, и при выбранной системе две клавиши вели в разные места.
+  if (input.pressed('KeyB')) jumpKey();
 
   /**
    * Квантовый привод: включить калибровку, а на ходу — сорвать прыжок.
@@ -3542,6 +3559,7 @@ function handleKeys(dt) {
     } else if (q.phase === 'calib') { stopQuantum(q); say(st, L('ПРИВОД ОТКЛЮЧЁН')); }
     else {
       const t = currentTarget(game.nav);
+      if (!t) { say(st, L('ЦЕЛЬ НЕ ВЫБРАНА · TAB — ВЗЯТЬ ТО, НА ЧТО НАВЕДЁН НОС'), '#ffcc66'); return; }
       // Коридор проверяется и здесь, до калибровки: держать прицел три
       // секунды, чтобы узнать «перекрыто», — издевательство.
       const res = canJump(world, ship, t);
@@ -3554,7 +3572,7 @@ function handleKeys(dt) {
           const hop = suggestHop(world, ship, t);
           if (hop) {
             selectTarget(hop);
-            say(st, L('ОБХОД ЧЕРЕЗ ') + hop.name + L(' — B ЕЩЁ РАЗ'), '#ffcc66', 4);
+            say(st, L('ОБХОД ЧЕРЕЗ ') + hop.name + L(' — J ЕЩЁ РАЗ'), '#ffcc66', 4);
           }
         }
       } else {
@@ -3566,14 +3584,12 @@ function handleKeys(dt) {
     }
   }
 
-  // J — ПРЫЖОК. Одна клавиша на оба привода.
+  // J — ПРЫЖОК. Одна клавиша на оба привода (и B — она же).
   //
-  // Раньше их было две: B — квантовый, внутри системы, J — варп, между
-  // системами. Для игрока это различие техническое: он хочет «лететь к
-  // тому, что выбрал», а каким приводом — дело корабля. Теперь J смотрит,
-  // что выбрано, и берёт нужный привод; выбранная на карте галактики
-  // система при этом стоит отметкой на экране с самого выбора
-  // (drawWarpAim), а не появляется после первого нажатия.
+  // Для игрока различие приводов техническое: он хочет «лететь к тому, что
+  // выбрал», а каким приводом — дело корабля. J смотрит, что в цели: чужая
+  // система — варп, остальное — квантовый привод. Система в цели стоит
+  // отметкой на экране с самого выбора (drawWarpAim).
   //
   // Порядок ветвей значим: J всегда отменяет ТО, ЧТО УЖЕ ИДЁТ, и только
   // на холодную решает, куда лететь. Иначе «отменить» пришлось бы искать
@@ -4383,8 +4399,8 @@ function step(dt) {
       // середину — следующий прыжок становится целью сам. Заправка — за
       // пилотом: в порту этой системы.
       const next = nextHop(game.warpRoute, sys);
-      game.warpTarget = next;
-      if (!next) game.warpRoute = null;
+      if (next) game.targetSystem(next, game.warpRoute);
+      else { game.warpTarget = null; game.warpRoute = null; }
       audioReset(game.audio, ship);
       say(st, L('ПРИБЫТИЕ: ') + sys.name.toUpperCase(), '#78e08f', 4);
       if (next) say(st, L('МАРШРУТ: ДАЛЬШЕ — ') + next.name.toUpperCase() + L(' · J, КОГДА ХВАТИТ ТОПЛИВА'), '#ffcc66', 6);
@@ -4566,6 +4582,12 @@ function prepareHud() {
   // корабли появляются и исчезают сами.
   refreshNav(game.nav, world, ship, game.peers);
   const target = currentTarget(game.nav);
+  // Цель пропала сама — пилот ушёл, NPC исчез: сказать. Молча гаснущая
+  // рамка читается как сбой прибора.
+  if (game.lastTarget && !target && !game.warpTarget) {
+    say(game.state, L('ЦЕЛЬ ПОТЕРЯНА: ') + targetLabel(game.lastTarget), '#ffcc66', 3);
+  }
+  game.lastTarget = target;
   game.info = navInfo(ship, target);
   // На что наведён нос прямо сейчас: приборы подсвечивают это, и то же
   // самое выберет Tab.

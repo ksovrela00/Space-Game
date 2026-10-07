@@ -3628,9 +3628,14 @@ await step('квантовый прыжок к пилоту и срыв, ког�
   put();
   frames(2);
 
-  key('Tab'); frames(2);
-  const t = game.nav.list[game.nav.index];
-  if (!t || !t.isPeer) throw new Error('пилот не выбран целью: ' + (t ? t.name : '—'));
+  // Под прицелом может оказаться и мишень из прошлого шага: Tab
+  // перебирает то, что под прицелом, — до нужного пилота.
+  let t = null;
+  for (let i = 0; i < 4 && !(t && t.name === 'ДАЛЬНИЙ'); i++) {
+    key('Tab'); frames(2);
+    t = game.nav.list[game.nav.index];
+  }
+  if (!t || !t.isPeer || t.name !== 'ДАЛЬНИЙ') throw new Error('пилот не выбран целью: ' + (t ? t.name : '—'));
 
   // Выход считается за двадцать километров от него — не в упор.
   const ex = exitPoint(t, game.ship.pos);
@@ -4384,8 +4389,8 @@ await step('отметка варпа не врёт, когда цель за с
 
   key('KeyM'); frames(2);
   if (game.map.view !== 'galaxy') { key('KeyG'); frames(2); }
-  // Цель — выбором: открытие галактики само её больше не ставит.
-  if (!game.warpTarget) { key('ArrowRight'); frames(2); }
+  // Цель — выбором и Tab: ни открытие галактики, ни сам выбор её не ставят.
+  if (!game.warpTarget) { key('ArrowRight'); frames(2); key('Tab'); frames(2); }
   key('KeyM'); frames(2);
   key('KeyJ'); frames(2);
   if (game.warp.phase !== 'align') {
@@ -4484,8 +4489,13 @@ await step('J — одна клавиша прыжка: привод выбир�
   key('KeyM'); frames(2);
   key('KeyG'); frames(2);
   key('ArrowRight'); frames(2);
+  // Выбор — ещё не цель: J по-прежнему вёл бы к звезде системы.
+  if (game.warpTarget) throw new Error('выбор на карте галактики сам стал целью');
+  key('Tab'); frames(2);
   const toName = game.warpTarget && game.warpTarget.name;
-  if (!toName) throw new Error('на карте галактики не выбралась система');
+  if (!toName) throw new Error('Tab на карте галактики не сделал систему целью');
+  // Цель одна: система вытеснила звезду своей системы.
+  if (game.nav.index !== -1) throw new Error('система в цели, а цель в системе осталась');
   // Карту оставляем в том виде, в каком взяли: следующий шаг открывает её
   // заново и ждёт вид системы. Проверка, меняющая обстановку за собой, —
   // это проверка, которая ломает соседнюю, а виноватой выглядит игра.
@@ -4549,17 +4559,20 @@ await step('варп-прыжок (J) в другую систему целик�
   if (!game.map.open) throw new Error('карта не открылась');
   key('KeyG'); frames(2);
   if (game.map.view !== 'galaxy') throw new Error('карта галактики не открылась');
-  // ЖАЛОБА БЫЛА ОБ ЭТОМ: «выбрал систему, нажал J, ничего не происходит».
-  // Цель ставилась только по Tab, и на карте была подсвеченная система при
-  // пустой цели. Выделение на карте галактики ВСЕГДА означает цель варпа.
-  // Но само открытие вида цель не ставит: случайный взгляд на карту не
-  // должен менять, куда полетит J.
+  // Само открытие вида цель не ставит: случайный взгляд на карту не
+  // должен менять, куда полетит J. И выбор системы — тоже: раньше он сразу
+  // делал её целью варпа, и снять её было нечем. Целью её делает Tab, а
+  // J на карте с выбранной системой берёт её сам («выбрал, нажал J»).
   if (game.warpTarget !== aimWas) throw new Error('открытие галактики само поменяло цель');
-  for (let i = 0; i < 3 && (!game.map.gsel || game.map.gsel.seed === game.sys.seed || !game.warpTarget); i++) {
+  for (let i = 0; i < 3 && (!game.map.gsel || game.map.gsel.seed === game.sys.seed); i++) {
     key('ArrowRight'); frames(2);
   }
-  if (!game.warpTarget || !game.map.gsel) throw new Error('стрелка не выбрала систему');
-  if (game.warpTarget.seed !== game.map.gsel.seed) throw new Error('цель и выбор разошлись');
+  if (!game.map.gsel || game.map.gsel.seed === game.sys.seed) throw new Error('стрелка не выбрала систему');
+  if (game.warpTarget !== aimWas) throw new Error('выбор системы сам поменял цель');
+  // Tab — переключатель: на системе, которая уже цель, он цель снимает.
+  // Прошлый шаг мог оставить целью ту же систему — тогда жать нечего.
+  if (!game.warpTarget || game.warpTarget.seed !== game.map.gsel.seed) { key('Tab'); frames(2); }
+  if (!game.warpTarget || game.warpTarget.seed !== game.map.gsel.seed) throw new Error('Tab не сделал выбор целью');
   const toName = game.warpTarget.name;
   key('KeyM'); frames(2);
 

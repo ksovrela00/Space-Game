@@ -25,7 +25,7 @@
 import { clamp } from '../core/vec3.js';
 import { CY, CY_DIM, AMBER, GREEN, RED, INK, PEER } from './theme.js';
 import { SHIP } from '../game/ship.js';
-import { fmtDist, fmtSpeed, fmtTime } from './hud.js';
+import { fmtDist, fmtSpeed, fmtTime, warpInfo } from './hud.js';
 import { targetLabel, targetKind, currentTarget } from '../game/nav.js';
 import { hullName } from '../game/npc.js';
 import { gearLabel } from '../game/landing.js';
@@ -373,6 +373,29 @@ function targetScreen(ctx, W, H, game) {
   const q = game.quantum;
   const target = game.nav ? currentTarget(game.nav) : null;
   chrome(ctx, W, H, 'target', [L('ПРЕД'), '', L('ПРЫЖОК'), '', L('СЛЕД')]);
+
+  // Цель — чужая система: та же карточка, в световых годах.
+  const sysT = target ? null : warpInfo(game);
+  if (sysT) {
+    ctx.textAlign = 'left';
+    ctx.font = f(20);
+    ctx.fillStyle = CY;
+    ctx.fillText(L('СИСТЕМА'), 16, 60);
+    ctx.font = f(38);
+    ctx.fillStyle = '#c9a8ff';
+    ctx.fillText(String(sysT.name).slice(0, 15), 16, 100);
+    ctx.font = f(56);
+    ctx.fillStyle = INK;
+    ctx.fillText(sysT.ly.toFixed(1) + L(' св. г.'), 16, 168);
+    ctx.font = f(24);
+    ctx.fillStyle = CY;
+    ctx.fillText(sysT.dest ? (L('маршрут до ') + sysT.dest.name).slice(0, 22) : L('варп ~') + Math.round(sysT.secs) + L(' с'), 16, 206);
+    directionBall(ctx, 424, 168, 64, ship, sysT.dir);
+    ctx.font = f(22);
+    ctx.fillStyle = '#c9a8ff';
+    ctx.fillText(L('J — ВАРП В ') + sysT.name.toUpperCase().slice(0, 12), 16, 270);
+    return;
+  }
 
   if (!target) {
     ctx.textAlign = 'center';

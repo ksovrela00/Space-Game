@@ -1350,4 +1350,30 @@ export const EN = {
   'Бак': 'Tank',
   'ПРИШЛО': 'INCOME',
   'УШЛО': 'SPENT',
+  // Единая цель (js/main.js, js/ui/map.js, js/ui/hud.js).
+  'взять в цель то, на что наведён нос: тело, станцию, пилота, NPC (цель одна — прежняя заменяется)':
+    'target what the nose points at: a body, station, pilot, NPC (one target — the previous one is replaced)',
+  'снять цель — любую, и систему тоже': 'clear the target — any, a system too',
+  'то же, что J (прежняя привычка)': 'same as J (old habit)',
+  'на карте: J или B': 'on the map: J or B',
+  'прыжок к выбранному прямо с карты: к системе — варп, к остальному — квантовый':
+    'jump to the selection right from the map: warp to a system, quantum to anything else',
+  'выбранное — в цель, а если оно уже цель — снять (дальняя система — маршрутом через соседей)':
+    'target the selection, or clear it if it is the target already (a far system — by a route through neighbours)',
+  'Перелёт в другую систему — варп-привод. Открыть карту (<b>M</b>), переключиться на галактику (<b>G</b>), выбрать систему — щелчком, строкой списка или <b>&larr;</b>/<b>&rarr;</b> — и взять её в цель: <b>Tab</b>, <b>Enter</b> или кнопкой в карточке. Цель в игре одна: система заменяет планету или пилота, и наоборот; снять цель — <b>Backspace</b> или той же кнопкой. Если напрямую не долететь (полного бака хватает на 21.6 светового года), карта прокладывает маршрут через соседей, и целью становится первый прыжок — по прибытии следующий ставится сам. Дальше <b>J</b> (можно прямо с карты): в кадре появится кольцо направления на ту звезду, его надо совместить с носом. Через четыре секунды удержания корабль уходит в тоннель на двадцать-тридцать секунд; прервать прыжок нельзя. Выход — прямо у чужой звезды, в четырёх её радиусах.':
+    'Travel to another system is the warp drive. Open the map (<b>M</b>), switch to the galaxy (<b>G</b>), pick a system — click it, its row, or <b>&larr;</b>/<b>&rarr;</b> — and make it the target: <b>Tab</b>, <b>Enter</b> or the card button. There is one target in the game: a system replaces a planet or a pilot, and vice versa; clear the target with <b>Backspace</b> or the same button. If it is too far for one jump (a full tank covers 21.6 light years), the map plots a route through neighbours and the first jump becomes the target — on arrival the next one is set by itself. Then <b>J</b> (right from the map too): a ring pointing at that star appears, align it with the nose. After four seconds of holding, the ship goes into the tunnel for twenty to thirty seconds; a jump cannot be interrupted. You exit right at the other star, four of its radii away.',
+  'Карта (<b>M</b>) — трёхмерная модель системы, которую вертят руками: тянуть левой — вращать, <b>W</b>/<b>A</b>/<b>S</b>/<b>D</b> или правой — двигать по плоскости, колесо или <b>&uarr;</b>/<b>&darr;</b> — масштаб, дважды щёлкнуть — подлететь к объекту. Планеты на ней — настоящие, освещённые своим солнцем; орбиты ярче у самого тела и гаснут назад по ходу — видно, куда оно идёт. Слева список объектов и <b>свои корабли</b> (щелчок по строке или <b>F</b> наводит на корабль), справа карточка выбранного: тип, тяжесть, температура, атмосфера, посадка, коридор прыжка — и кнопки: <b>Tab</b> — взять в цель или снять цель, <b>J</b> — прыжок прямо с карты. Станцию на обзоре не видно — к планете надо подлететь.':
+    'The map (<b>M</b>) is a 3D model of the system you turn by hand: drag with the left button to rotate, <b>W</b>/<b>A</b>/<b>S</b>/<b>D</b> or the right button to move along the plane, wheel or <b>&uarr;</b>/<b>&darr;</b> to zoom, double-click to fly to an object. The planets on it are real, lit by their sun; orbits are bright right at the body and fade behind it — you see where it is heading. On the left — the object list and <b>your ships</b> (click a row or <b>F</b> to show a ship), on the right — the card of the selection: type, gravity, temperature, atmosphere, landing, jump corridor — and buttons: <b>Tab</b> — target or clear the target, <b>J</b> — jump right from the map. A station is not visible in the overview — fly closer to its planet.',
+  'ЦЕЛЬ СНЯТА': 'TARGET CLEARED',
+  'НАВЕДИ НОС НА ЦЕЛЬ · BACKSPACE — СНЯТЬ ЦЕЛЬ': 'POINT THE NOSE AT A TARGET · BACKSPACE — CLEAR TARGET',
+  'ЦЕЛЬ НЕ ВЫБРАНА · TAB — ВЗЯТЬ ТО, НА ЧТО НАВЕДЁН НОС': 'NO TARGET · TAB — TARGET WHAT THE NOSE POINTS AT',
+  ' — J ЕЩЁ РАЗ': ' — J AGAIN',
+  'ЦЕЛЬ ПОТЕРЯНА: ': 'TARGET LOST: ',
+  'маршрут до ': 'route to ',
+  ' прыж.': ' jumps',
+  'варп ~': 'warp ~',
+  'TAB — ВЗЯТЬ В ЦЕЛЬ': 'TAB — TARGET',
+  'СНЯТЬ ЦЕЛЬ': 'CLEAR TARGET',
+  '— взять в цель то, что под прицелом,': '— target what is under the crosshair,',
+  '— прыжок к ней': '— jump to it',
 };

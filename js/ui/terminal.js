@@ -30,6 +30,7 @@ import { SHIP } from '../game/ship.js';
 import { cargoTons } from '../game/player.js';
 import { fuelCap, fuelLevel } from '../game/fuel.js';
 import { session } from '../net/session.js';
+import { VERSION } from '../core/version.js';
 import { fmtSpeed } from './hud.js';
 import { esc, kr, t1, pct, btn, kbd } from './termkit.js';
 import * as P from './menu.js';
@@ -131,7 +132,7 @@ export function terminalHtml(game, port = false) {
     <header class="th"><div class="who"><span class="kick">${esc(w.kick)}</span><h1>${esc(w.name)}</h1>${
     w.sub ? `<span class="sub">${esc(w.sub)}</span>` : ''}</div><div class="stats">${stats(game, port)}</div>${
     port ? '' : `<button class="x" data-act="close" title="${esc(L('ЗАКРЫТЬ'))}">✕</button>`}</header>
-    <nav class="tt">${tabHtml}</nav>
+    <nav class="tt">${tabHtml}<span class="ver">SOLAR TRADER v${esc(VERSION)}</span></nav>
     <main class="tb scroll" tabindex="-1">${body}</main>
     <footer class="tf">${note}<div class="acts">${foot}</div></footer>
   </div>`;
