@@ -243,7 +243,7 @@ export function stationAct(game, act, arg = {}) {
     redraw(game);
     return true;
   }
-  if (act === 'launch') { game.launch(); return true; }
+  if (act === 'launch') { game.launch(true); return true; }
   if (act === 'stand') { if (game.rise) game.rise(); return true; }
   if (act === 'map') { game.openMap(); return true; }
   if (act === 'repair') { if (!s.busy) game.repair(); return true; }

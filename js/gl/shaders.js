@@ -339,6 +339,28 @@ uniform float uFwScale;
 const float NIGHT_SKIP = -0.85;
 ${DETAIL_GLSL}` : ''}
 
+// Зал станции (js/gl/scene.js, setHall): внутри коробки зала и тоннеля
+// солнца нет — их закрывает корпус станции, — а светят потолочные ряды:
+// сверху и рассеянно. Коробки — в осях станции (км), фрагмент переводится
+// в них одним поворотом. uHallOn = 0 — станции рядом нет, блок пропускается.
+uniform float uHallOn;
+uniform vec3 uHallO;            // центр станции в осях камеры, км
+uniform mat3 uHallM;            // столбцы — оси станции в осях камеры
+uniform vec3 uHallLo;
+uniform vec3 uHallHi;
+uniform vec3 uTunLo;
+uniform vec3 uTunHi;
+uniform vec3 uHallUp;           // верх станции в осях камеры
+uniform vec4 uHallLight;        // рассеянный, сверху, снизу (от пола), сбоку (от стен)
+
+float hallAt(vec3 vp) {
+  if (uHallOn < 0.5) return 0.0;
+  vec3 p = (vp - uHallO) * uHallM;
+  bool a = all(greaterThan(p, uHallLo)) && all(lessThan(p, uHallHi));
+  bool b = all(greaterThan(p, uTunLo)) && all(lessThan(p, uTunHi));
+  return (a || b) ? 1.0 : 0.0;
+}
+
 out vec4 outColor;
 
 void main() {
@@ -517,7 +539,9 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
   // не нужно следить за порядком обхода вершин при сборке мешей.
   if (dot(n, normalize(vViewPos)) > 0.0) n = -n;
 
-  float lam = max(dot(n, uSunDir), 0.0);
+  // В зале станции солнца нет (hallAt): корпус станции вокруг.
+  float hall = hallAt(vViewPos);
+  float lam = max(dot(n, uSunDir), 0.0) * (1.0 - hall);
   // Свой корабль заслоняет солнце: гаснет прямой свет, рассеянный
   // остаётся. Нормаль здесь уже развёрнута к камере, и раз lam > 0 —
   // к солнцу тоже: по ней точку и отодвигают от поверхности.
@@ -527,6 +551,13 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
     lam *= sunVis;
   }
   float lit = uAmbient + (1.0 - uAmbient) * lam;
+  // Свет зала: ряды под потолком — сверху, отражённый от светлого пола —
+  // снизу, и рассеянный от стен.
+  if (hall > 0.5) {
+    float up = dot(n, uHallUp);
+    lit = uHallLight.x + uHallLight.y * max(up, 0.0) + uHallLight.z * max(-up, 0.0)
+        + uHallLight.w * (1.0 - abs(up));
+  }
   if (inner) lit = max(lit, 0.36);
 
   // Фары. Свет точечный и направленный: от лампы до точки считается

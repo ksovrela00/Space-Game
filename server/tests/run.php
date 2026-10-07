@@ -188,7 +188,7 @@ ok($again['player_id'] === $pid && $again['token'] !== $token, 'вход выд�
 $unguarded = [];
 foreach (Api::routes() as $name => [$fn, $needsAuth]) {
     $isPublic = in_array($name, ['ping', 'auth.register', 'auth.login',
-        'galaxy.systems', 'galaxy.system', 'galaxy.stations', 'station.info',
+        'galaxy.systems', 'galaxy.system', 'galaxy.stations', 'station.info', 'station.layout',
         'catalog.commodities', 'catalog.ships', 'catalog.specs'], true);
     if (!$isPublic && !$needsAuth) {
         $unguarded[] = $name;
@@ -1717,6 +1717,154 @@ ok((int) $rowC['landed_body'] === $L && (int) $rowC['landed_secured'] === 1
     && (int) Players::byId($rc['player_id'])['aboard_ship'] === $shipC
     && !in_array('landed_body', $cols, true) && in_array('-player.landed_body', $made, true),
     'перенос со схемы 9: стоянка переехала к кораблю, пилот в его кресле, старые столбцы снесены');
+
+// --- станция изнутри: площадки, помещения, хранилище -------------------------
+
+section('станция изнутри: площадки и помещения');
+{
+    // Каталог: площадки и помещения у каждой станции — из планировки
+    // генератора (js/game/stationplan.js), от шести до десяти площадок и от
+    // десяти до двадцати помещений.
+    $per = Db::all("SELECT b.`id`, b.`name`,
+            (SELECT COUNT(*) FROM `station_pad` sp WHERE sp.`station_id`=b.`id`) AS `pads`,
+            (SELECT COUNT(*) FROM `station_room` r WHERE r.`station_id`=b.`id`) AS `rooms`,
+            st.`pads` AS `berths`
+         FROM `body` b JOIN `station` st ON st.`body_id`=b.`id` WHERE b.`kind`='station'");
+    $bad = array_filter($per, static function ($r) {
+        return $r['pads'] < 6 || $r['pads'] > 10 || $r['rooms'] < 10 || $r['rooms'] > 20 || (int) $r['berths'] !== (int) $r['pads'];
+    });
+    ok($per && !$bad, 'у всех ' . count($per) . ' станций 6–10 площадок и 10–20 помещений, мест у причала — по площадкам'
+        . ($bad ? ': ' . implode(', ', array_column($bad, 'name')) : ''));
+    $shops = (int) Db::one("SELECT COUNT(*) FROM `station_room` WHERE `kind`='shop' AND `shop` IS NOT NULL");
+    $gates = (int) Db::one("SELECT COUNT(*) FROM `station_room` WHERE `kind`='gate' AND `pad` IS NOT NULL");
+    ok($shops > 0 && $gates === (int) Db::one('SELECT COUNT(*) FROM `station_pad`'),
+        "лавки помечены видом будущей лавки ($shops), у каждой площадки свой зал ожидания ($gates)");
+    // Хозяин лавки переживает перезаливку каталога: помещения обновляются
+    // на месте, по коду, а не сносятся.
+    $room = Db::row("SELECT * FROM `station_room` WHERE `kind`='shop' ORDER BY `id` LIMIT 1");
+    Db::update('station_room', ['tenant_id' => 42], '`id`=?', [(int) $room['id']]);
+    Seeder::catalog($catalog);
+    $again = Db::row('SELECT * FROM `station_room` WHERE `id`=?', [(int) $room['id']]);
+    ok($again !== null && (int) $again['tenant_id'] === 42 && $again['code'] === $room['code'],
+        'перезаливка каталога не уносит хозяина лавки: ' . $room['name']);
+    Db::update('station_room', ['tenant_id' => null], '`id`=?', [(int) $room['id']]);
+
+    // Новый пилот — на площадке в зале родного порта, с позой на её середине.
+    $ra = Auth::register('pad_a', 'secret', 'ПЛОЩАДКА А');
+    $ta = $ra['token'];
+    $sa = Api::call('player.state', [], $ta);
+    $home = (int) $sa['position']['dockedBody'];
+    $berthA = $sa['position']['berth'];
+    ok($berthA !== null && is_int($berthA['pad']) && $berthA['stored'] === false
+        && abs($berthA['pose']['up']['y'] - 1) < 1e-9,
+        'новый корабль стоит на площадке ' . ($berthA['pad'] ?? '—') . ' в зале порта, а не «в доке вообще»');
+
+    // Второй пилот в том же порту, пока первый в игре, — на другой площадке.
+    Db::update('player', ['online' => 1], '`id`=?', [$ra['player_id']]);
+    $rb = Auth::register('pad_b', 'secret', 'ПЛОЩАДКА Б');
+    $tb = $rb['token'];
+    $sb = Api::call('player.state', [], $tb);
+    ok($sb['position']['berth']['pad'] !== $berthA['pad'], 'второй корабль того же порта — на другой площадке: '
+        . $sb['position']['berth']['pad']);
+
+    // Площадку держит стоящий на ней (его хозяин в игре — ведёт хаб):
+    // сесть на чужую нельзя.
+    Db::update('player', ['online' => 1], '`id`=?', [$ra['player_id']]);
+    Api::call('station.undock', [], $tb);
+    denies('pad_busy', fn() => Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $berthA['pad']], $tb),
+        'на занятую площадку не встать');
+    // Площадка — по просьбе: порт выдаёт свободную и держит её за кораблём.
+    $req = Api::call('station.request', ['system' => 0, 'station' => $home], $tb);
+    $req2 = Api::call('station.request', ['system' => 0, 'station' => $home], $tb);
+    ok(is_int($req['pad']) && $req['pad'] !== $berthA['pad'] && $req2['pad'] === $req['pad'],
+        'порт выдаёт свободную площадку (' . $req['pad'] . ') и повторная просьба — та же');
+    // Встал на выданную, с позой из игры.
+    $pose = ['pos' => ['x' => 0.08, 'y' => -0.14, 'z' => 0.05], 'fwd' => ['x' => 0, 'y' => 0, 'z' => 1], 'up' => ['x' => 0, 'y' => 1, 'z' => 0]];
+    $d = Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $req['pad'], 'pose' => $pose], $tb);
+    $sb = Api::call('player.state', [], $tb);
+    ok($d['pad'] === $req['pad'] && $sb['position']['berth']['pad'] === $req['pad']
+        && abs($sb['position']['berth']['pose']['pos']['x'] - 0.08) < 1e-9,
+        'встал на выданную площадку: номер и поза на полу зала — в базе');
+    // Кривая поза из чужих рук в базу не идёт — площадка ставит свою.
+    Api::call('station.undock', [], $tb);
+    Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $req['pad'],
+        'pose' => ['pos' => ['x' => 'NaN', 'y' => 9e9, 'z' => 0], 'fwd' => ['x' => 0, 'y' => 0, 'z' => 7]]], $tb);
+    $pb = Api::call('player.state', [], $tb)['position']['berth']['pose'];
+    ok(is_array($pb) && abs($pb['pos']['y']) < 1 && abs($pb['up']['y'] - 1) < 1e-9,
+        'поза с мусором не пишется: корабль на середине площадки');
+    // Взлетел — площадка свободна сразу.
+    Api::call('station.undock', [], $tb);
+    ok(!in_array($req['pad'], Stations::busyPads(0, $home, -1), true), 'взлетел — площадка свободна');
+    // Сел мимо площадок — тоже в порту.
+    $d0 = Api::call('station.dock', ['system' => 0, 'station' => $home], $tb);
+    ok($d0['pad'] === null && Api::call('player.state', [], $tb)['position']['dockedBody'] === $home,
+        'сел на пол зала мимо площадок — в порту, без площадки');
+
+    // Крупному кораблю малая площадка мала.
+    $small = (int) Db::one("SELECT sp.`n` FROM `station_pad` sp JOIN `body` b ON b.`id`=sp.`station_id`
+        WHERE b.`system_id`=0 AND b.`local_id`=? AND sp.`size`='S' ORDER BY sp.`n` LIMIT 1", [$home]);
+    $shipB = (int) Players::ship($rb['player_id'])['id'];
+    $prom = (int) Db::one("SELECT `id` FROM `ship_type` WHERE `code`='prometheus'");
+    $chal = (int) Db::one("SELECT `id` FROM `ship_type` WHERE `code`='challenger'");
+    Db::update('ship', ['type_id' => $prom], '`id`=?', [$shipB]);
+    Api::call('station.undock', [], $tb);
+    denies('pad_small', fn() => Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $small], $tb),
+        '«Прометей» на малую площадку не встаёт');
+    $rp = Api::call('station.request', ['system' => 0, 'station' => $home], $tb);
+    $size = Db::one('SELECT sp.`size` FROM `station_pad` sp JOIN `body` b ON b.`id`=sp.`station_id`
+        WHERE b.`system_id`=0 AND b.`local_id`=? AND sp.`n`=?', [$home, $rp['pad']]);
+    ok($size === 'L', 'крейсеру порт выдаёт большую площадку: ' . $rp['pad']);
+    Db::update('ship', ['type_id' => $chal], '`id`=?', [$shipB]);
+    Api::call('station.dock', ['system' => 0, 'station' => $home], $tb);
+
+    // Хозяин вышел из игры — его корабль из мира ушёл, и площадка под ним
+    // для остальных свободна; вернулся, а на ней другой, — встаёт на свободную.
+    Db::update('player', ['online' => 0], '`id`=?', [$ra['player_id']]);
+    Api::call('station.undock', [], $tb);
+    Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $berthA['pad']], $tb);
+    Db::update('player', ['online' => 1], '`id`=?', [$rb['player_id']]);
+    $back = Api::call('player.state', [], $ta)['position']['berth'];
+    ok($back['pad'] !== $berthA['pad'] && $back['pad'] !== null,
+        'пока хозяина не было, на его площадку сел другой — вернувшись, он стоит на площадке ' . $back['pad']);
+    Db::update('player', ['online' => 0], '`id`=?', [$rb['player_id']]);
+    Api::call('station.undock', [], $tb);
+    Api::call('station.dock', ['system' => 0, 'station' => $home], $tb);
+
+    // Площадки и помещения — по сети.
+    $lay = Api::call('station.layout', ['system' => 0, 'station' => $home]);
+    ok(count($lay['pads']) >= 6 && count($lay['rooms']) >= 10
+        && count(array_filter($lay['rooms'], fn($r) => $r['kind'] === 'shop' || $r['kind'] === 'bar')) > 0,
+        'station.layout: площадок ' . count($lay['pads']) . ', помещений ' . count($lay['rooms']));
+
+    // Хранилище порта: купленный корабль — в нём, а не на площадке.
+    Ledger::add($ra['player_id'], 'ПРОВЕРКА', 300000, 'test');
+    $capital = (int) Db::one("SELECT b.`local_id` FROM `station` st JOIN `body` b ON b.`id`=st.`body_id`
+        WHERE st.`system_id`=0 AND st.`has_outfit`=1 ORDER BY st.`tech` DESC LIMIT 1");
+    $shipA = (int) Players::ship($ra['player_id'])['id'];
+    Db::update('ship', ['docked_body' => $capital, 'berth_station' => $capital], '`id`=?', [$shipA]);
+    Stations::park($shipA, 0, $capital);
+    $padA = (int) Players::shipRow($shipA)['pad'];
+    $bought = Api::call('shipyard.buy', ['code' => 'challenger'], $ta);
+    $nb = Players::shipRow((int) $bought['bought']);
+    ok((int) $nb['stored'] === 1 && $nb['pad'] === null && (int) $nb['docked_body'] === $capital,
+        'купленный корабль — в хранилище порта, а не на площадке');
+    // Вызвать его: он поднимается на площадку прежнего, прежний — в хранилище,
+    // пилот — в кресле вызванного.
+    $sr = Api::call('ship.retrieve', ['id' => (int) $bought['bought']], $ta);
+    $old = Players::shipRow($shipA);
+    $nb = Players::shipRow((int) $bought['bought']);
+    ok($sr['ship']['id'] === (int) $bought['bought'] && $sr['me']['aboard'] === (int) $bought['bought']
+        && $sr['me']['seated'] === true && (int) $nb['pad'] === $padA && (int) $nb['stored'] === 0
+        && (int) $old['stored'] === 1 && $old['pad'] === null && $nb['dock_pose'] !== null,
+        'вызван из хранилища: на площадке ' . $padA . ' вместо прежнего, пилот в его кресле, прежний — в хранилище');
+    // И обратно — пересадкой (ship.command): корабль в хранилище вызывается сам.
+    $sc = Api::call('ship.command', ['id' => $shipA], $ta);
+    ok($sc['ship']['id'] === $shipA && (int) Players::shipRow($shipA)['stored'] === 0
+        && (int) Players::shipRow((int) $bought['bought'])['stored'] === 1,
+        'пересадка в корабль из хранилища — тот же вызов: он на площадке, второй — в хранилище');
+    // Чужой корабль не вызвать, и не из своего порта — тоже.
+    denies('not_owner', fn() => Api::call('ship.retrieve', ['id' => $shipB], $ta), 'чужой корабль не вызвать');
+}
 
 // --- итог --------------------------------------------------------------------
 

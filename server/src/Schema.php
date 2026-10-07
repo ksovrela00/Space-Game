@@ -70,8 +70,19 @@ final class Schema
      *     `ship.stowed` — стоит ли он сейчас в этом трюме: тогда его место
      *     — место носителя (Players::carryAlong), а хаб не показывает его
      *     отдельным кораблём.
+     * 13 — станция изнутри (js/game/stationplan.js): зал за щелью,
+     *     площадки и помещения терминала. `station_pad` — площадки,
+     *     `station_room` — помещения (у лавок — вид будущей лавки и её
+     *     хозяин, торговли в них пока нет). У корабля — где он в зале:
+     *     `pad` (площадка), `berth_station` (у какой станции площадка
+     *     за ним), `pad_at` (когда выдана), `dock_pose` (где стоит на
+     *     полу зала, в осях станции) и `stored` (в хранилище порта, а не
+     *     на площадке: вызывают его ангарной службой). У пилота —
+     *     `on_station` и `station_pose`: он ходит по станции. У типа
+     *     корабля — `gear_clear_m`: просвет на шасси, по нему корабль
+     *     ставят на площадку.
      */
-    public const VERSION = 12;
+    public const VERSION = 13;
 
     /** Порядок важен: внешние ключи ссылаются назад. */
     public static function tables(): array
@@ -178,6 +189,59 @@ final class Schema
                     REFERENCES `star_system` (`id`) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
+            // Площадки зала станции (js/game/stationplan.js). Слепок
+            // генератора, как и тела: заливается выгрузкой (tools/export.mjs),
+            // и номер площадки у корабля значит одно и то же у всех. Место —
+            // в осях станции, метры: середина и размер, x — поперёк, z —
+            // вдоль оси порта.
+            'station_pad' => "CREATE TABLE `station_pad` (
+                `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                `station_id` BIGINT UNSIGNED NOT NULL,
+                `n` TINYINT NOT NULL,
+                -- S — под корабль до восьмидесяти метров, L — под крупный.
+                `size` CHAR(1) NOT NULL,
+                `side` TINYINT NOT NULL,
+                `x_m` DOUBLE NOT NULL,
+                `y_m` DOUBLE NOT NULL,
+                `z_m` DOUBLE NOT NULL,
+                `w_m` DOUBLE NOT NULL,
+                `d_m` DOUBLE NOT NULL,
+                UNIQUE KEY `one_no` (`station_id`, `n`),
+                CONSTRAINT `pad_station` FOREIGN KEY (`station_id`)
+                    REFERENCES `body` (`id`) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // Помещения терминала станции: конкорс, залы ожидания у
+            // площадок, службы порта и лавки. Пока это только помещения —
+            // по ним ходят, — но лавкам здесь уже есть куда лечь: `shop` —
+            // вид будущей лавки (снаряжение, одежда, электроника…),
+            // `tenant_id` — кто её держит (пусто — станция). Торговли в них
+            // ещё нет; когда появится, товар ляжет отдельной таблицей со
+            // ссылкой на строку отсюда.
+            'station_room' => "CREATE TABLE `station_room` (
+                `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                `station_id` BIGINT UNSIGNED NOT NULL,
+                -- Имя помещения в планировке (gate3, shop5, bar…): по нему
+                -- игра и сервер говорят об одной и той же комнате.
+                `code` VARCHAR(24) NOT NULL,
+                `kind` VARCHAR(16) NOT NULL,
+                `name` VARCHAR(96) NOT NULL,
+                `shop` VARCHAR(24) NULL,
+                `pad` TINYINT NULL,
+                `area_m2` DOUBLE NOT NULL DEFAULT 0,
+                `x_m` DOUBLE NOT NULL,
+                `y_m` DOUBLE NOT NULL,
+                `z_m` DOUBLE NOT NULL,
+                `w_m` DOUBLE NOT NULL,
+                `h_m` DOUBLE NOT NULL,
+                `d_m` DOUBLE NOT NULL,
+                `tenant_id` INT NULL,
+                UNIQUE KEY `one_code` (`station_id`, `code`),
+                KEY `shops` (`station_id`, `kind`),
+                CONSTRAINT `room_station` FOREIGN KEY (`station_id`)
+                    REFERENCES `body` (`id`) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
             // Наземный город. Отдельной таблицей, а не полем у `body`,
             // по той же причине, что и станция: городов на теле может не
             // быть ни одного, а может стать несколько, и рынок с
@@ -243,6 +307,9 @@ final class Schema
                 `length_m` DOUBLE NOT NULL,
                 `width_m` DOUBLE NOT NULL,
                 `height_m` DOUBLE NOT NULL,
+                -- Просвет на шасси, м: центр масс над полом. По нему корабль
+                -- ставят на площадку станции (Stations::padPose).
+                `gear_clear_m` DOUBLE NOT NULL DEFAULT 0,
                 `price` BIGINT NOT NULL DEFAULT 0,
                 -- Остальная лётная модель: разгон, торможение, угловые
                 -- скорости, форсаж, шасси — два десятка чисел, которые
@@ -327,6 +394,11 @@ final class Schema
                 `walk_pose` TEXT NULL,
                 `out_body` INT NULL,
                 `out_pose` TEXT NULL,
+                -- На станции (версия 13): пилот ходит по её залу и терминалу
+                -- (`aboard_ship` пуст), `station_pose` — точка ног в осях
+                -- станции, метры, и взгляд.
+                `on_station` INT NULL,
+                `station_pose` TEXT NULL,
                 -- План полёта: выбранная цель, отмеченная система варпа,
                 -- последний порт и вид камеры. Это не «настройки», а
                 -- состояние игры: выбрал цель, отложил, вернулся — цель
@@ -393,6 +465,14 @@ final class Schema
                 -- (версия 12, Players::ensureHangar).
                 `carrier_id` INT NULL,
                 `stowed` TINYINT(1) NOT NULL DEFAULT 0,
+                -- Зал станции (версия 13): площадка, у какой станции она за
+                -- кораблём и когда выдана, где корабль стоит на полу зала (в
+                -- осях станции, км) и стоит ли он в хранилище порта.
+                `pad` TINYINT NULL,
+                `berth_station` INT NULL,
+                `pad_at` DATETIME NULL,
+                `dock_pose` TEXT NULL,
+                `stored` TINYINT(1) NOT NULL DEFAULT 0,
                 `created_at` DATETIME NOT NULL,
                 KEY `owner` (`owner_id`),
                 KEY `carrier` (`carrier_id`),
@@ -529,6 +609,8 @@ final class Schema
                 'spec' => 'TEXT NULL',
                 // Версия 9: масса корпуса для расхода топлива.
                 'mass_t' => 'DECIMAL(10,1) NOT NULL DEFAULT 0',
+                // Версия 13: просвет на шасси — ставить на площадку.
+                'gear_clear_m' => 'DOUBLE NOT NULL DEFAULT 0',
             ],
             'equipment_type' => [
                 'tech' => 'TINYINT NOT NULL DEFAULT 1',
@@ -553,6 +635,12 @@ final class Schema
                 // Версия 12: вездеход в трюме носителя.
                 'carrier_id' => 'INT NULL',
                 'stowed' => 'TINYINT(1) NOT NULL DEFAULT 0',
+                // Версия 13: зал станции.
+                'pad' => 'TINYINT NULL',
+                'berth_station' => 'INT NULL',
+                'pad_at' => 'DATETIME NULL',
+                'dock_pose' => 'TEXT NULL',
+                'stored' => 'TINYINT(1) NOT NULL DEFAULT 0',
             ],
             // Версия 10: место человека.
             'player' => [
@@ -563,6 +651,9 @@ final class Schema
                 'out_pose' => 'TEXT NULL',
                 // Версия 11: в игре ли.
                 'online' => 'TINYINT(1) NOT NULL DEFAULT 0',
+                // Версия 13: пилот на станции.
+                'on_station' => 'INT NULL',
+                'station_pose' => 'TEXT NULL',
             ],
         ];
     }

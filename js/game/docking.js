@@ -4,15 +4,17 @@
 import { v3, normalize, dot, clamp } from '../core/vec3.js';
 import { toLocal, toWorld } from '../core/basis.js';
 import { SHIP } from './ship.js';
-import { aimAt, flyVelocity, levelRoll, rateCmd } from './pilot.js';
+import { aimAt, flyVelocity, levelRoll, rateCmd, alignBasis } from './pilot.js';
 import { SLOT } from '../models/stations.js';
 import { HULL } from './hull.js';
+import { stationM, stationWorld, hallZone, BERTH } from './berth.js';
+import { padByNo } from './stationplan.js';
 import { L } from '../core/lang.js';
 
 export const LIMITS = {
   speed: 0.28,     // км/с — максимальная относительная скорость входа
   align: 0.86,     // косинус угла между носом и осью порта
-  roll: 0.78,      // косинус рассогласования крена (по модулю)
+  roll: 0.78,      // косинус рассогласования крена: верх корабля — к верху станции
 };
 
 // Форма станции у каждой своя (js/models/stations.js): «Кориолис» —
@@ -36,7 +38,11 @@ export function relSpeed(ship, station) {
 // Насколько корабль готов войти в порт (для подсказок HUD).
 export function dockingQuality(ship, station) {
   const align = -dot(ship.basis.fwd, station.basis.fwd);   // нос против оси порта
-  const roll = Math.abs(dot(ship.basis.right, station.basis.right));
+  // Крен — к ВЕРХУ станции, а не «по модулю»: за щелью зал с тяжестью
+  // вниз по станции, и вошедший вверх ногами корабль висит над полом
+  // брюхом к потолку. Раньше щели было всё равно, как повернут корабль, —
+  // за ней ничего не было.
+  const roll = dot(ship.basis.up, station.basis.up);
   const speed = relSpeed(ship, station);
   const p = stationLocal(ship, station);
   // Попал ли в щель — тем же правилом, что и стыковка (checkStation):
@@ -58,31 +64,23 @@ export function dockingQuality(ship, station) {
 
 /**
  * Проверка положения корабля относительно станции.
- * @returns null | 'docked' | 'crash'
+ *
+ * Прошёл раму щели — 'enter': дальше корабль летит в тоннеле и зале станции
+ * (js/game/berth.js), а стыкуется он, только сев на площадку. Раньше
+ * пройденная рама и была стыковкой: корабль пропадал в центре станции.
+ * Задел ли корпус раму или стены, решают уже точки корпуса внутри
+ * (berth.js, hullContact): по центру масс этого не видно.
+ *
+ * @returns null | 'enter' | 'crash'
  */
 export function checkStation(ship, station) {
   const sh = station.shape;
   const p = stationLocal(ship, station);
-  // Створ — это СЛОЙ от плоскости порта до задней стенки, а не всё
-  // полупространство за ней. Без нижней границы корабль, оказавшийся на
-  // оси в шестидесяти километрах ПОЗАДИ станции, считался бы вошедшим в
-  // щель и стыковался мгновенно — так и было, пока проверку не написали.
-  if (p.z > sh.D || p.z < -sh.D) return null;
-
-  // Зазор в створе — по реальным обводам корпуса, а не по числу из
-  // воздуха: в щель проходит корабль целиком, а не его центр (slotFit).
-  // Крен станции согласован (LIMITS.roll), и оси корабля и щели
-  // совпадают по модулю.
-  const fit = slotFit();
-  const inSlot = Math.abs(p.x - fit.x) < fit.mx && Math.abs(p.y - fit.y) < fit.my;
-  if (inSlot) {
-    // В створе порта: считаем стыковку состоявшейся, когда прошли раму.
-    if (p.z < sh.D - 0.03) {
-      const q = dockingQuality(ship, station);
-      return q.ok ? 'docked' : 'crash';
-    }
-    return null;
-  }
+  // Дальше габарита ни корпуса, ни щели нет. Был здесь слой ±D, и мачта
+  // «Орбиса» с реактором (до 1.47 км за станцией) не была твёрдой вовсе.
+  if (p.z > sh.D || p.z < -sh.bound) return null;
+  // Центр масс прошёл раму и он в пустоте — тоннель или зал.
+  if (sh.hollow(p.x, p.y, p.z)) return 'enter';
   // Мимо щели. Столкновение — только если ТОЧКА ВНУТРИ КОРПУСА, а
   // корпус у каждого типа свой: у «Кориолиса» это кубооктаэдр, у
   // «Орбиса» — ступица, кольцо, спицы и мачта. Проверка нарисованного и
@@ -158,13 +156,26 @@ function flyAligned(ship, vec, k) {
 // от 0.3 км плюс длина носа и ещё сто метров на поворот.
 const decideAt = () => 0.3 + HULL.hi.z + 0.1;
 
-export function startDockingComputer(ship, station) {
+export function startDockingComputer(ship, station, pad = null) {
   const d = Math.hypot(
     station.pos.x - ship.pos.x,
     station.pos.y - ship.pos.y,
     station.pos.z - ship.pos.z);
   if (d > DOCK_RANGE) return { ok: false, reason: L('СТАНЦИЯ СЛИШКОМ ДАЛЕКО — ПРЫЖОК (B)') };
-  ship.docking = { station, phase: 'gate' };
+  // Внутри станции — сразу к площадке (или из тоннеля в зал), снаружи —
+  // к створу; дальше компьютер ведёт сквозь щель до самой площадки.
+  const inside = ship.berth && ship.berth.st === station;
+  ship.docking = { station, phase: inside ? 'tunnel' : 'gate', pad };
+  ship.autopilot = null;
+  return { ok: true };
+}
+
+/**
+ * Вылет докинг-компьютером: с пола зала — вверх, к тоннелю и наружу.
+ * Взлёт с площадки делает игра (js/main.js, liftOff), отсюда — дорога.
+ */
+export function startLaunchComputer(ship, station) {
+  ship.docking = { station, phase: 'climb', out: true };
   ship.autopilot = null;
   return { ok: true };
 }
@@ -181,11 +192,20 @@ const distTo = (ship, p) =>
 // Наведение носа, полёт заданным вектором скорости и гашение крена —
 // в js/game/pilot.js: тем же приёмом пользуется посадочный компьютер.
 
-// Согласование крена с вращающейся станцией (по модулю 180°).
+/**
+ * Крен корабля до верха станции: угол поворота вокруг носа, который
+ * приводит его «верх» к её «верху» (рад, со знаком). Не по модулю 180°:
+ * за щелью зал с тяжестью вниз по станции (js/game/berth.js).
+ */
+export function rollToStation(ship, station) {
+  const u = ship.basis.up, T = station.basis.up, f = ship.basis.fwd;
+  const cx = u.y * T.z - u.z * T.y, cy = u.z * T.x - u.x * T.z, cz = u.x * T.y - u.y * T.x;
+  return Math.atan2(cx * f.x + cy * f.y + cz * f.z, dot(u, T));
+}
+
+// Согласование крена с вращающейся станцией — верхом к её верху.
 const matchRoll = (ship, station, k = 2.0) => {
-  const tr = station.basis.right;
-  let err = Math.atan2(dot(tr, ship.basis.up), dot(tr, ship.basis.right));
-  if (Math.abs(err) > Math.PI / 2) err -= Math.sign(err) * Math.PI;
+  const err = rollToStation(ship, station);
   // Вперёд подаём скорость вращения станции, иначе регулятор всё время
   // отстаёт от вращающегося порта.
   const feed = station.spinRate * (dot(station.basis.fwd, ship.basis.fwd) < 0 ? 1 : -1);
@@ -196,6 +216,124 @@ const matchRoll = (ship, station, k = 2.0) => {
   return Math.abs(err);
 };
 
+// --- внутри станции -----------------------------------------------------------
+//
+// В зале компьютер летает, как посадочный над телом: брюхом к полу, нос —
+// по горизонтали туда, куда надо, вертикаль — подъёмными. Всё в осях
+// станции и в метрах планировки; скорость корабля в зале — уже
+// относительно зала (js/game/berth.js).
+
+// Высота полёта над полом зала, м: выше терминала (14 м) и выше самого
+// высокого корабля, стоящего на площадке («Прометей» — 66 м), с запасом.
+const CRUISE_Y = 90;
+// Скорости в зале, м/с: по тоннелю, по залу и спуск.
+const V_TUNNEL = 45, V_HALL = 55, V_DOWN = 9;
+
+const _tgt = v3(), _fw = v3(), _hv = v3();
+
+/** Нос — по горизонтали станции на точку (м, оси станции), брюхо — к полу. */
+function hallSteer(ship, st, p, at) {
+  const dx = at[0] - p[0], dz = at[2] - p[2];
+  const l = Math.hypot(dx, dz);
+  if (l > 0.5) {
+    _fw.x = st.basis.right.x * dx / l + st.basis.fwd.x * dz / l;
+    _fw.y = st.basis.right.y * dx / l + st.basis.fwd.y * dz / l;
+    _fw.z = st.basis.right.z * dx / l + st.basis.fwd.z * dz / l;
+  } else {
+    // На месте — курс прежний, лишь бы брюхом вниз.
+    const u = st.basis.up, f = ship.basis.fwd, k = f.x * u.x + f.y * u.y + f.z * u.z;
+    _fw.x = f.x - u.x * k; _fw.y = f.y - u.y * k; _fw.z = f.z - u.z * k;
+  }
+  return alignBasis(ship, _fw, st.basis.up);
+}
+
+/** Вертикаль подъёмными: к заданной вертикальной скорости (м/с). */
+function liftTo(ship, vUpWant, z) {
+  const full = Math.max(SHIP.liftMin, BERTH.g * SHIP.liftTWR);
+  ship.control.lift = clamp((vUpWant / 1000 - z.vUp) * 1.2 / full, -1, 1);
+}
+
+/**
+ * Докинг-компьютер внутри станции: тоннель → зал → над площадкой → вниз.
+ * На вылет (d.out) — наоборот: вверх → к тоннелю → наружу.
+ */
+function updateInside(ship, d, dt) {
+  const st = d.station;
+  const Lt = st.layout;
+  const z = hallZone(ship, st);
+  const p = z.local;
+  const pad = d.pad ? padByNo(Lt, d.pad) : null;
+  const hall = Lt.hall;
+  const cruise = Lt.floor + CRUISE_Y;
+  const k = (v) => clamp(v / 1000 / SHIP.maxSpeed, 0, 1);
+
+  if (d.out) {
+    // Вылет: подняться на ось тоннеля, к нему — и по тоннелю наружу.
+    if (d.phase === 'climb') {
+      hallSteer(ship, st, p, [p[0], 0, p[2]]);
+      liftTo(ship, clamp((0 - p[1]) / 4, -12, 18), z);
+      ship.throttle = 0;
+      if (p[1] > -12) d.phase = 'toTunnel';
+      return L('ДОКИНГ-КОМПЬЮТЕР: ПОДЪЁМ ') + Math.max(0, -p[1]).toFixed(0) + L(' м');
+    }
+    const entry = [0, 0, hall.hi[2] - 60];
+    if (d.phase === 'toTunnel') {
+      const dist = Math.hypot(entry[0] - p[0], entry[2] - p[2]);
+      const err = hallSteer(ship, st, p, entry);
+      liftTo(ship, clamp(-p[1] / 4, -10, 10), z);
+      ship.throttle = err > 0.35 ? 0 : k(clamp(dist / 5, 6, V_HALL));
+      if (dist < 25) d.phase = 'outbound';
+      return L('ДОКИНГ-КОМПЬЮТЕР: К ТОННЕЛЮ ') + dist.toFixed(0) + L(' м');
+    }
+    // По тоннелю — на ось и наружу; за створом компьютер отпускает сам
+    // (js/main.js: корабль вне станции — ship.docking снят).
+    const far = [0, 0, Lt.face + 2000];
+    const err = hallSteer(ship, st, p, [-p[0] * 4, 0, far[2]]);
+    liftTo(ship, clamp(-p[1] / 3, -8, 8), z);
+    ship.throttle = err > 0.3 ? 0 : k(V_TUNNEL);
+    return L('ДОКИНГ-КОМПЬЮТЕР: ВЫЛЕТ ПО ТОННЕЛЮ ') + Math.max(0, Lt.face - p[2]).toFixed(0) + L(' м');
+  }
+
+  // Заход: из тоннеля — в зал по оси.
+  if (d.phase === 'tunnel') {
+    // В зал — целиком: корма длинного корабля («Прометей» — 83 м за центром
+    // масс) ещё в тоннеле, когда центр уже в зале, и снижаться раньше —
+    // значит зацепить кормой пол тоннеля.
+    const into = [0, 0, hall.hi[2] - Math.max(-HULL.lo.z, HULL.hi.z) * 1000 - 25];
+    const dist = Math.max(0, p[2] - into[2]);
+    const err = hallSteer(ship, st, p, [-p[0] * 4, 0, into[2] - 200]);
+    liftTo(ship, clamp(-p[1] / 3, -8, 8), z);
+    ship.throttle = err > 0.3 ? 0 : k(clamp(dist / 4, 12, V_TUNNEL));
+    if (p[2] < into[2] + 5) d.phase = pad ? 'cruise' : 'hold';
+    return L('ДОКИНГ-КОМПЬЮТЕР: ТОННЕЛЬ ') + dist.toFixed(0) + L(' м');
+  }
+  if (!pad) {
+    // Площадки ещё нет (порт не ответил): висим на высоте перелёта.
+    hallSteer(ship, st, p, p);
+    liftTo(ship, clamp((cruise - p[1]) / 4, -10, 10), z);
+    ship.throttle = 0;
+    return L('ДОКИНГ-КОМПЬЮТЕР: ЖДЁМ ПЛОЩАДКУ');
+  }
+  const over = [pad.c[0], cruise, pad.c[2]];
+  const hd = Math.hypot(over[0] - p[0], over[2] - p[2]);
+  if (d.phase === 'cruise') {
+    const err = hallSteer(ship, st, p, over);
+    liftTo(ship, clamp((cruise - p[1]) / 4, -12, 12), z);
+    // Тормозить заранее: на последних метрах — не быстрее метра в
+    // секунду на метр, иначе тяжёлый корабль проскочит площадку.
+    ship.throttle = err > 0.3 ? 0 : k(clamp(hd / 3, 0, V_HALL));
+    if (hd < 6 && z.hSpeed * 1000 < 3) d.phase = 'descend';
+    return L('ДОКИНГ-КОМПЬЮТЕР: К ПЛОЩАДКЕ ') + pad.n + ' · ' + hd.toFixed(0) + L(' м');
+  }
+  // Спуск: шасси, брюхом вниз, над серединой площадки.
+  ship.gear.out = true;
+  hallSteer(ship, st, p, hd > 3 ? over : p);
+  const alt = p[1] - z.floor - SHIP.gearClear * 1000;
+  liftTo(ship, -clamp(alt / 4, 2, V_DOWN), z);
+  ship.throttle = hd > 3 ? k(clamp(hd / 3, 0, 6)) : 0;
+  return L('ДОКИНГ-КОМПЬЮТЕР: ПОСАДКА НА ПЛОЩАДКУ ') + pad.n + ' · ' + Math.max(0, alt).toFixed(0) + L(' м');
+}
+
 /**
  * Ведёт корабль в порт. Пишет в ship.control / ship.throttle.
  * @returns строка статуса для HUD
@@ -204,6 +342,11 @@ export function updateDockingComputer(ship, dt) {
   const d = ship.docking;
   if (!d) return null;
   const st = d.station;
+  // Внутри станции — свой полёт: в зале, к площадке и обратно.
+  if (ship.berth && ship.berth.st === st) {
+    if (!['tunnel', 'cruise', 'descend', 'hold', 'climb', 'toTunnel', 'outbound'].includes(d.phase)) d.phase = 'tunnel';
+    return updateInside(ship, d, dt);
+  }
   const p = stationLocal(ship, st);
   // Снос — от середины полосы, в которой корпус проходит (slotFit), а не
   // от оси щели: у «Прометея» она на 10 м ниже.

@@ -59,7 +59,7 @@ final class Players
 
     /** Поля места корабля: у вездехода в трюме они те же, что у носителя. */
     private const PLACE = ['system_id', 'pos_x', 'pos_y', 'pos_z', 'basis', 'docked_body', 'landed_body',
-        'landed_pose', 'landed_secured', 'anchor_body', 'anchor_pose'];
+        'landed_pose', 'landed_secured', 'anchor_body', 'anchor_pose', 'pad', 'berth_station', 'dock_pose'];
 
     /** Палуба корабля, м: дальше этого от центра точки на борту нет. */
     public const DECK_M = 60.0;
@@ -129,6 +129,8 @@ final class Players
             Loadout::forget($shipId);
             Db::update('ship', ['shield' => Loadout::shield($shipId)['shield_max']],
                 '`id`=?', [$shipId]);
+            // На площадку в зале порта: корабль стоит на полу, а не «в доке вообще».
+            Stations::park($shipId, $start['system_id'], $start['local_id']);
 
             // ...а пилот — в его кресле.
             Db::update('player', [
@@ -525,6 +527,14 @@ final class Players
             'anchorPose' => self::json($ship['anchor_pose']),
             'gearOut' => (bool) $ship['gear_out'],
             'hatches' => self::hatchesOf($ship),
+            // Где на полу зала станции (схема 13): площадка, поза в осях
+            // станции и стоит ли он в хранилище порта (вызывают — ангарной
+            // службой, Shipyard::retrieve).
+            'berth' => $ship['docked_body'] === null ? null : [
+                'pad' => $int($ship['pad'] ?? null),
+                'pose' => self::json($ship['dock_pose'] ?? null),
+                'stored' => (bool) ($ship['stored'] ?? false),
+            ],
         ];
     }
 
@@ -765,6 +775,9 @@ final class Players
         $ship = self::ship($playerId);
         $shipId = (int) $ship['id'];
         self::ensureStock($shipId);
+        // Площадку, на которой он стоял, мог занять другой, пока его не было.
+        Stations::settle($ship);
+        $ship = self::ship($playerId);
         // Строка пилота могла поправиться выше (ship чинит ship_id).
         $p = self::byId($playerId);
         // На борту чужого корабля, а хозяина нет в игре: такого корабля
@@ -1398,6 +1411,12 @@ final class Players
             $row = self::shipRow($shipId);
             if ($row === null || (int) $row['owner_id'] !== $playerId) {
                 throw ApiError::denied('not_owner', 'это не ваш корабль');
+            }
+            // Корабль в хранилище порта (схема 13): пересесть в него — значит
+            // сначала вызвать его на площадку (Shipyard::retrieve). Он и
+            // командование передаёт, и пилота сажает в кресло.
+            if ((int) ($row['stored'] ?? 0) === 1 && $row['docked_body'] !== null) {
+                return Shipyard::retrieve($playerId, $shipId);
             }
             if ((int) $p['aboard_ship'] !== $shipId && !self::sameDock($p, $row)) {
                 throw ApiError::denied('not_aboard', 'командуют из кресла: сначала на борт');

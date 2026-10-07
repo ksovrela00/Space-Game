@@ -24,6 +24,8 @@
 import { v3 } from '../core/vec3.js';
 import { makeMesh, mergeMeshes, orientOutward } from './geometry.js';
 import { PARTS } from './station.parts.js';
+import { interiorOf, stationLayout } from '../game/stationplan.js';
+import { hallMesh } from './stationhall.js';
 
 // --- общее ------------------------------------------------------------------
 
@@ -58,8 +60,6 @@ const PANEL = [150, 160, 176];
 const PANEL_ALT = [108, 118, 134];
 const TRIM = [214, 140, 58];
 const FRAME = [176, 186, 202];
-const TUNNEL = [26, 30, 38];
-const BAY = [214, 178, 108];       // нутро ангара — тёплый свет
 const APRON = [120, 128, 146];     // утопленная площадка створа
 const WINDOW = [150, 200, 235];
 const LIGHT_G = [90, 255, 130];
@@ -140,14 +140,14 @@ const mul = (v, k) => v3(v.x * k, v.y * k, v.z * k);
 const add = (a, b) => v3(a.x + b.x, a.y + b.y, a.z + b.z);
 
 /**
- * Рама створа и тоннель порта.
+ * Рама створа.
  *
  * Общая часть обоих типов: снаружи — многоугольник грани, внутри —
- * прямоугольная щель, между ними рама. Дальше щель уходит вглубь
- * тоннелем, и дно тоннеля СВЕТИТСЯ: ангар изнутри освещён, и в чёрном
- * небе именно это пятно света показывает, где порт.
+ * прямоугольная щель, между ними рама. За щелью — тоннель в зал станции
+ * (js/models/stationhall.js): раньше на его месте был глухой ящик со
+ * светящимся дном, и корабль, прошедший раму, просто пропадал.
  */
-function portFace(outer, z, depth) {
+function portFace(outer, z) {
   const n = outer.length;
   const out = [];
 
@@ -202,17 +202,6 @@ function portFace(outer, z, depth) {
   }
   out.push(makeMesh(av, af));
 
-  // Тоннель: щель уходит внутрь и слегка сужается, дно ангара светится.
-  const tv = [];
-  for (const p of inner) tv.push(v3(p.x, p.y, z - SINK));
-  for (const p of inner) tv.push(v3(p.x * 0.92, p.y * 0.92, z - SINK - depth));
-  const tf = [];
-  for (let i = 0; i < 8; i++) {
-    const j = (i + 1) % 8;
-    tf.push({ v: [i, j, 8 + j, 8 + i], c: TUNNEL, twoSided: true });
-  }
-  tf.push({ v: [8, 9, 10, 11, 12, 13, 14, 15], c: BAY, twoSided: true, emissive: 0.6 });
-  out.push(makeMesh(tv, tf));
 
   // Огни по краям площадки: сверху зелёные, снизу красные. По ним видно
   // не только ГДЕ порт, но и КАКОЙ крен нужен: станция вращается, и пара
@@ -347,9 +336,23 @@ const COR_S = 0.7;                 // грань квадрата на этом 
 // приходился бы точно в антенну. Проверяется в tools/test.mjs.
 const COR_BOUND = COR_S * Math.SQRT2 + 0.07;
 
+/**
+ * Пустота внутри корпуса: зал и тоннель (км, оси станции). Там корпус не
+ * твёрд: там летают, и обо что бьются — решают стены зала
+ * (js/game/berth.js), а не форма снаружи.
+ */
+function hollowOf(kind) {
+  const V = interiorOf(kind);
+  const lo = V.hall.lo.map((v) => v / 1000), hi = V.hall.hi.map((v) => v / 1000);
+  const t = { hw: V.tunnel.hw / 1000, hh: V.tunnel.hh / 1000, z0: V.tunnel.z0 / 1000 - 0.001, z1: V.tunnel.z1 / 1000 + 0.031 };
+  return (x, y, z) => (x > lo[0] && x < hi[0] && y > lo[1] && y < hi[1] && z > lo[2] && z < hi[2])
+    || (Math.abs(x) < t.hw && Math.abs(y) < t.hh && z > t.z0 && z < t.z1);
+}
+const corHollow = hollowOf('coriolis');
+
 const corInside = (x, y, z) => {
   const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
-  return ax <= COR_S && ay <= COR_S && az <= COR_S && ax + ay + az <= 2 * COR_S;
+  return ax <= COR_S && ay <= COR_S && az <= COR_S && ax + ay + az <= 2 * COR_S && !corHollow(x, y, z);
 };
 
 /** Вершины кубооктаэдра: все перестановки (±s, ±s, 0). */
@@ -424,7 +427,7 @@ function buildCoriolis() {
     const k = s / (Math.abs(c) + Math.abs(sn));   // ромб |x|+|y| = s
     outer.push({ x: c * k, y: sn * k });
   }
-  parts.push(...portFace(outer, s, s * 0.8));
+  parts.push(...portFace(outer, s));
 
   // Прожекторы по углам ромба: створ подсвечен снаружи, иначе в тени
   // планеты порт не найти вовсе.
@@ -562,9 +565,13 @@ function buildCoriolis() {
 // реактором на конце. Кольцо вращается вместе со станцией — в нём и
 // живут; порт остаётся на оси, поэтому заход тот же самый.
 
+// Ступица — с залом внутри: 560 м в радиусе и 840 в длину. Прежние 340 на
+// 600 были сплошным цилиндром, а зал с площадками (js/game/stationplan.js)
+// требует 720 × 280 м поперёк и полкилометра вдоль, со стенами в сотню
+// метров вокруг.
 const ORB = {
-  rh: 0.34,      // радиус ступицы
-  dh: 0.30,      // полудлина ступицы (плоскость створа)
+  rh: 0.56,      // радиус ступицы
+  dh: 0.42,      // полудлина ступицы (плоскость створа)
   R: 1.0,        // радиус кольца — 2 км поперёк
   tube: 0.10,    // полутолщина кольца
   zRing: -0.02,  // кольцо чуть позади створа
@@ -575,8 +582,11 @@ const ORB = {
 // реактором уходит дальше кольца.
 const ORB_BOUND = Math.max(ORB.R + ORB.tube, ORB.mast + 0.22);
 
+const orbHollow = hollowOf('orbis');
+
 const orbInside = (x, y, z) => {
   const rho = Math.hypot(x, y);
+  if (orbHollow(x, y, z)) return false;                               // зал и тоннель
   if (rho <= ORB.rh && Math.abs(z) <= ORB.dh) return true;            // ступица
   if (Math.abs(z - ORB.zRing) <= ORB.tube
     && Math.abs(rho - ORB.R) <= ORB.tube) return true;                // кольцо
@@ -638,7 +648,7 @@ function buildOrbis() {
     const a = (i / 8) * Math.PI * 2;
     outer.push({ x: Math.cos(a) * rh, y: Math.sin(a) * rh });
   }
-  parts.push(...portFace(outer, dh, dh * 1.2));
+  parts.push(...portFace(outer, dh));
 
   // Прожекторы по углам створа.
   for (let i = 0; i < 4; i++) {
@@ -787,12 +797,13 @@ function buildOrbis() {
  * Числа станции: то, что нужно игре, а не рисованию.
  *
  * `D` — плоскость створа: от неё считается заход и до неё меряется
- * остаток пути. `inside` — столкновение с корпусом. `bound` — габарит,
- * он же радиус станции как цели.
+ * остаток пути. `inside` — столкновение с корпусом. `hollow` — пустота
+ * внутри: зал и тоннель, где летают (js/game/berth.js). `bound` —
+ * габарит, он же радиус станции как цели.
  */
 const SHAPES = {
-  coriolis: { kind: 'coriolis', D: COR_S, bound: COR_BOUND, slot: SLOT, inside: corInside },
-  orbis: { kind: 'orbis', D: ORB.dh, bound: ORB_BOUND, slot: SLOT, inside: orbInside },
+  coriolis: { kind: 'coriolis', D: COR_S, bound: COR_BOUND, slot: SLOT, inside: corInside, hollow: corHollow },
+  orbis: { kind: 'orbis', D: ORB.dh, bound: ORB_BOUND, slot: SLOT, inside: orbInside, hollow: orbHollow },
 };
 
 export function stationShape(kind) {
@@ -801,12 +812,37 @@ export function stationShape(kind) {
 
 const BUILD = { coriolis: buildCoriolis, orbis: buildOrbis };
 const cache = new Map();
+const full = new Map();
 
-/** Меш станции. Строится один раз на тип: типов два, а станций много. */
-export function stationMesh(kind) {
+/** Корпус станции: один на тип — типов два, а станций много. */
+export function stationHull(kind) {
   const k = BUILD[kind] ? kind : 'coriolis';
   if (!cache.has(k)) cache.set(k, BUILD[k]());
   return cache.get(k);
+}
+
+/**
+ * Меш станции целиком: корпус её типа и зал по её планировке
+ * (js/game/stationplan.js) — площадки и терминал у каждой станции свои.
+ *
+ * @param st станция мира (type, name, layout) или имя типа: тогда зал —
+ *   по планировке, названной именем типа (проверки и листы чертежей)
+ */
+export function stationMesh(st) {
+  const kind = typeof st === 'string' ? st : st.type;
+  const k = BUILD[kind] ? kind : 'coriolis';
+  const name = typeof st === 'string' ? k : st.name;
+  const key = k + ':' + name;
+  let m = full.get(key);
+  if (!m) {
+    const L = typeof st === 'object' && st.layout ? st.layout : stationLayout(k, name);
+    const hull = stationHull(k);
+    m = mergeMeshes([hull, hallMesh(L)]);
+    m.bound = hull.bound;
+    m.kind = hull.kind;
+    full.set(key, m);
+  }
+  return m;
 }
 
 export { buildCoriolis, buildOrbis };

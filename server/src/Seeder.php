@@ -69,16 +69,17 @@ final class Seeder
             Db::run(
                 'INSERT INTO `ship_type`
                    (`code`,`name`,`title`,`hull_max`,
-                    `fuel_t`,`mass_t`,`length_m`,`width_m`,`height_m`,`price`,`spec`)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    `fuel_t`,`mass_t`,`length_m`,`width_m`,`height_m`,`gear_clear_m`,`price`,`spec`)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                  ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `title`=VALUES(`title`),
                    `hull_max`=VALUES(`hull_max`), `fuel_t`=VALUES(`fuel_t`), `mass_t`=VALUES(`mass_t`),
                    `length_m`=VALUES(`length_m`), `width_m`=VALUES(`width_m`),
-                   `height_m`=VALUES(`height_m`), `price`=VALUES(`price`), `spec`=VALUES(`spec`)',
+                   `height_m`=VALUES(`height_m`), `gear_clear_m`=VALUES(`gear_clear_m`),
+                   `price`=VALUES(`price`), `spec`=VALUES(`spec`)',
                 [
                     $t['code'], $t['name'], $t['title'] ?? '',
                     $spec['maxHull'], $spec['fuelMax'], $dim['massT'],
-                    $dim['lengthM'] ?? 0, $dim['widthM'] ?? 0, $dim['heightM'] ?? 0,
+                    $dim['lengthM'] ?? 0, $dim['widthM'] ?? 0, $dim['heightM'] ?? 0, $dim['gearClearM'] ?? 0,
                     (int) ($t['price'] ?? 0),
                     // В `spec` едет лётная модель БЕЗ тех чисел, что легли
                     // столбцами: одно число — одно место.
@@ -187,9 +188,65 @@ final class Seeder
             }
         }
 
+        $n += self::stationInsides($catalog);
+
         Schema::setMeta('galaxy_seed', (string) $catalog['galaxySeed']);
         Schema::setMeta('catalog_generated_at', (string) $catalog['generatedAt']);
         Schema::setMeta('catalog_seeded_at', Db::now());
+        return $n;
+    }
+
+    /**
+     * Площадки и помещения станций (js/game/stationplan.js, выгрузка
+     * tools/export.mjs).
+     *
+     * Площадки — снести и залить: своего у них в базе нет, корабль держит
+     * номер, а не строку. Помещения — НА МЕСТЕ, по коду: у лавки появится
+     * хозяин (tenant_id) и товар со ссылкой на строку, и перезаливка
+     * каталога не должна их уносить. Помещение, исчезнувшее из планировки,
+     * удаляется.
+     */
+    public static function stationInsides(array $catalog): array
+    {
+        $n = ['station_pad' => 0, 'station_room' => 0];
+        foreach ($catalog['systems'] as $s) {
+            foreach ($s['stations'] ?? [] as $st) {
+                $bodyId = Db::one('SELECT `id` FROM `body` WHERE `system_id`=? AND `local_id`=?',
+                    [$s['id'], $st['localId']]);
+                if ($bodyId === null) {
+                    continue;
+                }
+                Db::run('DELETE FROM `station_pad` WHERE `station_id`=?', [$bodyId]);
+                foreach ($st['pads'] as $p) {
+                    Db::run('INSERT INTO `station_pad` (`station_id`,`n`,`size`,`side`,`x_m`,`y_m`,`z_m`,`w_m`,`d_m`)
+                             VALUES (?,?,?,?,?,?,?,?,?)',
+                        [$bodyId, $p['n'], $p['size'], $p['side'], $p['x'], $p['y'], $p['z'], $p['w'], $p['d']]);
+                    $n['station_pad']++;
+                }
+                $codes = [];
+                foreach ($st['rooms'] as $r) {
+                    $codes[] = $r['code'];
+                    Db::run(
+                        'INSERT INTO `station_room`
+                           (`station_id`,`code`,`kind`,`name`,`shop`,`pad`,`area_m2`,`x_m`,`y_m`,`z_m`,`w_m`,`h_m`,`d_m`)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         ON DUPLICATE KEY UPDATE `kind`=VALUES(`kind`), `name`=VALUES(`name`), `shop`=VALUES(`shop`),
+                           `pad`=VALUES(`pad`), `area_m2`=VALUES(`area_m2`), `x_m`=VALUES(`x_m`), `y_m`=VALUES(`y_m`),
+                           `z_m`=VALUES(`z_m`), `w_m`=VALUES(`w_m`), `h_m`=VALUES(`h_m`), `d_m`=VALUES(`d_m`)',
+                        [$bodyId, $r['code'], $r['kind'], $r['name'], $r['shop'], $r['pad'], $r['areaM2'],
+                            $r['x'], $r['y'], $r['z'], $r['w'], $r['h'], $r['d']]
+                    );
+                    $n['station_room']++;
+                }
+                if ($codes) {
+                    $q = implode(',', array_fill(0, count($codes), '?'));
+                    Db::run('DELETE FROM `station_room` WHERE `station_id`=? AND `code` NOT IN (' . $q . ')',
+                        array_merge([$bodyId], $codes));
+                }
+                // Мест у причала — столько, сколько площадок в зале.
+                Db::run('UPDATE `station` SET `pads`=? WHERE `body_id`=?', [count($st['pads']), $bodyId]);
+            }
+        }
         return $n;
     }
 
@@ -214,6 +271,12 @@ final class Seeder
         Db::tx(function () use ($rows, &$n) {
             foreach ($rows as $st) {
                 $a = Content::stationOf($st['world'], (int) $st['id'], (bool) $st['home']);
+                // Мест у причала — по площадкам зала (stationInsides), если
+                // они уже залиты: число из Content — запасное.
+                $padN = (int) Db::one('SELECT COUNT(*) FROM `station_pad` WHERE `station_id`=?', [$st['id']]);
+                if ($padN > 0) {
+                    $a['pads'] = $padN;
+                }
                 Db::run(
                     'INSERT INTO `station`
                        (`body_id`,`system_id`,`name`,`world_type`,`tech`,`fee`,

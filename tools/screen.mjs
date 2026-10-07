@@ -565,6 +565,43 @@ const SCENES = {
       GAME.state.view = 'chase';
     `,
   },
+  hall: {
+    title: 'зал «Кориолиса»: корабль на площадке, вид от третьего лица',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('coriolis'));
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  hallorbis: {
+    title: 'зал «Орбиса»: корабль на площадке',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('orbis'));
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  hallfly: {
+    title: 'зал «Кориолиса» из тоннеля: площадки и терминал',
+    run: `
+      liftoff();
+      const st = pickStation('coriolis');
+      inHall(st, [0, -10, st.layout.hall.hi[2] + 40], -1);
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  hallcab: {
+    title: 'из кабины на площадке: зал станции за фонарём',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('coriolis'));
+      GAME.state.view = 'cockpit';
+      frames(20);
+    `,
+  },
   dock: {
     title: 'створ порта: помощник стыковки',
     run: `
@@ -1767,7 +1804,9 @@ const HELPERS = `
     const b = document.getElementById('bootBtn');
     if (b) b.click();
     frames(6);
-    if (GAME.state.mode === 'docked') press('Space');
+    // Из порта — сразу за створ (game.launchOut): вылет в игре — отрыв с
+    // площадки и полёт по залу, а снимкам нужен корабль в пустоте.
+    if (GAME.state.mode === 'docked') GAME.launchOut();
     frames(30);
   };
   // Поставить корабль в gap километрах от поверхности цели, носом на неё.
@@ -1800,6 +1839,20 @@ const HELPERS = `
   // нельзя — так и потеряли её из кадра в первый раз.
   // Из станций нужного типа берём ту, что повёрнута портом к солнцу:
   // порт смотрит наружу от планеты, и у половины станций он в тени.
+  // Корабль в зале станции st: точка p в её осях (м), нос — вдоль оси
+  // порта (dir = −1 — вглубь зала), брюхом к полу.
+  const inHall = (st, p, dir) => {
+    const s = GAME.ship, b = st.basis;
+    s.pos.x = st.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
+    s.pos.y = st.pos.y + (b.right.y * p[0] + b.up.y * p[1] + b.fwd.y * p[2]) / 1000;
+    s.pos.z = st.pos.z + (b.right.z * p[0] + b.up.z * p[1] + b.fwd.z * p[2]) / 1000;
+    s.basis.fwd.x = b.fwd.x * dir; s.basis.fwd.y = b.fwd.y * dir; s.basis.fwd.z = b.fwd.z * dir;
+    s.basis.up.x = b.up.x; s.basis.up.y = b.up.y; s.basis.up.z = b.up.z;
+    s.basis.right.x = b.right.x * dir; s.basis.right.y = b.right.y * dir; s.basis.right.z = b.right.z * dir;
+    s.vel.x = s.vel.y = s.vel.z = 0; s.speed = 0; s.throttle = 0;
+    s.berth = { st, pad: null };
+    frames(4);
+  };
   const pickStation = (type) => {
     const sun = GAME.world.star;
     const all = GAME.world.stations.filter((s) => s.type === type);

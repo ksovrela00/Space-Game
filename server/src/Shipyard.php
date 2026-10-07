@@ -89,19 +89,97 @@ final class Shipyard
         return $state;
     }
 
+    /**
+     * Вызвать свой корабль из хранилища порта на площадку — как в ангаре
+     * Star Citizen: тот, что стоит на площадке пилота, уходит в хранилище, а
+     * вызванный поднимается на его место. Пилот — в его кресле: пересесть из
+     * хранилища можно только так.
+     *
+     * Где пилот: на борту своего корабля в этом порту или на станции
+     * (on_station). Вызванный — свой и в этом же порту (docked_body).
+     */
+    public static function retrieve(int $playerId, int $shipId): array
+    {
+        return Db::tx(function () use ($playerId, $shipId) {
+            $p = Db::row('SELECT * FROM `player` WHERE `id`=? FOR UPDATE', [$playerId]);
+            if ($p === null) {
+                throw ApiError::notFound('нет такого игрока');
+            }
+            $want = Db::row('SELECT sh.*, t.`length_m`, t.`width_m`, t.`gear_clear_m`, t.`code` AS `type_code`
+                 FROM `ship` sh JOIN `ship_type` t ON t.`id`=sh.`type_id` WHERE sh.`id`=?', [$shipId]);
+            if ($want === null || (int) $want['owner_id'] !== $playerId) {
+                throw ApiError::denied('not_owner', 'это не ваш корабль');
+            }
+            if ($want['docked_body'] === null || $want['system_id'] === null || $want['carrier_id'] !== null) {
+                throw ApiError::denied('not_here', 'корабль не в порту');
+            }
+            $sys = (int) $want['system_id'];
+            $st = (int) $want['docked_body'];
+            // Пилот — в этом же порту: на станции или на борту корабля, что стоит здесь.
+            $here = $p['on_station'] !== null && (int) $p['on_station'] === $st && (int) $p['system_id'] === $sys;
+            if (!$here && $p['aboard_ship'] !== null) {
+                $from = Players::shipRow((int) $p['aboard_ship']);
+                $here = $from !== null && $from['docked_body'] !== null && (int) $from['docked_body'] === $st
+                    && (int) $from['system_id'] === $sys;
+            }
+            if (!$here) {
+                throw ApiError::denied('not_here', 'вызвать корабль можно только в том порту, где он стоит');
+            }
+            // Площадка: та, на которой стоит корабль, которым пилот командует,
+            // если он здесь, — иначе свободная по размеру вызванного.
+            $active = Players::shipRow((int) $p['ship_id']);
+            $pad = null;
+            if ($active !== null && (int) $active['id'] !== $shipId && $active['docked_body'] !== null
+                && (int) $active['docked_body'] === $st && (int) $active['system_id'] === $sys && $active['pad'] !== null) {
+                $row = Db::row('SELECT sp.`size` FROM `station_pad` sp JOIN `body` b ON b.`id`=sp.`station_id`
+                     WHERE b.`system_id`=? AND b.`local_id`=? AND sp.`n`=?', [$sys, $st, (int) $active['pad']]);
+                if ($row !== null && !($row['size'] === 'S' && Stations::padSizeOf($want) === 'L')) {
+                    $pad = (int) $active['pad'];
+                }
+                // Прежний — в хранилище, со всеми, кто на борту: им — в кресло
+                // нового (хозяину) и на ноги в нём же (пассажирам) не выйдет —
+                // пассажиров на корабле в хранилище быть не может, их на станцию.
+                Db::update('ship', ['stored' => 1, 'pad' => null, 'dock_pose' => null, 'hatches' => null],
+                    '`id`=?', [(int) $active['id']]);
+            }
+            if ($pad === null) {
+                $pad = Stations::freePad($sys, $st, Stations::padSizeOf($want), $shipId);
+            }
+            if ($pad === null) {
+                throw ApiError::denied('no_pad', 'свободной площадки под этот корабль нет');
+            }
+            $pose = Stations::padPose($sys, $st, $pad, (float) $want['gear_clear_m']);
+            Db::update('ship', ['stored' => 0, 'pad' => $pad, 'berth_station' => $st, 'pad_at' => Db::now(),
+                'dock_pose' => $pose === null ? null : json_encode($pose), 'hatches' => null], '`id`=?', [$shipId]);
+            // Командование — вызванным. Пилот на борту прежнего (он ушёл в
+            // хранилище) — в кресло вызванного; на станции — остаётся там.
+            $set = ['ship_id' => $shipId];
+            if ($p['aboard_ship'] !== null) {
+                $set += ['aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null,
+                    'on_station' => null, 'station_pose' => null];
+            }
+            Db::update('player', $set, '`id`=?', [$playerId]);
+            $state = Players::state($playerId);
+            $state['retrieved'] = ['id' => $shipId, 'pad' => $pad];
+            return $state;
+        });
+    }
+
     /** Свои корабли в этом доке: на них пересаживаются. */
     // Вездеход в трюме — не «свой корабль в доке»: пересесть в него в порту
     // нельзя (водят его по грунту, Players::command), и в списке он лишний.
     private static function here(int $playerId, array $port, int $activeId): array
     {
-        $rows = Db::all('SELECT s.`id`, s.`name`, t.`code`, t.`name` AS `type_name`, t.`title`
+        $rows = Db::all('SELECT s.`id`, s.`name`, s.`pad`, s.`stored`, t.`code`, t.`name` AS `type_name`, t.`title`
             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
             WHERE s.`owner_id`=? AND s.`system_id`=? AND s.`docked_body`=? AND s.`carrier_id` IS NULL ORDER BY s.`id`',
             [$playerId, $port['system_id'], $port['local_id']]);
         $out = [];
         foreach ($rows as $r) {
             $out[] = ['id' => (int) $r['id'], 'name' => $r['name'], 'type' => $r['code'],
-                'typeName' => $r['type_name'], 'title' => $r['title'], 'active' => (int) $r['id'] === $activeId];
+                'typeName' => $r['type_name'], 'title' => $r['title'], 'active' => (int) $r['id'] === $activeId,
+                // На площадке или в хранилище порта.
+                'pad' => $r['pad'] === null ? null : (int) $r['pad'], 'stored' => (bool) $r['stored']];
         }
         return $out;
     }
@@ -195,6 +273,10 @@ final class Shipyard
                 'fuel_t' => $type['fuel_t'],
                 'system_id' => $port['system_id'],
                 'docked_body' => $port['local_id'],
+                // Новый корабль — в хранилище порта: на площадку его вызывают
+                // ангарной службой (retrieve), как и любой свой корабль здесь.
+                'berth_station' => $port['local_id'],
+                'stored' => 1,
                 'created_at' => Db::now(),
             ]);
             // Заводская комплектация корпуса (stockOf): общий набор, а у

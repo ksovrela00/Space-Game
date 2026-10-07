@@ -18,6 +18,7 @@ import { setGravity } from './gravity.js';
 import { HOME_SEED, HOME_CLASS, HAB_HOME, systemBySeed } from './galaxy.js';
 import { pressureOf } from './bodyinfo.js';
 import { STATION_KINDS, stationShape } from '../models/stations.js';
+import { stationLayout } from './stationplan.js';
 import { makeCity, updateCity, canHostCity } from './city.js';
 import { L } from '../core/lang.js';
 
@@ -213,6 +214,10 @@ const makeStation = (rng, planet, name) => {
     // Базис: fwd — ось порта (наружу от планеты), right/up вращаются
     basis: { right: v3(1, 0, 0), up: v3(0, 1, 0), fwd: v3(0, 0, 1) },
     isStation: true,
+    // Что внутри: зал за щелью, площадки, терминал и помещения
+    // (js/game/stationplan.js). Тоже от имени — по той же причине, что и
+    // тип: лишнее число из генератора мира сдвинуло бы всю галактику.
+    layout: stationLayout(type, name),
   };
 };
 

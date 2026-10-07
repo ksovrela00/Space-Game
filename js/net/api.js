@@ -149,7 +149,18 @@ export function saveBeacon(payload) {
   return navigator.sendBeacon(base() + '?r=player.save', body);
 }
 
-export const dock = (system, station) => call('station.dock', { system, station });
+/**
+ * Встать в порт: корабль сел на пол зала. pad — площадка под ним (или null —
+ * сел мимо), pose — где именно, в осях станции (js/game/berth.js).
+ */
+export const dock = (system, station, pad = null, pose = null) =>
+  call('station.dock', { system, station, pad, pose });
+/** Попросить площадку: корабль вошёл в щель (Stations::request). size — 'S' | 'L'. */
+export const requestPad = (system, station, size) => call('station.request', { system, station, size });
+/** Помещения и площадки станции — то, что лежит в базе (station_room, station_pad). */
+export const stationLayout = (system, station) => call('station.layout', { system, station });
+/** Вызвать свой корабль из хранилища порта на свою площадку (Shipyard::retrieve). */
+export const retrieve = (id) => call('ship.retrieve', { id });
 /** Выйти из порта: действие, как и стыковка (Stations::undock). */
 export const undock = () => call('station.undock');
 /**

@@ -1081,6 +1081,19 @@ export class CabinView {
       const col = body.color || [128, 128, 128];
       for (let c = 0; c < 3; c++) out.planet[c] = (col[c] / 255) * CABIN.albedo * sa * sa * phase;
     }
+    // В зале станции (js/main.js, game.hall): солнца нет — корпус станции
+    // вокруг, — а «небо» над головой — ряды светильников под потолком
+    // зала: широкий свет сверху, по верху станции.
+    const H = game.hall;
+    if (H) {
+      vis = 0;
+      const u = H.basis.up;
+      toCab(u.x, u.y, u.z, out.skyDir);
+      out.planetDir[0] = -out.skyDir[0]; out.planetDir[1] = -out.skyDir[1]; out.planetDir[2] = -out.skyDir[2];
+      out.sky[0] = 0.62; out.sky[1] = 0.62; out.sky[2] = 0.58;
+      // Отсвет светлого пола зала снизу.
+      out.planet[0] = 0.10; out.planet[1] = 0.10; out.planet[2] = 0.10;
+    }
     this.sunVis = vis;
     for (let c = 0; c < 3; c++) out.sunC[c] = sun[c] * vis;
     return out;

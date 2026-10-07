@@ -1397,8 +1397,9 @@ final class Hub
      * Корабли системы без водителя: из базы, раз в DORM_EVERY. Все —
      * кто из хозяев в игре, решает shipsOf на каждый снимок.
      *
-     * В порту спящих не показываем: корабль в доке стоит внутри станции,
-     * рисовать его снаружи некуда. Вездеход в трюме — с отметкой носителя
+     * В порту — те, что стоят на площадках зала (схема 13): место у них —
+     * в осях станции (поле b — номер станции). В хранилище порта корабля
+     * не видно вовсе. Вездеход в трюме — с отметкой носителя
      * (cr): место у него — место носителя (Players::carryAlong), а где он в
      * трюме, ставит игра — на плиту платформы (js/game/hangar.js).
      */
@@ -1413,7 +1414,8 @@ final class Hub
             'SELECT s.*, t.`hull_max`, t.`code` AS `type_code`, p.`name` AS `owner_name`, p.`login` AS `owner_login`
              FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
              JOIN `player` p ON p.`id` = s.`owner_id`
-             WHERE s.`system_id`=? AND s.`docked_body` IS NULL',
+             WHERE s.`system_id`=? AND (s.`docked_body` IS NULL
+               OR (s.`dock_pose` IS NOT NULL AND s.`stored`=0))',
             [$sys]
         ) as $r) {
             $row = [
@@ -1421,7 +1423,7 @@ final class Hub
                 'by' => (int) $r['owner_id'],
                 'name' => (string) ($r['owner_name'] ?: $r['owner_login']),
                 'dorm' => 1,
-                'mode' => $r['landed_body'] !== null ? 'landed' : 'flight',
+                'mode' => $r['docked_body'] !== null ? 'docked' : ($r['landed_body'] !== null ? 'landed' : 'flight'),
                 'sys' => $sys,
                 'v' => 0.0,
                 'hull' => round((float) $r['hull'], 1), 'hmax' => (float) $r['hull_max'],
@@ -1437,7 +1439,15 @@ final class Hub
             }
             $pose = $r['landed_body'] !== null ? json_decode((string) $r['landed_pose'], true) : null;
             $anchor = $r['anchor_body'] !== null ? json_decode((string) $r['anchor_pose'], true) : null;
-            if (is_array($pose) && is_array($pose['dir'] ?? null) && is_numeric($pose['radius'] ?? null)
+            $dock = $r['docked_body'] !== null ? json_decode((string) $r['dock_pose'], true) : null;
+            if (is_array($dock) && is_array($dock['pos'] ?? null)) {
+                // На площадке в зале станции: в её осях, км.
+                $row['g'] = 1;
+                $row += ['b' => (int) $r['docked_body'],
+                    'lx' => self::num($dock['pos']['x'] ?? 0), 'ly' => self::num($dock['pos']['y'] ?? 0),
+                    'lz' => self::num($dock['pos']['z'] ?? 0)]
+                    + self::axes($dock['fwd'] ?? null, $dock['up'] ?? null);
+            } elseif (is_array($pose) && is_array($pose['dir'] ?? null) && is_numeric($pose['radius'] ?? null)
                 && is_array($pose['fwd'] ?? null) && is_array($pose['up'] ?? null)) {
                 $rad = (float) $pose['radius'];
                 $row += ['b' => (int) $r['landed_body'],

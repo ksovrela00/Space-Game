@@ -23,7 +23,7 @@ import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
   corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed,
 } from '../js/game/quantum.js';
-import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
+import { checkStation, startDockingComputer, startLaunchComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
   isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
@@ -103,6 +103,13 @@ import { buildPrometheus, buildPrometheusGear } from '../js/models/prometheus.js
 import { stageLift, legBoxes, LEG, tripodShares } from '../js/models/gear.js';
 import { LAMP, lampBeams, lampCone } from '../js/game/lamps.js';
 import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
+import {
+  frameOf as stationFrame, carryInStation, enterStation, stationField, stepInStation, settleInHall,
+  hallZone, padPose, placeDocked, takeoffFromHall, stationM, BERTH,
+} from '../js/game/berth.js';
+import {
+  stationLayout, padAt, padByNo, padSizeFor, interiorOf, inHall, PAD, TERM, STATION_G,
+} from '../js/game/stationplan.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
 import { buildCockpit, makeYoke, updateYoke, YOKE, SCREENS, CMAT } from '../js/models/cockpit.js';
@@ -497,8 +504,10 @@ console.log('\n== станции ==');
   // Обе точки — ПО ДИАГОНАЛИ: по осям от ступицы к кольцу идут спицы, и
   // там тело в любом случае. Проверка на оси проходила бы и с
   // выброшенным кольцом — то есть не проверяла бы ничего.
+  // Ступица теперь 560 м в радиусе (внутри неё зал): «между ступицей и
+  // кольцом» — это 0.75 км от оси.
   const d45 = Math.SQRT1_2;
-  ok(orb.inside(1.0 * d45, 1.0 * d45, -0.02) && !orb.inside(0.42 * d45, 0.42 * d45, -0.02),
+  ok(orb.inside(1.0 * d45, 1.0 * d45, -0.02) && !orb.inside(0.75 * d45, 0.75 * d45, -0.02),
     '«Орбис»: кольцо сплошное, а между ним и ступицей пусто');
   ok(orb.inside(0.6, 0, -0.02), '«Орбис»: спица — тоже тело, а не картинка');
   ok(orb.inside(0, 0, -0.8) && !orb.inside(0.4, 0, -0.8),
@@ -623,30 +632,62 @@ console.log('\n== выбор цели наведением ==');
 }
 
 console.log('\n== докинг-компьютер ==');
-function dockTest(distKm, startDir) {
+// Стыковка теперь — не рама щели, а посадка на площадку в зале станции:
+// подход к створу, тоннель, зал, над площадкой, вниз на шасси. Проверка
+// ведёт корабль ВЕСЬ путь тем же кодом, что игра (js/main.js, hallStep):
+// перенос вместе со станцией, тяжесть зала, касания пола и стен
+// (js/game/berth.js, stepInStation). Состыковался — значит сел на ту
+// площадку, которую ему дали, и ни разу ни обо что не ударился.
+function stepBerth(w, st, sh, z) {
+  const frame = sh.berth ? stationFrame(st, sh._frame || (sh._frame = stationFrame(st))) : null;
+  updateWorld(w, STEP);
+  if (frame) carryInStation(sh, st, frame);
+  clearControls(sh);
+  updateDockingComputer(sh, STEP);
+  updateGear(sh, STEP);
+  updateShip(sh, STEP, sh.berth ? stationField(st) : null);
+  if (!sh.berth) {
+    const r = checkStation(sh, st);
+    if (r === 'enter') { enterStation(sh, st); return { enter: true }; }
+    if (r === 'crash') return { crash: true, reason: 'корпус станции' };
+    return null;
+  }
+  return stepInStation(sh, st, z);
+}
+
+function dockTest(distKm, startDir, station = null) {
   const w = makeSystem(0x1a7e);
-  const st = w.home.station;
+  const st = station ? station(w) : w.home.station;
   const sh = makeShip();
   const bb = makeBasis();
   // Ставим корабль на расстоянии distKm от станции в заданном направлении
   const d = normalize(startDir(st));
   placeShip(sh, v3(st.pos.x + d.x * distKm, st.pos.y + d.y * distKm, st.pos.z + d.z * distKm), bb);
-  const res = startDockingComputer(sh, st);
+  // Площадка — по размеру корпуса, как её даёт порт (Stations::request).
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = st.layout.pads.find((p) => want === 'S' ? p.size === 'S' : p.size === 'L');
+  const res = startDockingComputer(sh, st, pad.n);
   if (!res.ok) return { status: 'refused', reason: res.reason };
-  let t = 0;
+  let t = 0, entered = null, bumps = 0;
+  const z = {};
   for (let i = 0; i < 60 * 900; i++) {
-    updateWorld(w, STEP);
-    clearControls(sh);
-    updateDockingComputer(sh, STEP);
-    updateShip(sh, STEP);
+    const ev = stepBerth(w, st, sh, z);
     t += STEP;
-    const nb = nearestBody(w, sh.pos);
-    if (nb.gap <= 0) return { status: 'crash-planet', t };
-    const r = checkStation(sh, st);
-    if (r === 'docked') return { status: 'docked', t, q: dockingQuality(sh, st) };
-    if (r === 'crash') return { status: 'crash-station', t, q: dockingQuality(sh, st) };
+    if (!sh.berth) {
+      const nb = nearestBody(w, sh.pos);
+      if (nb.gap <= 0) return { status: 'crash-planet', t };
+    }
+    if (!ev) continue;
+    if (ev.enter) { entered = t; continue; }
+    if (ev.crash) return { status: 'crash-station', t, why: ev.reason, entered };
+    if (ev.bump) { bumps++; continue; }
+    if (ev.left) return { status: 'left', t };
+    if (ev.landed) {
+      settleInHall(sh, st);
+      return { status: sh.berth.pad === pad.n && bumps === 0 ? 'docked' : 'wrong-pad', t, pad: sh.berth.pad, want: pad.n, bumps, entered };
+    }
   }
-  return { status: 'timeout', t };
+  return { status: 'timeout', t, entered };
 }
 
 const t1 = dockTest(20, (st) => ({ ...st.basis.fwd }));
@@ -664,6 +705,44 @@ ok(t3.status === 'docked' && t3.t > 30,
 
 const t4 = dockTest(400, (st) => ({ ...st.basis.fwd }));
 ok(t4.status === 'refused', `с 400 км докинг-компьютер отказывает: ${t4.reason || t4.status}`);
+
+// И обратно: с площадки — вверх, к тоннелю и сквозь щель наружу, ни обо
+// что не задев. Отрыв — как в игре (js/main.js, game.launch).
+function launchTest(station = null) {
+  const w = makeSystem(0x1a7e);
+  const st = station ? station(w) : w.home.station;
+  const sh = makeShip();
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = st.layout.pads.filter((p) => want === 'S' || p.size === 'L').pop();
+  sh.gear.out = true; sh.gear.t = 1;
+  placeDocked(sh, st, padPose(st.layout, pad.n));
+  sh.berth = { st, pad: pad.n };
+  takeoffFromHall(sh);
+  startLaunchComputer(sh, st);
+  let t = 0, bumps = 0;
+  const z = {};
+  for (let i = 0; i < 60 * 300; i++) {
+    const ev = stepBerth(w, st, sh, z);
+    t += STEP;
+    if (!ev) continue;
+    if (ev.crash) return { status: 'crash', t, why: ev.reason };
+    if (ev.bump) bumps++;
+    if (ev.left) return { status: bumps ? 'bumped' : 'out', t, bumps, pad: pad.n };
+    if (ev.landed) return { status: 'landed-again', t };
+  }
+  return { status: 'timeout', t, bumps };
+}
+const l1 = launchTest();
+ok(l1.status === 'out', `вылет с дальней площадки ${l1.pad} докинг-компьютером: ${l1.status} за ${l1.t.toFixed(0)} с`);
+
+// И у «Кориолиса»: зал у него больше, тоннель длиннее, площадок десять.
+{
+  const cor = (w) => w.stations.find((s) => s.type === 'coriolis');
+  const c1 = dockTest(30, (st) => ({ ...st.basis.fwd }), cor);
+  const c2 = launchTest(cor);
+  ok(c1.status === 'docked' && c2.status === 'out',
+    `«Кориолис»: заход по оси — ${c1.status} за ${c1.t.toFixed(0)} с на площадку ${c1.pad}, вылет — ${c2.status} за ${c2.t.toFixed(0)} с`);
+}
 
 // «Прометей» в ту же щель. Он доворачивает вдвое дольше, и с прежними
 // коэффициентами компьютер раскачивал его на входе на сотню метров и бил
@@ -684,6 +763,8 @@ ok(t4.status === 'refused', `с 400 км докинг-компьютер отк�
   ];
   ok(runs.every(([, r]) => r.status === 'docked'),
     'докинг-компьютер вводит «Прометей» в порт: ' + runs.map(([n, r]) => `${n} — ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с`).join('; '));
+  const lp = launchTest();
+  ok(lp.status === 'out', `«Прометей» с большой площадки ${lp.pad} — наружу, ни обо что не задев: ${lp.status} за ${lp.t.toFixed(0)} с`);
   useShipType('challenger');
 }
 
@@ -715,8 +796,8 @@ ok(t4.status === 'refused', `с 400 км докинг-компьютер отк�
       sh.speed = 0;
       return checkStation(sh, st);
     };
-    ok(st !== null && enter(0, 0) === 'docked',
-      `${kind}: по оси в створ — стыковка`);
+    ok(st !== null && enter(0, 0) === 'enter',
+      `${kind}: по оси в створ — вход в тоннель`);
     ok(enter(SLOT.hw * 2.5, 0) === 'crash',
       `${kind}: мимо створа в обшивку — столкновение`);
     ok(enter(0, SLOT.hh * 4) === 'crash',
@@ -952,8 +1033,14 @@ console.log('\n== полный цикл: станция -> станция ==');
   aimAtTarget(sh, leg);
   startCalibration(q, leg);
   let t = 0, status = 'timeout', docking = false;
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = to.layout.pads.find((p) => want === 'S' || p.size === 'L');
+  const zz = {};
+  let frame = null;
   for (let i = 0; i < 60 * 1500; i++) {
+    if (sh.berth) frame = stationFrame(to, frame || undefined);
     updateWorld(w, STEP);
+    if (sh.berth) carryInStation(sh, to, frame);
     clearControls(sh);
     if (q.phase !== 'idle') {
       // Пока привод калибруется, нос надо держать на цели — в игре это
@@ -961,7 +1048,7 @@ console.log('\n== полный цикл: станция -> станция ==');
       if (q.phase === 'calib') aimAtTarget(sh, leg);
       const ev = updateQuantum(q, sh, w, STEP);
       if (ev === 'arrive') {
-        if (leg === to) { startDockingComputer(sh, to); docking = true; }
+        if (leg === to) { startDockingComputer(sh, to, pad.n); docking = true; }
         else {
           // Дошли до обходной точки — считаем следующее плечо.
           leg = canJump(w, sh, to).ok ? to : suggestHop(w, sh, to, SHIP.quantumSpeed);
@@ -974,12 +1061,21 @@ console.log('\n== полный цикл: станция -> станция ==');
     } else if (sh.docking) {
       updateDockingComputer(sh, STEP);
     }
-    if (q.phase !== 'jump') updateShip(sh, STEP);
+    updateGear(sh, STEP);
+    if (q.phase !== 'jump') updateShip(sh, STEP, sh.berth ? stationField(to) : null);
     t += STEP;
+    if (sh.berth) {
+      // В зале — шаг игры (js/game/berth.js): сел на площадку — состыковался.
+      const ev = stepInStation(sh, to, zz);
+      if (ev && ev.landed) { settleInHall(sh, to); status = sh.berth.pad === pad.n ? 'docked' : 'wrong-pad'; break; }
+      if (ev && (ev.crash || ev.bump)) { status = 'удар в зале: ' + ev.reason; break; }
+      if (ev && ev.left) { status = 'вылетел из зала'; break; }
+      continue;
+    }
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0) { status = 'crash into ' + nb.body.name; break; }
     const r = checkStation(sh, to);
-    if (r === 'docked') { status = 'docked'; break; }
+    if (r === 'enter') enterStation(sh, to);
     if (r === 'crash') { status = 'crash-station'; break; }
   }
   ok(status === 'docked', `${from.name} -> ${to.name}: ${status} за ${t.toFixed(0)} с (докинг включался: ${docking})`);

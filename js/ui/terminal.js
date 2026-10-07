@@ -13,8 +13,9 @@
 // только пилота. Прокручивается одно тело, шапка и подвал на месте.
 //
 // Клавиши: 1–9 — раздел по номеру, Q/E и ←/→ — соседний, ↑/↓ — строка в
-// списке (рынок, верфь), I и Esc — закрыть (в порту I — к своим делам,
-// Esc — обратно к порту). W/A/S/D здесь не делают ничего: в окне без
+// списке (рынок, верфь), I и Esc — закрыть, и в порту тоже: сам он там
+// больше не висит — корабль стоит на площадке в зале станции, и терминал
+// открывают тем же I, что и в полёте. W/A/S/D здесь не делают ничего: в окне без
 // пространства им двигать нечего, а листать ими разделы значило бы
 // приучить руку к тому, что WASD что-то выбирает.
 //
@@ -40,7 +41,7 @@ export function makeMenu() {
   return {
     open: false,       // терминал вне порта открыт (I)
     tab: 'ship',       // раздел на экране — порта или пилота
-    lastPort: 'port',  // куда вернуть Esc в порту
+    lastPort: 'port',  // последний раздел порта
     lastPilot: 'ship', // с чего открывать I
     shown: false,      // терминал сейчас на экране
     port: false,       // показан в порту (с разделами порта)
@@ -123,15 +124,17 @@ export function terminalHtml(game, port = false) {
   const note = port && s && s.note
     ? `<div class="note ${s.noteKind || ''}">${esc(s.note)}</div>`
     : `<div class="note dim">${kbd('Q')}${kbd('E')}${esc(L('разделы'))}${port ? ' &nbsp; ' + kbd('↑') + kbd('↓') + esc(L('выбор')) : ''}</div>`;
+  // Вылет из терминала — докинг-компьютером (C): щелчок по кнопке не
+  // «подержать пробел три секунды», а руками из зала выводят без терминала.
   const foot = port
     ? `${btn(esc(L('КАРТА')) + ' ' + kbd('M'), 'map')}${game.cockpit ? btn(esc(L('ВСТАТЬ')) + ' ' + kbd('Y'), 'stand') : ''}${
-      btn(esc(L('ВЫЛЕТ')) + ' ' + kbd(L('ПРОБЕЛ')), 'launch', {}, 'pri')}`
+      btn(esc(L('ЗАКРЫТЬ')) + ' ' + kbd('I'), 'close')}${btn(esc(L('ВЫЛЕТ')) + ' ' + kbd('C'), 'launch', {}, 'pri')}`
     : btn(esc(L('ЗАКРЫТЬ')) + ' ' + kbd('I'), 'close');
 
   return `<div class="tw">
     <header class="th"><div class="who"><span class="kick">${esc(w.kick)}</span><h1>${esc(w.name)}</h1>${
-    w.sub ? `<span class="sub">${esc(w.sub)}</span>` : ''}</div><div class="stats">${stats(game, port)}</div>${
-    port ? '' : `<button class="x" data-act="close" title="${esc(L('ЗАКРЫТЬ'))}">✕</button>`}</header>
+    w.sub ? `<span class="sub">${esc(w.sub)}</span>` : ''}</div><div class="stats">${stats(game, port)}</div><button class="x" data-act="close" title="${
+    esc(L('ЗАКРЫТЬ'))}">✕</button></header>
     <nav class="tt">${tabHtml}<span class="ver">SOLAR TRADER v${esc(VERSION)}</span></nav>
     <main class="tb scroll" tabindex="-1">${body}</main>
     <footer class="tf">${note}<div class="acts">${foot}</div></footer>
@@ -243,8 +246,8 @@ export function terminalFrame(game, want, port) {
     useTab(game, port, port ? M.tab : M.lastPilot);
     M.paint = () => paint(game);
     el.onclick = (e) => onClick(game, e);
-    // Пробел и Enter в терминале — клавиши игры (вылет), а не «нажать
-    // кнопку в фокусе»: иначе пробел вылетал бы и заодно покупал.
+    // Пробел и Enter в терминале — клавиши игры, а не «нажать кнопку в
+    // фокусе»: иначе пробел заодно покупал бы.
     el.onkeydown = (e) => {
       if (e.code === 'Space' || e.code === 'Enter' || e.code === 'Tab'
         || e.code === 'ArrowUp' || e.code === 'ArrowDown') e.preventDefault();
@@ -266,19 +269,16 @@ export function terminalFrame(game, want, port) {
 
 /**
  * Клавиши терминала. Вернёт, что делать игре: 'close' — закрыть, 'map' —
- * закрыть и открыть карту; null — разобрано здесь.
+ * закрыть и открыть карту, в порту ещё 'stand' — встать (Y) и 'launch' —
+ * вылет компьютером (C), как на кнопках подвала; null — разобрано здесь.
  */
 export function terminalKeys(game, inp, port) {
   const M = game.menu;
   const tabs = tabsFor(port);
-  if (!port && inp.pressed('KeyI', 'Escape')) return 'close';
-  if (!port && inp.pressed('KeyM')) return 'map';
-  if (port && inp.pressed('KeyI')) {
-    // В порту I — к своим делам и обратно к порту.
-    useTab(game, port, isPilotTab(M.tab) ? M.lastPort : M.lastPilot);
-    return null;
-  }
-  if (port && inp.pressed('Escape') && isPilotTab(M.tab)) { useTab(game, port, M.lastPort); return null; }
+  if (inp.pressed('KeyI', 'Escape')) return 'close';
+  if (inp.pressed('KeyM')) return 'map';
+  if (port && inp.pressed('KeyY')) return 'stand';
+  if (port && inp.pressed('KeyC')) return 'launch';
   for (let i = 0; i < tabs.length && i < 9; i++) {
     if (inp.pressed('Digit' + (i + 1), 'Numpad' + (i + 1))) { useTab(game, port, tabs[i][0]); return null; }
   }
@@ -309,5 +309,5 @@ function scrollToSel() {
   if (r && r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
 }
 
-/** Терминал открыт вне порта — для проверок и подсказок. */
+/** Терминал на экране — для проверок и подсказок. */
 export const terminalOpen = (game) => !!game.menu.shown;
