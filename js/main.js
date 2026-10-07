@@ -4814,6 +4814,8 @@ function render() {
   const st = game.renderStats;
   st.polys = scene ? scene.tris : 0;
   st.items = scene ? scene.draws : 0;
+  st.culled = scene ? scene.culled : 0;
+  st.cullOn = !!(scene && scene.cull);
   st.gpu = scene ? scene.name : null;
   // Цена кадра: его длительность, чистое время карты (если драйвер
   // отдаёт таймер) и множитель детализации, выбранный по ним

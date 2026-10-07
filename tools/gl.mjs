@@ -3381,18 +3381,44 @@ console.log('\n== мок GL: путь отрисовки ==');
     };
     const base = settle();
 
+    // В километре перед камерой: в кадре (сбоку от взгляда его отсеет
+    // отсев за кадром — GlScene.seen).
+    const f1 = cam.basis.fwd;
     const near = {
       id: 2, name: 'БЕТА', v: 0, mode: 'flight',
-      pos: v3(ship.pos.x + 1, ship.pos.y, ship.pos.z),
+      pos: v3(cam.pos.x + f1.x, cam.pos.y + f1.y, cam.pos.z + f1.z),
       basis: makeBasis(),
     };
+    // Нарисован ли меш в точке корабля в кадре (не в проходе тени).
+    const drawnAt = (p) => {
+      let hit = false;
+      const draw0 = scene.drawObject;
+      scene.drawObject = function (prog, mesh, pos, basis, scale, sun) {
+        const r = draw0.call(this, prog, mesh, pos, basis, scale, sun);
+        if (r && !this.depthEye && Math.hypot(pos.x - p.x, pos.y - p.y, pos.z - p.z) < 1e-9) hit = true;
+        return r;
+      };
+      const d = frame();
+      scene.drawObject = draw0;
+      return { d, hit };
+    };
     game.peers = [near];
-    const withPeer = frame();
+    const fr = drawnAt(near.pos), withPeer = fr.d;
     // И отбрасывает тень: в километре — свой слой карты теней, это ещё
-    // один вызов прохода глубины (js/gl/shipshadow.js).
+    // один вызов прохода глубины (js/gl/shipshadow.js). Перед камерой к
+    // корпусу добавляются и его огни — вызовов больше, чем два.
     const shade = scene.shadowWho.includes('peer') ? 1 : 0;
-    ok(withPeer === base + 1 + shade && shade === 1,
+    ok(fr.hit && withPeer >= base + 1 + shade && shade === 1,
       `чужой корабль в километре рисуется и отбрасывает тень: ${base} вызовов без него, ${withPeer} с ним (${shade} — в карту теней)`);
+
+    // Тот же корабль в километре за спиной камеры: в кадре его нет, и вызова
+    // на него нет, а тень он бросает по-прежнему — проход тени смотрит из
+    // солнца, и отсев за кадром его не касается.
+    game.peers = [Object.assign({}, near, { pos: v3(cam.pos.x - f1.x, cam.pos.y - f1.y, cam.pos.z - f1.z) })];
+    const bk = drawnAt(game.peers[0].pos), behind = bk.d;
+    const shadeB = scene.shadowWho.includes('peer') ? 1 : 0;
+    ok(!bk.hit && behind === base + shadeB && shadeB === 1 && scene.culled > 0,
+      `чужой корабль за спиной камеры не рисуется (${behind} вызовов против ${base}, отсечено ${scene.culled}), а тень бросает (${shadeB} — в карту теней)`);
 
     // Далёкий не рисуется: на таком расстоянии корпус не занимает и
     // пикселя, и весь смысл в метке HUD, а не в невидимом меше.
@@ -3685,10 +3711,23 @@ console.log('\n== мок GL: путь отрисовки ==');
   }
 
   // Вид от третьего лица: добавляется корабль и факелы двигателей.
+  // Мерить числом вызовов против кадра у станции нельзя: отсев за кадром
+  // (GlScene.seen) снимает то, что вне взгляда, и кадры несравнимы.
+  // Поэтому — нарисован ли сам корабль.
   game.state.view = 'chase';
   ship.throttle = 0.8;
-  const d2 = frame();
-  ok(d2 >= d1, `вид от 3-го лица: ${d2} вызовов (свой корабль и выхлоп)`);
+  let ownDrawn = false, d2 = 0;
+  {
+    const own = scene.glMeshFor(game.shipMesh), draw0 = scene.drawObject;
+    scene.drawObject = function (prog, mesh, pos, basis, scale, sun) {
+      const r = draw0.call(this, prog, mesh, pos, basis, scale, sun);
+      if (r && mesh === own && !this.depthEye) ownDrawn = true;
+      return r;
+    };
+    d2 = frame();
+    scene.drawObject = draw0;
+  }
+  ok(ownDrawn && d2 > 0, `вид от 3-го лица: свой корабль в кадре, ${d2} вызовов (корабль и выхлоп)`);
   game.state.view = 'cockpit';
   ship.throttle = 0;
 
@@ -4246,6 +4285,8 @@ console.log('\n== мок GL: путь отрисовки ==');
     // матрице ближайшей плитки — сотни метров, а не радиус тела
     // (js/gl/tilegeo.js), и шейдер получает её начало для мелкого рельефа.
     {
+      // Здесь меряется начало отсчёта, а не отсев: все плитки списка.
+      scene.cull = false;
       const seen = [];
       const draw0 = scene.drawObject;
       scene.drawObject = function (prog, mesh, pos, basis, scale, sun) {
@@ -4254,6 +4295,7 @@ console.log('\n== мок GL: путь отрисовки ==');
       };
       scene.render(game);
       scene.drawObject = draw0;
+      scene.cull = true;
       const meshes = new Set(scene.tiles.draw.map((t) => scene.tiles.get(tileKey(t.face, t.level, t.tx, t.ty)).mesh));
       const tiles = seen.filter((s) => meshes.has(s.mesh));
       const nearest = Math.min(...tiles.map((s) => s.d));
@@ -4261,6 +4303,51 @@ console.log('\n== мок GL: путь отрисовки ==');
       ok(tiles.length === scene.tiles.draw.length && nearest < 1 && shift && shift.every((v) => v === 0),
         `плитки рисуются от своей середины: до ближайшей ${(nearest * 1000).toFixed(0)} м от камеры ` +
         `(от центра тела было бы ${moon.radius.toFixed(0)} км), сдвиг для рельефа после плиток сброшен`);
+    }
+
+    // Отсев за кадром (GlScene.seen): плитки, что не попадают в кадр, не
+    // рисуются. Проверяется НЕ его же счётом, а настоящими матрицами кадра:
+    // грани пирамиды взгляда извлекаются из матрицы проекции (Гриб —
+    // Хартманн), и сфера каждой отсечённой плитки (а в ней все её вершины,
+    // mesh.bound) целиком за одной из них — в осях камеры через uModelView.
+    // Нарисованные и отсечённые вместе — весь список: выбор плиток отсев не
+    // трогает.
+    {
+      const drawn = new Set();
+      const draw0 = scene.drawObject;
+      scene.drawObject = function (prog, mesh, pos, basis, scale, sun) {
+        const r = draw0.call(this, prog, mesh, pos, basis, scale, sun);
+        if (r) drawn.add(mesh);
+        return r;
+      };
+      scene.render(game);
+      scene.drawObject = draw0;
+      const list = scene.tiles.draw.map((t) => scene.tiles.get(tileKey(t.face, t.level, t.tx, t.ty)));
+      const cut = list.filter((e) => !drawn.has(e.mesh));
+      const B = bodyBasis(moon, makeBasis()), R = moon.radius, P = scene.proj;
+      const row = (i) => [P[i], P[4 + i], P[8 + i], P[12 + i]];
+      const r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+      const planes = [[1, r0], [-1, r0], [1, r1], [-1, r1], [1, r2]].map(([sg, q]) => {
+        const p = r3.map((v, i) => v + sg * q[i]);
+        const l = Math.hypot(p[0], p[1], p[2]);
+        return p.map((v) => v / l);
+      });
+      const mv = new Float32Array(16);
+      let leak = 0;
+      for (const e of cut) {
+        const o = e.origin;
+        const at = v3(moon.pos.x + R * (B.right.x * o[0] + B.up.x * o[1] + B.fwd.x * o[2]),
+          moon.pos.y + R * (B.right.y * o[0] + B.up.y * o[1] + B.fwd.y * o[2]),
+          moon.pos.z + R * (B.right.z * o[0] + B.up.z * o[1] + B.fwd.z * o[2]));
+        modelView(cam.basis, cam.pos, B, at, R, mv);
+        const { c, r } = e.mesh.bound;
+        const q = [0, 1, 2].map((i) => mv[i] * c[0] + mv[4 + i] * c[1] + mv[8 + i] * c[2] + mv[12 + i]);
+        const out = planes.some((p) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2] + p[3] < -r * R);
+        if (!out) leak++;
+      }
+      ok(cut.length > 0 && leak === 0 && list.filter((e) => drawn.has(e.mesh)).length + cut.length === list.length,
+        `плитки за кадром не рисуются: ${cut.length} из ${list.length}, и ни одна из них не задевает кадр ` +
+        `по матрицам вида и проекции (задевают: ${leak})`);
     }
 
     // Зависание: ничего не строится. Это то, чего принципиально не могли

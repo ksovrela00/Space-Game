@@ -17,6 +17,10 @@ export class GlMesh {
     this.mode = mode;
     this.indexType = indexType;   // null, если без индексов
     this.buffers = buffers;       // для освобождения
+    // Сфера, в которой лежат все вершины (в единицах модели): по ней сцена
+    // не рисует то, что целиком за кадром (GlScene.seen). null — не знаем,
+    // и такой меш рисуется всегда.
+    this.bound = null;
   }
 
   draw() {
@@ -41,6 +45,30 @@ export class GlMesh {
   }
 
   get tris() { return this.mode === this.gl.TRIANGLES ? this.count / 3 : 0; }
+}
+
+/**
+ * Сфера вокруг вершин: середина их коробки и самая дальняя от неё вершина.
+ * Не наименьшая, но верная оценка сверху — для отсева за кадром большего не
+ * нужно.
+ */
+export function boundOf(pos) {
+  if (!pos || pos.length < 3) return null;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (let i = 0; i + 2 < pos.length; i += 3) {
+    const x = pos[i], y = pos[i + 1], z = pos[i + 2];
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (z < z0) z0 = z; if (z > z1) z1 = z;
+  }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
+  let r2 = 0;
+  for (let i = 0; i + 2 < pos.length; i += 3) {
+    const dx = pos[i] - cx, dy = pos[i + 1] - cy, dz = pos[i + 2] - cz;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d > r2) r2 = d;
+  }
+  return isFinite(r2) ? { c: [cx, cy, cz], r: Math.sqrt(r2) } : null;
 }
 
 const arrayBuffer = (gl, data) => {
@@ -106,7 +134,9 @@ export function buildFlatMesh(gl, locs, mesh) {
   attrib(gl, locs.aColor, arrayBuffer(gl, col), 4);
   if (mat) attrib(gl, locs.aMat, arrayBuffer(gl, mat), 1);
   gl.bindVertexArray(null);
-  return new GlMesh(gl, vao, n, gl.TRIANGLES, null);
+  const m = new GlMesh(gl, vao, n, gl.TRIANGLES, null);
+  m.bound = boundOf(pos);
+  return m;
 }
 
 /** Меш с индексами и нормалями в вершинах: планеты, атмосфера. */
@@ -134,7 +164,9 @@ export function buildIndexedMesh(gl, locs, data) {
   gl.bindVertexArray(null);
 
   const type = data.indices instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
-  return new GlMesh(gl, vao, data.indices.length, gl.TRIANGLES, type, bufs);
+  const m = new GlMesh(gl, vao, data.indices.length, gl.TRIANGLES, type, bufs);
+  m.bound = boundOf(data.positions);
+  return m;
 }
 
 /**

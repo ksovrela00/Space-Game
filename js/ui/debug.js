@@ -51,6 +51,7 @@ export function drawDebug(r, game, dbg) {
   const rs = game.renderStats || { polys: 0, items: 0, backend: '?' };
   const lines = [
     `fps ${dbg.fps.toFixed(0)}   ${rs.backend}: треугольников ${rs.polys}, вызовов ${rs.items}` +
+      (rs.cullOn ? `, за кадром не рисуется ${rs.culled}` : ', отсев за кадром выключен (?cull=0)') +
       (rs.detail ? ', деталь на пиксель' : '') +
       (rs.inside ? ', за бортом не рисуется (глухая комната)' : ''),
     rs.gpu ? `GPU ${rs.gpu}` : '',

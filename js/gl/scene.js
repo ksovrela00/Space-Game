@@ -128,6 +128,7 @@ const NEAR_BRIDGE = 4e-5;          // км
 const NEAR_FOOT = 5e-5;            // км
 const FAR_BRIDGE = 0.25;           // км
 const FAR = 2e9;             // с запасом на всю систему
+const CULL_SLACK = 0.002;    // км — запас сферы меша при отсеве за кадром (seen)
 const AMBIENT = 0.14;
 // Поток частиц в прыжке: сколько их и как далеко впереди рождаются.
 // Глубина рождения важнее числа: при uZ0 = 5 частица появляется в
@@ -221,6 +222,11 @@ export class GlScene {
     this.error = null;
     this.tris = 0;
     this.draws = 0;
+    this.culled = 0;
+    // Отсев за кадром (seen): ?cull=0 выключает — сравнить кадр с ним и без.
+    this.cull = new URLSearchParams(
+      typeof location !== 'undefined' ? location.search : '').get('cull') !== '0';
+    this.cullTanX = 1; this.cullTanY = 1; this.cullCosX = 1; this.cullCosY = 1;
     if (!this.ok) {
       this.error = L('WebGL2 недоступен');
       return;
@@ -784,7 +790,41 @@ export class GlScene {
     plateUniforms(gl, prog, u.plate);
   }
 
+  /**
+   * Попадает ли меш в кадр камеры: его сфера (mesh.bound) пересекает
+   * пирамиду взгляда — боковые грани и плоскость глаза. Дальней плоскости
+   * у сцены нет (логарифмическая глубина), и по ней не отсекаем.
+   *
+   * Только «рисовать или нет», а не «нужно ли»: что выбрано — плитки,
+   * поля камней, уровни подробности — выбирается как раньше, и отвернулся
+   * — грунт за спиной не грубеет. Видеокарта и сама не закрашивает пикселей
+   * за кадром, но вершины и вызов она обрабатывает: у земли за кадром
+   * 13–15% плиток грунта, сверху — до четверти.
+   *
+   * В проходе тени (depthEye — «камера» в солнце) не отсекаем: то, что за
+   * кадром, бросает тень в кадр.
+   */
+  seen(mesh, pos, basis, scale) {
+    const B = mesh.bound;
+    if (!B || !this.cull || this.depthEye) return true;
+    const cam = this.camera, cb = cam.basis, c = B.c;
+    const dx = pos.x + (basis.right.x * c[0] + basis.up.x * c[1] + basis.fwd.x * c[2]) * scale - cam.pos.x;
+    const dy = pos.y + (basis.right.y * c[0] + basis.up.y * c[1] + basis.fwd.y * c[2]) * scale - cam.pos.y;
+    const dz = pos.z + (basis.right.z * c[0] + basis.up.z * c[1] + basis.fwd.z * c[2]) * scale - cam.pos.z;
+    // Запас: трава гнётся под струёй двигателя в шейдере (wash), и сфера
+    // по вершинам её не видит; плюс округления. Два метра и два процента.
+    const r = B.r * Math.abs(scale) * 1.02 + CULL_SLACK;
+    const z = dx * cb.fwd.x + dy * cb.fwd.y + dz * cb.fwd.z;
+    if (z < -r) return false;
+    const x = dx * cb.right.x + dy * cb.right.y + dz * cb.right.z;
+    if ((Math.abs(x) - this.cullTanX * z) * this.cullCosX > r) return false;
+    const y = dx * cb.up.x + dy * cb.up.y + dz * cb.up.z;
+    if ((Math.abs(y) - this.cullTanY * z) * this.cullCosY > r) return false;
+    return true;
+  }
+
   drawObject(prog, mesh, pos, basis, scale, sunPos) {
+    if (!this.seen(mesh, pos, basis, scale)) { this.culled++; return false; }
     const gl = this.gl;
     // В проходе глубины тени «камера» — солнце (updateShipShadow): те же
     // части корабля рисуются теми же вызовами, только в оси карты.
@@ -798,6 +838,7 @@ export class GlScene {
     mesh.draw();
     this.draws++;
     this.tris += mesh.faces || mesh.tris;
+    return true;
   }
 
   render(game) {
@@ -817,6 +858,7 @@ export class GlScene {
     this.gpuTimer.begin();
     this.tris = 0;
     this.draws = 0;
+    this.culled = 0;
     this.rockDraws = 0;
     this.floraDraws = 0;
     this.cityDraws = 0;
@@ -830,6 +872,14 @@ export class GlScene {
     const aspect = this.canvas.width / this.canvas.height;
     const foot = (game.walk && game.walk.on) || (HULL.ground && game.state && game.state.view === 'cockpit');
     perspective(cam.fov, aspect, foot ? NEAR_FOOT : NEAR, FAR, this.proj);
+    // Пирамида взгляда для отсева за кадром (seen): тангенсы половин угла
+    // и косинусы для расстояния до боковых граней. Кабина рисуется со своей
+    // ближней плоскостью, но с тем же углом и почти тем же соотношением
+    // сторон — запаса в два процента хватает.
+    this.cullTanY = Math.tan(cam.fov / 2) * 1.02;
+    this.cullTanX = this.cullTanY * aspect;
+    this.cullCosX = 1 / Math.hypot(1, this.cullTanX);
+    this.cullCosY = 1 / Math.hypot(1, this.cullTanY);
 
     // Досборка геометрии и запекание поверхности — ДО настройки кадра.
     // Проход запекания рисует в свою текстуру: он меняет вьюпорт и
@@ -1864,6 +1914,9 @@ export class GlScene {
     for (const t of this.tiles.draw) {
       const e = this.tiles.get(tileKey(t.face, t.level, t.tx, t.ty));
       if (!e || !e.mesh) continue;
+      // За кадром — не рисуем и не готовим к рисованию (текстура, деталь).
+      const at = this.localOrigin(body, e.origin);
+      if (!this.seen(e.mesh, at, this.basisTmp, body.radius)) { this.culled++; continue; }
       // Угол плитки на грани куба — тот же счёт, что в tileBounds, но
       // без объекта: плиток в кадре сотни, и мусор здесь лишний.
       const step = 2 / (1 << t.level);
@@ -1875,7 +1928,7 @@ export class GlScene {
       }
       gl.bindTexture(gl.TEXTURE_2D, e.tex.tex);
       gl.uniform3f(shift, e.origin[0], e.origin[1], e.origin[2]);
-      this.drawObject(prog, e.mesh, this.localOrigin(body, e.origin), this.basisTmp, body.radius, sunPos);
+      this.drawObject(prog, e.mesh, at, this.basisTmp, body.radius, sunPos);
     }
     gl.uniform3f(shift, 0, 0, 0);
     gl.uniform1f(prog.loc('uSurfMode'), 0);
@@ -2118,7 +2171,6 @@ export class GlScene {
     // пиксель: это обычные модели, просто мелкие и в осях тела — от
     // середины поля, как плитки от своей (точность, см. drawTiles).
     if (this.rockBody && this.rocks.mesh) {
-      this.rockDraws++;
       bodyBasis(this.rockBody, this.basisTmp);
       const o = this.rocks.origin;
       gl.uniform3f(prog.loc('uLocalShift'), o[0], o[1], o[2]);
@@ -2126,8 +2178,8 @@ export class GlScene {
       gl.uniform1f(prog.loc('uSurfMode'), 2);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.ground.rock);
-      this.drawObject(prog, this.rocks.mesh, this.localOrigin(this.rockBody, o), this.basisTmp,
-        this.rockBody.radius, sunPos);
+      if (this.drawObject(prog, this.rocks.mesh, this.localOrigin(this.rockBody, o), this.basisTmp,
+        this.rockBody.radius, sunPos)) this.rockDraws++;
       gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
       gl.uniform1f(prog.loc('uSurfMode'), 0);
       gl.uniform3f(prog.loc('uLocalShift'), 0, 0, 0);
@@ -2137,7 +2189,6 @@ export class GlScene {
     // своим началом координат на грунте и в километрах (js/gl/flora.js):
     // в долях радиуса трава короче шага float32 и схлопывается.
     if (this.floraBody && this.flora.mesh) {
-      this.floraDraws++;
       bodyBasis(this.floraBody, this.basisTmp);
       toWorld(this.basisTmp, this.floraBody.pos, this.flora.origin,
         this._floraPos || (this._floraPos = { x: 0, y: 0, z: 0 }));
@@ -2148,7 +2199,7 @@ export class GlScene {
       this.washOn = !!(this.washKnob && w.on && w.body === this.floraBody);
       washUniforms(gl, prog, this.washOn ? w : null, this.flora.origin,
         performance.now() / 1000);
-      this.drawObject(prog, this.flora.mesh, this._floraPos, this.basisTmp, 1, sunPos);
+      if (this.drawObject(prog, this.flora.mesh, this._floraPos, this.basisTmp, 1, sunPos)) this.floraDraws++;
       gl.uniform1f(prog.loc('uWashOn'), 0);
     }
 
@@ -2169,8 +2220,7 @@ export class GlScene {
       // Дальше этого город не занимает и пикселя — рисовать его там
       // незачем, за это отвечает метка в приборах.
       if (d < c.radius * 2 * this.camera.focal) {
-        this.drawObject(prog, this.city.mesh, c.pos, c.basis, 1, sunPos);
-        this.cityDraws = 1;
+        if (this.drawObject(prog, this.city.mesh, c.pos, c.basis, 1, sunPos)) this.cityDraws = 1;
       }
     }
 
@@ -2624,8 +2674,7 @@ export class GlScene {
         this.tmpPos.x = ship.pos.x + b.right.x * hp.x + b.up.x * y + b.fwd.x * hp.z;
         this.tmpPos.y = ship.pos.y + b.right.y * hp.x + b.up.y * y + b.fwd.y * hp.z;
         this.tmpPos.z = ship.pos.z + b.right.z * hp.x + b.up.z * y + b.fwd.z * hp.z;
-        this.drawObject(prog, this.glMeshFor(part.mesh), this.tmpPos, b, 1, sunPos);
-        this.gearDraws++;
+        if (this.drawObject(prog, this.glMeshFor(part.mesh), this.tmpPos, b, 1, sunPos)) this.gearDraws++;
       }
     });
   }
@@ -2665,8 +2714,7 @@ export class GlScene {
       this.tmpPos.x = ship.pos.x + b.right.x * hp.x + b.up.x * y + b.fwd.x * hp.z;
       this.tmpPos.y = ship.pos.y + b.right.y * hp.x + b.up.y * y + b.fwd.y * hp.z;
       this.tmpPos.z = ship.pos.z + b.right.z * hp.x + b.up.z * y + b.fwd.z * hp.z;
-      this.drawObject(prog, this.glMeshFor(mesh), this.tmpPos, wb, 1, sunPos);
-      this.gearDraws++;
+      if (this.drawObject(prog, this.glMeshFor(mesh), this.tmpPos, wb, 1, sunPos)) this.gearDraws++;
     });
   }
 
