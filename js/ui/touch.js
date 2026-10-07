@@ -90,6 +90,12 @@ export function touchLayout(w, h, insets = { left: 0, right: 0, bottom: 0, top: 
   // собраны (t.stand).
   buttons.push(btn(w - R - pad - TOUCH.btnR - step * 4, insets.top + pad + TOUCH.btnR, 'stand', 'ВСТАТЬ', 'KeyY',
     false, 'stand'));
+  // Бортовой терминал (I): трюм, подряды, деньги. Без кнопки на телефоне до
+  // него было не добраться вовсе — клавиатуры нет. Он есть и в кресле, и на
+  // ногах, поэтому кнопок две, на одном месте, по одной на каждый набор.
+  const termX = w - R - pad - TOUCH.btnR - step * 5;
+  buttons.push(btn(termX, insets.top + pad + TOUCH.btnR, 'term', 'МЕНЮ', 'KeyI'));
+  buttons.push(btn(w - R - pad - TOUCH.btnR, insets.top + pad + TOUCH.btnR, 'wTerm', 'МЕНЮ', 'KeyI', false, null, true));
   // На ногах (t.walk) джойстик ведёт ноги, палец по экрану — голову, а
   // под правой рукой — прыжок, бег и «сесть» у кресла. Полётных кнопок
   // в это время нет вовсе: ручки остались в рубке.

@@ -77,7 +77,10 @@ if (!chrome) {
 // экономика: её проверяет серверный набор.
 const PORT_SCENE = (tab) => `
   liftoff();
-  return GAME.rescue().then(() => Promise.all([
+  // Буксир — после того, как сервер принял вылет: вызовы уходят в одном
+  // такте, и ответ на вылет, пришедший позже буксира, снова выводил корабль
+  // из порта — в центр звезды, и снимок показывал гибель о Lave.
+  return new Promise((r) => setTimeout(r, 60)).then(() => GAME.rescue()).then(() => Promise.all([
     import('./js/net/session.js'), import('./js/ui/station.js'), import('./js/game/specs.js'),
   ])).then(([Sess, S, Sp]) => {
     Sess.session.mode = 'online';
@@ -98,7 +101,11 @@ const PORT_SCENE = (tab) => `
       ['helium3', 'ГЕЛИЙ-3', 'топливо', 690, 0], ['electronics', 'ЭЛЕКТРОНИКА', 'техника', 488, 104],
       ['medicine', 'МЕДИКАМЕНТЫ', 'техника', 612, 61.9], ['stims', 'СТИМУЛЯТОРЫ', 'запрещённое', 2010, 0],
     ].map(([code, name, category, price, stock]) => ({
-      code, name, category, price, stock, legal: code !== 'stims' }));
+      code, name, category, price, stock, legal: code !== 'stims',
+      // Средние цены — из каталога сервера (server/src/Content.php): по
+      // ним рынок ставит ▼ и ▲ у здешней цены.
+      base_price: { water: 30, ore: 55, grain: 65, hydrogen: 75, minerals: 90, biomass: 140, rare_metals: 380,
+        machines: 410, helium3: 520, electronics: 620, medicine: 780, stims: 1450 }[code] }));
     const doc = Sp.specsDoc();
     const bySlot = new Map();
     for (const m of doc.modules) {
@@ -117,6 +124,15 @@ const PORT_SCENE = (tab) => `
     }
     GAME.station.market = { fuelPrice: 74, goods };
     GAME.station.outfit = { open: true, resale: 0.6, slots: [...bySlot.values()] };
+    // Верфь корпусов — как её отдаёт Shipyard::offer: свой корабль в доке,
+    // корпуса на продажу и вездеход в ангар.
+    GAME.station.ships = { open: true, tech: 5,
+      here: [{ id: 1, active: true, typeName: 'Challenger', title: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ' }],
+      hulls: doc.shipTypes.filter((t) => !(t.spec && t.spec.ground)).map((t) => ({ code: t.code, name: t.name,
+        title: t.title, price: t.price, sold: t.code !== 'prometheus', tech: t.code === 'prometheus' ? 6 : 4,
+        lengthM: t.code === 'prometheus' ? 420 : 65, widthM: t.code === 'prometheus' ? 160 : 67,
+        heightM: t.code === 'prometheus' ? 96 : 19, massT: t.code === 'prometheus' ? 310000 : 1682 })),
+      hangar: { code: 'rover', name: 'Rover', title: 'ВЕЗДЕХОД', price: 24000, for: 1, have: null, sold: true } };
     S.stationAct(GAME, 'tab', { tab: '${tab}' });
   });
 `;
@@ -291,6 +307,22 @@ const ROVER_SCENE = (then) => `
 // Берег: суша не выше пяти метров над морем, у которой в двухстах метрах
 // по какой-нибудь из восьми сторон — вода. Камера — в стороне на off км,
 // на высоте alt, нос опущен на pitch градусов.
+// Карта: открыть её, когда игра уже на связи. Нажатия до связи копятся и
+// разбираются потом одним кадром — M и следующая клавиша пришли бы вместе,
+// и вторая потерялась бы. Поэтому ждём открытой карты по-настоящему,
+// между задачами, и только тогда — остальное.
+const MAP_SCENE = (then) => `
+  liftoff();
+  return new Promise((res) => {
+    let i = 0;
+    const tick = () => {
+      if (!GAME.map.open && GAME.state.mode === 'flight') press('KeyM'); else frames(1);
+      if (GAME.map.open || ++i > 200) res(); else setTimeout(tick, 30);
+    };
+    tick();
+  }).then(() => { ${then} });
+`;
+
 const COAST_SCENE = (alt, off, pitch) => `
   liftoff();
   return standWhere(atmoWorld(),
@@ -1018,6 +1050,16 @@ const SCENES = {
     title: 'карта системы',
     run: 'liftoff(); press("KeyM");',
   },
+  // Трёхмерная карта вблизи: родная планета с лунами, станцией и маркерами.
+  mapplanet: {
+    title: 'карта системы: родная планета крупно',
+    run: MAP_SCENE('GAME.map.sel = GAME.world.home; press("Space"); frames(90);'),
+  },
+  // Галактика с маршрутом: до Laleor напрямую не долететь — через соседа.
+  mapgal: {
+    title: 'карта галактики: маршрут до дальней системы',
+    run: MAP_SCENE('press("KeyG"); for (let i = 0; i < 6; i++) press("ArrowRight"); frames(90);'),
+  },
   portmarket: {
     title: 'экран станции: рынок',
     run: PORT_SCENE('market'),
@@ -1027,8 +1069,16 @@ const SCENES = {
     run: PORT_SCENE('outfit'),
   },
   portfuel: {
-    title: 'экран станции: заправка и ремонт',
-    run: PORT_SCENE('fuel'),
+    title: 'терминал в порту: перед вылетом — бак, ремонт, трюм',
+    run: PORT_SCENE('port'),
+  },
+  portships: {
+    title: 'терминал в порту: верфь кораблей и ангар',
+    run: PORT_SCENE('ships'),
+  },
+  portcargo: {
+    title: 'терминал в порту: трюм со здешними ценами',
+    run: PORT_SCENE('cargo'),
   },
   fuel: {
     title: 'полёт на резерве: шкала топлива и подсказка про буксир',
@@ -1622,8 +1672,20 @@ const SCENES = {
     `,
   },
   menu: {
-    title: 'меню пилота',
+    title: 'бортовой терминал (I): корабль',
     run: 'liftoff(); press("KeyI");',
+  },
+  menucargo: {
+    title: 'бортовой терминал: трюм',
+    run: 'liftoff(); press("KeyI"); frames(4); GAME.menu.lastPilot = GAME.menu.tab = "cargo"; GAME.menu.dirty = true; frames(4);',
+  },
+  menujobs: {
+    title: 'бортовой терминал: подряды',
+    run: 'liftoff(); press("KeyI"); frames(4); GAME.menu.lastPilot = GAME.menu.tab = "contracts"; GAME.menu.dirty = true; frames(4);',
+  },
+  menumoney: {
+    title: 'бортовой терминал: финансы',
+    run: 'liftoff(); press("KeyI"); frames(4); GAME.menu.lastPilot = GAME.menu.tab = "money"; GAME.menu.dirty = true; frames(4);',
   },
   help: {
     title: 'страница управления (клавиша H)',

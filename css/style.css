@@ -132,67 +132,347 @@ html, body {
 .langs { margin: 0 0 14px; }
 .btn.on { color: #d8f2ff; border-color: #4fb3e0; background: rgba(79,179,224,0.12); }
 
-/* Экран станции. Шире обычной панели: рынок — таблица в шесть столбцов,
-   и в 760 точках цена налезала бы на кнопки. */
-.panel.station { max-width: min(1000px, 96vw); width: 1000px; }
-.st-sum { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 12px; letter-spacing: 2px;
-  color: #5e9dc0; margin: 0 0 12px; }
-.st-sum b { color: #d8f2ff; font-weight: normal; }
-.st-sum b.low, .fuelbar.low .fill { color: #ffcc66; }
-.st-sum b.bad { color: #ff8866; }
-.st-tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid #1d5f86; margin-bottom: 12px; }
-.st-tabs .tab {
-  font-family: inherit; font-size: 13px; letter-spacing: 3px; cursor: pointer;
-  padding: 8px 16px; color: #7fb6d4; background: transparent;
-  border: 1px solid #1d5f86; border-bottom: none;
-}
-.st-tabs .tab.on { color: #061520; background: #4fb3e0; border-color: #4fb3e0; }
-.st-body { min-height: 180px; }
-.st-body h3 { font-size: 13px; letter-spacing: 3px; font-weight: normal; color: #ffcc66; margin: 14px 0 6px; }
-.st-note { font-size: 12px; letter-spacing: 1px; color: #8fc7e6; margin: 8px 0 0; }
-.st-note.good { color: #78e08f; }
-.st-note.warn { color: #ff8866; }
-.st-foot { border-top: 1px solid #1d5f86; margin-top: 12px; padding-top: 4px; }
-.rows .dim { color: #5e7f94; font-size: 11px; }
-.rows .dim.good { color: #78e08f; }
-.rows .dim.warn { color: #ff8866; }
-.rows td.num { text-align: right; white-space: nowrap; }
-.rows td.acts { white-space: nowrap; }
-.rows tr.head td { color: #5e9dc0; font-size: 11px; letter-spacing: 2px; border-bottom: 1px solid #12405e; }
-.rows.trade td, .rows.fit td { padding: 5px 10px 5px 0; border-bottom: 1px solid rgba(29,95,134,.35); }
-.rows tr.illegal td:first-child { color: #ff8866; }
-.rows tr.mine td:first-child { color: #d8f2ff; }
-.btn.small { padding: 5px 10px; font-size: 12px; letter-spacing: 1px; margin: 2px 4px 2px 0; }
 .btn:disabled { opacity: .35; cursor: default; }
 .btn:disabled:hover { background: #4fb3e0; }
 .btn.ghost:disabled:hover { background: transparent; color: #7fb6d4; border-color: #1d5f86; }
-.fuelbar { position: relative; height: 14px; border: 1px solid #1d5f86; margin: 4px 0 6px; }
-.fuelbar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: #4fb3e0; }
-.fuelbar.low .fill { background: #ffcc66; }
-.fuelbar.bad .fill { background: #ff8866; }
-/* Черта резерва: ниже неё прыжков нет, только двигатели до порта. */
-.fuelbar .mark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: #ff8866; }
-/* Подписи столбцов внутри ячеек — только на узком экране, где шапки нет. */
-.rows .lbl { display: none; }
 
-/* Узкий экран (телефон стоя): шесть столбцов рынка в 360 точек не
-   влезают, и кнопки уезжали за край. Строка товара становится двумя:
-   товар, цена, склад и трюм — сверху, купить и продать — снизу. Шапки
-   нет, поэтому подписи переезжают в ячейки. Верфь — так же: название и
-   число сверху, кнопка снизу. */
-@media (max-width: 640px) {
-  .panel.station { padding: 14px 12px; }
-  .rows.trade, .rows.trade tbody, .rows.fit, .rows.fit tbody { display: block; }
-  .rows.trade tr { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; column-gap: 6px;
-    align-items: end; padding: 6px 0; border-bottom: 1px solid rgba(29,95,134,.35); }
-  .rows.trade tr.head { display: none; }
-  .rows.trade td, .rows.fit td { border-bottom: none; padding: 1px 0; }
-  .rows.trade td.acts { grid-column: span 2; }
-  .rows .lbl { display: block; color: #5e7f94; font-size: 10px; letter-spacing: 1px; }
-  .rows.fit tr { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; padding: 5px 0;
-    border-bottom: 1px solid rgba(29,95,134,.35); }
-  .rows.fit td.acts { grid-column: 1 / -1; }
-  .rows.fit td.grp { grid-column: 1 / -1; }
+/* --- Бортовой терминал (js/ui/terminal.js): дела пилота и порт ------------
+
+   Окно ОДНОГО размера, что бы в нём ни было: раньше экран порта сжимался
+   и растягивался от раздела к разделу, и глаз каждый раз искал закладки
+   заново. Шапка, закладки и подвал стоят на месте, прокручивается только
+   тело (.tb) — «вылет» и закладки не уезжают за край.
+
+   Разрядка букв — только у мелких подписей заглавными. В основном тексте
+   её нет: моноширинный шрифт с разрядкой в три точки читается по буквам,
+   а не словами — так был набран прежний экран порта. */
+.term {
+  --line: #1d5f86;
+  --line2: rgba(29,95,134,.38);
+  --cy: #4fb3e0;
+  --ink: #d8f2ff;
+  --txt: #9cc8e0;
+  --dim: #5f8ca8;
+  --amber: #ffcc66;
+  --green: #78e08f;
+  --red: #ff7a66;
+  --bg: rgba(3,11,19,.96);
+  --card: rgba(8,24,38,.62);
+  position: fixed; inset: 0; z-index: 9;
+  display: flex; align-items: center; justify-content: center;
+  /* Вне порта кадр под терминалом виден: корабль летит дальше, и это
+     надо замечать. В порту за ним только тёмный док. */
+  background: rgba(0,4,10,.5);
+  color: var(--txt);
+  font-size: 13px;
+}
+.term.port { background: radial-gradient(ellipse at center, rgba(4,14,26,.9), rgba(0,0,0,.96)); }
+.term.hidden { display: none; }
+.term .tw {
+  width: min(1180px, calc(100vw - 32px));
+  height: min(800px, calc(100vh - 32px));
+  height: min(800px, calc(100dvh - 32px));
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  box-shadow: 0 0 0 1px rgba(80,200,255,.10), 0 18px 60px rgba(0,0,0,.6), 0 0 40px rgba(0,120,200,.18);
+}
+
+/* Шапка: где ты — слева, с чем — справа. */
+.term .th {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 16px 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(28,86,130,.32), rgba(28,86,130,.08));
+}
+.term .who { flex: 1 1 auto; min-width: 0; }
+.term .kick { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; }
+.term .who h1 {
+  font-size: 21px; font-weight: normal; letter-spacing: 1px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 0 12px rgba(90,200,255,.35);
+}
+.term .who .sub { font-size: 12px; color: var(--amber); }
+.term .stats { display: flex; flex: 0 0 auto; }
+.term .stat { min-width: 104px; padding: 2px 14px; border-left: 1px solid var(--line2); }
+.term .stat span { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); }
+.term .stat b { display: block; font-weight: normal; font-size: 14px; color: var(--ink); white-space: nowrap; }
+.term .stat i { display: block; height: 3px; margin-top: 4px; background: rgba(79,179,224,.15); }
+.term .stat i s { display: block; height: 100%; background: var(--cy); }
+.term .stat.low b { color: var(--amber); } .term .stat.low i s { background: var(--amber); }
+.term .stat.bad b { color: var(--red); } .term .stat.bad i s { background: var(--red); }
+.term .stat.speed b { color: var(--amber); }
+.term .x {
+  flex: 0 0 auto; width: 36px; height: 36px; margin-left: 4px;
+  font: inherit; font-size: 16px; color: var(--txt); background: transparent;
+  border: 1px solid var(--line2); cursor: pointer;
+}
+.term .x:hover { color: var(--ink); border-color: var(--cy); }
+
+/* Закладки: в порту две группы — порт и свои дела. */
+.term .tt {
+  display: flex; align-items: stretch; gap: 2px; padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; scrollbar-width: none;
+}
+.term .tt::-webkit-scrollbar { display: none; }
+.term .tt .grp {
+  align-self: center; padding: 0 6px 0 12px; font-size: 10px; letter-spacing: 2px; color: var(--dim);
+  white-space: nowrap;
+}
+.term .tt .grp:not(:first-child) { margin-left: 10px; border-left: 1px solid var(--line2); }
+.term .tab {
+  font: inherit; font-size: 13px; letter-spacing: 1px; color: var(--txt);
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  padding: 11px 14px 9px; cursor: pointer; white-space: nowrap;
+}
+.term .tab:hover { color: var(--ink); background: rgba(79,179,224,.06); }
+.term .tab.on { color: var(--ink); border-bottom-color: var(--cy); background: rgba(79,179,224,.11); }
+.term kbd {
+  display: inline-block; min-width: 18px; padding: 0 4px; margin-right: 7px;
+  font: inherit; font-size: 10px; line-height: 16px; text-align: center;
+  color: var(--dim); border: 1px solid var(--line2); border-radius: 3px;
+}
+.term .tab.on kbd { color: var(--cy); border-color: var(--cy); }
+
+/* Тело: единственное, что прокручивается. */
+.term .tb {
+  overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 16px 20px 20px;
+  touch-action: pan-y; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.term .tb:focus { outline: none; }
+.term .tb::-webkit-scrollbar { width: 10px; }
+.term .tb::-webkit-scrollbar-thumb { background: var(--line); }
+
+/* Подвал: итог последнего действия слева, главное действие справа. */
+.term .tf {
+  display: flex; align-items: center; gap: 12px; padding: 10px 16px 10px 20px;
+  border-top: 1px solid var(--line); background: rgba(5,17,28,.9);
+}
+.term .tf .note { flex: 1 1 auto; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term .tf .note kbd { margin-right: 2px; }
+.term .tf .acts { flex: 0 0 auto; display: flex; gap: 8px; }
+
+/* Кнопки. */
+.term .b {
+  font: inherit; font-size: 12px; letter-spacing: 1px; white-space: nowrap;
+  padding: 8px 14px; color: var(--ink); cursor: pointer;
+  background: rgba(79,179,224,.08); border: 1px solid var(--line);
+}
+.term .b:hover { background: rgba(79,179,224,.2); border-color: var(--cy); }
+.term .b.pri { color: #04121c; background: var(--cy); border-color: var(--cy); }
+.term .b.pri:hover { background: #7fd4ff; }
+.term .b.pri kbd { color: #04121c; border-color: rgba(4,18,28,.5); }
+.term .b.warn { color: #1c1204; background: var(--amber); border-color: var(--amber); }
+.term .b.on { color: #04121c; background: var(--cy); border-color: var(--cy); }
+.term .b.sm { padding: 5px 10px; font-size: 11px; }
+.term .b.sq { width: 38px; padding: 8px 0; font-size: 16px; line-height: 1; }
+.term .b.wide { display: block; width: 100%; margin-top: 12px; padding: 11px 14px; font-size: 13px; }
+.term .b:disabled { opacity: .32; cursor: default; }
+.term .b:disabled:hover { background: rgba(79,179,224,.08); border-color: var(--line); }
+.term .b.pri:disabled:hover { background: var(--cy); }
+.term .b kbd { margin: 0 0 0 6px; }
+
+/* Цвета смысла — общие для всех разделов. */
+.term .good { color: var(--green); }
+.term .warn { color: var(--amber); }
+.term .bad { color: var(--red); }
+.term .dim { color: var(--dim); }
+.term p { line-height: 1.55; }
+.term .hint { font-size: 12px; color: var(--dim); margin: 6px 0 10px; }
+.term .h { font-size: 11px; font-weight: normal; letter-spacing: 2px; color: var(--amber); margin: 18px 0 8px; }
+.term .card > .h:first-child, .term .tb > .h:first-child { margin-top: 0; }
+.term .sub-h { font-size: 10px; letter-spacing: 2px; color: var(--dim); margin: 10px 0 2px; }
+
+/* Раскладки: две колонки; список и панель выбранного. */
+.term .cols2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.term .stack { display: grid; gap: 16px; }
+.term .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 360px); gap: 18px; align-items: start; }
+.term .detail {
+  position: sticky; top: 0;
+  padding: 14px 16px 16px; background: var(--card); border: 1px solid var(--line2);
+  /* Панель прилипает к верху тела, и если она выше тела, её низ — кнопку
+     сделки — не увидеть никогда. Поэтому у неё своя прокрутка. */
+  max-height: calc(min(800px, 100vh - 32px) - 210px);
+  max-height: calc(min(800px, 100dvh - 32px) - 210px);
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+}
+.term .detail:empty { display: none; }
+.term .card { padding: 14px 16px; background: var(--card); border: 1px solid var(--line2); }
+.term .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.term .card.ship b { display: block; font-size: 15px; font-weight: normal; color: var(--ink); }
+.term .card.ship.mine { border-color: var(--cy); }
+.term .card .acts, .term .detail .acts, .term .card > .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+
+/* Пары «подпись — значение». */
+.term .kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 16px; margin: 8px 0 0; }
+.term .kv dt { color: var(--dim); }
+.term .kv dd { color: var(--ink); text-align: right; }
+.term .kv dd.good { color: var(--green); } .term .kv dd.warn { color: var(--amber); }
+.term .kv dd.bad { color: var(--red); } .term .kv dd.dim { color: var(--dim); }
+
+/* Шкала: доля и, у бака, черта резерва. */
+.term .meter { position: relative; height: 8px; margin: 5px 0 10px; background: rgba(79,179,224,.12); }
+.term .meter i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--cy); }
+.term .meter.good i { background: var(--green); }
+.term .meter.low i { background: var(--amber); }
+.term .meter.bad i { background: var(--red); }
+.term .meter s { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--red); }
+.term .gauge { display: flex; align-items: baseline; gap: 10px; }
+.term .gauge > span { font-size: 11px; letter-spacing: 2px; color: var(--dim); }
+.term .gauge b { font-weight: normal; color: var(--ink); }
+.term .gauge b.good { color: var(--green); } .term .gauge b.low { color: var(--amber); } .term .gauge b.bad { color: var(--red); }
+.term .gauge .r { margin-left: auto; }
+.term .gauge.sp { margin-top: 14px; }
+
+/* Списки: строка выбирается щелчком и подсвечивается. */
+.term .lt { width: 100%; border-collapse: collapse; }
+.term .lt th {
+  position: sticky; top: -16px; z-index: 1;
+  font-weight: normal; text-align: left; font-size: 10px; letter-spacing: 2px; color: var(--dim);
+  padding: 6px 10px; background: #061420; border-bottom: 1px solid var(--line2);
+}
+.term .lt td { padding: 8px 10px; border-bottom: 1px solid rgba(29,95,134,.22); vertical-align: middle; }
+.term .lt .n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.term .lt th.n { text-align: right; }
+.term .lt tr.row { cursor: pointer; }
+.term .lt tr.row:hover td { background: rgba(79,179,224,.06); }
+.term .lt tr.sel td { background: rgba(79,179,224,.15); color: var(--ink); }
+.term .lt tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--cy); }
+.term .lt .nm { display: block; color: var(--ink); }
+.term .lt .nm.dim { color: var(--dim); }
+.term .lt .sub { display: block; font-size: 11px; color: var(--dim); }
+.term .lt tr.illegal .nm { color: var(--red); }
+.term .lt tr.grp td { padding: 16px 10px 6px; font-size: 10px; letter-spacing: 2px; color: var(--amber); border-bottom: 1px solid var(--line2); }
+.term .lt tr.grp:first-child td { padding-top: 4px; }
+.term .lt b { font-weight: normal; color: var(--ink); }
+.term .badge {
+  display: inline-block; min-width: 22px; padding: 1px 6px; font-size: 11px; text-align: center;
+  color: #04121c; background: var(--cy);
+}
+
+/* Панель выбранного: заголовок, цена, сделка. */
+.term .dh h3 { font-size: 18px; font-weight: normal; letter-spacing: 1px; color: var(--ink); margin: 2px 0 6px; }
+.term .price { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 2px; }
+.term .price b { font-size: 24px; font-weight: normal; color: var(--ink); }
+.term .price span { color: var(--dim); }
+.term .seg { display: flex; margin: 14px 0 10px; }
+.term .seg .b { flex: 1 1 0; }
+.term .seg .b + .b { border-left: none; }
+.term .qty { display: flex; align-items: center; gap: 6px; }
+.term .qty .v {
+  flex: 1 1 auto; text-align: center; font-weight: normal; font-size: 18px; color: var(--ink);
+  padding: 6px; border: 1px solid var(--line2); background: rgba(0,0,0,.25);
+}
+.term .presets { display: flex; gap: 6px; margin-top: 8px; }
+.term .presets .b { flex: 1 1 0; }
+
+/* Оснащение: стоящий модуль и предложения со сравнением. */
+.term .inst { padding: 10px 12px; margin: 8px 0; border: 1px solid var(--line2); background: rgba(0,0,0,.2); }
+.term .inst b { display: block; font-weight: normal; color: var(--ink); margin: 2px 0; }
+.term .inst .val { display: block; color: var(--txt); }
+.term .inst .dim { display: block; font-size: 11px; }
+.term .offer { padding: 10px 12px; margin: 8px 0; border: 1px solid var(--line2); }
+.term .offer > b { display: block; font-weight: normal; color: var(--ink); margin-bottom: 4px; }
+.term .cmp { width: 100%; border-collapse: collapse; font-size: 12px; }
+.term .cmp td { padding: 2px 0; }
+.term .cmp td:first-child { color: var(--dim); }
+.term .cmp .n { text-align: right; white-space: nowrap; padding-left: 10px; }
+.term .of { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 8px; }
+.term .of .cost { flex: 1 1 auto; font-size: 12px; color: var(--dim); }
+.term .of .cost b { font-weight: normal; font-size: 14px; color: var(--ink); }
+
+/* Порт: значки услуг и уровень. */
+.term .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.term .chip {
+  font: inherit; font-size: 11px; letter-spacing: 1px; padding: 4px 9px;
+  color: var(--txt); background: transparent; border: 1px solid var(--line2);
+}
+.term button.chip { cursor: pointer; color: var(--ink); border-color: var(--line); }
+.term button.chip:hover { border-color: var(--cy); background: rgba(79,179,224,.12); }
+.term .chip.off { opacity: .4; text-decoration: line-through; }
+.term .pips { letter-spacing: 1px; color: var(--cy); }
+.term .pips i { font-style: normal; color: rgba(79,179,224,.22); }
+.term .tag { font-size: 11px; letter-spacing: 1px; padding: 4px 9px; color: var(--cy); border: 1px solid var(--cy); }
+.term .banner { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 10px 12px; margin-bottom: 14px; border: 1px solid rgba(255,204,102,.4); background: rgba(255,204,102,.06); }
+.term .banner b { font-weight: normal; letter-spacing: 1px; }
+.term .banner span { color: var(--txt); }
+
+/* Пилот: имя корабля, трюм, подряды, деньги. */
+.term .ident { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+.term .ident h2 { font-size: 26px; font-weight: normal; letter-spacing: 2px; color: var(--ink); }
+.term .ident span { color: var(--dim); }
+.term .holdbar { margin-bottom: 14px; }
+.term .mission .mh { display: flex; justify-content: space-between; gap: 12px; }
+.term .mission .mh b { font-weight: normal; color: var(--ink); font-size: 14px; }
+.term .mission p { margin-top: 6px; color: var(--txt); }
+.term .mission.dead { border-color: rgba(255,122,102,.5); }
+.term .money { display: flex; flex-wrap: wrap; gap: 12px 40px; margin-bottom: 16px; }
+.term .money span { display: block; font-size: 10px; letter-spacing: 2px; color: var(--dim); }
+.term .money b { font-weight: normal; font-size: 18px; color: var(--ink); }
+.term .money div:first-child b { font-size: 28px; }
+.term .money b.good { color: var(--green); } .term .money b.bad { color: var(--red); }
+.term .empty { text-align: center; padding: 56px 16px; }
+.term .empty b { display: block; font-weight: normal; font-size: 15px; letter-spacing: 1px; color: var(--txt); margin-bottom: 8px; }
+.term .empty p { color: var(--dim); max-width: 520px; margin: 0 auto; }
+
+/* Средний экран: двум колонкам и панели тесно — показатели мельче. */
+@media (max-width: 1100px) {
+  .term .stat { min-width: 0; padding: 2px 10px; }
+  .term .stat b { font-size: 13px; }
+}
+
+/* Узкий экран (телефон стоя): одна колонка. Панель выбранного товара или
+   гнезда — снизу, прилипает к нижней кромке, пока листают список: так
+   видно и что выбрано, и что ещё есть. */
+@media (max-width: 760px) {
+  .term .tw { width: 100vw; height: 100vh; height: 100dvh; border: none; }
+  .term .th { flex-wrap: wrap; padding: 8px 10px 8px 12px; gap: 6px 10px; }
+  .term .who { flex-basis: calc(100% - 60px); }
+  .term .stats { order: 3; width: 100%; }
+  .term .stat { flex: 1 1 0; min-width: 0; padding: 0 6px; }
+  .term .stat:first-child { border-left: none; padding-left: 0; }
+  .term .stat b { font-size: 12px; }
+  .term .cols2, .term .split { display: block; }
+  .term .cols2 > * + *, .term .split > * + * { margin-top: 14px; }
+  .term .detail { position: sticky; top: auto; bottom: -20px; max-height: 62vh; overflow-y: auto;
+    box-shadow: 0 -12px 28px rgba(0,0,0,.7); background: #071a2a; }
+  .term .tb { padding: 12px; }
+  .term .tf { padding: 8px 10px; }
+  .term .tf .note { display: none; }
+  .term .tf .acts { flex: 1 1 auto; justify-content: flex-end; }
+  /* Столбец «к средней» — тот же, что словами в панели сделки: на узком
+     экране ему не хватает места, и таблица вылезала за край. */
+  .term .lt .opt { display: none; }
+  .term .lt td, .term .lt th { padding-left: 6px; padding-right: 6px; }
+}
+
+/* Низкий экран (телефон лёжа: 390 точек высоты): шапка и закладки
+   тоньше — телу остаётся больше половины высоты. */
+@media (max-height: 520px) {
+  .term .tw { width: 100vw; height: 100vh; height: 100dvh; border: none; }
+  .term .th { padding: 5px 10px 5px 14px; }
+  .term .who h1 { font-size: 15px; }
+  .term .who .sub, .term .kick { display: none; }
+  .term .stat b { font-size: 12px; }
+  .term .stat span { font-size: 9px; letter-spacing: 1px; }
+  .term .tab { padding: 7px 10px 6px; font-size: 12px; }
+  .term .tb { padding: 10px 14px; }
+  .term .tf { padding: 5px 10px; }
+  .term .b { padding: 6px 10px; }
+  .term .ident { margin-bottom: 8px; } .term .ident h2 { font-size: 18px; }
+  .term .detail { max-height: calc(100vh - 150px); max-height: calc(100dvh - 150px); }
+  .term .empty { padding: 20px 12px; }
+}
+
+/* Пальцем в мелкую кнопку не попасть: цель — не меньше 40 точек. */
+@media (pointer: coarse) {
+  .term .b, .term .x, .term .chip { min-height: 40px; }
+  .term .b.sm { min-height: 36px; }
+  .term .tab { padding: 10px 12px; }
+  .term .lt td { padding: 11px 8px; }
+  .term .tt kbd, .term .tf kbd, .term .b kbd { display: none; }
 }
 
 /* Мелкий экран: телефон в горизонте — это 393 точки высоты, и стартовый
@@ -209,8 +489,6 @@ html, body {
 @media (pointer: coarse) {
   /* Пальцем в мелкую кнопку не попасть: минимальная цель — 44 точки. */
   .btn { padding: 12px 22px; min-height: 44px; }
-  .btn.small { padding: 8px 12px; min-height: 40px; }
-  .st-tabs .tab { padding: 12px 14px; }
   #screen, #hud { cursor: default; }
   .keys { display: none; }
 }

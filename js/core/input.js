@@ -17,8 +17,17 @@
  * было: колесо игре, прокрутка страницы отменена.
  */
 const scrollPanel = (el) => {
-  const p = el && el.closest ? el.closest('.panel') : null;
-  return p && p.scrollHeight > p.clientHeight + 1 ? p : null;
+  // .scroll — тело бортового терминала (js/ui/terminal.js): прокручивается
+  // оно, а не рамка вокруг.
+  // Прокручиваемые вложены: панель сделки в теле терминала. Колесо — первой
+  // снизу, которой есть что прокручивать.
+  let p = el && el.closest ? el.closest('.panel, .scroll') : null;
+  while (p) {
+    if (p.scrollHeight > p.clientHeight + 1) return p;
+    const up = p.parentElement;
+    p = up && up.closest ? up.closest('.panel, .scroll') : null;
+  }
+  return null;
 };
 
 const BLOCK = new Set([

@@ -32,6 +32,10 @@
 <!-- Приборная панель отдельным прозрачным слоем поверх сцены -->
 <canvas id="hud"></canvas>
 
+<!-- Бортовой терминал (I) и порт: одно окно, разметку собирает игра
+     (js/ui/terminal.js). Под оверлеями справки и крушения — они важнее. -->
+<div id="term" class="term hidden"></div>
+
 <div id="overlay" class="overlay hidden">
   <div class="panel" id="panel"></div>
 </div>

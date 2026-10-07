@@ -175,6 +175,11 @@ export const ATMO_THICK = 0.2;
 // пропадал под ровной синевой.
 export const ATMO_GLOW = 2;
 const MIN_PIXELS = 0.4;      // тела мельче — не рисуем
+// Карта (renderMap): рассеянный свет ярче полётного — ночная сторона
+// планеты на карте должна читаться шаром, а не дырой; ближняя плоскость —
+// своя: камера карты подходит к телу на пару его радиусов.
+const MAP_AMBIENT = 0.3;
+const MAP_NEAR = 1e-3;
 const BUILD_MS = 2.5;        // бюджет на досборку мешей тел за кадр
 
 // Подсветка корабля в варп-тоннеле. Вчетверо выше обычной: теней в
@@ -948,6 +953,164 @@ export class GlScene {
     gl.disable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
     this.gpuTimer.end();
+  }
+
+  /**
+   * Карта системы и галактики (js/ui/map.js).
+   *
+   * Та же видеокарта и те же программы, что в полёте, только глаз —
+   * камера карты (map.camera), а список тел и их размеры даёт сама карта
+   * (map.gl): тело мельче нескольких пикселей рисуется не меньше их, как
+   * его значок, иначе шар и подписи разъехались бы. Мир за бортом под
+   * картой не рисуется вовсе — его всё равно не видно, а стоил бы он
+   * столько же, сколько полёт.
+   *
+   * Камера сцены подменяется на кадр и возвращается — всё, что считает от
+   * this.camera (матрицы, свет, море, ореол), работает без переделки.
+   */
+  renderMap(game, map) {
+    if (!this.ok) return false;
+    const gl = this.gl;
+    const saved = this.camera, savedCull = this.cull, savedJump = this.jump.power;
+    const cam = map.camera;
+    this.worldTime = game.world ? game.world.time : 0;
+    this.resize();
+    this.gpuTimer.begin();
+    this.tris = 0; this.draws = 0; this.culled = 0;
+    this.camera = cam;
+    // Тел на карте десяток: отсев за кадром не окупается, а пирамиду для
+    // него считает render — здесь её нет.
+    this.cull = false;
+    // Поток частиц прыжка рисуется вместе со звёздами — на карте он лишний.
+    this.jump.power = 0;
+    try {
+      const aspect = this.canvas.width / Math.max(1, this.canvas.height);
+      perspective(cam.fov, aspect, MAP_NEAR, FAR, this.proj);
+      if (pendingBuilds()) pumpBuilds(gl, this.meshLocs, BUILD_MS);
+      if (game.world) this.updateSky(game.world);
+
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clearDepth(1);
+      gl.disable(gl.CULL_FACE);
+      gl.depthFunc(gl.LEQUAL);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.STENCIL_TEST);
+      gl.stencilMask(0xff);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+
+      this.drawStars();
+      if (map.gl.mode === 'system' && game.world) this.drawMapBodies(game, map);
+      this.drawMapGlows(map);
+    } finally {
+      this.camera = saved;
+      this.cull = savedCull;
+      this.jump.power = savedJump;
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+      this.gpuTimer.end();
+    }
+    return true;
+  }
+
+  /** Тела карты: шары той же программой, что в полёте, и кольца. */
+  drawMapBodies(game, map) {
+    const gl = this.gl;
+    const cam = this.camera;
+    const prog = this.pMesh;
+    prog.use();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex.tex);
+    gl.uniform1i(prog.loc('uSurfTex'), 0);
+    gl.uniform1f(prog.loc('uSurfMode'), 0);
+    this.useGround(prog);
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uAmbient'), MAP_AMBIENT);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    this.useShipShadow(prog, false);
+    // Ни фар, ни теней от них, ни дымки, ни детали на пиксель: тела на
+    // карте — модели на столе, а не грунт под ногами.
+    this.setLamps(prog, null);
+    gl.uniform1i(prog.loc('uShadeN'), 0);
+    this.setAir(prog, null);
+    this.setDetail(prog, null, 0);
+    const sunPos = game.world.star.pos;
+    for (const it of map.gl.bodies) {
+      const body = it.body;
+      const c = cam.toCamera(body.pos);
+      const d = Math.hypot(c.x, c.y, c.z);
+      const px = d > it.r ? cam.focal * it.r / d : 1e4;
+      const level = Math.min(6, planetLevel(body, px));
+      const mesh = requestPlanetMesh(gl, this.meshLocs, body, level);
+      bodyBasis(body, this.basisTmp);
+      this.setWater(prog, body);
+      this.drawObject(prog, mesh, body.pos, this.basisTmp, it.r,
+        body.kind === 'star' ? { x: body.pos.x, y: body.pos.y, z: body.pos.z + 1 } : sunPos);
+    }
+    this.setWater(prog, null);
+
+    if (!map.gl.rings.length) return;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    const ring = this.pRing;
+    ring.use();
+    gl.uniformMatrix4fv(ring.loc('uProj'), false, this.proj);
+    gl.uniform1f(ring.loc('uLogFC'), this.logFC);
+    for (const it of map.gl.rings) {
+      const body = it.body;
+      if (!body._ringMesh) {
+        body._ringMesh = buildRingMesh(gl, this.ringLocs, body.rings.inner, body.rings.outer);
+      }
+      // Плоскость колец — экваториальная (как в drawTransparent).
+      const b = this.basisTmp;
+      b.right.x = body.eqRef.x; b.right.y = body.eqRef.y; b.right.z = body.eqRef.z;
+      b.up.x = body.eqSide.x; b.up.y = body.eqSide.y; b.up.z = body.eqSide.z;
+      b.fwd.x = body.pole.x; b.fwd.y = body.pole.y; b.fwd.z = body.pole.z;
+      gl.uniform3fv(ring.loc('uColor'), new Float32Array([
+        body.rings.color[0] / 255, body.rings.color[1] / 255, body.rings.color[2] / 255]));
+      this.drawObject(ring, body._ringMesh, body.pos, b, it.r, sunPos);
+    }
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Свечения карты: корона звезды системы, звёзды галактики. Радиус — в
+   * пикселях: на карте свечение — знак, и размер у него экранный.
+   */
+  drawMapGlows(map) {
+    const list = map.gl.glows;
+    if (!list.length) return;
+    const gl = this.gl;
+    const cam = this.camera;
+    const prog = this.pGlow;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.depthMask(false);
+    gl.disable(gl.DEPTH_TEST);
+    prog.use();
+    gl.uniformMatrix4fv(prog.loc('uProj'), false, this.proj);
+    gl.uniform1f(prog.loc('uLogFC'), this.logFC);
+    gl.uniform2fv(prog.loc('uViewport'), new Float32Array([this.canvas.width, this.canvas.height]));
+    gl.uniform1f(prog.loc('uFalloff'), GLOW_FALLOFF);
+    // Пиксели карты — в точках экрана (CSS), холст сцены — в своих.
+    const dpr = this.canvas.width / Math.max(1, cam.w);
+    for (const g of list) {
+      const c = cam.toCamera(g.pos);
+      if (c.z <= 0) continue;
+      gl.uniform3fv(prog.loc('uCenterView'), new Float32Array([c.x, c.y, c.z]));
+      gl.uniform1f(prog.loc('uRadiusPx'), g.px * dpr);
+      gl.uniform3fv(prog.loc('uColor'), new Float32Array(g.color));
+      gl.uniform1f(prog.loc('uIntensity'), g.k);
+      this.quad.draw();
+      this.draws++;
+    }
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
   }
 
   /**

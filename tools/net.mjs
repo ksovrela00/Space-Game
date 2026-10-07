@@ -69,7 +69,7 @@ const el = (id) => ({
   focus() {}, closest: () => null,
 });
 const nodes = { screen: el('screen'), hud: el('hud'), overlay: el('overlay'),
-  panel: el('panel'), boot: el('boot'), bootBtn: el('bootBtn'), bootBody: el('bootBody'),
+  panel: el('panel'), term: el('term'), boot: el('boot'), bootBtn: el('bootBtn'), bootBody: el('bootBody'),
   link: el('link'), linkTitle: el('linkTitle'), linkBody: el('linkBody') };
 globalThis.document = { getElementById: (id) => nodes[id] || el(id), createElement: () => el('div') };
 
@@ -543,10 +543,15 @@ if (CASE === 'server') {
       services: { market: true, board: true, repair: true, outfit: true } };
     SERVER_STATE.ship.fuelT = 4;
     game.ship.fuel = 4;
+    // Экран порта — бортовой терминал (js/ui/terminal.js): заправка на его
+    // первом разделе. Разметку берём строкой — так же, как её ставит рамка.
+    const T = await import('../js/ui/terminal.js');
+    const term = () => T.terminalHtml(game, true);
     S.showDocked(game);
-    S.stationAct(game, 'tab', { tab: 'fuel' });
+    S.stationAct(game, 'tab', { tab: 'port' });
+    S.stationLoad(game, 'port');
     await settle();
-    ok(/ДО ПОЛНОГО · 8 т · 640/.test(nodes.panel.innerHTML),
+    ok(/ДО ПОЛНОГО · 8 т · 640/.test(term()),
       'цену заправки экран взял у сервера: 8 т по ' + FUEL_PRICE + ' кр');
     const before = game.player.balance;
     S.stationAct(game, 'refuel', { tons: 'full' });
@@ -554,7 +559,7 @@ if (CASE === 'server') {
     ok(calls.some((u) => u.indexOf('station.refuel') >= 0) && game.ship.fuel === 12
       && game.player.balance === before - 640,
       'заправка прошла через сервер: бак ' + game.ship.fuel + ' т, счёт ' + game.player.balance);
-    ok(/ЗАПРАВКА: 8 т/.test(nodes.panel.innerHTML), 'и экран сказал, сколько налито и почём');
+    ok(/ЗАПРАВКА: 8 т/.test(term()), 'и экран сказал, сколько налито и почём');
 
     S.stationAct(game, 'tab', { tab: 'market' });
     await settle();

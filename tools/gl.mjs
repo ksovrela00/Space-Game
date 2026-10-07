@@ -3363,6 +3363,36 @@ console.log('\n== мок GL: путь отрисовки ==');
   ok(d1 > 0 && scene.tris > 0,
     `кадр у станции: ${d1} вызовов, ${scene.tris} треугольников`);
 
+  // Карта (js/ui/map.js, renderMap): сцена рисует её камерой карты — шары
+  // тел той же программой, корону и звёзды неба, — а мир за бортом под
+  // картой не рисует вовсе. Камера полёта после кадра карты та же: её
+  // подменяют на кадр, и забыть вернуть — значит улететь взглядом в карту.
+  {
+    const { makeMap, mapFrame, resetMap } = await import('../js/ui/map.js');
+    const { makeNav } = await import('../js/game/nav.js');
+    const { systemById } = await import('../js/game/galaxy.js');
+    const mg = {
+      world, ship, nav: makeNav(world), map: makeMap(), state: { messages: [], mode: 'flight' },
+      sys: systemById(0), fleet: [], peers: [], selectTarget() {},
+    };
+    resetMap(mg.map, world);
+    mapFrame(mg, 1600, 900, 0);
+    const camWas = scene.camera, posWas = { ...scene.camera.pos };
+    const b0 = state.draws;
+    const drew = scene.renderMap(mg, mg.map);
+    const dm = state.draws - b0;
+    const bodies = mg.map.gl.bodies.length, rings = mg.map.gl.rings.length;
+    mg.map.view = 'galaxy';
+    mapFrame(mg, 1600, 900, 0);
+    const b1 = state.draws;
+    scene.renderMap(mg, mg.map);
+    const dg = state.draws - b1;
+    const back = scene.camera === camWas && scene.camera.pos.x === posWas.x && scene.camera.pos.z === posWas.z;
+    ok(drew && back && dm >= bodies + rings + 2 && dm <= bodies + rings + 6 && dg >= 7 && dg <= 12,
+      `карта: система — ${dm} вызовов (${bodies} шаров, колец ${rings}, звёзды, небо, корона), ` +
+      `галактика — ${dg} (семь звёзд и небо); камера полёта на месте`);
+  }
+
   // Чужие пилоты в кадре. Проверка тупая — «стало на один вызов
   // больше», — но ловит она ровно то, из-за чего всё это писалось:
   // список пилотов приходил, а в космосе было пусто.

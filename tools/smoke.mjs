@@ -157,6 +157,7 @@ const nodes = {
   panel: el('panel'),
   boot: el('boot'),
   bootBtn: el('bootBtn'),
+  term: el('term'),
 };
 
 globalThis.document = {
@@ -530,13 +531,17 @@ function langStep() {
   const ruHud = hud.filter((s) => CYR.test(s));
   if (ruHud.length) throw new Error('в приборах осталось русское: ' + ruHud.slice(0, 3).join(' | '));
 
-  // Меню пилота.
-  key('KeyI');
-  const menu = shown();
-  if (!menu.some((s) => s.indexOf('PILOT MENU') >= 0)) throw new Error('меню не переведено');
-  if (!menu.some((s) => s.indexOf('CARGO') >= 0)) throw new Error('разделы меню не переведены');
-  const ruMenu = menu.filter((s) => CYR.test(s));
-  if (ruMenu.length) throw new Error('в меню осталось русское: ' + ruMenu.slice(0, 3).join(' | '));
+  // Бортовой терминал: разметка, а не холст — смотрим её текст. Корабль и
+  // трюм (2): подписи игры. Подряды и лента — слова сервера, они по-русски.
+  key('KeyI'); frames(2);
+  for (const tab of ['Digit1', 'Digit2']) {
+    key(tab); frames(1);
+    const text = nodes.term.innerHTML.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ');
+    if (text.indexOf('SHIP TERMINAL') < 0 || text.indexOf('HOLD') < 0) throw new Error('терминал не переведён');
+    const ru = text.match(/[^ ]*[А-Яа-яЁё][^ ]*/);
+    // Товары в трюме — названия с сервера: они переводятся словарём.
+    if (ru) throw new Error('в терминале осталось русское (' + tab + '): ' + ru[0]);
+  }
   key('KeyI');
   frames(2);
 
@@ -2975,29 +2980,49 @@ await step('карта системы (M): масштаб, выбор, назн�
   if (map.sel !== game.nav.list[game.nav.index]) throw new Error('выбрана не текущая цель');
   if (Math.abs(map.zoom - 1) > 1e-6) throw new Error('масштаб при открытии ' + map.zoom);
 
-  // Колесо приближает, W и S — тоже. Это и было главной претензией к
-  // старой карте: она не приближалась вовсе.
-  mouse('mousemove', { clientX: 400, clientY: 400 });
+  // Колесо приближает, стрелки вверх и вниз — тоже. Это и было главной
+  // претензией к старой карте: она не приближалась вовсе.
+  mouse('mousemove', { clientX: 700, clientY: 450 });
   mouse('wheel', { deltaY: -600 });
   frames(2);
   const zWheel = map.zoom;
   if (!(zWheel > 1.5)) throw new Error('колесо не приближает: ×' + zWheel.toFixed(2));
-  key('KeyW'); frames(2);
-  if (!(map.zoom > zWheel)) throw new Error('W не приближает');
+  key('ArrowUp'); frames(2);
+  if (!(map.zoom > zWheel)) throw new Error('↑ не приближает');
   // Нажатия разбираются раз в кадр: два в одном кадре — это одно.
-  key('KeyS'); frames(2); key('KeyS'); frames(2);
-  if (!(map.zoom < zWheel)) throw new Error('S не отдаляет');
+  key('ArrowDown'); frames(2); key('ArrowDown'); frames(2);
+  if (!(map.zoom < zWheel)) throw new Error('↓ не отдаляет');
+
+  // W/A/S/D двигают карту по плоскости, а не переключают объекты и не
+  // меняют масштаб (жалоба: «A и D бесят — должны просто двигать карту»).
+  {
+    const selWas = map.sel, zWas = map.zoom;
+    const f0 = { x: map.cam.g.fx, z: map.cam.g.fz };
+    holdDown('KeyD'); frames(20); release('KeyD'); frames(1);
+    const f1 = { x: map.cam.g.fx, z: map.cam.g.fz };
+    holdDown('KeyW'); frames(20); release('KeyW'); frames(1);
+    const f2 = { x: map.cam.g.fx, z: map.cam.g.fz };
+    const d1 = Math.hypot(f1.x - f0.x, f1.z - f0.z), d2 = Math.hypot(f2.x - f1.x, f2.z - f1.z);
+    if (!(d1 > 0 && d2 > 0)) throw new Error('D и W не двигают карту: ' + d1 + ', ' + d2);
+    if (map.sel !== selWas) throw new Error('D переключила объект');
+    if (Math.abs(map.zoom - zWas) > 1e-9) throw new Error('W поменяла масштаб');
+  }
 
   // Щелчок по нарисованному объекту выбирает его. Координаты берём из
   // того же списка, по которому карта ищет попадание, — так проверяется
   // связка «нарисовано там же, где ловится».
-  key('KeyX'); frames(3);                       // сброс вида: снова вся система
+  // Сброс вида: снова вся система. Вид к ней ЕДЕТ (полсекунды), и щёлкать
+  // в движущуюся планету — не то, что делает игрок: ждём, пока встанет.
+  key('KeyX'); frames(90);
   const spot = map.items.find((it) => it.obj === game.world.home);
   if (!spot) throw new Error('родной планеты нет на карте');
   mouse('mousemove', { clientX: spot.sx, clientY: spot.sy });
   mouse('mousedown', { button: 0, clientX: spot.sx, clientY: spot.sy });
   frames(2);
+  // Выбор в сцене — по отпусканию без протаскивания: тянуть с нажатой
+  // кнопкой значит вращать карту, а не выбирать.
   mouse('mouseup', { button: 0 });
+  frames(1);
   if (map.sel !== game.world.home) {
     throw new Error('щелчок не выбрал планету: ' + (map.sel && map.sel.name));
   }
@@ -3081,116 +3106,63 @@ await step('карта системы (M): масштаб, выбор, назн�
   if (nodes.screen.classList.contains('map')) throw new Error('курсор остался после карты');
 });
 
-// Меню пилота. Три свойства, которые нельзя проверить глазами за один
-// заход и очень легко сломать: раздел рисуется тот, что выбран; полёт на
-// это время глохнет, а МИР — НЕТ; клавиша I в порту не открывает ничего.
-await step('меню пилота (I): разделы, живой мир, мёртвое управление', () => {
+// Бортовой терминал вне порта (I). Свойства, которые легко сломать и не
+// видно глазами за один заход: показан тот раздел, что выбран; полёт на
+// это время глохнет, а МИР — НЕТ; закрытый терминал возвращает управление.
+// Терминал — разметка (js/ui/terminal.js), и проверяется по ней.
+await step('бортовой терминал (I): разделы, живой мир, мёртвое управление', () => {
+  const term = nodes.term;
+  const html = () => term.innerHTML;
+  const need = (...parts) => {
+    for (const p of parts) if (html().indexOf(p) < 0) throw new Error('в терминале нет «' + p + '»');
+  };
   try {
   if (game.state.mode !== 'flight') { key('Space'); frames(4); }
   // В пустое место и НА ТЯГЕ: просто присвоить скорость мало —
   // стабилизатор гасит всё, что не задано ручкой, и корабль встаёт за
-  // полсекунды (первый заход этой проверки на том и сломался).
+  // полсекунды.
   game.ship.pos.x = 0; game.ship.pos.y = 2.2e6; game.ship.pos.z = 0;
   game.ship.throttle = 0.5;
   frames(90);
   if (!(game.ship.speed > 0.2)) throw new Error('корабль не разогнался: ' + game.ship.speed);
 
-  const seen = () => {
-    texts = [];
-    frames(1);
-    const list = texts.map((t) => t.s);
-    texts = null;
-    return list;
-  };
-  const has = (list, s) => list.some((t) => t.indexOf(s) >= 0);
-  const need = (list, ...parts) => {
-    for (const s of parts) if (!has(list, s)) throw new Error('нет строки «' + s + '»');
-  };
-
   key('KeyI'); frames(1);
-  if (!game.menu.open) throw new Error('меню не открылось в полёте');
-  // ВЁРСТКА. Ни одна надпись не вылезает за рамку и не наезжает на
-  // соседнюю. Проверяется счётом, а не глазами: кегль и ширина колонок
-  // зависят от размера окна, и разъезжается это молча — на телефоне
-  // раньше, чем на мониторе.
-  const layout = (title) => {
-    texts = [];
-    frames(1);
-    const list = texts; texts = null;
-    // Меню рисуется последним, и первая его надпись — заголовок. Всё, что
-    // до него, принадлежит приборам под меню.
-    // В шапке — и имя пилота (с сервера): «МЕНЮ ПИЛОТА · JAMESON».
-    const from = list.findIndex((t) => t.s.indexOf('МЕНЮ ПИЛОТА') === 0);
-    if (from < 0) throw new Error(title + ': заголовка меню нет в кадре');
-    const r = game.menu.rect, fs = game.menu.fs;
-    // Consolas: ширина знака 0.55 em — ровно та же оценка, что у
-    // measureText в этом моке. Брать здесь «с запасом» нельзя: перенос
-    // строки меряет текст по measureText, и запас в проверке объявлял бы
-    // виновным честно перенесённый абзац.
-    const span = (t) => {
-      const w = t.s.length * (parseFloat(t.font) || fs) * 0.55;
-      const x0 = t.align === 'right' ? t.x - w : t.align === 'center' ? t.x - w / 2 : t.x;
-      return { x0, x1: x0 + w, y: t.y, s: t.s };
-    };
-    const boxes = list.slice(from).map(span);
-    for (const b of boxes) {
-      if (b.x0 < r.x - 1 || b.x1 > r.x + r.w + 1 || b.y < r.y || b.y > r.y + r.h + 1) {
-        throw new Error(title + ': «' + b.s + '» вылезла за рамку меню');
-      }
-    }
-    for (let a = 0; a < boxes.length; a++) {
-      for (let c = a + 1; c < boxes.length; c++) {
-        const p = boxes[a], q = boxes[c];
-        if (Math.abs(p.y - q.y) > fs * 0.6) continue;      // разные строки
-        if (p.x0 < q.x1 - 1 && q.x0 < p.x1 - 1) {
-          throw new Error(title + ': «' + p.s + '» наезжает на «' + q.s + '»');
-        }
-      }
-    }
-    return boxes.length;
-  };
-  layout('КОРАБЛЬ');
+  if (!game.menu.open || term.classList.contains('hidden')) throw new Error('терминал не открылся в полёте');
+  if (term.classList.contains('port')) throw new Error('в полёте терминал открылся портовым');
+  // Открывается он на разделе, где его закрыли в прошлый раз (шаг языка
+  // оставил трюм), — первый раздел ставим сами.
+  key('Digit1'); frames(1);
 
-  // 1. КОРАБЛЬ: имя из модели, габариты из модели, щиты и бак.
-  const shipTab = seen();
-  need(shipTab, 'МЕНЮ ПИЛОТА', 'CHALLENGER', 'ГАБАРИТЫ', 'ДЛИНА', '65.0 м',
-    // «ГНЕЗДО СВОБОДНО» — на месте невыставленного оружия. Проверка та
-    // же, что и раньше: пустых строк в карточке не бывает, отсутствие
-    // модуля написано словами.
-    'УСТАНОВЛЕННЫЕ МОДУЛИ', 'КВАНТОВЫЙ ПРИВОД', 'ГНЕЗДО СВОБОДНО', 'ЩИТЫ', 'ТОПЛИВО',
-    'КОРАБЛЬ В ПОЛЁТЕ');
-  if (has(shipTab, 'ЗАНЯТО') || has(shipTab, 'НАЧАЛЬНЫЙ КАПИТАЛ')) {
-    throw new Error('на вкладке корабля видно чужой раздел');
-  }
+  // 1. КОРАБЛЬ: имя, габариты, модули по группам, в шапке — скорость.
+  need('БОРТОВОЙ ТЕРМИНАЛ', 'CHALLENGER', 'ГАБАРИТЫ', 'УСТАНОВЛЕННЫЕ МОДУЛИ', 'КВАНТОВЫЙ ПРИВОД',
+    'ГНЕЗДО СВОБОДНО', 'ЩИТЫ', 'ТОПЛИВО', 'СКОРОСТЬ', 'data-act="close"');
+  if (/ЗАНЯТО|НАЧАЛЬНЫЙ КАПИТАЛ|data-act="launch"/.test(html())) throw new Error('на вкладке корабля видно чужое');
 
-  // 2. ГРУЗ: тоннаж и чем занято.
+  // 2. ТРЮМ: тоннаж, чем занят и почём брали.
   key('Digit2'); frames(1);
-  const cargoTab = seen();
-  need(cargoTab, 'ЗАНЯТО 13.0 / 20.0 Т', 'СВОБОДНО', 'ВОДА', 'ЗЕРНО', 'ЖЕЛЕЗНАЯ РУДА', '6.0 т');
-  layout('ГРУЗ');
+  need('ЗАНЯТО', '13 т / 20 т', 'ВОДА', 'ЗЕРНО', 'ЖЕЛЕЗНАЯ РУДА', 'КУПЛЕНО ПО');
 
-  // 3. ЗАДАНИЯ: срок и награда.
+  // 3. ПОДРЯДЫ: куда, срок, награда, штраф.
   key('Digit3'); frames(1);
-  const questTab = seen();
-  need(questTab, 'ДОСТАВКА · LAVE VI', 'ОСТАЛОСЬ', fmtCrowns(1200), 'РАЗВЕДКА · BEON');
-  layout('ЗАДАНИЯ');
+  need('ДОСТАВКА · LAVE VI', 'осталось', fmtCrowns(1200, true), 'РАЗВЕДКА · BEON', 'Штраф за срыв');
 
-  // 4. ФИНАНСЫ: баланс и лента.
+  // 4. ФИНАНСЫ: баланс и лента — у каждой строки своё время. Раньше всем
+  // строкам ставились одни «часы пилота» на миг разбора ответа сервера.
   key('Digit4'); frames(1);
-  const moneyTab = seen();
-  need(moneyTab, fmtCrowns(game.player.balance), 'НАЧАЛЬНЫЙ КАПИТАЛ',
-    fmtCrowns(3400, true), 'ПРИШЛО', 'УШЛО');
-  layout('ФИНАНСЫ');
+  need(fmtCrowns(game.player.balance), 'НАЧАЛЬНЫЙ КАПИТАЛ', fmtCrowns(3400, true), 'ПРИШЛО', 'УШЛО', 'ОСТАТОК');
+  const times = new Set([...html().matchAll(/<tr><td class="dim">([^<]+)<\/td>/g)].map((m) => m[1]));
+  if (times.size < 3) throw new Error('в ленте одно время на все операции: ' + [...times].join(', '));
 
-  // Мир под меню ЖИВЁТ: корабль летит дальше, часы пилота идут.
+  // Мир под терминалом ЖИВЁТ: корабль летит дальше, часы пилота идут.
   const p0 = { x: game.ship.pos.x, y: game.ship.pos.y, z: game.ship.pos.z };
   const t0 = game.player.time, w0 = game.world.time;
   frames(60);
   const moved = Math.hypot(game.ship.pos.x - p0.x, game.ship.pos.y - p0.y, game.ship.pos.z - p0.z);
-  if (!(moved > 0.1)) throw new Error('корабль замер под меню: ' + moved.toFixed(3) + ' км');
+  if (!(moved > 0.1)) throw new Error('корабль замер под терминалом: ' + moved.toFixed(3) + ' км');
   if (!(game.world.time > w0) || !(game.player.time > t0)) throw new Error('время остановилось');
 
-  // ...а вот управление — нет: ни разворота, ни тяги, ни выбора цели.
+  // ...а вот управление — нет: ни разворота, ни тяги, ни выбора цели. И
+  // W/A/S/D в терминале не листают разделы: им там двигать нечего.
   const f0 = { ...game.ship.basis.fwd };
   const thr0 = game.ship.throttle;
   holdDown('KeyD'); holdDown('ShiftLeft');
@@ -3198,28 +3170,26 @@ await step('меню пилота (I): разделы, живой мир, мёр
   release('KeyD'); release('ShiftLeft');
   key('KeyZ'); frames(2);
   const dot = f0.x * game.ship.basis.fwd.x + f0.y * game.ship.basis.fwd.y + f0.z * game.ship.basis.fwd.z;
-  if (dot < 0.99999) throw new Error('корабль развернулся при открытом меню: dot ' + dot.toFixed(5));
+  if (dot < 0.99999) throw new Error('корабль развернулся при открытом терминале: dot ' + dot.toFixed(5));
   if (Math.abs(game.ship.throttle - thr0) > 1e-9) {
-    throw new Error('тяга изменилась при открытом меню: ' + thr0 + ' -> ' + game.ship.throttle);
+    throw new Error('тяга изменилась при открытом терминале: ' + thr0 + ' -> ' + game.ship.throttle);
   }
-  // Зато D сделал своё дело как клавиша МЕНЮ: с четвёртого раздела
-  // пролистнул на первый, по кругу. Ровно это и значит «ввод забрало
-  // меню»: клавиша жива, но работает не на корабль.
-  if (game.menu.tab !== 0) throw new Error('D не пролистал разделы: ' + game.menu.tab);
+  if (game.menu.tab !== 'money') throw new Error('D пролистал разделы: ' + game.menu.tab);
+  // Разделы листают Q и E — по кругу.
+  key('KeyE'); frames(1);
+  if (game.menu.tab !== 'ship') throw new Error('E с последнего раздела не вернул на первый: ' + game.menu.tab);
+  key('KeyQ'); frames(1);
+  if (game.menu.tab !== 'money') throw new Error('Q не пролистал назад: ' + game.menu.tab);
 
-  // Мышь: щелчок по закладке переключает раздел. Курсор в меню видно
-  // (класс на #screen), и закладки обязаны на него отвечать.
-  key('Digit1'); frames(1);
-  const t3 = game.menu.tabRects[2];
-  mouse('mousedown', { button: 0, clientX: t3.x + t3.w / 2, clientY: t3.y + t3.h / 2 });
+  // Мышь: щелчок по закладке — одна точка разбора на весь терминал.
+  term.onclick({ target: { closest: () => ({ disabled: false, dataset: { act: 'tab', tab: 'contracts' } }) } });
   frames(1);
-  mouse('mouseup', { button: 0 });
-  if (game.menu.tab !== 2) throw new Error('щелчок по закладке не сработал: ' + game.menu.tab);
+  if (game.menu.tab !== 'contracts' || html().indexOf('ДОСТАВКА · LAVE VI') < 0) {
+    throw new Error('щелчок по закладке не сработал: ' + game.menu.tab);
+  }
 
-  // Длинное описание обязано переноситься по словам. Без этой строки
-  // перенос не проверяется вовсе: у демо-заданий описания короткие и
-  // помещаются даже на телефоне — проверка вёрстки была бы зелёной и с
-  // напрочь выключенным переносом.
+  // Длинное описание подряда — целиком: прокрутка у терминала есть, и
+  // обрезать текст по нижней кромке, как делал холст, больше незачем.
   const longOne = addMission(game.player, {
     title: 'ПОДРЯД · ДАЛЬНИЙ',
     desc: 'Забрать партию охлаждённого биоматериала с орбитальной станции '
@@ -3228,40 +3198,27 @@ await step('меню пилота (I): разделы, живой мир, мёр
     reward: 4100,
     time: 30 * 60,
   });
-
-  // ТЕЛЕФОН. Кегль и колонки считаются от размера окна, и разъезжается
-  // вёрстка первым делом на узком экране — там, где её труднее всего
-  // заметить. Проверяем все четыре раздела на 390x844.
-  const W0 = window.innerWidth, H0 = window.innerHeight;
-  window.innerWidth = 390; window.innerHeight = 844;
-  for (const fn of winListeners.resize || []) fn();
-  frames(2);
-  for (let tab = 1; tab <= 4; tab++) {
-    key('Digit' + tab); frames(1);
-    layout('ТЕЛЕФОН, РАЗДЕЛ ' + tab);
-  }
-  window.innerWidth = W0; window.innerHeight = H0;
-  for (const fn of winListeners.resize || []) fn();
-  frames(2);
+  frames(1);
+  need('не превышая допустимую температуру в трюме.');
   game.player.missions = game.player.missions.filter((mm) => mm !== longOne);
 
   key('KeyI'); frames(2);
-  if (game.menu.open) throw new Error('меню не закрылось');
+  if (game.menu.open || !term.classList.contains('hidden')) throw new Error('терминал не закрылся по I');
+  key('KeyI'); frames(2);
+  key('Escape'); frames(2);
+  if (game.menu.open || !term.classList.contains('hidden')) throw new Error('терминал не закрылся по Esc');
 
-  // Закрытое меню возвращает управление — иначе проверка выше проходила
-  // бы и на намертво отключённых клавишах.
-  // Полторы секунды: тяжёлый корабль трогается с задержкой, и за
-  // полсекунды рыскание успевает довернуть его на полградуса.
+  // Закрытый терминал возвращает управление — иначе проверка выше
+  // проходила бы и на намертво отключённых клавишах.
   holdDown('KeyD'); frames(90); release('KeyD');
   const back = f0.x * game.ship.basis.fwd.x + f0.y * game.ship.basis.fwd.y + f0.z * game.ship.basis.fwd.z;
-  if (back > 0.999) throw new Error('после закрытия меню корабль не слушается: dot ' + back.toFixed(5));
+  if (back > 0.999) throw new Error('после закрытия терминала корабль не слушается: dot ' + back.toFixed(5));
   } finally {
     // Что бы ни упало выше, следующие проверки должны начинать с
-    // закрытого меню и живого управления.
+    // закрытого терминала и живого управления.
     game.menu.open = false;
     game.ship.vel.x = 0; game.ship.vel.y = 0; game.ship.vel.z = 0;
     game.ship.speed = 0; game.ship.throttle = 0;
-    // Корабль по инерции ещё доворачивал бы секунды две.
     game.ship.rot.pitch = game.ship.rot.yaw = game.ship.rot.roll = 0;
     if (game.ship.torq) game.ship.torq.pitch = game.ship.torq.yaw = game.ship.torq.roll = 0;
     frames(2);
@@ -3825,34 +3782,37 @@ await step('докинг-компьютер доводит до стыковки
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode + ', фаза ' + (game.ship.docking && game.ship.docking.phase) + ', причина: ' + game.crashReason);
 });
 
-await step('экран станции: разделы, клавиши 1–5, рынок и верфь с сервера, английский', async () => {
+await step('терминал в порту: разделы, клавиши, рынок и верфь с сервера, английский', async () => {
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
-  const html = () => nodes.panel.innerHTML;
-  for (const want of ['СТЫКОВКА', '1 ПОРТ', '2 РЫНОК', '3 ВЕРФЬ', '4 ЗАПРАВКА', '5 КОРАБЛИ', 'ВЫЛЕТ']) {
-    if (html().indexOf(want) < 0) throw new Error('на экране порта нет «' + want + '»');
+  frames(1);
+  const html = () => nodes.term.innerHTML;
+  for (const want of ['>ПОРТ<', '>РЫНОК<', '>ОСНАЩЕНИЕ<', '>ВЕРФЬ<', '>КОРАБЛЬ<', '>ТРЮМ<', 'data-act="launch"', 'ПЕРЕД ВЫЛЕТОМ']) {
+    if (html().indexOf(want) < 0) throw new Error('в терминале порта нет «' + want + '»');
   }
-  if (!nodes.panel.classList.contains('station')) throw new Error('панель без разметки станции');
+  if (!nodes.term.classList.contains('port') || nodes.term.classList.contains('hidden')) {
+    throw new Error('терминал порта не показан');
+  }
   // Разделы спрашивают сервер — ответ приходит не в том же кадре.
   const tab = async (n) => { key('Digit' + n); frames(1); await settle(4); frames(1); };
   await tab(2);
   if (!/ВОДА/.test(html())) throw new Error('рынок не показал товары сервера');
   await tab(3);
-  if (!/Замена засчитывает/.test(html())) throw new Error('верфь не нарисована по ответу сервера');
-  await tab(4);
-  if (!/class="fuelbar/.test(html()) || !/ДО ПОЛНОГО|БАК ПОЛОН/.test(html())) {
-    throw new Error('раздел заправки не нарисован');
+  if (!/Замена засчитывает/.test(html())) throw new Error('оснащение не нарисовано по ответу сервера');
+  await tab(1);
+  if (!/class="meter/.test(html()) || !/ДО ПОЛНОГО|БАК ПОЛОН/.test(html())) {
+    throw new Error('заправка на первом разделе не нарисована');
   }
-  await tab(5);
+  await tab(4);
   if (!/ВЕРФЬ КОРАБЛЕЙ/.test(html()) || !/Prometheus/.test(html())) {
-    throw new Error('раздел кораблей не нарисован по ответу сервера');
+    throw new Error('верфь кораблей не нарисована по ответу сервера');
   }
   if (/Автономн|без сервера|даром/.test(html())) throw new Error('экран порта говорит об автономной игре');
   // Английский: во всех пяти разделах ни одной русской буквы.
   const CYR = /[А-Яа-яЁё]/;
   try {
     setLang('en');
-    for (let i = 1; i <= 5; i++) {
-      key('Digit' + i); frames(1);
+    for (let i = 1; i <= 6; i++) {
+      key('Digit' + i); frames(1); await settle(4); frames(1);
       const text = html().replace(/<[^>]+>/g, ' ');
       if (CYR.test(text)) {
         throw new Error('в разделе ' + i + ' осталось русское: ' + (text.match(/[^ ]*[А-Яа-яЁё][^ ]*/) || [''])[0]);
@@ -3863,6 +3823,16 @@ await step('экран станции: разделы, клавиши 1–5, р�
   }
   key('Digit1'); frames(1);
   if (!/Планета/.test(html())) throw new Error('раздел порта не вернулся');
+  // I в порту — к своим делам и обратно: отдельного меню там нет.
+  key('KeyI'); frames(1);
+  if (!['ship', 'cargo', 'contracts', 'money'].includes(game.menu.tab) || html().indexOf('>ПОДРЯДЫ<') < 0) {
+    throw new Error('I в порту не открыл свои разделы: ' + game.menu.tab);
+  }
+  key('KeyI'); frames(1);
+  if (game.menu.tab !== 'port') throw new Error('второе I не вернуло к порту: ' + game.menu.tab);
+  // Enter больше не вылетает: им по привычке подтверждают покупку.
+  key('Enter'); frames(2);
+  if (game.state.mode !== 'docked') throw new Error('Enter увёл корабль из порта');
   // Справка поверх порта — в своей рамке, а не в широкой станционной.
   key('KeyH'); frames(2);
   key('KeyH'); frames(2);
@@ -3881,8 +3851,8 @@ await step('пересадка в доке: игра — на новом кор�
   const first = JSON.parse(JSON.stringify(S.ship));
   const second = Object.assign(JSON.parse(JSON.stringify(first)), { id: 2, hull: 600, fuelT: 270,
     type: { code: 'prometheus', name: 'Prometheus' } });
-  const html = () => nodes.panel.innerHTML;
-  const row = (name) => (html().split('<tr').find((r) => r.indexOf('>' + name + '<') >= 0) || '');
+  const html = () => nodes.term.innerHTML;
+  const row = (name) => (html().split('class="card ship').find((r) => r.indexOf('<b>' + name + '</b>') >= 0) || '');
   fake.routes['ship.command'] = (b) => {
     S.ship = JSON.parse(JSON.stringify(b.id === 2 ? second : first));
     return JSON.parse(JSON.stringify(S));
@@ -3893,7 +3863,7 @@ await step('пересадка в доке: игра — на новом кор�
   try {
     // Список кораблей прошлого шага — без второго корабля: спросить заново.
     game.station.ships = null;
-    key('Digit5'); frames(1); await settle(4); frames(1);
+    key('Digit4'); frames(1); await settle(4); frames(1);
     if (row('Prometheus').indexOf('data-act="board"') < 0) throw new Error('у «Прометея» нет кнопки «пересесть»');
     stationAct(game, 'board', { id: '2' });
     await settle(12); frames(2); await settle(6); frames(1);
@@ -3924,21 +3894,31 @@ await step('в порту: Y — пройтись по кораблю (экра�
     game.cockpit = buildCockpit();
     await game.loadInterior();
     if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
-    if (nodes.panel.innerHTML.indexOf('ПРОЙТИСЬ ПО КОРАБЛЮ') < 0) {
-      // Кнопка появляется, когда кабина есть: перерисуем экран с ней.
-      key('Digit1'); frames(1);
-      if (nodes.panel.innerHTML.indexOf('ПРОЙТИСЬ ПО КОРАБЛЮ') < 0) throw new Error('на экране порта нет кнопки «пройтись»');
+    frames(1);
+    if (nodes.term.innerHTML.indexOf('data-act="stand"') < 0) {
+      // Кнопка появляется, когда кабина есть: перерисуем терминал с ней.
+      game.menu.dirty = true; frames(1);
+      if (nodes.term.innerHTML.indexOf('data-act="stand"') < 0) throw new Error('в терминале порта нет кнопки «встать»');
     }
     key('KeyY'); frames(70);
     if (!game.walk.on || game.walk.phase !== 'walk') throw new Error('в порту Y не поднял пилота');
-    if (!nodes.overlay.classList.contains('hidden')) throw new Error('экран порта остался поверх идущего');
+    if (!nodes.term.classList.contains('hidden')) throw new Error('терминал порта остался поверх идущего');
+    // На ногах I — свои разделы, без порта: торгуют из кресла.
+    key('KeyI'); frames(2);
+    if (!game.menu.open || nodes.term.classList.contains('hidden') || nodes.term.classList.contains('port')) {
+      throw new Error('на ногах I не открыл терминал пилота');
+    }
+    if (nodes.term.innerHTML.indexOf('data-act="launch"') >= 0) throw new Error('на ногах в терминале кнопка вылета');
+    key('KeyI'); frames(2);
+    if (game.menu.open || !nodes.term.classList.contains('hidden')) throw new Error('на ногах терминал не закрылся');
     // Пробел в порту на ногах — прыжок, а не вылет.
     key('Space'); frames(40);
     if (game.state.mode !== 'docked') throw new Error('пробел на ногах увёл корабль из порта');
     key('KeyE'); frames(50);
     if (game.walk.on) throw new Error('E у кресла не посадил пилота');
-    if (nodes.overlay.classList.contains('hidden') || nodes.panel.innerHTML.indexOf('СТЫКОВКА') < 0) {
-      throw new Error('сев, пилот не увидел экран порта');
+    frames(1);
+    if (nodes.term.classList.contains('hidden') || nodes.term.innerHTML.indexOf('data-act="launch"') < 0) {
+      throw new Error('сев, пилот не увидел терминал порта');
     }
   } finally {
     game.cockpit = saved;
@@ -3946,10 +3926,11 @@ await step('в порту: Y — пройтись по кораблю (экра�
   }
 });
 
-await step('в порту меню пилота не открывается', () => {
+await step('в порту терминал один: I не открывает второго окна поверх порта', () => {
   if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
   key('KeyI'); frames(2);
-  if (game.menu.open) throw new Error('меню открылось на станции');
+  if (game.menu.open || !nodes.term.classList.contains('port')) throw new Error('в порту открылся терминал вне порта');
+  key('KeyI'); frames(2);
 });
 
 await step('вылет со станции по Space', async () => {
@@ -4403,6 +4384,8 @@ await step('отметка варпа не врёт, когда цель за с
 
   key('KeyM'); frames(2);
   if (game.map.view !== 'galaxy') { key('KeyG'); frames(2); }
+  // Цель — выбором: открытие галактики само её больше не ставит.
+  if (!game.warpTarget) { key('ArrowRight'); frames(2); }
   key('KeyM'); frames(2);
   key('KeyJ'); frames(2);
   if (game.warp.phase !== 'align') {
@@ -4560,20 +4543,23 @@ await step('варп-прыжок (J) в другую систему целик�
   const oldWorld = game.world;
   const oldBodies = game.world.bodies.concat(game.world.stations);
 
-  // Цель — на карте галактики: M, G, Tab. Другого места назначить её нет.
+  // Цель — на карте галактики: M, G, стрелка. Другого места назначить её нет.
+  const aimWas = game.warpTarget;
   key('KeyM'); frames(2);
   if (!game.map.open) throw new Error('карта не открылась');
   key('KeyG'); frames(2);
   if (game.map.view !== 'galaxy') throw new Error('карта галактики не открылась');
-  // ЖАЛОБА БЫЛА РОВНО ОБ ЭТОМ: «выбрал систему, нажал J, ничего не
-  // происходит». Цель ставилась только по Tab, и на карте была
-  // подсвеченная система при пустой цели. Теперь выделение на карте
-  // галактики ВСЕГДА означает цель варпа — в том числе то, которое
-  // появилось само при открытии вида.
-  if (!game.warpTarget) throw new Error('открытие галактики не назначило цель');
+  // ЖАЛОБА БЫЛА ОБ ЭТОМ: «выбрал систему, нажал J, ничего не происходит».
+  // Цель ставилась только по Tab, и на карте была подсвеченная система при
+  // пустой цели. Выделение на карте галактики ВСЕГДА означает цель варпа.
+  // Но само открытие вида цель не ставит: случайный взгляд на карту не
+  // должен менять, куда полетит J.
+  if (game.warpTarget !== aimWas) throw new Error('открытие галактики само поменяло цель');
+  for (let i = 0; i < 3 && (!game.map.gsel || game.map.gsel.seed === game.sys.seed || !game.warpTarget); i++) {
+    key('ArrowRight'); frames(2);
+  }
+  if (!game.warpTarget || !game.map.gsel) throw new Error('стрелка не выбрала систему');
   if (game.warpTarget.seed !== game.map.gsel.seed) throw new Error('цель и выбор разошлись');
-  key('ArrowRight'); frames(2);
-  if (game.warpTarget.seed !== game.map.gsel.seed) throw new Error('стрелка не перенесла цель');
   const toName = game.warpTarget.name;
   key('KeyM'); frames(2);
 

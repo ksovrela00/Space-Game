@@ -70,7 +70,7 @@ import { useShipType, useShipEquipment } from './game/specs.js';
 import {
   showCrash, showHelp, hideOverlay, bootHtml, BOOT_START, BOOT_FULL,
 } from './ui/screens.js';
-import { showDocked, stationKeys, makeStation, syncFromServer, forgetPort } from './ui/station.js';
+import { showDocked, makeStation, syncFromServer, forgetPort } from './ui/station.js';
 import { nextZoom, zoomFov, lookScale } from './game/zoom.js';
 import { makeStick, moveStick, centerStick, stickControls, STICK } from './game/mousefly.js';
 import {
@@ -99,8 +99,9 @@ import {
   burnThrust, burnQuantum, burnWarp, warpSettled, applyServerFuel, resetFuelBook,
   fuelLevel, fuelReserve,
 } from './game/fuel.js';
-import { makeMap, drawMap, mapInput, resetMap } from './ui/map.js';
-import { makeMenu, menuInput, drawMenu } from './ui/menu.js';
+import { makeMap, drawMap, mapInput, resetMap, mapFrame, mapTouch } from './ui/map.js';
+import { nextHop } from './game/warproute.js';
+import { makeMenu, terminalFrame, terminalKeys } from './ui/terminal.js';
 import { makePlayer, updatePlayer, savePlayer, loadPlayer, applyServer } from './game/player.js';
 import {
   session, start as sessionStart, queueSave, flushOnExit, linkError,
@@ -366,9 +367,17 @@ function enterSystem(target) {
   game.statusLine = null;
   game.scanBlips.length = 0;
   game.map.follow = null;
+  game.map.cam.follow = null;
   game.map.hover = null;
   game.map.sel = null;
   game.map.items.length = 0;
+  // Всё, что карта держит от прошлого кадра, — тела старой системы.
+  game.map.vis.clear();
+  game.map.gl.bodies.length = 0;
+  game.map.gl.rings.length = 0;
+  game.map.cfor = null;
+  game.map.last.obj = null;
+  game.map.press = null;
 
   // 2. Отпустить видеопамять. Меши планет висят на телах старого мира, но
   //    буферы живут в драйвере, и сборщик мусора до них не дотянется.
@@ -757,7 +766,30 @@ game.closeOverlay = () => {
 function closeLayers() {
   game.map.open = false;
   game.help = false;
+  // И терминал: открытый в полёте, он оставался поверх экрана крушения и
+  // забирал клавиши — «Продолжить» было не нажать с клавиатуры.
+  game.menu.open = false;
 }
+
+/**
+ * Бортовой терминал (I): открыть вне порта. Ручки отпущены, мышь —
+ * курсором: в терминале жмут кнопки. В порту он и так на экране.
+ */
+game.openTerminal = () => {
+  game.menu.open = true;
+  game.deckMap.open = false;
+  input.unlock();
+  input.releaseAll();
+};
+
+/** Закрыть терминал: мышь — обратно взгляду на ногах или ручке в кресле. */
+game.closeTerminal = () => {
+  game.menu.open = false;
+  // Закрыли клавишей или кнопкой — это и есть действие игрока, без
+  // которого браузер мышь не отдаёт.
+  if (game.walk.on && !Q.touchUi) input.lock(screenCanvas);
+  else grabStickMouse();
+};
 
 // --- пилот на ногах -------------------------------------------------------------
 //
@@ -1133,6 +1165,11 @@ function walkKeys() {
       DM.open = false;
       if (!Q.touchUi) input.lock(screenCanvas);
     }
+    return;
+  }
+  // Терминал — и на ногах: трюм, подряды, деньги смотрят где угодно.
+  if (input.pressed('KeyI')) {
+    game.openTerminal();
     return;
   }
   if (input.pressed('KeyM') && game.interior && !w.out && !w.ride) {
@@ -3332,6 +3369,14 @@ function handleKeys(dt) {
   // На ногах ручки корабля остались в рубке: разбирается только своё —
   // сесть, справка, мышь. Ходьбу читает walkFrame. Это раньше тоннеля:
   // по кораблю ходят и в варпе.
+  // Бортовой терминал вне порта забирает клавиши целиком — и в кресле, и
+  // на ногах: разделы листают Q/E, а не ходят и не крутят корабль.
+  if (game.menu.open) {
+    const act = terminalKeys(game, input, false);
+    if (act === 'close') game.closeTerminal();
+    else if (act === 'map' && !game.walk.on) { game.closeTerminal(); game.openMap(); }
+    return;
+  }
   if (game.walk.on && !game.help) { walkKeys(); return; }
 
   // В тоннеле не работает ничего, кроме звука: карта чужой системы —
@@ -3361,9 +3406,6 @@ function handleKeys(dt) {
     return;
   }
 
-  // Меню пилота забирает ввод целиком: полётные клавиши на это время
-  // не разбираются, иначе выбор раздела уводил бы корабль с курса.
-  if (game.menu.open) { menuInput(game.menu, input); return; }
   // Справка: закрыть её — и только. Ручки отпущены, корабль летит.
   if (game.help) {
     if (input.pressed('KeyH')) game.closeOverlay();
@@ -3372,25 +3414,41 @@ function handleKeys(dt) {
   // Карта — единственный слой, где работают мышь и колесо, поэтому её
   // ввод разбирается целиком в js/ui/map.js, а не здесь.
   if (game.map.open) {
-    if (input.pressed('KeyM')) closeMap();
+    if (input.pressed('KeyM', 'Escape')) closeMap();
     else if (input.pressed('KeyH')) openHelp();
-    else mapInput(game, input);
+    else {
+      // Действие с карты (кнопка, клавиша, касание) исполняется тем же
+      // кодом, что B и J в полёте: проверки и отказы у них одни.
+      const act = mapInput(game, input) || game.map.touchAct;
+      game.map.touchAct = null;
+      if (act === 'close') closeMap();
+      else if (act === 'jump' || act === 'warp') {
+        closeMap();
+        if (st.mode === ST.FLIGHT) {
+          if (act === 'jump') quantumKey();
+          else jumpKey();
+        } else say(st, L('ПРЫЖКИ — ТОЛЬКО В ПОЛЁТЕ'), '#ffcc66');
+      }
+    }
     return;
   }
-  if (input.pressed('KeyI')) {
-    // Только в полёте. В порту и на грунте своё меню появится отдельно.
-    if (st.mode === ST.FLIGHT) game.menu.open = true;
+  // Терминал — в полёте и на грунте. В порту он и так на экране, и I там
+  // переключает между портом и своими делами: это разбирает terminalKeys
+  // ниже, и забирать нажатие здесь нельзя.
+  if (input.pressed('KeyI') && (st.mode === ST.FLIGHT || st.mode === ST.LANDED)) {
+    game.openTerminal();
     return;
   }
 
+  // Справка и карта — и в порту: терминал под ними прячется сам и
+  // возвращается, когда их закроют (terminalFrame).
   if (input.pressed('KeyH')) {
-    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) openHelp();
+    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED || st.mode === ST.DOCKED) openHelp();
     return;
   }
 
   if (input.pressed('KeyM')) {
-    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED) game.openMap();
-    else if (st.mode === ST.DOCKED) showDocked(game);
+    if (st.mode === ST.FLIGHT || st.mode === ST.LANDED || st.mode === ST.DOCKED) game.openMap();
     return;
   }
 
@@ -3401,9 +3459,11 @@ function handleKeys(dt) {
   }
 
   if (st.mode === ST.DOCKED) {
-    // 1–4 — разделы экрана станции (js/ui/station.js).
-    if (stationKeys(game, input)) return;
-    if (input.pressed('Space', 'Enter')) game.launch();
+    // Разделы терминала, строки списков, I — к своим делам
+    // (js/ui/terminal.js). Вылет — пробелом; Enter больше не вылетает:
+    // им по привычке подтверждают покупку, и улетал корабль с рынка.
+    terminalKeys(game, input, true);
+    if (input.pressed('Space')) game.launch();
     return;
   }
   // Буксир вызывают и с грунта: пустой бак на луне — тот же тупик.
@@ -3518,7 +3578,9 @@ function handleKeys(dt) {
   // Порядок ветвей значим: J всегда отменяет ТО, ЧТО УЖЕ ИДЁТ, и только
   // на холодную решает, куда лететь. Иначе «отменить» пришлось бы искать
   // на другой клавише, и это была бы та же развилка, только хуже.
-  if (input.pressed('KeyJ')) {
+  if (input.pressed('KeyJ')) jumpKey();
+
+  function jumpKey() {
     const w = game.warp;
     const q = game.quantum;
     if (w.phase === 'tunnel') {
@@ -4317,9 +4379,15 @@ function step(dt) {
       say(st, L('СИСТЕМА ') + w.to.name.toUpperCase(), '#9fd9ff', 3);
     } else if (ev === 'arrive') {
       finishWarp(w, ship);
-      game.warpTarget = null;
+      // Маршрут через соседей (js/game/warproute.js): прибыли в его
+      // середину — следующий прыжок становится целью сам. Заправка — за
+      // пилотом: в порту этой системы.
+      const next = nextHop(game.warpRoute, sys);
+      game.warpTarget = next;
+      if (!next) game.warpRoute = null;
       audioReset(game.audio, ship);
       say(st, L('ПРИБЫТИЕ: ') + sys.name.toUpperCase(), '#78e08f', 4);
+      if (next) say(st, L('МАРШРУТ: ДАЛЬШЕ — ') + next.name.toUpperCase() + L(' · J, КОГДА ХВАТИТ ТОПЛИВА'), '#ffcc66', 6);
       save();
     }
     return;
@@ -4801,6 +4869,19 @@ let cursorClass = '';
 function render() {
   setupCamera();
 
+  // Бортовой терминал: на экране ли он и в каком виде. Решается здесь, по
+  // состоянию, а не вызовами «показать/спрятать» по всей игре: в порту в
+  // кресле он есть всегда, вне порта — пока открыт (I); под картой,
+  // справкой, крушением и в тоннеле его нет.
+  {
+    const st = game.state;
+    const port = st.mode === ST.DOCKED && !!ship.dockedAt && !game.walk.on;
+    if (port) game.menu.open = false;
+    const want = booted && !game.map.open && !game.help && st.mode !== ST.CRASHED
+      && game.warp.phase !== 'tunnel' && (port || game.menu.open);
+    terminalFrame(game, want, port);
+  }
+
   // План палубы — мышью, как меню: стрелка (js/ui/deckmap.js).
   const wantCursor = game.menu.open || game.deckMap.open ? 'menu' : game.map.open ? 'map' : '';
   if (wantCursor !== cursorClass) {
@@ -4809,7 +4890,16 @@ function render() {
     cursorClass = wantCursor;
   }
 
-  if (scene) scene.render(game);
+  // Под картой мир не рисуется: его не видно, а стоил бы он кадр полёта.
+  // Сцену карты рисует та же видеокарта (js/gl/scene.js, renderMap) по
+  // камере и списку тел карты — их считает mapFrame до отрисовки.
+  if (game.map.open) {
+    mapFrame(game, hud.camera.w, hud.camera.h, game.frameDt || 0);
+    game.map.glDrawn = !!(scene && scene.renderMap(game, game.map));
+  } else if (scene) scene.render(game);
+  // Курсор на карте — по тому, что под ним: кнопка, тело, «тащу».
+  const mapCursor = game.map.open ? game.map.cursor : '';
+  if (screenCanvas && screenCanvas.style && screenCanvas.style.cursor !== mapCursor) screenCanvas.style.cursor = mapCursor;
 
   const st = game.renderStats;
   st.polys = scene ? scene.tris : 0;
@@ -4903,13 +4993,13 @@ function render() {
     else drawWalkHud(hud, game, walkHints());
   }
   else if (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED) drawHud(hud, game);
-  // Кто ещё в игре и где — поверх приборов и карты, но не в порту и не в
-  // справке: там свои экраны целиком.
-  if (game.map.open || (!game.help && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED))) {
+  // Кто ещё в игре и где — поверх приборов, но не в порту и не в справке:
+  // там свои экраны целиком. И не на карте: там пилоты видны в самой
+  // системе, а панель легла бы на список объектов.
+  if (!game.map.open && !game.help && (game.state.mode === ST.FLIGHT || game.state.mode === ST.LANDED)) {
     drawPilots(hud, game);
   }
   // Меню рисуется ПОВЕРХ приборов, а не вместо них: кадр под ним живой.
-  if (game.menu.open) drawMenu(hud, game);
   // Сенсорные органы поверх приборов, но только в полёте и на грунте:
   // в меню и на карте они мешают, а делать нечего.
   if (Q.touchUi && !layerOpen()
@@ -5030,6 +5120,8 @@ function frame(now) {
   let dt = (now - last) / 1000;
   last = now;
   if (dt > 0.25) dt = 0.25;      // после переключения таба не «телепортируемся»
+  // Камера карты догоняет цель по времени кадра (js/game/mapcam.js).
+  game.frameDt = dt;
   tickDebug(dbg, dt);
 
   // Нет связи с сервером — игра стоит, пока она не вернётся (linkHeld).
@@ -5060,6 +5152,11 @@ function frame(now) {
     touchApply(game.touch, ship);
   }
 
+  // Карта на телефоне — пальцами: касания идут ей, а не органам полёта
+  // (их под слоем нет). Действие разбирается вместе с клавишами.
+  if (Q.touchUi && game.map.open) {
+    game.map.touchAct = mapTouch(game, [...touchPoints.values()]) || game.map.touchAct;
+  }
   handleKeys(dt);
   mouseFlightFrame();
   if (game.walk.on) walkFrame(dt);

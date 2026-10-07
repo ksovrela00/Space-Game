@@ -1,38 +1,36 @@
-// Экран станции: порт, рынок, верфь, заправка.
+// Разделы порта в бортовом терминале: порт, рынок, верфь, корабли.
 //
-// Открывается сам, как только корабль встал в порт, и живёт, пока он там
-// стоит. Четыре раздела — то, зачем в порт вообще летают:
+// Терминал в порту открывается сам, как только корабль встал, и живёт,
+// пока он там стоит (рамка — js/ui/terminal.js). Разделов четыре — то,
+// зачем в порт вообще летают:
 //
-//   1 ПОРТ      что это за станция, какие в ней услуги, чем она берёт
-//   2 РЫНОК     товары на перевозку: купить здесь, продать там
-//   3 ВЕРФЬ     модули: поставить недостающий, заменить на лучший,
-//               продать установленный
-//   4 ЗАПРАВКА  топливо по цене здешнего водорода и ремонт корпуса
+//   ПОРТ     что это за станция и что нужно кораблю перед вылетом:
+//            топливо, ремонт, трюм — с кнопками прямо здесь
+//   РЫНОК    товары на перевозку: список слева, сделка справа
+//   ОСНАЩЕНИЕ модули по гнёздам: что стоит, что предлагают, и чем
+//            предложенное лучше или хуже стоящего — числами
+//   ВЕРФЬ    свои корабли в доке, корабли на продажу, ангар
+//
+// Рядом с ними в порту — разделы пилота (js/ui/menu.js): трюм, подряды,
+// финансы. Одно окно на всё, а не два меню, каждое со своими клавишами.
+//
+// Заправка и ремонт раньше были отдельным разделом. Это два самых частых
+// дела в порту, и делают их перед вылетом — поэтому они переехали на
+// первый раздел, который открывается при стыковке.
 //
 // Цены, склады, остаток крон и то, что станет с кораблём после замены
 // модуля, считает СЕРВЕР (server/src/Market.php, Outfit.php, Fuel.php).
-// Экран только показывает его ответы и присылает «что и сколько»: здесь
-// нет ни одной цены, посчитанной на месте. Посчитай их игра — и первый
-// же желающий купил бы тысячу тонн за одну крону.
-//
-// Без сервера игры нет вовсе (js/boot.js), а пропала связь посреди
-// стоянки — игра стоит под надписью «нет связи» (js/main.js), и экран
-// порта под ней ждёт вместе с ней.
-//
-// Вёрстка — DOM, а не холст: это таблицы, кнопки и прокрутка, и браузер
-// делает их лучше, чем сделала бы игра. Нажатия разбирает один
-// обработчик на всю панель (data-act): кнопки перерисовываются после
-// каждой сделки, и вешать слушатель на каждую значило бы копить их.
+// Здесь только показ его ответов и «что и сколько»: ни одной цены,
+// посчитанной на месте, кроме произведения цены на тонны в подписи кнопки.
+// Посчитай их игра — и первый же желающий купил бы тысячу тонн за крону.
 
 import { fmtDist } from './hud.js';
-import { KIND_RU, hideOverlay } from './screens.js';
-import { ST } from '../game/state.js';
+import { KIND_RU } from './screens.js';
 import { SHIP } from '../game/ship.js';
-import { cargoTons } from '../game/player.js';
+import { cargoTons, applyServer } from '../game/player.js';
 import { fuelCap, fuelReserve, fuelLevel, warpRange } from '../game/fuel.js';
 import { useShipEquipment, specsDoc, typeSpec } from '../game/specs.js';
-import { describeModule, moduleDetail } from '../game/loadout.js';
-import { applyServer } from '../game/player.js';
+import { describeModule, moduleDetail, moduleSpec } from '../game/loadout.js';
 import { say } from '../game/state.js';
 import {
   session, isOnline, refuel as serverRefuel, buyGoods, sellGoods,
@@ -40,10 +38,12 @@ import {
 } from '../net/session.js';
 import { stations as apiStations } from '../net/api.js';
 import { L, numLocale } from '../core/lang.js';
+import { esc, kr, t1, btn, meter, kv, empty, head } from './termkit.js';
+import { SLOT_GROUPS, groupOf, hullState } from './menu.js';
 
-export const TABS = [
-  ['port', 'ПОРТ'], ['market', 'РЫНОК'], ['outfit', 'ВЕРФЬ'], ['fuel', 'ЗАПРАВКА'], ['ships', 'КОРАБЛИ'],
-];
+// «Оснащение» — модули, «верфь» — корабли: так их зовут в космосимах, и
+// закладка «КОРАБЛИ» не встаёт рядом с «КОРАБЛЕМ» пилота.
+export const TABS = [['port', 'ПОРТ'], ['market', 'РЫНОК'], ['outfit', 'ОСНАЩЕНИЕ'], ['ships', 'ВЕРФЬ']];
 
 // Подписи гнёзд на верфи. Ключ — гнездо, а не модуль: видов на гнездо
 // бывает несколько, и заголовок у них один.
@@ -54,29 +54,23 @@ const SLOT = {
   gear: 'ШАССИ',
 };
 
-/** Состояние экрана: раздел, ответы сервера, занятость, последнее сообщение. */
+/** Состояние порта: ответы сервера, занятость, выбор на рынке и верфи. */
 export const makeStation = () => ({
-  tab: 'port',
   at: null,          // в каком порту собраны ответы ниже
   market: null,      // прайс: {goods, station, fuelPrice}
   outfit: null,      // верфь: {open, slots, resale}
-  ships: null,       // верфь корпусов: {open, tech, hulls, here}
+  ships: null,       // верфь корпусов: {open, tech, hulls, here, hangar}
   yards: null,       // порты системы с верфью — для «здесь верфи нет»
   err: {},           // почему раздел не загрузился
   busy: false,       // запрос в пути: кнопки заперты
   note: '',
   noteKind: '',      // '' | 'good' | 'warn'
+  good: null,        // рынок: выбранный товар (код)
+  side: 'buy',       // рынок: 'buy' | 'sell'
+  qty: null,         // рынок: тонн в сделке; null — по умолчанию стороны
+  slot: null,        // верфь: выбранное гнездо
+  arm: null,         // дорогая кнопка, ждущая второго нажатия
 });
-
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
-// «|| 0» — против «−0 кр»: ноль, округлённый из минус десятитысячной,
-// печатается со знаком.
-const kr = (n) => (Math.round(n) || 0).toLocaleString(numLocale()) + ' ' + L('кр');
-const t1 = (v) => (Math.round(v * 10) / 10).toLocaleString(numLocale()) + ' ' + L('т');
-const btn = (label, act, data = {}, cls = '', off = false) =>
-  `<button class="btn ${cls}"${off ? ' disabled' : ''} data-act="${act}"${
-    Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('')}>${esc(label)}</button>`;
 
 const st = (game) => game.station || (game.station = makeStation());
 
@@ -85,6 +79,17 @@ const hullName = (code) => {
   const t = specsDoc() && specsDoc().shipTypes.find((x) => x.code === code);
   return t ? t.name : code;
 };
+
+/**
+ * Перерисовать терминал. Сам он здесь не виден (рамка импортирует этот
+ * модуль, а не наоборот), поэтому зовём то, что рамка оставила в
+ * game.menu, — или просто помечаем, и рамка перерисует в кадре.
+ */
+function redraw(game) {
+  if (!game.menu) return;
+  game.menu.dirty = true;
+  if (game.menu.paint) game.menu.paint();
+}
 
 // --- обмен с сервером ------------------------------------------------------------
 
@@ -103,13 +108,15 @@ export function syncFromServer(game, state = session.player) {
   if (typeof sh.shield === 'number') game.ship.shield = Math.min(sh.shield, SHIP.maxShield || 0);
 }
 
+/** Какой ответ сервера нужен разделу. Трюм в порту — ради здешних цен. */
+const NEED = { port: 'market', market: 'market', cargo: 'market', outfit: 'outfit', ships: 'ships' };
+
 /** Догрузить то, что нужно открытому разделу. Повторный вызов ничего не шлёт. */
-function load(game) {
+export function stationLoad(game, tab) {
   const s = st(game);
-  // Связь пропала — запрос подождёт: экран перерисуют, когда она вернётся.
+  // Связь пропала — запрос подождёт: раздел перерисуют, когда она вернётся.
   if (!isOnline()) return;
-  const need = s.tab === 'market' || s.tab === 'fuel' ? 'market'
-    : (s.tab === 'outfit' ? 'outfit' : (s.tab === 'ships' ? 'ships' : null));
+  const need = NEED[tab];
   if (!need || s[need] || s.err[need] === 'loading') return;
   s.err[need] = 'loading';
   const at = s.at;
@@ -132,7 +139,7 @@ function loadYards(game) {
   apiStations(game.sys.id).then((r) => {
     s.yards = (r.stations || []).filter((x) => x.services && x.services.outfit).map((x) => x.name);
     redraw(game);
-  }).catch(() => { /* список — подсказка, без него экран всё равно цел */ });
+  }).catch(() => { /* список — подсказка, без него раздел всё равно цел */ });
 }
 
 /**
@@ -161,6 +168,7 @@ async function run(game, fn, done) {
   const s = st(game);
   if (s.busy) return;
   s.busy = true;
+  s.arm = null;
   s.note = L('ЗАПРОС…');
   s.noteKind = '';
   redraw(game);
@@ -169,6 +177,7 @@ async function run(game, fn, done) {
     syncFromServer(game);
     s.note = done(r);
     s.noteKind = 'good';
+    s.qty = null;
     say(game.state, s.note, '#78e08f', 3);
   } catch (e) {
     s.note = L('ОТКАЗ: ') + (e.message || String(e));
@@ -181,56 +190,124 @@ async function run(game, fn, done) {
   }
 }
 
+// --- рынок: пределы сделки ---------------------------------------------------------
+
+const floor1 = (v) => Math.floor(v * 10 + 1e-6) / 10;
+
+/**
+ * Сколько можно купить и продать и ЧТО держит предел: склад, трюм или
+ * деньги. Причина пишется под кнопкой словами — запертая кнопка без
+ * объяснения читается как поломка.
+ */
+export function tradeLimits(game, g) {
+  const hold = SHIP.hold || 0;
+  const free = Math.max(0, hold - cargoTons(game.player));
+  const money = Math.max(0, game.player.balance);
+  const byMoney = g.price > 0 ? money / g.price : Infinity;
+  const have = game.player.cargo.find((c) => c.code === g.code);
+  const held = have ? have.tons : 0;
+  const lim = [['stock', g.stock], ['room', free], ['money', byMoney]].sort((a, b) => a[1] - b[1])[0];
+  return { buyMax: floor1(Math.min(g.stock, free, byMoney)), why: lim[0], held, have, free, money };
+}
+
+/** Тонн в сделке: выбранное игроком или то, с чего сторона начинается. */
+function tradeQty(s, lim) {
+  const max = s.side === 'sell' ? lim.held : lim.buyMax;
+  const q = s.qty === null ? (s.side === 'sell' ? lim.held : Math.min(10, lim.buyMax)) : s.qty;
+  return Math.max(0, Math.min(max, q));
+}
+
+const goodOf = (s) => (s.market ? s.market.goods.find((g) => g.code === s.good) || null : null);
+
+/** Выбрать товар: сторона сделки — продажа, если он уже в трюме. */
+function pickGood(game, code) {
+  const s = st(game);
+  s.good = code;
+  const g = goodOf(s);
+  s.side = g && tradeLimits(game, g).held > 0 ? 'sell' : 'buy';
+  s.qty = null;
+}
+
 // --- действия ----------------------------------------------------------------
 
 /**
  * Разобрать нажатие. Отдельной функцией, а не внутри обработчика щелчка:
- * так её зовут и клавиши (1–4), и проверки, у которых нет настоящего DOM.
+ * так её зовут и клавиши, и проверки, у которых нет настоящего DOM.
  */
 export function stationAct(game, act, arg = {}) {
   const s = st(game);
   if (act === 'tab') {
-    if (TABS.some(([k]) => k === arg.tab)) s.tab = arg.tab;
+    if (game.menu) game.menu.tab = arg.tab;
     s.note = '';
+    s.arm = null;
     redraw(game);
     return true;
   }
   if (act === 'launch') { game.launch(); return true; }
   if (act === 'stand') { if (game.rise) game.rise(); return true; }
   if (act === 'map') { game.openMap(); return true; }
-  if (act === 'repair') { game.repair(); return true; }
+  if (act === 'repair') { if (!s.busy) game.repair(); return true; }
+  // Выбор и подготовка сделки — не запросы: работают и пока сервер думает.
+  if (act === 'good') { pickGood(game, arg.code); s.arm = null; redraw(game); return true; }
+  if (act === 'side') { s.side = arg.side === 'sell' ? 'sell' : 'buy'; s.qty = null; redraw(game); return true; }
+  if (act === 'qty' || act === 'qset') {
+    const g = goodOf(s);
+    if (!g) return true;
+    const lim = tradeLimits(game, g);
+    const max = s.side === 'sell' ? lim.held : lim.buyMax;
+    let q = act === 'qty' ? tradeQty(s, lim) + (+arg.d || 0)
+      : (arg.v === 'max' ? max : +arg.v);
+    q = Math.round(Math.max(0, Math.min(max, q)) * 10) / 10;
+    s.qty = q;
+    redraw(game);
+    return true;
+  }
+  if (act === 'slot') { s.slot = arg.slot; s.arm = null; redraw(game); return true; }
+  // Дорогая кнопка: первое нажатие только взводит её, второе — делает.
+  if (act === 'arm') { s.arm = arg.key; redraw(game); return true; }
   if (s.busy) return false;
+  if (act === 'trade') {
+    const g = goodOf(s);
+    if (!g) return false;
+    const lim = tradeLimits(game, g);
+    let tons = tradeQty(s, lim);
+    if (!(tons > 0)) return false;
+    // «Всё» — ровно столько, сколько лежит, а не округлённое вниз: иначе
+    // в трюме оставались бы сотые доли тонны.
+    if (s.side === 'sell' && tons >= lim.held - 0.05) tons = lim.held;
+    return stationAct(game, s.side, { code: g.code, name: g.name, tons });
+  }
   const tons = +arg.tons;
   if (act === 'buy' && tons > 0) {
     run(game, () => buyGoods(arg.code, tons),
-      (r) => L('КУПЛЕНО: ') + L(arg.name || arg.code) + ', ' + t1(r.tons) + ' · −' + kr(-r.sum));
+      (r) => L('КУПЛЕНО: ') + L(arg.name || arg.code) + ', ' + t1(r.tons) + ' · ' + kr(r.sum));
     return true;
   }
   if (act === 'sell' && tons > 0) {
     run(game, () => sellGoods(arg.code, tons),
-      (r) => L('ПРОДАНО: ') + L(arg.name || arg.code) + ', ' + t1(r.tons) + ' · +' + kr(r.sum));
+      (r) => L('ПРОДАНО: ') + L(arg.name || arg.code) + ', ' + t1(r.tons) + ' · ' + kr(r.sum, true));
     return true;
   }
   if (act === 'fit') {
     run(game, () => buyModule(arg.code),
-      (r) => L('УСТАНОВЛЕНО: ') + L(arg.name || arg.code) + ' · −' + kr(r.cost));
+      (r) => L('УСТАНОВЛЕНО: ') + L(arg.name || arg.code) + ' · ' + kr(-r.cost));
     return true;
   }
   if (act === 'unfit') {
     run(game, () => sellModule(arg.code),
-      (r) => L('ПРОДАНО: ') + L(arg.name || arg.code) + ' · +' + kr(r.credit + (r.refund || 0)));
+      (r) => L('ПРОДАНО: ') + L(arg.name || arg.code) + ' · ' + kr(r.credit + (r.refund || 0), true));
     return true;
   }
   if (act === 'hull') {
     run(game, () => buyHull(arg.code),
-      () => L('КУПЛЕН КОРАБЛЬ: ') + (arg.name || arg.code) + ' · −' + kr(+arg.price) + L(' · ОН В ЭТОМ ДОКЕ'));
+      () => L('КУПЛЕН КОРАБЛЬ: ') + (arg.name || arg.code) + ' · ' + kr(-arg.price) + L(' · ОН В ЭТОМ ДОКЕ'));
     return true;
   }
   if (act === 'rover') {
     // Вездеход покупают тем же вызовом верфи, что корабль (Shipyard::buy):
     // встаёт он не в док, а в трюм того корабля, которым командуют.
     run(game, () => buyHull(arg.code),
-      () => L('КУПЛЕН ВЕЗДЕХОД: ') + (arg.name || arg.code) + ' · −' + kr(+arg.price) + L(' · ОН В ТРЮМЕ'));
+      () => L('КУПЛЕН ВЕЗДЕХОД: ') + (arg.name || arg.code) + ' · ' + kr(-arg.price) + L(' · ОН В ТРЮМЕ'));
     return true;
   }
   if (act === 'board') {
@@ -252,338 +329,444 @@ export function stationAct(game, act, arg = {}) {
   }
   if (act === 'refuel') {
     run(game, () => serverRefuel(arg.tons === undefined || arg.tons === 'full' ? null : tons),
-      (r) => L('ЗАПРАВКА: ') + t1(r.tons) + ' · −' + kr(r.cost));
+      (r) => L('ЗАПРАВКА: ') + t1(r.tons) + ' · ' + kr(-r.cost));
     return true;
   }
   return false;
 }
 
-// --- разделы -----------------------------------------------------------------------
+/** Порядок строк раздела — для ↑/↓ (js/ui/terminal.js). */
+export function stationRows(game, tab) {
+  const s = st(game);
+  if (tab === 'market' && s.market) return { act: 'good', keys: s.market.goods.map((g) => g.code), cur: s.good };
+  if (tab === 'outfit' && s.outfit) return { act: 'slot', keys: slotOrder(s.outfit).map((x) => x.slot), cur: s.slot };
+  return null;
+}
+
+// --- общее -----------------------------------------------------------------------
+
+const loading = (what) => `<p class="hint">${esc(what)}</p>`;
+const failed = (msg) => `<p class="warn">${esc(msg)}</p>`;
+
+/** Верфи здесь нет: где она есть — чтобы это не было тупиком. */
+function noYard(s, tech, what) {
+  const where = s.yards && s.yards.length ? L(' Верфь в этой системе: ') + s.yards.join(', ') + '.' : '';
+  return `<div class="banner warn"><b>${esc(L('ВЕРФИ ЗДЕСЬ НЕТ'))}</b><span>${esc(L(what) + tech + '.' + where)}</span></div>`;
+}
+
+// --- ПОРТ ------------------------------------------------------------------------
 
 function portTab(game) {
+  const s = st(game);
   const ship = game.ship;
   const station = ship.dockedAt;
   const planet = station ? station.parent : null;
   const port = game.port;
-  const rows = [
-    [L('Планета'), planet ? planet.name : '—'],
-    [L('Тип'), planet ? L(KIND_RU[planet.kind] || planet.kind) : '—'],
-    [L('Радиус планеты'), planet ? fmtDist(planet.radius) : '—'],
-    [L('Высота орбиты'), station && planet ? fmtDist(station.orbit.radius - planet.radius) : '—'],
-    [L('Стыковок выполнено'), String(game.stats.docks)],
-  ];
-  if (port) {
-    rows.push([L('Уровень порта'), port.tech + ' ' + L('из 5')]);
-    rows.push([L('Сбор за место'), kr(port.fee)]);
-    const svc = [
-      [port.services.market, 'рынок'], [port.services.outfit, 'верфь'],
-      [port.services.repair, 'ремонт'], [true, 'заправка'], [port.services.board, 'подряды'],
-    ].filter(([on]) => on).map(([, name]) => L(name));
-    rows.push([L('Услуги'), svc.join(', ')]);
-  }
-  const lines = rows.map(([a, b]) => `<tr><td>${esc(a)}</td><td class="v">${esc(b)}</td></tr>`).join('');
-  const note = L('Рынок — товары на перевозку, верфь — модули корабля, заправка — топливо и ремонт. Клавиши 1–4 переключают разделы, Пробел — вылет.');
-  return `<table class="rows">${lines}</table><p class="sub">${esc(note)}</p>`;
-}
+  const svc = port && port.services ? port.services : {};
 
-function marketTab(game) {
-  const s = st(game);
-  if (s.err.market && s.err.market !== 'loading') return `<p class="warn">${esc(s.err.market)}</p>`;
-  if (!s.market) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ БИРЖУ…'))}</p>`;
+  // Услуги — значками, а включённые ещё и ведут в свой раздел: «рынок
+  // есть» и «на рынок» — одно нажатие, а не поиск закладки.
+  const chips = [
+    ['market', 'рынок', svc.market, 'market'], ['outfit', 'верфь', svc.outfit, 'outfit'],
+    ['repair', 'ремонт', svc.repair, null], ['fuel', 'заправка', true, null], ['board', 'подряды', svc.board, null],
+  ].map(([, name, on, tab]) => (on && tab
+    ? `<button class="chip on" data-act="tab" data-tab="${tab}">${esc(L(name))} ›</button>`
+    : `<span class="chip ${on ? 'on' : 'off'}">${esc(L(name))}</span>`)).join('');
 
-  const hold = SHIP.hold || 0;
-  const used = cargoTons(game.player);
-  const free = Math.max(0, hold - used);
-  const money = game.player.balance;
-  const mine = new Map(game.player.cargo.map((c) => [c.code, c]));
-  const rows = s.market.goods.map((g) => {
-    const have = mine.get(g.code);
-    const canBuy = Math.floor(Math.min(g.stock, free, g.price > 0 ? money / g.price : 0) * 10) / 10;
-    const held = have ? have.tons : 0;
-    // В плюс или в минус идёт рейс — по средней цене покупки в трюме.
-    const gain = have && have.avgPrice > 0 ? (g.price - have.avgPrice) * held : 0;
-    const d = { code: g.code, name: g.name };
-    return `<tr${g.legal ? '' : ' class="illegal"'}>
-      <td>${esc(L(g.name))}<div class="dim">${esc(L(g.category))}${g.legal ? '' : ' · ' + esc(L('запрещено'))}</div></td>
-      <td class="v num"><span class="lbl">${esc(L('ЦЕНА ЗА Т'))}</span>${esc(kr(g.price))}</td>
-      <td class="v num"><span class="lbl">${esc(L('СКЛАД'))}</span>${g.stock > 0 ? esc(t1(g.stock)) : '—'}</td>
-      <td class="v num"><span class="lbl">${esc(L('В ТРЮМЕ'))}</span>${held > 0 ? esc(t1(held)) + `<div class="dim ${gain >= 0 ? 'good' : 'warn'}">${
-        gain >= 0 ? '+' : '−'}${esc(kr(Math.abs(gain)))}</div>` : '—'}</td>
-      <td class="acts">${btn('+1', 'buy', { ...d, tons: 1 }, 'small', s.busy || canBuy < 1)}${
-        btn('+10', 'buy', { ...d, tons: 10 }, 'small', s.busy || canBuy < 10)}${
-        btn(L('МАКС'), 'buy', { ...d, tons: canBuy }, 'small', s.busy || canBuy < 0.1)}</td>
-      <td class="acts">${btn('−1', 'sell', { ...d, tons: Math.min(1, held) }, 'small ghost', s.busy || held <= 0)}${
-        btn(L('ВСЁ'), 'sell', { ...d, tons: held }, 'small ghost', s.busy || held <= 0)}</td>
-    </tr>`;
-  }).join('');
-  return `<p class="sub">${esc(L('ТРЮМ '))}${esc(t1(used))} / ${esc(t1(hold))} · ${
-    esc(L('СВОБОДНО '))}${esc(t1(free))}. ${esc(L('Цена одна на покупку и продажу: дёшево там, где товар производят, дорого там, где его ждут.'))}</p>
-    <table class="rows trade">
-      <tr class="head"><td>${esc(L('ТОВАР'))}</td><td>${esc(L('ЦЕНА ЗА Т'))}</td><td>${
-        esc(L('СКЛАД'))}</td><td>${esc(L('В ТРЮМЕ'))}</td><td>${esc(L('КУПИТЬ'))}</td><td>${esc(L('ПРОДАТЬ'))}</td></tr>
-      ${rows}
-    </table>`;
-}
+  const tech = port ? port.tech : 0;
+  const techBar = port ? `<span class="pips">${'■'.repeat(tech)}<i>${'■'.repeat(Math.max(0, 5 - tech))}</i></span> ${tech} ${esc(L('из 5'))}` : '—';
+  const info = `<section class="card">
+    ${head(L('СТАНЦИЯ'))}
+    <dl class="kv">
+      <dt>${esc(L('Планета'))}</dt><dd>${esc(planet ? planet.name : '—')}</dd>
+      <dt>${esc(L('Тип'))}</dt><dd>${esc(planet ? L(KIND_RU[planet.kind] || planet.kind) : '—')}</dd>
+      <dt>${esc(L('Высота орбиты'))}</dt><dd>${esc(station && planet ? fmtDist(station.orbit.radius - planet.radius) : '—')}</dd>
+      <dt>${esc(L('Уровень порта'))}</dt><dd>${techBar}</dd>
+      <dt>${esc(L('Сбор за место'))}</dt><dd>${esc(port ? kr(port.fee) : '—')}</dd>
+      <dt>${esc(L('Стыковок выполнено'))}</dt><dd>${esc(String(game.stats.docks))}</dd>
+    </dl>
+    <div class="chips">${chips}</div>
+  </section>`;
 
-function outfitTab(game) {
-  const s = st(game);
-  if (s.err.outfit && s.err.outfit !== 'loading') return `<p class="warn">${esc(s.err.outfit)}</p>`;
-  if (!s.outfit) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ВЕРФЬ…'))}</p>`;
-  const o = s.outfit;
-  const money = game.player.balance;
-
-  let head = '';
-  if (!o.open) {
-    const where = s.yards && s.yards.length
-      ? L(' Верфь в этой системе: ') + s.yards.join(', ') + '.'
-      : '';
-    head = `<p class="warn">${esc(L('ВЕРФИ ЗДЕСЬ НЕТ'))}</p><p class="sub">${esc(
-      L('Модули ставят на станциях уровня 4–5, здесь — ') + (game.port ? game.port.tech : '?') + '.' + where)}</p>`;
-  } else {
-    head = `<p class="sub">${esc(L('Замена засчитывает стоящий модуль: верфь берёт его за '))}${
-      Math.round(o.resale * 100)}${esc(L('% цены. Двигатель, маневровые и подъёмные можно только заменить — без них корабль не выйдет из дока.'))}</p>`;
-  }
-
-  const blocks = o.slots.map((sl) => {
-    const title = L(SLOT[sl.slot] || sl.slot.toUpperCase());
-    const have = sl.installed.map((m) => {
-      const sell = !o.open ? ''
-        : (sl.required
-          ? `<span class="dim">${esc(L('только замена'))}</span>`
-          : btn(L('ПРОДАТЬ · +') + kr(m.resale), 'unfit', { code: m.code, name: m.name }, 'small ghost', s.busy));
-      const detail = moduleDetail({ slot: sl.slot, spec: m.spec });
-      return `<tr class="mine"><td>${esc(L(m.name))}<div class="dim">${esc(L('стоит на корабле'))}${
-        detail ? ' · ' + esc(detail) : ''}</div></td>
-        <td class="v">${esc(describeModule({ slot: sl.slot, spec: m.spec }))}</td><td class="acts">${sell}</td></tr>`;
-    });
-    if (!sl.installed.length) {
-      have.push(`<tr class="mine"><td class="dim">${esc(L('ГНЕЗДО СВОБОДНО'))}</td><td></td><td></td></tr>`);
-    }
-    const offers = sl.offers.map((m) => {
-      let act;
-      if (!o.open) act = '';
-      else if (m.fits === false) {
-        act = `<span class="dim">${esc(L('только для ') + (m.hulls || []).map((h) => hullName(h)).join(', '))}</span>`;
-      } else if (!m.sold) act = `<span class="dim">${esc(L('уровень ') + m.tech)}</span>`;
-      else {
-        act = btn(L('ПОСТАВИТЬ · ') + kr(m.net), 'fit', { code: m.code, name: m.name }, 'small',
-          s.busy || money < m.net);
-        if (m.credit > 0) act += `<div class="dim">${esc(L('с зачётом ') + kr(m.credit))}</div>`;
-      }
-      return `<tr><td>${esc(L(m.name))}<div class="dim">${esc(moduleDetail({ slot: sl.slot, spec: m.spec }))}</div></td>
-        <td class="v">${esc(describeModule({ slot: sl.slot, spec: m.spec }))}</td><td class="acts">${act}</td></tr>`;
-    });
-    return `<tr><td class="grp" colspan="3">${esc(title)}</td></tr>${have.join('')}${offers.join('')}`;
-  }).join('');
-  return `${head}<table class="rows fit">${blocks}</table>`;
+  return `<div class="cols2"><div class="stack">${preflight(game, s)}</div><div class="stack">${info}</div></div>`;
 }
 
 /**
- * Корабли: свои в этом доке (пересесть) и верфь корпусов (купить).
- * Числа корпусов — из базы (ship_type): габарит, масса, цена.
+ * Перед вылетом: бак, корпус, трюм — то, что проверяют, прежде чем
+ * отдать швартовы, и с кнопками прямо здесь.
  */
-function shipsTab(game) {
-  const s = st(game);
-  if (s.err.ships && s.err.ships !== 'loading') return `<p class="warn">${esc(s.err.ships)}</p>`;
-  if (!s.ships) return `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ВЕРФЬ…'))}</p>`;
-  const o = s.ships;
-  const money = game.player.balance;
-  const m1 = (v) => Math.round(v) + L(' м');
-  const here = o.here.map((x) => {
-    const act = x.active
-      ? `<span class="dim">${esc(L('ВЫ В ЕГО КРЕСЛЕ'))}</span>`
-      : btn(L('ПЕРЕСЕСТЬ'), 'board', { id: x.id }, 'small', s.busy);
-    return `<tr class="${x.active ? 'mine' : ''}"><td>${esc(x.typeName)}<div class="dim">${esc(L(x.title))} · №${x.id}</div></td>
-      <td class="v"></td><td class="acts">${act}</td></tr>`;
-  }).join('');
-  let head;
-  if (!o.open) {
-    const where = s.yards && s.yards.length ? L(' Верфь в этой системе: ') + s.yards.join(', ') + '.' : '';
-    head = `<p class="warn">${esc(L('ВЕРФИ ЗДЕСЬ НЕТ'))}</p><p class="sub">${esc(
-      L('Корабли продают на станциях уровня 4–5, здесь — ') + o.tech + '.' + where)}</p>`;
-  } else {
-    head = `<p class="sub">${esc(L('Купленный корабль встаёт в этот же док с заводскими модулями и полным баком; ваш остаётся рядом.'))}</p>`;
-  }
-  const hulls = o.hulls.map((h) => {
-    let act;
-    if (!o.open) act = '';
-    else if (!h.sold) act = `<span class="dim">${esc(L('уровень ') + h.tech)}</span>`;
-    else act = btn(L('КУПИТЬ · ') + kr(h.price), 'hull', { code: h.code, name: h.name, price: h.price }, 'small',
-      s.busy || money < h.price);
-    const dims = m1(h.lengthM) + ' × ' + m1(h.widthM) + ' × ' + m1(h.heightM) + ' · '
-      + Math.round(h.massT).toLocaleString(numLocale()) + L(' т');
-    // Оружейных гнёзд у корпуса — из каталога (server/data/specs.php): у
-    // крейсера их пять, и выбирают его в том числе за это.
-    const spec = typeSpec(h.code);
-    const guns = spec && spec.gunMounts > 0 ? ' · ' + L('ОРУЖЕЙНЫХ ГНЁЗД: ') + spec.gunMounts : '';
-    return `<tr><td>${esc(h.name)}<div class="dim">${esc(L(h.title) + guns)}</div></td>
-      <td class="v">${esc(dims)}</td><td class="acts">${act}</td></tr>`;
-  }).join('');
-  // Ангар корабля, которым командуют: вездеход в трюм (у корабля без
-  // ангара строки нет). Приписан он к этому кораблю: после гибели
-  // возвращается в его трюм.
-  const H = o.hangar;
-  let hangar = '';
-  if (H) {
-    let act;
-    if (H.have) act = `<span class="dim">${esc(L('В ТРЮМЕ'))}</span>`;
-    else if (!o.open) act = '';
-    else act = btn(L('КУПИТЬ · ') + kr(H.price), 'rover', { code: H.code, name: H.name, price: H.price }, 'small',
-      s.busy || money < H.price);
-    hangar = `<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('АНГАР КОРАБЛЯ'))}</td></tr>
-      <tr><td>${esc(H.name)}<div class="dim">${esc(L(H.title) + ' · ' + L('в трюм корабля №') + H.for)}</div></td>
-      <td class="v"></td><td class="acts">${act}</td></tr></table>`;
-  }
-  return `<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('В ЭТОМ ДОКЕ'))}</td></tr>${here}</table>
-    ${head}<table class="rows fit"><tr><td class="grp" colspan="3">${esc(L('ВЕРФЬ КОРАБЛЕЙ'))}</td></tr>${hulls}</table>${hangar}`;
-}
-
-function fuelTab(game) {
-  const s = st(game);
+function preflight(game, s) {
   const ship = game.ship;
   const cap = fuelCap();
   const reserve = fuelReserve();
   const lvl = fuelLevel(ship);
-  const frac = cap > 0 ? ship.fuel / cap : 0;
-  const cls = lvl === 'ok' ? '' : (lvl === 'low' ? 'low' : 'bad');
-  const bar = `<div class="fuelbar ${cls}"><div class="fill" style="width:${(frac * 100).toFixed(1)}%"></div>
-    <div class="mark" style="left:${(reserve / cap * 100).toFixed(1)}%"></div></div>`;
-  const range = `<p class="sub">${esc(L('В баке ') + t1(ship.fuel) + ' / ' + t1(cap) + L(', резерв ') + t1(reserve)
-    + L('. Варп — до ') + warpRange(ship).toFixed(1) + L(' св. г., квантовый ход — до ')
-    + (SHIP.quantumFuel > 0 ? (Math.max(0, ship.fuel - reserve) / SHIP.quantumFuel).toFixed(0) : '—')
-    + L(' млн км.'))}</p>`;
+  const cls = lvl === 'ok' ? 'cy' : (lvl === 'low' ? 'low' : 'bad');
+  const ranges = L('Варп — до ') + warpRange(ship).toFixed(1) + L(' св. г., квантовый ход — до ')
+    + (SHIP.quantumFuel > 0 ? (Math.max(0, ship.fuel - reserve) / SHIP.quantumFuel).toFixed(0) : '—') + L(' млн км.');
 
-  let fuel;
-  if (s.err.market && s.err.market !== 'loading') {
-    fuel = `<p class="warn">${esc(s.err.market)}</p>`;
-  } else if (!s.market) {
-    fuel = `<p class="sub">${esc(L('ЗАПРАШИВАЕМ ЦЕНУ…'))}</p>`;
-  } else {
+  let fuelActs;
+  if (s.err.market && s.err.market !== 'loading') fuelActs = failed(s.err.market);
+  else if (!s.market) fuelActs = loading(L('ЗАПРАШИВАЕМ ЦЕНУ…'));
+  else {
     const price = s.market.fuelPrice;
     const room = Math.max(0, cap - ship.fuel);
     const money = game.player.balance;
     const afford = Math.floor(Math.min(room, price > 0 ? money / price : 0) * 10) / 10;
     const full = Math.ceil(room * price - 1e-9);
-    const cost = `<p class="sub">${esc(L('Топливо — водород: тонна стоит здесь столько же, сколько на рынке порта, — '))}${
-      esc(kr(price))}.</p>`;
-    fuel = room < 0.001 ? cost + `<p class="good">${esc(L('БАК ПОЛОН'))}</p>` : cost + `<div>${
-      btn(L('ДО ПОЛНОГО · ') + t1(room) + ' · ' + kr(full), 'refuel', { tons: 'full' }, '',
-        s.busy || room < 0.001 || money < full)}${
-      btn('+1 ' + L('т') + ' · ' + kr(price), 'refuel', { tons: 1 }, 'ghost', s.busy || room < 0.001 || money < price)}${
-      btn(L('НА ВСЕ ДЕНЬГИ · ') + t1(afford), 'refuel', { tons: afford }, 'ghost',
-        s.busy || afford < 0.1 || afford >= room - 1e-3)}</div>`;
+    fuelActs = room < 0.001
+      ? `<p class="good">${esc(L('БАК ПОЛОН'))}</p>`
+      : `<div class="acts">${
+        btn(esc(L('ДО ПОЛНОГО · ') + t1(room) + ' · ' + kr(full)), 'refuel', { tons: 'full' }, 'pri',
+          s.busy || money < full)}${
+        btn(esc('+1 ' + L('т') + ' · ' + kr(price)), 'refuel', { tons: 1 }, '', s.busy || money < price)}${
+        money < full && afford >= 0.1
+          ? btn(esc(L('НА ВСЕ ДЕНЬГИ · ') + t1(afford)), 'refuel', { tons: afford }, '', s.busy) : ''}</div>
+        <p class="hint">${esc(L('Водород: тонна стоит здесь ') + kr(price) + L(' — как на рынке порта.'))}</p>`;
   }
 
-  // Ремонт живёт здесь же: это то, что делают с кораблём перед вылетом.
+  // Ремонт: стоимость — пропавшие единицы корпуса по ставке порта, ровно
+  // как считает сервер (Stations::repair).
   const port = game.port;
-  const damage = Math.max(0, (SHIP.maxHull || 100) - Math.round(ship.hull));
+  const h = hullState(ship);
+  const damage = Math.max(0, (SHIP.maxHull || 100) - ship.hull);
   let repair;
-  if (damage <= 0) repair = L('Корпус цел.');
+  if (damage <= 0.01) repair = `<p class="good">${esc(L('Корпус цел.'))}</p>`;
   else if (!port || !port.services || !port.services.repair) {
-    repair = L('Корпус повреждён, а чинить здесь нечем: нужен порт с мастерской.');
-  } else repair = null;
-  const repairHtml = repair !== null
-    ? `<p class="sub">${esc(repair)}</p>`
-    : `<p class="sub">${esc(L('Корпус повреждён на ') + damage + L('%.'))}</p>${
-      btn(L('РЕМОНТ · ') + kr(Math.ceil(damage * port.repairRate)), 'repair', {}, '', s.busy)}`;
+    repair = `<p class="warn">${esc(L('Корпус повреждён, а чинить здесь нечем: нужен порт с мастерской.'))}</p>`;
+  } else {
+    const cost = Math.ceil(damage * port.repairRate);
+    repair = `<div class="acts">${btn(esc(L('РЕМОНТ · ') + kr(cost)), 'repair', {}, 'pri',
+      s.busy || game.player.balance < cost)}</div>`;
+  }
 
-  return `<h3>${esc(L('ТОПЛИВО'))}</h3>${bar}${range}${fuel}<h3>${esc(L('КОРПУС'))} · ${
-    Math.round(ship.hull)}%</h3>${repairHtml}`;
+  const used = cargoTons(game.player);
+  const hold = SHIP.hold || 0;
+  return `<section class="card">
+    ${head(L('ПЕРЕД ВЫЛЕТОМ'))}
+    <div class="gauge"><span>${esc(L('ТОПЛИВО'))}</span><b class="${cls === 'cy' ? '' : cls}">${esc(t1(ship.fuel) + ' / ' + t1(cap))}</b></div>
+    ${meter(cap > 0 ? ship.fuel / cap : 0, cls, cap > 0 ? reserve / cap : null)}
+    <p class="hint">${esc(ranges)} ${esc(L('Красная черта — резерв: ниже неё прыжков нет.'))}</p>
+    ${fuelActs}
+    <div class="gauge sp"><span>${esc(L('КОРПУС'))}</span><b class="${h.cls}">${h.pct} %</b></div>
+    ${meter(h.f, h.cls)}
+    ${repair}
+    <div class="gauge sp"><span>${esc(L('ТРЮМ'))}</span><b>${esc(t1(used) + ' / ' + t1(hold))}</b></div>
+    ${meter(hold > 0 ? used / hold : 0, used >= hold - 1e-6 ? 'low' : 'cy')}
+    <div class="acts">${btn(esc(L('НА РЫНОК ›')), 'tab', { tab: 'market' })}${used > 0 ? btn(esc(L('ЧТО В ТРЮМЕ ›')), 'tab', { tab: 'cargo' }) : ''}</div>
+  </section>`;
 }
 
-// --- экран целиком -----------------------------------------------------------------
+// --- РЫНОК -----------------------------------------------------------------------
 
-/** Разметка экрана целиком — строкой: по ней экран проверяется без браузера. */
-export function stationHtml(game) {
-  return html(game);
+/** Цена против средней по галактике: дёшево — покупать, дорого — продавать. */
+function trend(g) {
+  if (!(g.base_price > 0)) return { text: '—', cls: 'dim', word: '' };
+  const d = g.price / g.base_price - 1;
+  const p = Math.round(Math.abs(d) * 100);
+  if (p < 5) return { text: '≈', cls: 'dim', word: L('около средней по галактике') };
+  return d < 0
+    ? { text: '▼ ' + p + '%', cls: 'good', word: L('на ') + p + L('% дешевле средней — здесь выгодно покупать') }
+    : { text: '▲ ' + p + '%', cls: 'warn', word: L('на ') + p + L('% дороже средней — здесь выгодно продавать') };
 }
 
-function html(game) {
+function marketTab(game) {
   const s = st(game);
-  const ship = game.ship;
-  const station = ship.dockedAt;
-  const planet = station ? station.parent : null;
-  const lvl = fuelLevel(ship);
-  const sum = [
-    [L('СЧЁТ'), kr(game.player.balance), ''],
-    [L('ТРЮМ'), t1(cargoTons(game.player)) + ' / ' + t1(SHIP.hold || 0), ''],
-    [L('БАК'), t1(ship.fuel) + ' / ' + t1(fuelCap()), lvl === 'ok' ? '' : (lvl === 'low' ? 'low' : 'bad')],
-    [L('КОРПУС'), Math.round(ship.hull) + '%', ship.hull < 40 ? 'bad' : ''],
-  ].filter(Boolean).map(([a, b, c]) => `<span>${esc(a)} <b class="${c}">${esc(b)}</b></span>`).join('');
-  const tabs = TABS.map(([k, name], i) =>
-    `<button class="tab${s.tab === k ? ' on' : ''}" data-act="tab" data-tab="${k}">${i + 1} ${esc(L(name))}</button>`).join('');
-  const body = s.tab === 'market' ? marketTab(game)
-    : s.tab === 'outfit' ? outfitTab(game)
-      : s.tab === 'fuel' ? fuelTab(game)
-        : s.tab === 'ships' ? shipsTab(game) : portTab(game);
-  const note = s.note ? `<p class="st-note ${s.noteKind}">${esc(s.note)}</p>` : '';
-  return `<h1>${esc(L('СТЫКОВКА'))}</h1><h2>${esc(station ? station.name : '')}${
-    planet ? ' · ' + esc(planet.name) : ''}</h2>
-    <div class="st-sum">${sum}</div>
-    <div class="st-tabs">${tabs}</div>
-    <div class="st-body">${body}</div>
-    ${note}
-    <div class="st-foot">${btn(L('ВЫЛЕТ'), 'launch')}${btn(L('КАРТА СИСТЕМЫ'), 'map', {}, 'ghost')}${
-  game.cockpit ? btn(L('ПРОЙТИСЬ ПО КОРАБЛЮ · Y'), 'stand', {}, 'ghost') : ''}</div>`;
+  if (s.err.market && s.err.market !== 'loading') return failed(s.err.market);
+  if (!s.market) return loading(L('ЗАПРАШИВАЕМ БИРЖУ…'));
+  const goods = s.market.goods;
+  if (!goodOf(s) && goods.length) {
+    // Первым выбран то, что уже лежит в трюме: в порт чаще прилетают
+    // продавать, — а нет такого, то первый товар со склада.
+    const mine = goods.find((g) => game.player.cargo.some((c) => c.code === g.code));
+    pickGood(game, (mine || goods.find((g) => g.stock > 0) || goods[0]).code);
+  }
+  const held = new Map(game.player.cargo.map((c) => [c.code, c]));
+  const rows = goods.map((g) => {
+    const tr = trend(g);
+    const h = held.get(g.code);
+    return `<tr class="row${g.code === s.good ? ' sel' : ''}${g.legal ? '' : ' illegal'}" data-act="good" data-code="${esc(g.code)}">
+      <td><span class="nm">${esc(L(g.name))}</span><span class="sub">${esc(L(g.category))}${g.legal ? '' : ' · ' + esc(L('запрещено'))}</span></td>
+      <td class="n">${esc(kr(g.price))}</td><td class="n opt ${tr.cls}">${esc(tr.text)}</td>
+      <td class="n${g.stock > 0 ? '' : ' dim'}">${g.stock > 0 ? esc(t1(g.stock)) : '—'}</td>
+      <td class="n">${h ? `<b>${esc(t1(h.tons))}</b>` : '<span class="dim">—</span>'}</td></tr>`;
+  }).join('');
+  const list = `<p class="hint">${esc(L('Цена одна на покупку и продажу. ▼ — дешевле средней по галактике, ▲ — дороже.'))}</p>
+    <table class="lt"><thead><tr><th>${esc(L('ТОВАР'))}</th><th class="n">${esc(L('ЦЕНА ЗА Т'))}</th><th class="n opt">${
+    esc(L('К СРЕДНЕЙ'))}</th><th class="n">${esc(L('СКЛАД'))}</th><th class="n">${esc(L('В ТРЮМЕ'))}</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const g = goodOf(s);
+  return `<div class="split"><div>${list}</div><aside class="detail scroll">${g ? tradePanel(game, s, g) : ''}</aside></div>`;
 }
 
-const overlay = () => document.getElementById('overlay');
-const panelEl = () => document.getElementById('panel');
-
-/** Разбор щелчка по панели: одна точка на все кнопки экрана. */
-function onClick(game, e) {
-  const t = e && e.target && e.target.closest ? e.target.closest('[data-act]') : null;
-  if (!t || t.disabled) return;
-  // Фокус с кнопки снимаем: иначе Enter, которым в порту вылетают,
-  // заодно нажал бы и её — вторую покупку того же товара.
-  if (t.blur) t.blur();
-  const p = panelEl();
-  try { p.focus({ preventScroll: true }); } catch (err) { p.focus(); }
-  stationAct(game, t.dataset.act, { ...t.dataset });
+/** Сделка с выбранным товаром: что он такое, сколько, почём и почему не больше. */
+function tradePanel(game, s, g) {
+  const lim = tradeLimits(game, g);
+  const tr = trend(g);
+  const sell = s.side === 'sell';
+  const q = tradeQty(s, lim);
+  const max = sell ? lim.held : lim.buyMax;
+  const gain = lim.have && lim.have.avgPrice > 0 ? (g.price - lim.have.avgPrice) * lim.held : null;
+  const facts = kv([
+    [L('На складе'), g.stock > 0 ? t1(g.stock) : L('пусто'), g.stock > 0 ? '' : 'dim'],
+    [L('В трюме'), lim.held > 0 ? t1(lim.held) : '—'],
+    lim.have && lim.have.avgPrice > 0 ? [L('Куплено по'), kr(lim.have.avgPrice)] : null,
+    gain !== null ? [L('Продать всё — итог рейса'), kr(gain, true), gain >= 0 ? 'good' : 'bad'] : null,
+  ]);
+  const seg = `<div class="seg">${btn(esc(L('КУПИТЬ')), 'side', { side: 'buy' }, sell ? '' : 'on')}${
+    btn(esc(L('ПРОДАТЬ')), 'side', { side: 'sell' }, sell ? 'on' : '', lim.held <= 0)}</div>`;
+  const step = `<div class="qty">${btn('−', 'qty', { d: -1 }, 'sq', s.busy || q <= 0)}<b class="v">${esc(t1(q))}</b>${
+    btn('+', 'qty', { d: 1 }, 'sq', s.busy || q >= max)}</div>`;
+  const presets = `<div class="presets">${btn('1 ' + esc(L('т')), 'qset', { v: 1 }, 'sm', max < 1)}${
+    btn('10 ' + esc(L('т')), 'qset', { v: 10 }, 'sm', max < 10)}${
+    btn(esc((sell ? L('ВСЁ') : L('МАКС')) + ' · ' + t1(max)), 'qset', { v: 'max' }, 'sm', max < 0.1)}</div>`;
+  // Почему не больше: держит склад, трюм или деньги.
+  let why = '';
+  if (!sell) {
+    why = max < 0.1
+      ? ({ stock: L('Склад пуст — купить нечего.'), room: L('Трюм полон: сначала продайте груз.'),
+        money: L('Не хватает крон даже на десятую тонны.') })[lim.why]
+      : ({ stock: L('Предел — склад порта: ') + t1(g.stock), room: L('Предел — свободное место в трюме: ') + t1(lim.free),
+        money: L('Предел — деньги на счету: хватит на ') + t1(lim.buyMax) })[lim.why];
+  }
+  const sum = q * g.price;
+  const go = btn(esc((sell ? L('ПРОДАТЬ ') : L('КУПИТЬ ')) + t1(q) + ' · ' + (sell ? kr(sum, true) : kr(-sum))),
+    'trade', {}, 'pri wide', s.busy || q < 0.1);
+  return `<div class="dh"><span class="kick">${esc(L(g.category))}</span><h3>${esc(L(g.name))}</h3></div>
+    ${g.legal ? '' : `<p class="warn">${esc(L('Запрещённый товар: возить его — риск.'))}</p>`}
+    <div class="price"><b>${esc(kr(g.price))}</b><span>${esc(L('за тонну'))}</span></div>
+    ${tr.word ? `<p class="${tr.cls}">${esc(tr.word)}</p>` : ''}
+    ${facts}${seg}${step}${presets}${why ? `<p class="hint">${esc(why)}</p>` : ''}${go}`;
 }
 
-/** Перерисовать, не трогая прокрутку: после сделки глаз остаётся на строке. */
-function redraw(game) {
-  if (game.state.mode !== ST.DOCKED || !game.ship.dockedAt) return;
-  if (game.walk && game.walk.on) return;
-  const p = panelEl();
-  const keep = p.scrollTop;
-  p.innerHTML = html(game);
-  p.scrollTop = keep;
-  load(game);
+// --- ВЕРФЬ -------------------------------------------------------------------------
+
+/**
+ * Числа, по которым сравнивают модули одного гнезда: подпись, вид и что
+ * лучше — больше (+1) или меньше (−1). Двигатель выбирают не по одной
+ * скорости: форсированный быстрее, но прожорливее, и это видно сразу.
+ */
+const fx = (v, d = 2) => (+v).toFixed(d);
+const big = (v) => Math.round(v).toLocaleString(numLocale());
+const CMP = {
+  engine: [['maxSpeed', 'скорость', (v) => fx(v) + L(' км/с'), 1], ['accel', 'разгон', (v) => fx(v) + L(' км/с²'), 1],
+    ['exhaust', 'струя (экономичность)', (v) => big(v) + L(' км/с'), 1]],
+  rcs: [['lateral', 'поперёк курса', (v) => fx(v) + L(' км/с²'), 1], ['tipAccel', 'оконечности', (v) => fx(v / 9.81, 1) + ' g', 1]],
+  lift: [['liftTWR', 'тяга к весу', (v) => '×' + v, 1], ['liftExhaust', 'струя (экономичность)', (v) => big(v) + L(' км/с'), 1]],
+  boost: [['boostMax', 'форсаж', (v) => '×' + v, 1], ['boostBurn', 'заряд', (v) => v + L(' с'), 1],
+    ['boostFill', 'восстановление', (v) => v + L(' с'), -1]],
+  drive: [['quantumSpeed', 'скорость', (v) => big(v / 1000) + L(' тыс. км/с'), 1],
+    ['quantumFuel', 'расход', (v) => v + L(' т на млн км'), -1], ['spool', 'калибровка', (v) => v + L(' с'), -1]],
+  warp: [['warpFuel', 'расход', (v) => v + L(' т на св. год'), -1]],
+  tank: [['fuelTank', 'запас', (v) => '+' + v + L(' т'), 1]],
+  hold: [['hold', 'трюм', (v) => v + L(' т'), 1]],
+  shield: [['maxShield', 'ёмкость', (v) => v + L(' ед.'), 1], ['shieldRegen', 'восстановление', (v) => '+' + v + L('/с'), 1],
+    ['shieldDelay', 'задержка', (v) => v + L(' с'), -1]],
+  scanner: [['reach', 'дальность', (v) => big(v) + L(' км'), 1]],
+  gear: [['gearTime', 'выпуск', (v) => fx(v, 1) + L(' с'), -1]],
+  lamp: [['range', 'дальность', (v) => v + L(' км'), 1]],
+};
+
+/** Числа модуля для сравнения: у сканера — последняя ступень. */
+function cmpSpec(slot, m) {
+  if (!m) return {};
+  const sp = moduleSpec({ slot, spec: m.spec });
+  if (slot === 'scanner' && Array.isArray(sp.steps)) sp.reach = sp.steps[sp.steps.length - 1];
+  return sp;
+}
+
+/** Таблица «стоит → предлагают» с разницей, раскрашенной по смыслу. */
+function compare(slot, cur, next) {
+  const rows = CMP[slot];
+  if (!rows) return `<p class="hint">${esc(describeModule({ slot, spec: next.spec }))}</p>`;
+  const a = cmpSpec(slot, cur), b = cmpSpec(slot, next);
+  return `<table class="cmp">${rows.map(([k, label, f, better]) => {
+    const nv = b[k];
+    if (typeof nv !== 'number') return '';
+    const ov = a[k];
+    let delta = '', cls = '';
+    if (typeof ov === 'number' && Math.abs(nv - ov) > 1e-9) {
+      const up = (nv - ov) * better > 0;
+      cls = up ? 'good' : 'bad';
+      delta = (nv > ov ? '▲' : '▼');
+    }
+    return `<tr><td>${esc(L(label))}</td><td class="n dim">${typeof ov === 'number' ? esc(f(ov)) : '—'}</td>
+      <td class="n ${cls}">${esc(f(nv))} ${delta}</td></tr>`;
+  }).join('')}</table>`;
+}
+
+/** Гнёзда в порядке групп, как на карточке корабля. */
+function slotOrder(o) {
+  const order = SLOT_GROUPS.flatMap(([, list]) => list);
+  const idx = (s) => { const i = order.indexOf(s); return i < 0 ? order.length : i; };
+  return o.slots.slice().sort((a, b) => idx(a.slot) - idx(b.slot));
+}
+
+/** Сколько предложений гнезда можно поставить здесь. */
+const offersHere = (o, sl) => (o.open ? sl.offers.filter((m) => m.sold && m.fits !== false).length : 0);
+
+function outfitTab(game) {
+  const s = st(game);
+  if (s.err.outfit && s.err.outfit !== 'loading') return failed(s.err.outfit);
+  if (!s.outfit) return loading(L('ЗАПРАШИВАЕМ ВЕРФЬ…'));
+  const o = s.outfit;
+  const slots = slotOrder(o);
+  if (!slots.some((x) => x.slot === s.slot)) {
+    const first = slots.find((x) => offersHere(o, x) > 0) || slots[0];
+    s.slot = first ? first.slot : null;
+  }
+  let group = '';
+  const rows = slots.map((sl) => {
+    const g = groupOf(sl.slot);
+    const gh = g !== group ? `<tr class="grp"><td colspan="3">${esc(L(g))}</td></tr>` : '';
+    group = g;
+    const inst = sl.installed[0];
+    const n = offersHere(o, sl);
+    // Гнездо — крупно, модуль в нём — строкой ниже; у заводского модуля
+    // имя совпадает с гнездом, и второй раз его не пишем.
+    const title = L(SLOT[sl.slot] || sl.slot.toUpperCase());
+    const name = inst ? L(inst.name) : '';
+    const sub = !inst ? `<span class="sub dim">${esc(L('гнездо свободно'))}</span>`
+      : name.toUpperCase() !== title.toUpperCase() ? `<span class="sub">${esc(name)}</span>` : '';
+    return `${gh}<tr class="row${sl.slot === s.slot ? ' sel' : ''}" data-act="slot" data-slot="${esc(sl.slot)}">
+      <td><span class="nm">${esc(title)}</span>${sub}</td>
+      <td class="n">${inst ? esc(describeModule({ slot: sl.slot, spec: inst.spec })) : ''}</td>
+      <td class="n">${n ? `<span class="badge">${n}</span>` : ''}</td></tr>`;
+  }).join('');
+  const top = o.open
+    ? `<p class="hint">${esc(L('Замена засчитывает стоящий модуль: верфь берёт его за ') + Math.round(o.resale * 100)
+      + L('% цены.'))} ${esc(L('Цифра справа — сколько модулей для гнезда продают здесь.'))}</p>`
+    : noYard(s, game.port ? game.port.tech : '?', 'Модули ставят на станциях уровня 4–5, здесь — ');
+  const sl = slots.find((x) => x.slot === s.slot);
+  return `${top}<div class="split"><div><table class="lt">${rows}</table></div><aside class="detail scroll">${
+    sl ? slotPanel(game, s, o, sl) : ''}</aside></div>`;
+}
+
+function slotPanel(game, s, o, sl) {
+  const money = game.player.balance;
+  const title = L(SLOT[sl.slot] || sl.slot.toUpperCase());
+  const inst = sl.installed.map((m) => {
+    let act = '';
+    if (o.open) {
+      if (sl.required) act = `<p class="hint">${esc(L('Только замена: без него корабль не выйдет из дока.'))}</p>`;
+      else {
+        const key = 'unfit:' + m.code;
+        act = `<div class="acts">${s.arm === key
+          ? btn(esc(L('ТОЧНО ПРОДАТЬ? · ') + kr(m.resale, true)), 'unfit', { code: m.code, name: m.name }, 'warn', s.busy)
+          : btn(esc(L('ПРОДАТЬ · ') + kr(m.resale, true)), 'arm', { key }, '', s.busy)}</div>`;
+      }
+    }
+    const detail = moduleDetail({ slot: sl.slot, spec: m.spec });
+    return `<div class="inst"><span class="kick">${esc(L('СТОИТ'))}</span><b>${esc(L(m.name))}</b>
+      <span class="val">${esc(describeModule({ slot: sl.slot, spec: m.spec }))}</span>${detail ? `<span class="dim">${esc(detail)}</span>` : ''}${act}</div>`;
+  });
+  if (!sl.installed.length) inst.push(`<div class="inst"><span class="kick">${esc(L('СТОИТ'))}</span><b class="dim">${esc(L('гнездо свободно'))}</b></div>`);
+  const cur = sl.installed[0] || null;
+  const offers = sl.offers.map((m) => {
+    let foot;
+    if (!o.open) foot = `<span class="dim">${esc(L('здесь не продают'))}</span>`;
+    else if (m.fits === false) foot = `<span class="dim">${esc(L('только для ') + (m.hulls || []).map((h) => hullName(h)).join(', '))}</span>`;
+    else if (!m.sold) foot = `<span class="dim">${esc(L('продают на верфях уровня ') + m.tech)}</span>`;
+    else {
+      const short = money < m.net;
+      foot = `<span class="cost">${m.credit > 0 ? esc(kr(m.price) + ' − ' + L('зачёт') + ' ' + kr(m.credit) + ' = ') : ''}<b>${esc(kr(m.net))}</b></span>${
+        btn(esc(L('ПОСТАВИТЬ')), 'fit', { code: m.code, name: m.name }, 'pri', s.busy || short)}${
+        short ? `<span class="bad">${esc(L('не хватает ') + kr(m.net - money))}</span>` : ''}`;
+    }
+    return `<div class="offer"><b>${esc(L(m.name))}</b>${compare(sl.slot, cur, m)}<div class="of">${foot}</div></div>`;
+  });
+  return `<div class="dh"><span class="kick">${esc(L(groupOf(sl.slot)))}</span><h3>${esc(title)}</h3></div>
+    ${inst.join('')}${offers.length ? head(L('НА ВЕРФИ')) + offers.join('') : `<p class="hint">${esc(L('Других модулей для этого гнезда нет.'))}</p>`}`;
+}
+
+// --- КОРАБЛИ ------------------------------------------------------------------------
+
+/**
+ * Корабли: свои в этом доке (пересесть), верфь корпусов (купить), ангар.
+ * Числа корпусов — из базы (ship_type): габарит, масса, цена. Покупка —
+ * в два нажатия: корабль стоит как сотня рейсов, и купленный случайным
+ * щелчком назад уже не сдать.
+ */
+function shipsTab(game) {
+  const s = st(game);
+  if (s.err.ships && s.err.ships !== 'loading') return failed(s.err.ships);
+  if (!s.ships) return loading(L('ЗАПРАШИВАЕМ ВЕРФЬ…'));
+  const o = s.ships;
+  const money = game.player.balance;
+
+  const here = o.here.map((x) => `<div class="card ship${x.active ? ' mine' : ''}">
+      <b>${esc(x.typeName)}</b><span class="dim">${esc(L(x.title))} · №${esc(x.id)}</span>
+      <div class="acts">${x.active ? `<span class="tag">${esc(L('ВЫ В ЕГО КРЕСЛЕ'))}</span>`
+    : btn(esc(L('ПЕРЕСЕСТЬ')), 'board', { id: x.id }, 'pri', s.busy)}</div></div>`).join('');
+
+  const buy = (act, key, label, data, price) => (s.arm === key
+    ? btn(esc(L('ПОДТВЕРДИТЬ · ') + kr(-price)), act, data, 'warn', s.busy || money < price)
+    : btn(esc(label + kr(price)), 'arm', { key }, 'pri', s.busy || money < price));
+
+  const hulls = o.hulls.map((h) => {
+    let act;
+    if (!o.open) act = '';
+    else if (!h.sold) act = `<span class="dim">${esc(L('продают на верфях уровня ') + h.tech)}</span>`;
+    else {
+      act = buy('hull', 'hull:' + h.code, L('КУПИТЬ · '), { code: h.code, name: h.name, price: h.price }, h.price);
+      if (money < h.price) act += `<span class="bad">${esc(L('не хватает ') + kr(h.price - money))}</span>`;
+    }
+    // Оружейных гнёзд у корпуса — из каталога (server/data/specs.php): у
+    // крейсера их пять, и выбирают его в том числе за это.
+    const spec = typeSpec(h.code);
+    return `<div class="card ship"><b>${esc(h.name)}</b><span class="dim">${esc(L(h.title))}</span>
+      ${kv([
+        [L('Габарит'), Math.round(h.lengthM) + '×' + Math.round(h.widthM) + '×' + Math.round(h.heightM) + L(' м')],
+        [L('Масса'), Math.round(h.massT).toLocaleString(numLocale()) + L(' т')],
+        spec && spec.gunMounts > 0 ? [L('Оружейных гнёзд'), String(spec.gunMounts)] : null,
+        spec && spec.fuelMax > 0 ? [L('Бак'), t1(spec.fuelMax)] : null,
+      ])}
+      <div class="acts">${act}</div></div>`;
+  }).join('');
+
+  // Ангар корабля, которым командуют: вездеход в трюм (у корабля без
+  // ангара блока нет). Приписан он к этому кораблю: после гибели
+  // возвращается в его трюм.
+  const H = o.hangar;
+  let hangar = '';
+  if (H) {
+    let act;
+    if (H.have) act = `<span class="tag">${esc(L('В ТРЮМЕ'))}</span>`;
+    else if (!o.open) act = '';
+    else {
+      act = buy('rover', 'rover:' + H.code, L('КУПИТЬ · '), { code: H.code, name: H.name, price: H.price }, H.price);
+      if (money < H.price) act += `<span class="bad">${esc(L('не хватает ') + kr(H.price - money))}</span>`;
+    }
+    hangar = head(L('АНГАР КОРАБЛЯ')) + `<div class="cards"><div class="card ship"><b>${esc(H.name)}</b>
+      <span class="dim">${esc(L(H.title) + ' · ' + L('в трюм корабля №') + H.for)}</span><div class="acts">${act}</div></div></div>`;
+  }
+  const top = o.open
+    ? `<p class="hint">${esc(L('Купленный корабль встаёт в этот же док с заводскими модулями и полным баком; ваш остаётся рядом.'))}</p>`
+    : noYard(s, o.tech, 'Корабли продают на станциях уровня 4–5, здесь — ');
+  return `${head(L('В ЭТОМ ДОКЕ'))}<div class="cards">${here}</div>${head(L('ВЕРФЬ КОРАБЛЕЙ'))}${top}<div class="cards">${hulls}</div>${hangar}`;
+}
+
+// --- наружу ---------------------------------------------------------------------------
+
+/** Содержимое раздела порта. */
+export function stationBody(game, tab) {
+  if (tab === 'market') return marketTab(game);
+  if (tab === 'outfit') return outfitTab(game);
+  if (tab === 'ships') return shipsTab(game);
+  return portTab(game);
 }
 
 /**
- * Показать экран станции. Зовётся при стыковке и всякий раз, когда в порту
- * что-то поменялось (ответ сервера на стыковку, ремонт, закрытие карты).
+ * Встали в порт или вернулись к нему (сели в кресло, закрыли карту).
+ * Новый порт — ответы прошлого ни к чему: у него свои цены и верфь, и
+ * открывается он на первом разделе — с баком и ремонтом. Показывает
+ * терминал рамка (js/ui/terminal.js): в порту, в кресле — он на экране.
  */
 export function showDocked(game) {
-  // Пилот ходит по кораблю — экран порта покажется, когда он сядет.
   if (game.walk && game.walk.on) return;
   const s = st(game);
   const here = game.ship.dockedAt;
   if (s.at !== here) {
-    // Новый порт — ответы прошлого ни к чему: у него свои цены и верфь.
-    Object.assign(s, makeStation(), { tab: s.tab, at: here });
+    Object.assign(s, makeStation(), { at: here });
+    if (game.menu) game.menu.tab = 'port';
   }
-  const p = panelEl();
-  p.classList.add('station');
-  p.tabIndex = -1;
-  p.onclick = (e) => onClick(game, e);
-  p.innerHTML = html(game);
-  p.scrollTop = 0;
-  overlay().classList.remove('hidden');
-  try { p.focus({ preventScroll: true }); } catch (e) { p.focus(); }
-  load(game);
-}
-
-/** Клавиши в порту: 1–5 — разделы. Вылет (Пробел, Enter) разбирает main.js. */
-export function stationKeys(game, input) {
-  for (let i = 0; i < TABS.length; i++) {
-    if (input.pressed('Digit' + (i + 1), 'Numpad' + (i + 1))) {
-      stationAct(game, 'tab', { tab: TABS[i][0] });
-      return true;
-    }
-  }
-  return false;
+  redraw(game);
 }

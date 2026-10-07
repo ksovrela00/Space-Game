@@ -194,6 +194,8 @@ export function applyServer(p, st) {
     t: p.time,
     label: e.label,
     sum: e.amount | 0,
+    // Остаток после операции: по нему в ленте видно, откуда взялся счёт.
+    after: typeof e.balance_after === 'number' ? e.balance_after : undefined,
   }));
 
   p.cargo = (st.cargo || []).map((c) => ({
@@ -213,6 +215,10 @@ export function applyServer(p, st) {
     total: +m.timeLimitS || 0,
     done: m.state !== 'active',
     target: m.target ? m.target.name : null,
+    // Система назначения и условия — для карточки подряда в терминале.
+    where: m.target && m.target.system ? m.target.system : null,
+    tons: +m.tons || 0,
+    penalty: m.penalty | 0,
   }));
 
   p.nextId = Math.max(p.nextId, 1);

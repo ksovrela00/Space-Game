@@ -46,7 +46,7 @@
       'entry', 'fleet', 'flow', 'fuel', 'hull',
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'npc', 'peers', 'pilot',
       'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface',
-      'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly', 'rover', 'drivecam', 'rovernav', 'hangar'
+      'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly', 'rover', 'drivecam', 'rovernav', 'hangar', 'mapcam', 'warproute'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
@@ -67,7 +67,7 @@
       'camera', 'starfield'
     ],
     'ui/': [
-      'debug', 'deckmap', 'displays', 'hud', 'layer', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'theme',
+      'debug', 'deckmap', 'displays', 'hud', 'layer', 'map', 'menu', 'panels', 'pilots', 'screens', 'station', 'terminal', 'termkit', 'theme',
       'touch', 'walkhud'
     ]
   };

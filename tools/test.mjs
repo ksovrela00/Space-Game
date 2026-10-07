@@ -7,7 +7,7 @@ import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../j
 import { ROMAN } from '../js/core/rng.js';
 import {
   makeGalaxy, systemDistance, warpSeconds, SYSTEM_COUNT, MIN_APART,
-  HOME_SEED, HAB_HOME, WARP_MIN, WARP_MAX, systemById,
+  HOME_SEED, HAB_HOME, WARP_MIN, WARP_MAX, systemById, galaxy,
 } from '../js/game/galaxy.js';
 import {
   makeWarp, updateWarp, startWarp, canWarp, warpAxis, warpPower,
@@ -88,8 +88,12 @@ import {
 } from '../js/game/bodyinfo.js';
 import { resetMap,
   makeMap, mapObjects, objectCard, focusOn, fitScale, pickAt, fmtMass,
-  markerOnBody, glyphRadius,
+  mapFrame, mapInput, mapTouch, systemCard,
 } from '../js/ui/map.js';
+import {
+  makeMapCam, snapMapCam, stepMapCam, poseCamera, turnMapCam, panMapCam, zoomMapCam, MAPCAM,
+} from '../js/game/mapcam.js';
+import { planRoute, roads, hopLimit, nextHop } from '../js/game/warproute.js';
 import { makeAudio, updateAudio, playAudio, audioCue, audioReset, AUDIO } from '../js/game/audio.js';
 import { Sound } from '../js/core/sound.js';
 import { ST as AST } from '../js/game/state.js';
@@ -3449,10 +3453,9 @@ console.log('\n== карта системы ==');
     const wide = city.body.radius * scaleOf();
     focusOn(m, world, city);
     const near = city.body.radius * scaleOf();
-    ok(wide < 5 && near > 20 && near < Math.min(m.vw, m.vh) &&
-       glyphRadius(city, m) === 4,
+    ok(wide < 5 && near > 20 && near < Math.min(m.vw, m.vh),
       `город на карте: на общем виде диск планеты ${wide.toFixed(1)} px (город скрыт), ` +
-      `после выбора — ${near.toFixed(0)} px, значок 4 px`);
+      `после выбора — ${near.toFixed(0)} px`);
   }
 
   // Попадание курсором: по экранным координатам, а не по мировым.
@@ -3464,27 +3467,174 @@ console.log('\n== карта системы ==');
   ok(/10²⁴ кг/.test(fmtMass(1.71e24)) && /Земли/.test(fmtMass(1.71e24)),
     `масса читается человеком: ${fmtMass(massOf(home))}`);
 
-  // ТО, ЧТО БЫЛО СЛОМАНО: карта — проекция на плоскость орбит, и два
-  // маркера из шести стоят над полюсами, то есть приходятся ровно на
-  // центр своего тела. Они закрывали планету и перехватывали щелчок.
+  // Маркер — точка в пустоте ВОКРУГ тела: даже если он ближе к курсору,
+  // выбирается тело, в него и целятся. Крупный диск ловит щелчок всем
+  // собой, а не одной серединой.
   {
     const fake = { kind: 'moon', radius: 1000, pos: v3(), isBody: true };
-    const over = { isMarker: true, body: fake, pos: v3(0, 3000, 0) };   // над полюсом
-    const side = { isMarker: true, body: fake, pos: v3(3000, 0, 0) };   // в стороне
+    const over = { isMarker: true, body: fake, pos: v3(0, 3000, 0) };
     const m2 = makeMap();
-    m2.vx = 0; m2.vy = 0; m2.vw = 1200; m2.vh = 800; m2.scale = 0.01;
-    ok(markerOnBody(over, m2) && !markerOnBody(side, m2) &&
-       Math.abs(glyphRadius(fake, m2) - 10) < 1e-9,
-      `маркер над полюсом ложится на диск тела (значок ${glyphRadius(fake, m2).toFixed(0)} px) ` +
-      'и не рисуется, боковой — рисуется');
-
-    // И даже если маркер оказался ближе к курсору, выбирается тело: он
-    // точка в пустоте ВОКРУГ него, и целятся в него.
     m2.items = [{ obj: over, sx: 100, sy: 100 }, { obj: fake, sx: 104, sy: 100 }];
     ok(pickAt(m2, 100, 100) === fake,
       'маркер не перехватывает выбор у тела, на котором лежит');
     m2.items = [{ obj: over, sx: 100, sy: 100 }];
     ok(pickAt(m2, 100, 100) === over, 'сам по себе маркер выбирается как раньше');
+    m2.items = [{ obj: fake, sx: 100, sy: 100, r: 60 }];
+    ok(pickAt(m2, 150, 120) === fake && pickAt(m2, 170, 100) === null,
+      'диск в 60 px ловит щелчок у своего края и не дальше');
+  }
+
+  // --- камера трёхмерной карты (js/game/mapcam.js) ---------------------------
+  //
+  // Карта стала моделью, которую вертят руками, и у рук есть ожидания:
+  // тянешь вправо — сцена едет вправо, тянешь сдвигом — точка под рукой
+  // остаётся под рукой. Знаки легко перепутать (у камеры «вправо» при
+  // нулевом угле — это −X), поэтому они проверяются по экрану.
+  {
+    const cam = new Camera();
+    cam.fov = MAPCAM.fov; cam.resize(1600, 900);
+    const mc = makeMapCam();
+    mc.g.dist = 1000; mc.g.yaw = 0.4; mc.g.pitch = 0.6;
+    snapMapCam(mc);
+    poseCamera(mc, cam);
+    const scr = (p) => cam.project(cam.toCamera(p));
+    const c0 = scr(v3(0, 0, 0));
+    // Ближняя к глазу точка плоскости — под фокусом.
+    const near = v3(Math.sin(mc.yaw) * 300, 0, Math.cos(mc.yaw) * 300);
+    const n0 = scr(near);
+    turnMapCam(mc, 40, 0); snapMapCam(mc); poseCamera(mc, cam);
+    const n1 = scr(near);
+    // Сдвиг: точка плоскости под фокусом едет туда, куда тянут.
+    mc.g.yaw = 0.4; snapMapCam(mc); poseCamera(mc, cam);
+    const pxKm = mc.dist / cam.focal;
+    const p0 = scr(v3(0, 0, 0));
+    panMapCam(mc, 50, 0, pxKm); snapMapCam(mc); poseCamera(mc, cam);
+    const p1 = scr(v3(0, 0, 0));
+    panMapCam(mc, 0, 40, pxKm); snapMapCam(mc); poseCamera(mc, cam);
+    const p2 = scr(v3(0, 0, 0));
+    ok(Math.abs(c0.x - 800) < 1e-6 && Math.abs(c0.y - 450) < 1e-6 && n1.x > n0.x + 5 &&
+       Math.abs(p1.x - p0.x - 50) < 1 && p2.y > p1.y + 20,
+      `камера карты: фокус в середине кадра, тянешь вправо — ближний край едет вправо на ${(n1.x - n0.x).toFixed(0)} px, ` +
+      `сдвиг на 50 px — точка под рукой уходит на ${(p1.x - p0.x).toFixed(1)} px, вниз — на ${(p2.y - p1.y).toFixed(0)} px`);
+
+    // Масштаб — в логарифме и в пределах: с края системы до станции у
+    // планеты пять порядков, и вид проходит их ровно, без перелёта.
+    const z = makeMapCam();
+    z.lo = 10; z.hi = 1e7; z.g.dist = 1e6; snapMapCam(z);
+    zoomMapCam(z, 1e9);
+    const lo = z.g.dist;
+    zoomMapCam(z, 1e-12);
+    const hi = z.g.dist;
+    z.g.dist = 100; z.dist = 1e6;
+    let over = false, prev = z.dist;
+    for (let i = 0; i < 120; i++) { stepMapCam(z, 1 / 60); if (z.dist < 100 - 1e-9 || z.dist > prev) over = true; prev = z.dist; }
+    ok(lo === 10 && hi === 1e7 && !over && Math.abs(z.dist - 100) < 1,
+      `масштаб карты: пределы ${lo}–${hi.toExponential(0)} км, подлёт с 10⁶ до 100 км за две секунды без перелёта (${z.dist.toFixed(1)} км)`);
+  }
+
+  // --- трёхмерная карта целиком ---------------------------------------------
+  //
+  // Кадр карты считает то же, что потом рисуют видеокарта и слой
+  // приборов: каждое тело — шар не мельче нескольких пикселей. ТО, ЧТО БЫЛО
+  // СЛОМАНО в плоской карте: маркеры над полюсами ложились на центр тела
+  // и закрывали его; в трёхмерной маркер, лёгший на диск, не рисуется
+  // вовсе, а сбоку — рисуется.
+  {
+    const g3 = {
+      world, ship: mship, nav: makeNav(world), map: makeMap(), state: { messages: [], mode: 'flight' },
+      sys: systemById(0), fleet: [], peers: [], selectTarget() {},
+    };
+    resetMap(g3.map, world);
+    mapFrame(g3, 1600, 900, 0);
+    const m3 = g3.map;
+    const it = (o) => m3.items.find((x) => x.obj === o);
+    const st3 = it(world.star), hm = it(home);
+    const bodiesGl = m3.gl.bodies.length;
+    ok(st3 && hm && hm.r >= 4 && st3.r >= 8 && Math.abs(m3.zoom - 1) < 1e-9 && bodiesGl >= world.planets.length + 1 &&
+       m3.gl.bodies.every((b) => b.r >= b.body.radius - 1e-9),
+      `обзор системы: звезда ${st3 ? st3.r.toFixed(1) : '—'} px, ${home.name} ${hm ? hm.r.toFixed(1) : '—'} px, ` +
+      `видеокарте — ${bodiesGl} шаров не меньше настоящих`);
+
+    // Маркеры выбранного тела: ни один нарисованный не лежит на его диске.
+    m3.sel = home;
+    focusOn(m3, world, home);
+    for (let i = 0; i < 200; i++) mapFrame(g3, 1600, 900, 1 / 60);
+    const hv = it(home);
+    const marks = m3.items.filter((x) => x.obj.isMarker);
+    const onDisc = marks.filter((x) => Math.hypot(x.sx - hv.sx, x.sy - hv.sy) < hv.r + 4);
+    ok(hv && marks.length >= 3 && onDisc.length === 0,
+      `у выбранной ${home.name} (${hv ? hv.r.toFixed(0) : '—'} px) видно ${marks.length} маркеров из 6, на диске — ${onDisc.length}`);
+
+    // Пальцами (телефон): касание — щелчок, щипок — масштаб. Палец,
+    // оставшийся после щипка, — продолжение жеста: отпустив его, ничего
+    // не выбирают. На старой карте касания не доходили вовсе.
+    {
+      m3.sel = null;
+      mapFrame(g3, 1600, 900, 1 / 60);
+      const hp = it(home);
+      mapTouch(g3, [{ id: 1, x: hp.sx, y: hp.sy }]);
+      mapTouch(g3, []);
+      const tapped = m3.sel === home;
+      m3.sel = null;
+      const z0 = m3.cam.g.dist;
+      mapTouch(g3, [{ id: 1, x: 700, y: 400 }, { id: 2, x: 800, y: 400 }]);
+      mapTouch(g3, [{ id: 1, x: 650, y: 400 }, { id: 2, x: 850, y: 400 }]);
+      mapTouch(g3, [{ id: 1, x: hp.sx, y: hp.sy }]);
+      mapTouch(g3, []);
+      ok(tapped && m3.cam.g.dist < z0 * 0.6 && m3.sel === null,
+        `пальцы: касание выбрало ${home.name}, щипок вдвое приблизил (${(z0 / m3.cam.g.dist).toFixed(1)}×), ` +
+        'отпущенный после щипка палец ничего не выбрал');
+      m3.sel = home;
+    }
+
+    // Открыть галактику — не значит выбрать цель. Раньше открытие вида
+    // само ставило ближайшего соседа, и случайный взгляд на карту менял,
+    // куда полетит J.
+    const keys = (codes) => ({
+      pressed: (...c) => c.some((x) => codes.includes(x)), mouse: { x: -1, y: -1, left: false, right: false, clicked: false },
+      takePan(o) { o.x = 0; o.y = 0; return o; }, takeDrag(o) { o.x = 0; o.y = 0; return o; }, takeWheel: () => 0, down: new Set(),
+    });
+    g3.warpTarget = null;
+    mapInput(g3, keys(['KeyG']));
+    mapFrame(g3, 1600, 900, 1 / 60);
+    const opened = m3.view === 'galaxy' && g3.warpTarget === null && m3.gsel === null;
+    mapInput(g3, keys(['ArrowRight']));
+    const picked = g3.warpTarget && m3.gsel && g3.warpTarget.seed === m3.gsel.seed;
+    ok(opened && picked,
+      `галактика открывается без цели (${opened ? 'цели нет' : 'цель появилась сама'}), стрелка выбирает и назначает: ` +
+      (g3.warpTarget ? g3.warpTarget.name : '—'));
+  }
+
+  // --- маршрут по галактике (js/game/warproute.js) ---------------------------
+  //
+  // Прыжок не длиннее того, на что хватает полного бака сверх резерва. Дальше
+  // — через соседей: README, «Приводы», Lave — Laleor на заводском баке
+  // идёт через Ried или Vesoar. Карта показывает этот маршрут и сама ставит
+  // следующий прыжок по прибытии.
+  {
+    const sys = galaxy().systems;
+    const lim = hopLimit();
+    const lave = sys[0], laleor = sys.find((s) => s.name === 'Laleor');
+    const r = planRoute(lave, laleor, lim);
+    const direct = planRoute(lave, laleor, 30);
+    const allOk = sys.every((s) => s === lave || planRoute(lave, s, lim));
+    const hopsOk = r && r.path.every((s, i) => i === 0 || systemDistance(r.path[i - 1], s) <= lim + 1e-9);
+    const rs = roads(lim);
+    const mid = r && r.path[1];
+    ok(r && r.hops === 2 && ['Ried', 'Vesoar'].includes(mid.name) && hopsOk && direct && direct.hops === 1 && allOk &&
+       rs.length > 6 && rs.length < sys.length * (sys.length - 1) / 2,
+      `маршрут Lave — Laleor: ${r ? r.path.map((s) => s.name).join(' › ') : 'нет'} (${r ? r.ly.toFixed(1) : '—'} св. лет, ` +
+      `предел прыжка ${lim.toFixed(1)}); с баком на 30 — напрямую; дорог ${rs.length}, вся галактика достижима`);
+    ok(nextHop(r.path.map((s) => s.id), lave) === mid && nextHop(r.path.map((s) => s.id), mid) === laleor &&
+       nextHop(r.path.map((s) => s.id), laleor) === null && nextHop(null, lave) === null,
+      'по прибытии в середину маршрута следующий прыжок — к концу, в конце — никуда');
+
+    // Карточка системы, до которой напрямую не долететь, говорит, как.
+    const gg = { sys: lave, ship: { fuel: 12 }, world };
+    const card = systemCard(gg, laleor, r);
+    const rowOf = (key) => (card.rows.find(([k]) => k === key) || [])[1] || '';
+    ok(/нет/.test(rowOf('ПРЯМОЙ ПРЫЖОК')) && rowOf('МАРШРУТ').includes(mid.name) && /2 прыжка/.test(rowOf('ВСЕГО')),
+      `карточка ${laleor.name}: «${rowOf('ПРЯМОЙ ПРЫЖОК')}», маршрут «${rowOf('МАРШРУТ')}», «${rowOf('ВСЕГО')}»`);
   }
 }
 
@@ -6302,8 +6452,8 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     `все ${used.size} клавиш игры стоят в таблице справки`
     + (missing.length ? ': нет ' + missing.join(', ') : ''));
 
-  ok(table.includes('1–4'),
-    'разделы меню (1–4) названы в справке: в коде их номер склеивается, и из него клавиш не видно');
+  ok(table.includes('1–9') && table.includes('1–8'),
+    'разделы терминала (1–9, в порту 1–8) названы в справке: в коде их номер склеивается, и из него клавиш не видно');
 
   // Проверка кусается: убери из таблицы строку про фары — и она это
   // скажет. Без этой строки предыдущая сверка молча проходила бы на
@@ -6342,8 +6492,9 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // Цель события: холст сцены или что-то внутри панели. Настоящий DOM
   // отвечает на closest(), этого хватает и здесь.
   const overScene = { closest: () => null };
+  // Селектор — список: панели справки и прокручиваемые части терминала.
   const overPanel = (tall) => ({
-    closest: (sel) => (sel === '.panel'
+    closest: (sel) => (sel.split(',').map((x) => x.trim()).includes('.panel')
       ? { scrollHeight: tall ? 900 : 300, clientHeight: 300 } : null),
   });
 
@@ -8183,14 +8334,17 @@ console.log('\n== наземный город ==');
     'кнопка буксира на экране и ни на что не налезает');
 }
 
-// --- экран станции ---------------------------------------------------------------
+// --- бортовой терминал: порт и дела пилота ----------------------------------------
 //
-// Разметку проверяем без браузера: экран — строка HTML из состояния, и
-// всё, что в ней считается (сколько можно купить, во что обойдётся
-// замена), видно по самим кнопкам.
+// Разметку проверяем без браузера: терминал — строка HTML из состояния
+// (js/ui/terminal.js, station.js, menu.js), и всё, что в нём считается
+// (сколько можно купить и что держит предел, во что обойдётся замена,
+// чем модуль лучше стоящего), видно по самим кнопкам и подписям.
 {
-  console.log('\n== экран станции ==');
+  console.log('\n== бортовой терминал ==');
   const S = await import('../js/ui/station.js');
+  const T = await import('../js/ui/terminal.js');
+  const P = await import('../js/ui/menu.js');
   const { session: sess } = await import('../js/net/session.js');
   const F = await import('../js/game/fuel.js');
   const docF = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
@@ -8203,52 +8357,81 @@ console.log('\n== наземный город ==');
   const game = {
     ship, sys: systemById(0), stats: { docks: 3 },
     state: { mode: 'docked', messages: [] },
-    player: { balance: 1000, cargo: [{ code: 'water', name: 'ВОДА', tons: 4, avgPrice: 20 }] },
+    player: { balance: 1000, cargo: [{ code: 'water', name: 'ВОДА', tons: 4, avgPrice: 20 }],
+      missions: [], ledger: [] },
     port: { tech: 5, fee: 90, repairRate: 15,
       services: { market: true, board: true, repair: true, outfit: true } },
     station: S.makeStation(),
+    menu: T.makeMenu(),
   };
   game.station.at = port;
+  const page = (tab) => { game.menu.tab = tab; return T.terminalHtml(game, true); };
   const was = sess.mode;
   sess.mode = 'online';
   try {
-    game.station.tab = 'market';
     game.station.market = {
       fuelPrice: 80,
       goods: [
-        { code: 'water', name: 'ВОДА', category: 'сырьё', legal: true, price: 30, stock: 100 },
-        { code: 'medicine', name: 'МЕДИКАМЕНТЫ', category: 'техника', legal: true, price: 700, stock: 5 },
-        { code: 'stims', name: 'СТИМУЛЯТОРЫ', category: 'запрещённое', legal: false, price: 1450, stock: 0 },
+        { code: 'water', name: 'ВОДА', category: 'сырьё', legal: true, price: 30, base_price: 30, stock: 100 },
+        { code: 'medicine', name: 'МЕДИКАМЕНТЫ', category: 'техника', legal: true, price: 700, base_price: 780, stock: 5 },
+        { code: 'stims', name: 'СТИМУЛЯТОРЫ', category: 'запрещённое', legal: false, price: 2030, base_price: 1450, stock: 0 },
       ],
     };
-    const html = S.stationHtml(game);
-    const maxOf = (code) => {
-      const m = html.match(new RegExp('data-code="' + code + '"[^>]*data-tons="([0-9.]+)"[^>]*>МАКС'));
-      return m ? +m[1] : null;
-    };
+
+    // Закладки: в порту — четыре порта и четыре свои, с номерами клавиш.
+    const html = page('market');
+    const tabs = [...html.matchAll(/data-act="tab" data-tab="(\w+)"><kbd>(\d)<\/kbd>/g)].map((m) => m[2] + m[1]);
+    ok(tabs.join(' ') === '1port 2market 3outfit 4ships 5ship 6cargo 7contracts 8money'
+      && /data-act="launch"/.test(html) && !/data-act="close"/.test(html),
+      'в порту восемь разделов (порт и свои), вылет в подвале, закрыть нельзя: ' + tabs.join(' '));
+
+    // Рынок: выбран то, что в трюме, и сторона — продажа: в порт чаще
+    // прилетают продавать. Кнопка — сколько и почём.
+    const water = S.tradeLimits(game, game.station.market.goods[0]);
+    ok(game.station.good === 'water' && game.station.side === 'sell'
+      && /data-act="trade"[^>]*>ПРОДАТЬ 4 т · \+120 кр</.test(html),
+      'на рынке выбрана вода из трюма, сделка — продать все 4 т за +120 кр');
+    ok(/Продать всё — итог рейса<\/dt><dd class="good">\+40 кр/.test(html),
+      'и видно, в плюс ли рейс: куплено по 20, продаётся по 30 — +40 кр');
     const free = SHIP.hold - 4;
-    ok(maxOf('water') === Math.min(free, Math.floor(1000 / 30 * 10) / 10),
-      'МАКС воды — сколько влезет в трюм: ' + maxOf('water') + ' т из свободных ' + free);
-    ok(maxOf('medicine') === 1.4, 'МАКС медикаментов — на сколько хватит денег: ' + maxOf('medicine') + ' т');
-    ok(/class="illegal"/.test(html) && /запрещено/.test(html), 'запрещённый товар помечен');
-    ok(/data-act="sell"[^>]*data-code="water"[^>]*data-tons="4"/.test(html)
-      && /\+40 кр/.test(html),
-      'своя вода продаётся целиком, и видно, в плюс ли рейс: +40 кр');
-    ok(/1 ПОРТ/.test(html) && /2 РЫНОК/.test(html) && /3 ВЕРФЬ/.test(html) && /4 ЗАПРАВКА/.test(html),
-      'четыре раздела с номерами клавиш');
+    ok(water.buyMax === Math.min(free, Math.floor(1000 / 30 * 10) / 10) && water.why === 'room',
+      `купить воды можно ${water.buyMax} т — держит место в трюме (${free} т свободно)`);
+    const med = S.tradeLimits(game, game.station.market.goods[1]);
+    ok(med.buyMax === 1.4 && med.why === 'money', 'медикаменты — 1.4 т: держат деньги (1000 кр по 700)');
+    S.stationAct(game, 'good', { code: 'medicine' });
+    const mh = page('market');
+    ok(game.station.side === 'buy' && /data-act="trade"[^>]*>КУПИТЬ 1,4 т · −980 кр</.test(mh)
+      && /Предел — деньги на счету: хватит на 1,4 т/.test(mh),
+      'медикаментов в трюме нет — сторона «купить», предел объяснён словами');
+    ok(/▼ 10%/.test(mh) && /▲ 40%/.test(mh) && /class="row[^"]*illegal"/.test(mh) && /запрещено/.test(mh),
+      'цена против средней по галактике: ▼ 10% и ▲ 40%; запрещённый товар помечен');
+    S.stationAct(game, 'qty', { d: -1 });
+    ok(game.station.qty === 0.4, 'шаг количества: 1.4 − 1 = 0.4 т');
+    S.stationAct(game, 'qset', { v: 10 });
+    ok(game.station.qty === 1.4, 'больше предела не поставить: 10 т урезано до 1.4');
+    S.stationAct(game, 'good', { code: 'stims' });
+    ok(/Склад пуст — купить нечего\./.test(page('market')), 'пустой склад: кнопка заперта и сказано почему');
 
-    game.station.tab = 'fuel';
-    const fuelHtml = S.stationHtml(game);
+    // ↑/↓ — строка списка.
+    const keys = (...codes) => ({ pressed: (...c) => c.some((x) => codes.includes(x)) });
+    T.terminalKeys(game, keys('ArrowUp'), true);
+    ok(game.station.good === 'medicine', '↑ на рынке — товар выше');
+
+    // Порт: бак, ремонт, трюм — с кнопками.
+    const portHtml = page('port');
     const room = SHIP.fuelCap - 5;
-    ok(fuelHtml.includes('ДО ПОЛНОГО · ' + (Math.round(room * 10) / 10).toLocaleString('ru-RU') + ' т · '
+    ok(portHtml.includes('ДО ПОЛНОГО · ' + (Math.round(room * 10) / 10).toLocaleString('ru-RU') + ' т · '
       + Math.ceil(room * 80).toLocaleString('ru-RU') + ' кр'),
-      'заправка до полного: ' + room + ' т по 80 кр');
-    ok(/class="mark"/.test(fuelHtml), 'на шкале бака отмечен резерв');
+      'заправка до полного прямо на первом разделе: ' + room + ' т по 80 кр');
+    ok(/<s style="left:/.test(portHtml), 'на шкале бака отмечен резерв');
+    ship.hull = SHIP.maxHull - 10;
+    ok(page('port').includes('РЕМОНТ · 150 кр'), 'ремонт — пропавшие 10 единиц по ставке 15: 150 кр, как у сервера');
+    ship.hull = SHIP.maxHull;
 
-    // Верфь: заводской двигатель можно только заменить, лучший модуль
-    // столицы на верфи уровня 4 не продаётся, замена показывает зачёт.
+    // Оснащение: заводской двигатель — только замена, лучший модуль
+    // столицы на верфи уровня 4 не продаётся, замена показывает зачёт и
+    // разницу чисел.
     const mod = (code) => docF.modules.find((m) => m.code === code);
-    game.station.tab = 'outfit';
     game.station.outfit = {
       open: true, resale: 0.6,
       slots: [
@@ -8265,34 +8448,85 @@ console.log('\n== наземный город ==');
             sold: true, credit: 0, net: 14000 }] },
       ],
     };
-    const fit = S.stationHtml(game);
-    ok(/только замена/.test(fit) && !/data-act="unfit"[^>]*data-code="engine"/.test(fit),
-      'маршевый двигатель продать нельзя — только заменить');
-    ok(/ПОСТАВИТЬ · 23[\s ]800 кр/.test(fit) && /с зачётом 7[\s ]200 кр/.test(fit),
-      'замена двигателя: 23 800 кр с зачётом заводского');
-    ok(/уровень 5/.test(fit) && !/data-code="quantum_x"/.test(fit),
+    game.player.balance = 30000;
+    S.stationAct(game, 'slot', { slot: 'engine' });
+    let fit = page('outfit');
+    ok(/Только замена/.test(fit) && !/data-act="unfit"/.test(fit), 'маршевый двигатель продать нельзя — только заменить');
+    ok(/31[\s ]000 кр − зачёт 7[\s ]200 кр = <\/span>|31[\s ]000 кр − зачёт 7[\s ]200 кр = <b>23[\s ]800 кр/.test(fit)
+      && /data-act="fit"[^>]*data-code="engine_x"/.test(fit),
+      'замена двигателя: 31 000 − зачёт 7 200 = 23 800 кр, кнопка «поставить»');
+    ok(/1\.80 км\/с ▲/.test(fit) && /class="n bad">29[\s ]000 км\/с ▼/.test(fit),
+      'сравнение со стоящим: скорость ▲ зелёным, струя 40 000 → 29 000 ▼ красным — форсированный прожорливее');
+    S.stationAct(game, 'slot', { slot: 'drive' });
+    fit = page('outfit');
+    ok(/продают на верфях уровня 5/.test(fit) && !/data-act="fit"[^>]*data-code="quantum_x"/.test(fit),
       'привод второго поколения здесь не продают — сказано, где');
-    ok(/ГНЕЗДО СВОБОДНО/.test(fit) && /data-act="fit"[^>]*data-code="tank_x"[^>]*disabled|disabled[^>]*data-act="fit"[^>]*data-code="tank_x"/.test(fit),
-      'в пустое гнездо бака можно поставить, но на тысячу крон — не хватит, и кнопка заперта');
-    ok(/data-act="unfit"[^>]*data-code="quantum"/.test(fit), 'квантовый привод продаётся');
-    ok(/струя 40[\s ]000 км\/с/.test(fit) && /струя 29[\s ]000 км\/с/.test(fit),
-      'двигатели сравниваются по струе: видно, что форсированный прожорливее');
+    ok(/data-act="arm"[^>]*data-key="unfit:quantum"/.test(fit) && !/data-act="unfit"/.test(fit),
+      'продажа привода — в два нажатия: сначала кнопка только взводится');
+    S.stationAct(game, 'arm', { key: 'unfit:quantum' });
+    ok(/data-act="unfit"[^>]*data-code="quantum"[^>]*>ТОЧНО ПРОДАТЬ\?/.test(page('outfit')), '…и только второе нажатие продаёт');
+    game.player.balance = 1000;
+    S.stationAct(game, 'slot', { slot: 'tank' });
+    fit = page('outfit');
+    ok(/disabled data-act="fit"[^>]*data-code="tank_x"/.test(fit) && /не хватает 13[\s ]000 кр/.test(fit)
+      && /гнездо свободно/.test(fit),
+      'в пустое гнездо бака можно поставить, но на тысячу крон — нет: кнопка заперта, сказано, сколько не хватает');
+    T.terminalKeys(game, keys('ArrowUp'), true);
+    ok(game.station.slot === 'drive', '↑ в оснащении — гнездо выше (в порядке групп)');
 
-    // Автономной игры нет: ни один раздел порта о ней не говорит и не
-    // обещает ничего «даром без сервера».
+    // Автономной игры нет: ни один раздел терминала о ней не говорит.
     let solo = '';
-    for (const tab of ['port', 'market', 'outfit', 'ships', 'fuel']) {
-      game.station.tab = tab;
-      const h = S.stationHtml(game);
-      if (/Автономн|без сервера|даром/i.test(h)) solo = tab;
+    for (const tab of ['port', 'market', 'outfit', 'ships', 'ship', 'cargo', 'contracts', 'money']) {
+      if (/Автономн|без сервера|даром/i.test(page(tab))) solo = tab;
     }
-    game.station.tab = 'market';
-    ok(solo === '', 'автономной игры нет: ни один раздел порта о ней не говорит' + (solo ? ' (' + solo + ')' : ''));
+    ok(solo === '', 'автономной игры нет: ни один раздел о ней не говорит' + (solo ? ' (' + solo + ')' : ''));
 
-    // Клавиши 1–4 переключают разделы.
-    const keys = { pressed: (...c) => c.includes('Digit3') };
-    game.state.mode = 'hold';                    // перерисовка без DOM не нужна
-    ok(S.stationKeys(game, keys) && game.station.tab === 'outfit', 'клавиша 3 — верфь');
+    // Клавиши: номер, Q/E по кругу, I — к своим делам и обратно.
+    game.menu.tab = 'market'; game.menu.lastPort = 'market';
+    T.terminalKeys(game, keys('Digit3'), true);
+    const d3 = game.menu.tab;
+    T.terminalKeys(game, keys('KeyQ'), true);
+    T.terminalKeys(game, keys('KeyQ'), true);
+    T.terminalKeys(game, keys('KeyQ'), true);
+    const back = game.menu.tab;
+    T.terminalKeys(game, keys('Digit2'), true);
+    T.terminalKeys(game, keys('KeyI'), true);
+    const mine = game.menu.tab;
+    T.terminalKeys(game, keys('KeyI'), true);
+    ok(d3 === 'outfit' && back === 'money' && mine === 'money' && game.menu.tab === 'market',
+      `клавиши: 3 — ${d3}, трижды Q — ${back} (по кругу), с рынка I — к своим (${mine}), ещё раз I — обратно (${game.menu.tab})`);
+    const wasd = game.menu.tab;
+    ok(T.terminalKeys(game, keys('KeyA', 'KeyD', 'KeyW', 'KeyS'), true) === null && game.menu.tab === wasd,
+      'W/A/S/D в терминале не делают ничего');
+
+    // Вне порта: только свои разделы, закрыть — I, Esc, ✕; карта — M.
+    game.menu.tab = 'ship';
+    const fl = T.terminalHtml(game, false);
+    const flTabs = [...fl.matchAll(/data-act="tab" data-tab="(\w+)"/g)].map((m) => m[1]);
+    ok(flTabs.join(',') === 'ship,cargo,contracts,money' && /class="x" data-act="close"/.test(fl) && !/data-act="launch"/.test(fl),
+      'вне порта — четыре своих раздела, крестик, вылета нет');
+    ok(T.terminalKeys(game, keys('Escape'), false) === 'close' && T.terminalKeys(game, keys('KeyI'), false) === 'close'
+      && T.terminalKeys(game, keys('KeyM'), false) === 'map', 'вне порта Esc и I закрывают, M — на карту');
+
+    // Финансы: время операции — своё у каждой строки (раньше у всех было
+    // одно — «часы пилота» в миг разбора ответа сервера), и остаток.
+    game.player.ledger = [
+      { at: '2026-10-04 06:01:00', t: 600, label: 'ПОКУПКА: ВОДА, 6 Т', sum: -480, after: 2920 },
+      { at: '2026-10-04 06:03:00', t: 600, label: 'СТЫКОВОЧНЫЙ СБОР', sum: -285, after: 2635 },
+    ];
+    const money = page('money');
+    const at = (s) => P.fmtAt(s, new Date(2026, 11, 31));
+    ok(money.includes(at('2026-10-04 06:01:00')) && money.includes(at('2026-10-04 06:03:00'))
+      && at('2026-10-04 06:01:00') !== at('2026-10-04 06:03:00') && /2[\s ]635 кр/.test(money)
+      && money.indexOf('СТЫКОВОЧНЫЙ СБОР') < money.indexOf('ПОКУПКА: ВОДА'),
+      `лента: у каждой операции своё время (${at('2026-10-04 06:01:00')}, ${at('2026-10-04 06:03:00')}), остаток, свежее сверху`);
+
+    // Корпус в процентах — от предела ЭТОГО корпуса: у крейсера 600 единиц,
+    // и целый корпус был бы «600 %».
+    const maxWas = SHIP.maxHull;
+    SHIP.maxHull = 600; ship.hull = 600;
+    ok(P.hullState(ship).pct === 100 && T.terminalHtml(game, true).includes('100 %'), 'целый корпус крейсера — 100 %, а не 600 %');
+    SHIP.maxHull = maxWas; ship.hull = maxWas;
   } finally {
     sess.mode = was;
   }

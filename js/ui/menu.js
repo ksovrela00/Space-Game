@@ -1,74 +1,31 @@
-// Меню пилота (клавиша I): корабль, груз, задания, финансы.
+// Разделы пилота в бортовом терминале (клавиша I): корабль, трюм,
+// подряды, финансы.
 //
-// Открывается ТОЛЬКО в полёте. В порту его нет намеренно: там будет своя
-// станционная часть (рынок, доска заданий, ремонт), и одно меню на два
-// места неизбежно превратилось бы в набор оговорок «здесь можно, здесь
-// нельзя».
+// Сам терминал — рамка, закладки, клавиши, показ — живёт в
+// js/ui/terminal.js; здесь только содержимое четырёх разделов, строкой
+// HTML. Строкой — потому что по ней раздел проверяется без браузера
+// (tools/test.mjs), а браузер нужен лишь, чтобы её показать.
 //
-// Мир при открытом меню НЕ ОСТАНАВЛИВАЕТСЯ — в отличие от карты. Причин
-// две. Первая: в сети остановить мир нельзя в принципе, и раз меню
-// задумано на будущее с онлайном, останавливать его нельзя уже сейчас.
-// Вторая: меню и должно быть местом, где решают на ходу — сбросить груз
-// до досмотра, посмотреть срок задания в прыжке. Поэтому корабль летит
-// дальше, а в подвале меню всё время висит скорость: это не украшение, а
-// предупреждение.
+// Раньше меню рисовалось на холсте приборов, и у холста не было ни
+// прокрутки, ни переноса строк: длинный трюм и лента операций обрезались
+// по нижней кромке («…ещё 12 записей выше»), а нажать в них было нечего.
+// Разметка даёт всё это даром, и теми же кнопками, что в порту.
 //
-// Управление кораблём на это время глохнет (input.enabled в js/main.js) —
-// иначе клавиши разделов уводили бы корабль с курса.
+// Мир под терминалом НЕ ОСТАНАВЛИВАЕТСЯ: в сети остановить его нельзя, и
+// корабль летит дальше. Поэтому в шапке всё время видна скорость, а
+// числа, которые меняются на ходу (бак, щиты, сроки подрядов), обновляет
+// рамка на месте (liveValues), не пересобирая раздел.
 
-import { CY, CY_DIM, AMBER, GREEN, RED, INK } from './theme.js';
 import { SHIP } from '../game/ship.js';
 import { HULL } from '../game/hull.js';
 import { CROWN, cargoTons, ledgerTotals, missionExpired } from '../game/player.js';
-import { fmtTime, fmtSpeed } from './hud.js';
+import { fmtTime } from './hud.js';
 import { modules } from '../game/loadout.js';
-import { fuelCap, fuelLevel } from '../game/fuel.js';
-import { session } from '../net/session.js';
+import { fuelCap, fuelReserve, fuelLevel, warpRange, massT } from '../game/fuel.js';
 import { L, numLocale } from '../core/lang.js';
+import { esc, kr, t1, meter, kv, empty, head } from './termkit.js';
 
-const MONO = 'Consolas, monospace';
-
-export const TABS = [L('КОРАБЛЬ'), L('ГРУЗ'), L('ЗАДАНИЯ'), L('ФИНАНСЫ')];
-
-export function makeMenu() {
-  return {
-    open: false,
-    tab: 0,
-    // Прямоугольники закладок с прошлого кадра: по ним ловится щелчок.
-    // Тот же приём, что у карты (js/ui/map.js) — вёрстка считается один
-    // раз, при отрисовке, и разбора попадания отдельной копией нет.
-    tabRects: [],
-    hover: -1,             // закладка под курсором
-    rect: null,            // рамка меню с прошлого кадра
-    body: null,            // рабочее поле под закладками
-    fs: 13,                // кегль, выбранный по размеру окна
-  };
-}
-
-/**
- * Разбор ввода. Вызывается вместо всего остального управления, поэтому
- * возвращать сюда полётные клавиши не нужно — их на это время нет.
- */
-export function menuInput(menu, input) {
-  if (input.pressed('KeyI', 'Escape')) { menu.open = false; return; }
-  for (let i = 0; i < TABS.length; i++) {
-    if (input.pressed('Digit' + (i + 1), 'Numpad' + (i + 1))) menu.tab = i;
-  }
-  if (input.pressed('ArrowRight', 'KeyD')) menu.tab = (menu.tab + 1) % TABS.length;
-  if (input.pressed('ArrowLeft', 'KeyA')) menu.tab = (menu.tab + TABS.length - 1) % TABS.length;
-  // Закладка под курсором подсвечивается: курсор в меню видно (в полёте
-  // он спрятан), и без отклика непонятно, жмётся ли тут вообще что-то.
-  const { x, y } = input.mouse;
-  menu.hover = -1;
-  for (const r of menu.tabRects) {
-    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-      menu.hover = r.i;
-      if (input.mouse.clicked) menu.tab = r.i;
-    }
-  }
-}
-
-// --- мелкий инструмент вёрстки ----------------------------------------------
+export const TABS = [['ship', 'КОРАБЛЬ'], ['cargo', 'ТРЮМ'], ['contracts', 'ПОДРЯДЫ'], ['money', 'ФИНАНСЫ']];
 
 /** Кроны с разрядами и знаком: «+1 200 кр», «−35 кр». */
 export const fmtCrowns = (n, signed = false) => {
@@ -86,416 +43,248 @@ export const fmtClock = (s) => {
   return hh + ':' + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
 };
 
-const fmtTons = (t) => (t >= 10 ? t.toFixed(0) : t.toFixed(1)) + L(' т');
-
-/** Строка «подпись — значение»: подпись слева, значение прижато вправо. */
-function row(ctx, x, y, w, label, value, color = INK, dim = CY_DIM) {
-  ctx.textAlign = 'left';
-  ctx.fillStyle = dim;
-  ctx.fillText(label, x, y);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = color;
-  ctx.fillText(value, x + w, y);
+/**
+ * Когда была операция. Сервер ставит время в UTC («2026-10-04 06:01:00»),
+ * показываем местное: сегодня — часы и минуты, раньше — ещё и число.
+ *
+ * Раньше в ленте стояли «часы пилота» — одно и то же время у всех строк:
+ * при разборе ответа сервера им всем ставился нынешний счётчик игры.
+ */
+export function fmtAt(at, now = new Date()) {
+  const d = at ? new Date(String(at).replace(' ', 'T') + 'Z') : null;
+  if (!d || isNaN(d.getTime())) return '—';
+  const p2 = (n) => String(n).padStart(2, '0');
+  const hm = p2(d.getHours()) + ':' + p2(d.getMinutes());
+  const same = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return same ? hm : p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + ' ' + hm;
 }
 
-/** Шкала без делений: здесь она показывает долю, а не показание прибора. */
-function bar(ctx, x, y, w, h, frac, color) {
-  ctx.fillStyle = 'rgba(79,179,224,0.12)';
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, Math.max(0, Math.min(1, frac)) * w, h);
-  ctx.strokeStyle = CY_DIM;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+/** Доля корпуса и его цвет: процент — от предела ЭТОГО корпуса. */
+export function hullState(ship) {
+  const max = SHIP.maxHull || 100;
+  const f = Math.max(0, Math.min(1, ship.hull / max));
+  return { f, pct: Math.round(f * 100), cls: f > 0.6 ? 'good' : f > 0.3 ? 'low' : 'bad' };
 }
 
-/** Заголовок блока с чертой под ним. */
-function head(ctx, x, y, w, text) {
-  ctx.textAlign = 'left';
-  ctx.fillStyle = CY;
-  ctx.fillText(text, x, y);
-  ctx.strokeStyle = CY_DIM;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x, y + 4.5);
-  ctx.lineTo(x + w, y + 4.5);
-  ctx.stroke();
-}
+const fuelCls = (ship) => ({ ok: '', low: 'low', reserve: 'bad', dry: 'bad' })[fuelLevel(ship)] || '';
 
-/** Разбивка текста по ширине: описание задания — единственное место,
- *  где текст длиннее строки, и обрезать его многоточием жалко. */
-function wrap(ctx, text, w) {
-  const words = String(text).split(' ');
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    const test = line ? line + ' ' + word : word;
-    if (line && ctx.measureText(test).width > w) { lines.push(line); line = word; }
-    else line = test;
-  }
-  if (line) lines.push(line);
-  return lines;
-}
+/** Сколько квантового хода в баке сверх резерва, млн км. */
+const quantumRange = (ship) => (SHIP.quantumFuel > 0
+  ? Math.max(0, ship.fuel - fuelReserve()) / SHIP.quantumFuel : 0);
 
-const hullColor = (frac) => (frac > 0.6 ? GREEN : frac > 0.3 ? AMBER : RED);
+// Гнёзда по смыслу. Порядок и подписи общие с верфью (js/ui/station.js):
+// на карточке корабля и на верфи модуль ищут в одном и том же месте.
+export const SLOT_GROUPS = [
+  ['ДВИЖЕНИЕ', ['engine', 'rcs', 'lift', 'boost']],
+  ['ПРЫЖКИ И ТОПЛИВО', ['drive', 'warp', 'tank']],
+  ['СИСТЕМЫ', ['hold', 'shield', 'scanner', 'computer', 'lamp', 'gear']],
+];
+export const groupOf = (slot) => {
+  for (const [g, list] of SLOT_GROUPS) if (list.includes(slot)) return g;
+  return 'СИСТЕМЫ';
+};
 
-// --- разделы -----------------------------------------------------------------
+// --- КОРАБЛЬ -------------------------------------------------------------------
 
-function drawShip(ctx, b, game, fs) {
+function shipTab(game) {
   const { ship } = game;
-  const hullFrac = ship.hull / SHIP.maxHull;
-  const fuelFrac = ship.fuel / fuelCap();
-  const fuelC = { ok: AMBER, low: AMBER, reserve: RED, dry: RED }[fuelLevel(ship)];
+  const h = hullState(ship);
+  const cap = fuelCap();
   const m = (km) => (km * 1000).toFixed(1) + L(' м');
+  const name = ship.mesh && ship.mesh.name ? ship.mesh.name : (SHIP.typeName || L('КОРАБЛЬ'));
 
-  // Содержимое описывается СПИСКОМ, а не рисуется на месте: одна и та же
-  // карточка ложится в две колонки на мониторе и в одну на телефоне, и
-  // держать для этого две копии вёрстки — верный способ развести их.
-  const left = [
-    { t: 'name', s: (ship.mesh && ship.mesh.name ? ship.mesh.name : L('КОРАБЛЬ')).toUpperCase() },
-    { t: 'sub', s: L(SHIP.typeTitle || 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ') },
-    { t: 'head', s: L('ГАБАРИТЫ') },
-    { t: 'row', a: L('ДЛИНА'), b: m(HULL.size.z) },
-    { t: 'row', a: L('ШИРИНА'), b: m(HULL.size.x) },
-    { t: 'row', a: L('ВЫСОТА'), b: m(HULL.size.y) },
-    { t: 'head', s: L('СОСТОЯНИЕ') },
-    { t: 'row', a: L('КОРПУС'), b: Math.round(ship.hull) + ' %', c: hullColor(hullFrac) },
-    { t: 'bar', frac: hullFrac, c: hullColor(hullFrac) },
-  ];
-  if (SHIP.maxShield > 0) {
-    const sf = ship.shield / SHIP.maxShield;
-    // Щит меряется ЕДИНИЦАМИ, а не процентами: процент от сорока — это
-    // число, из которого не понять, выдержит ли он ещё одно попадание.
-    left.push({ t: 'row', a: L('ЩИТЫ'),
-      b: Math.round(ship.shield) + ' / ' + SHIP.maxShield, c: hullColor(sf) });
-    left.push({ t: 'bar', frac: sf, c: CY });
-  } else {
-    // Пустая строка читалась бы как поломка прибора, поэтому «нет щитов»
-    // написано словами.
-    left.push({ t: 'row', a: L('ЩИТЫ'), b: L('НЕ УСТАНОВЛЕНЫ'), c: CY_DIM });
+  const shield = SHIP.maxShield > 0
+    ? `<div class="gauge"><span>${esc(L('ЩИТЫ'))}</span><b data-live="shield">${esc(liveText(game).shield)}</b></div>
+      ${meter(ship.shield / SHIP.maxShield, 'cy', null, 'shieldBar')}`
+    : `<div class="gauge"><span>${esc(L('ЩИТЫ'))}</span><b class="dim">${esc(L('НЕ УСТАНОВЛЕНЫ'))}</b></div>`;
+
+  const state = `<section class="card">
+    ${head(L('СОСТОЯНИЕ'))}
+    <div class="gauge"><span>${esc(L('КОРПУС'))}</span><b class="${h.cls}">${h.pct} %</b></div>
+    ${meter(h.f, h.cls)}
+    ${shield}
+    <div class="gauge"><span>${esc(L('ТОПЛИВО'))}</span><b class="${fuelCls(ship)}" data-live="fuel">${esc(liveText(game).fuel)}</b></div>
+    ${meter(cap > 0 ? ship.fuel / cap : 0, fuelCls(ship) || 'cy', cap > 0 ? fuelReserve() / cap : null, 'fuelBar')}
+    ${kv([
+      [L('Варп'), liveText(game).warp, '', 'warp'],
+      [L('Квантовый ход'), liveText(game).quantum, '', 'quantum'],
+      [L('Резерв бака'), t1(fuelReserve()), 'dim'],
+    ])}
+  </section>`;
+
+  const dims = `<section class="card">
+    ${head(L('ГАБАРИТЫ'))}
+    ${kv([
+      [L('Длина × ширина × высота'), m(HULL.size.z) + ' × ' + m(HULL.size.x) + ' × ' + m(HULL.size.y)],
+      [L('Масса'), Math.round(massT()).toLocaleString(numLocale()) + L(' т')],
+      [L('Трюм'), t1(SHIP.hold || 0)],
+      [L('Оружейных гнёзд'), String(Math.max(1, SHIP.gunMounts || 1))],
+    ])}
+  </section>`;
+
+  // Значения из настоящих констант, а не переписаны сюда: иначе карточка
+  // начнёт врать в тот день, когда двигатель перенастроят.
+  const perf = `<section class="card">
+    ${head(L('ХОДОВЫЕ КАЧЕСТВА'))}
+    ${kv([
+      [L('Предел хода'), SHIP.maxSpeed.toFixed(2) + L(' км/с')],
+      [L('На форсаже'), (SHIP.maxSpeed * SHIP.boostMax).toFixed(1) + L(' км/с')],
+      [L('Разгон'), SHIP.accel.toFixed(2) + L(' км/с²')],
+      [L('Торможение'), SHIP.brake.toFixed(2) + L(' км/с²')],
+      [L('Поперёк курса'), SHIP.lateral.toFixed(2) + L(' км/с²')],
+    ])}
+  </section>`;
+
+  // Модули — по группам, как на верфи. Список общий с сервером
+  // (js/game/loadout.js): карточка и каталог говорят об одном железе.
+  const rows = modules();
+  const groups = [...SLOT_GROUPS.map(([g]) => g), 'ВООРУЖЕНИЕ'];
+  const byGroup = new Map(groups.map((g) => [g, []]));
+  for (const r of rows) {
+    const g = r.slot === 'gun' || r.slot === 'mounts' ? 'ВООРУЖЕНИЕ' : groupOf(r.slot);
+    byGroup.get(g).push(r);
   }
-  left.push({ t: 'row', a: L('ТОПЛИВО'),
-    b: ship.fuel.toFixed(1) + ' / ' + fuelCap().toFixed(1) + L(' т'), c: fuelC });
-  left.push({ t: 'bar', frac: fuelFrac, c: fuelC });
+  const mods = `<section class="card">
+    ${head(L('УСТАНОВЛЕННЫЕ МОДУЛИ'))}
+    ${groups.filter((g) => byGroup.get(g).length).map((g) => `<div class="sub-h">${esc(L(g))}</div>${kv(
+      byGroup.get(g).filter((r) => r.slot !== 'mounts').map((r) => [r.name, r.value, r.installed ? '' : 'dim']))}`).join('')}
+  </section>`;
 
-  // Значения берутся из настоящих констант, а не переписаны сюда: иначе
-  // карточка начнёт врать в тот день, когда двигатель перенастроят.
-  const right = [
-    { t: 'head', s: L('ХАРАКТЕРИСТИКИ') },
-    { t: 'row', a: L('ПРЕДЕЛ ХОДА'), b: SHIP.maxSpeed.toFixed(2) + L(' км/с') },
-    { t: 'row', a: L('НА ФОРСАЖЕ'), b: (SHIP.maxSpeed * SHIP.boostMax).toFixed(1) + L(' км/с') },
-    { t: 'row', a: L('РАЗГОН'), b: SHIP.accel.toFixed(2) + L(' км/с²') },
-    { t: 'row', a: L('ТОРМОЖЕНИЕ'), b: SHIP.brake.toFixed(2) + L(' км/с²') },
-    { t: 'row', a: L('ПОПЕРЁК КУРСА'), b: SHIP.lateral.toFixed(2) + L(' км/с²') },
-    { t: 'head', s: L('УСТАНОВЛЕННЫЕ МОДУЛИ') },
-    // Список общий с сервером (js/game/loadout.js): карточка в игре и
-    // каталог в базе обязаны говорить об одном и том же железе.
-    ...modules().map((m) => ({ t: 'row', a: m.name, b: m.value, c: m.installed ? INK : CY_DIM })),
-  ];
-
-  // Хватит ли ширины на две колонки, решает САМАЯ ДЛИННАЯ строка, а не
-  // размер окна: подпись и значение стоят в одной строке навстречу друг
-  // другу, и на узкой колонке они сходятся вплотную. На телефоне (390 px)
-  // двух колонок не выходит вовсе — «ПОСАДОЧНЫЙ КОМПЬЮТЕР ЕСТЬ» требует
-  // 26 знаков, а в колонке их 14.
-  const chars = (it) => (it.t === 'row' ? it.a.length + String(it.b).length + 3
-    : it.t === 'bar' ? 0 : String(it.s).length);
-  const widest = Math.max(...left.map(chars), ...right.map(chars));
-  const glyph = fs * 0.6;
-  const twoCol = b.w / 2 - fs * 2 >= widest * glyph;
-
-  const weight = (it) => (it.t === 'bar' ? 0.75 : it.t === 'head' ? 1.35 : it.t === 'name' ? 2.0 : 1);
-  const paint = (items, x, w, y0, line) => {
-    let y = y0;
-    for (const it of items) {
-      if (it.t === 'name') {
-        ctx.font = `${Math.round(fs * 1.8)}px ${MONO}`;
-        ctx.textAlign = 'left';
-        ctx.fillStyle = INK;
-        ctx.fillText(it.s, x, y + line * 1.2);
-        ctx.font = `${fs}px ${MONO}`;
-      } else if (it.t === 'sub') {
-        ctx.textAlign = 'left';
-        ctx.fillStyle = CY_DIM;
-        ctx.fillText(it.s, x, y + line * 0.8);
-      } else if (it.t === 'head') {
-        head(ctx, x, y + line * 0.9, w, it.s);
-      } else if (it.t === 'bar') {
-        bar(ctx, x, y, w, Math.max(4, Math.round(fs * 0.4)), it.frac, it.c);
-      } else {
-        row(ctx, x, y + line * 0.8, w, it.a, it.b, it.c || INK);
-      }
-      y += line * weight(it);
-    }
-    return y;
-  };
-
-  const top = b.y + fs * 0.6;
-  const avail = b.h - fs * 1.2;
-  if (twoCol) {
-    const colW = Math.floor((b.w - fs * 4) / 2);
-    const rows = Math.max(left.reduce((a, it) => a + weight(it), 0),
-      right.reduce((a, it) => a + weight(it), 0));
-    const line = Math.min(fs * 1.62, avail / rows);
-    paint(left, b.x, colW, top, line);
-    paint(right, b.x + colW + fs * 4, colW, top, line);
-  } else {
-    // Одна колонка: межстрочный интервал считается из того, сколько
-    // строк надо уместить. Иначе карточка вылезает за рамку снизу —
-    // ровно это и поймала проверка вёрстки на 390x844.
-    const rows = [...left, ...right].reduce((a, it) => a + weight(it), 0);
-    const line = Math.min(fs * 1.5, avail / rows);
-    const y = paint(left, b.x, b.w, top, line);
-    paint(right, b.x, b.w, y, line);
-  }
+  return `<div class="ident"><h2>${esc(name.toUpperCase())}</h2><span>${esc(L(SHIP.typeTitle || 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ'))}${
+    ship.id !== null && ship.id !== undefined ? ' · №' + esc(ship.id) : ''}</span></div>
+    <div class="cols2"><div class="stack">${state}${dims}${perf}</div><div class="stack">${mods}</div></div>`;
 }
 
-function drawCargo(ctx, b, game, fs) {
+// --- ТРЮМ ----------------------------------------------------------------------
+
+/**
+ * Трюм. В порту рядом с каждым товаром — его здешняя цена и чем кончится
+ * продажа: ради этого вопроса трюм в порту и открывают. Щелчок по строке
+ * ведёт на рынок, сразу к продаже этого товара.
+ */
+function cargoTab(game, port) {
   const p = game.player;
-  const line = Math.round(fs * 1.9);
   const used = cargoTons(p);
-  const free = Math.max(0, SHIP.hold - used);
-
-  let y = b.y + fs * 1.6;
-  ctx.font = `${Math.round(fs * 1.5)}px ${MONO}`;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = INK;
-  ctx.fillText(L('ЗАНЯТО ') + used.toFixed(1) + ' / ' + SHIP.hold.toFixed(1) + L(' Т'), b.x, y);
-  ctx.font = `${fs}px ${MONO}`;
-  ctx.textAlign = 'right';
-  ctx.fillStyle = CY_DIM;
-  ctx.fillText(L('СВОБОДНО ') + fmtTons(free), b.x + b.w, y);
-
-  y += fs * 0.7;
-  bar(ctx, b.x, y, b.w, Math.max(6, Math.round(fs * 0.6)), used / SHIP.hold,
-    free <= 0 ? AMBER : CY);
-  y += fs * 2.2;
-
+  const hold = SHIP.hold || 0;
+  const free = Math.max(0, hold - used);
+  const top = `<div class="holdbar"><div class="gauge"><span>${esc(L('ЗАНЯТО'))}</span><b>${esc(t1(used))} / ${esc(t1(hold))}</b>
+    <span class="r">${esc(L('СВОБОДНО'))} <b>${esc(t1(free))}</b></span></div>${meter(hold > 0 ? used / hold : 0, free <= 0 ? 'low' : 'cy')}</div>`;
   if (!p.cargo.length) {
-    ctx.textAlign = 'center';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(L('ТРЮМ ПУСТ'), b.x + b.w / 2, y + fs * 2);
-    return;
+    return top + empty(L('ТРЮМ ПУСТ'), L('Груз покупают на рынке порта: дёшево там, где его производят, дорого там, где его ждут.'));
   }
-
-  head(ctx, b.x, y, b.w, L('НАИМЕНОВАНИЕ'));
-  ctx.textAlign = 'right';
-  ctx.fillStyle = CY;
-  ctx.fillText(L('МАССА'), b.x + b.w, y);
-  y += line * 0.9;
-
-  for (const c of p.cargo) {
-    if (y > b.y + b.h - line * 0.5) break;
-    row(ctx, b.x, y, b.w, L(c.name), fmtTons(c.tons), INK, INK);
-    // Доля трюма под этой позицией: по полоскам видно, чем он забит,
-    // без арифметики в уме.
-    bar(ctx, b.x, y + fs * 0.35, b.w, Math.max(3, Math.round(fs * 0.28)),
-      c.tons / SHIP.hold, CY_DIM);
-    y += line;
-  }
+  const market = port && game.station && game.station.market ? game.station.market : null;
+  const price = new Map(market ? market.goods.map((g) => [g.code, g.price]) : []);
+  const rows = p.cargo.map((c) => {
+    const here = price.get(c.code);
+    const gain = here !== undefined && c.avgPrice > 0 ? (here - c.avgPrice) * c.tons : null;
+    const tail = market
+      ? `<td class="n">${here !== undefined ? esc(kr(here)) : '—'}</td><td class="n ${gain === null ? '' : gain >= 0 ? 'good' : 'bad'}">${
+        gain === null ? '—' : esc(kr(gain, true))}</td>`
+      : '';
+    const act = port && here !== undefined ? ` data-act="tomarket" data-code="${esc(c.code)}"` : '';
+    return `<tr class="${act ? 'row' : ''}"${act}><td>${esc(L(c.name))}</td><td class="n">${esc(t1(c.tons))}</td>
+      <td class="n">${c.avgPrice > 0 ? esc(kr(c.avgPrice)) : '—'}</td><td class="n">${c.avgPrice > 0 ? esc(kr(c.avgPrice * c.tons)) : '—'}</td>${tail}</tr>`;
+  }).join('');
+  const headRow = `<tr><th>${esc(L('ТОВАР'))}</th><th class="n">${esc(L('ТОНН'))}</th><th class="n">${esc(L('КУПЛЕНО ПО'))}</th><th class="n">${
+    esc(L('ЗАТРАЧЕНО'))}</th>${market ? `<th class="n">${esc(L('ЦЕНА ЗДЕСЬ'))}</th><th class="n">${esc(L('ЕСЛИ ПРОДАТЬ'))}</th>` : ''}</tr>`;
+  const hint = port
+    ? (market ? L('Щелчок по строке — на рынок, к продаже этого товара.') : L('ЗАПРАШИВАЕМ БИРЖУ…'))
+    : L('Продают груз на рынке любого порта. Цена одна на покупку и продажу.');
+  return `${top}<table class="lt"><thead>${headRow}</thead><tbody>${rows}</tbody></table><p class="hint">${esc(hint)}</p>`;
 }
 
-function drawMissions(ctx, b, game, fs) {
-  const p = game.player;
-  const line = Math.round(fs * 1.5);
+// --- ПОДРЯДЫ -------------------------------------------------------------------
 
+function contractsTab(game) {
+  const p = game.player;
   if (!p.missions.length) {
-    ctx.textAlign = 'center';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(L('АКТИВНЫХ ЗАДАНИЙ НЕТ'), b.x + b.w / 2, b.y + b.h / 2);
-    ctx.fillText(L('БРАТЬ ИХ БУДЕТ ГДЕ НА СТАНЦИЯХ'), b.x + b.w / 2, b.y + b.h / 2 + line);
-    return;
+    return empty(L('АКТИВНЫХ ПОДРЯДОВ НЕТ'), L('Подряды берут на доске в порту: доставка груза, срок, награда.'));
   }
-
-  let y = b.y + fs * 1.8;
-  for (const m of p.missions) {
-    if (y > b.y + b.h - line * 2) break;
+  const lt = liveText(game);
+  return `<div class="stack">${p.missions.map((m) => {
     const dead = missionExpired(m);
-
-    ctx.font = `${Math.round(fs * 1.15)}px ${MONO}`;
-    row(ctx, b.x, y, b.w, L(m.title), fmtCrowns(m.reward), dead ? RED : GREEN, INK);
-    ctx.font = `${fs}px ${MONO}`;
-    y += line;
-
-    row(ctx, b.x, y, b.w,
-      dead ? L('СРОК ВЫШЕЛ') : L('ОСТАЛОСЬ ') + fmtTime(m.left),
-      dead ? L('ПРОСРОЧЕНО') : '', dead ? RED : AMBER, dead ? RED : AMBER);
-    y += fs * 0.5;
-    bar(ctx, b.x, y, b.w, Math.max(3, Math.round(fs * 0.25)),
-      m.total > 0 ? m.left / m.total : 0, dead ? RED : AMBER);
-    y += line * 0.8;
-
-    ctx.textAlign = 'left';
-    ctx.fillStyle = CY_DIM;
-    for (const s of wrap(ctx, L(m.desc), b.w)) {
-      // Длинное описание обрывается по нижней кромке поля, а не лезет за
-      // рамку: проверять высоту только перед заданием мало — оно само
-      // может оказаться в три строки.
-      if (y > b.y + b.h) break;
-      ctx.fillText(s, b.x, y);
-      y += line * 0.85;
-    }
-    y += line * 0.7;
-  }
+    return `<section class="card mission${dead ? ' dead' : ''}">
+      <div class="mh"><b>${esc(L(m.title))}</b><span class="good">${esc(kr(m.reward, true))}</span></div>
+      ${kv([
+        m.target ? [L('Куда'), m.target + (m.where ? ' · ' + m.where : '')] : null,
+        m.tons > 0 ? [L('Груз'), t1(m.tons)] : null,
+        m.penalty > 0 ? [L('Штраф за срыв'), kr(m.penalty), 'bad'] : null,
+        [L('Срок'), lt['mt' + m.id], dead ? 'bad' : 'warn', 'mt' + m.id],
+      ])}
+      ${meter(m.total > 0 ? m.left / m.total : 0, dead ? 'bad' : 'low', null, 'mb' + m.id)}
+      ${m.desc ? `<p>${esc(L(m.desc))}</p>` : ''}
+    </section>`;
+  }).join('')}</div>`;
 }
 
-function drawFinance(ctx, b, game, fs) {
+// --- ФИНАНСЫ -------------------------------------------------------------------
+
+function moneyTab(game) {
   const p = game.player;
-  const line = Math.round(fs * 1.45);
   const t = ledgerTotals(p);
-
-  let y = b.y + fs * 1.8;
-  ctx.textAlign = 'left';
-  ctx.font = `${Math.round(fs * 1.9)}px ${MONO}`;
-  ctx.fillStyle = p.balance < 0 ? RED : INK;
-  ctx.fillText(fmtCrowns(p.balance), b.x, y);
-  ctx.font = `${fs}px ${MONO}`;
-  ctx.textAlign = 'right';
-  ctx.fillStyle = GREEN;
-  ctx.fillText(L('ПРИШЛО ') + fmtCrowns(t.in, true), b.x + b.w, y - line * 0.8);
-  ctx.fillStyle = RED;
-  ctx.fillText(L('УШЛО −') + fmtCrowns(t.out), b.x + b.w, y);
-
-  y += line * 1.4;
-  head(ctx, b.x, y, b.w, L('ВРЕМЯ'));
-  ctx.textAlign = 'left';
-  ctx.fillStyle = CY;
-  ctx.fillText(L('ОПЕРАЦИЯ'), b.x + fs * 6.5, y);
-  ctx.textAlign = 'right';
-  ctx.fillText(L('СУММА'), b.x + b.w, y);
-  y += line;
-
-  // Лента идёт СВЕЖИМ ВВЕРХ: последнее движение денег — то, ради чего
-  // раздел и открывают.
-  const fits = Math.max(0, Math.floor((b.y + b.h - y) / line));
-  const shown = p.ledger.slice(-fits).reverse();
-  for (const e of shown) {
-    ctx.textAlign = 'left';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(fmtClock(e.t), b.x, y);
-    ctx.fillStyle = INK;
-    ctx.fillText(L(e.label), b.x + fs * 6.5, y);
-    ctx.textAlign = 'right';
-    ctx.fillStyle = e.sum >= 0 ? GREEN : RED;
-    ctx.fillText(fmtCrowns(e.sum, true), b.x + b.w, y);
-    y += line;
-  }
-  const hidden = p.ledger.length - shown.length;
-  if (hidden > 0) {
-    ctx.textAlign = 'left';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(L('…ещё ') + hidden + L(' записей выше'), b.x, y);
-  }
-  if (!p.ledger.length) {
-    ctx.textAlign = 'center';
-    ctx.fillStyle = CY_DIM;
-    ctx.fillText(L('ДВИЖЕНИЯ СРЕДСТВ НЕ БЫЛО'), b.x + b.w / 2, y + line);
-  }
+  const top = `<div class="money"><div><span>${esc(L('НА СЧЕТУ'))}</span><b class="${p.balance < 0 ? 'bad' : ''}">${esc(kr(p.balance))}</b></div>
+    <div><span>${esc(L('ПРИШЛО'))}</span><b class="good">${esc(kr(t.in, true))}</b></div>
+    <div><span>${esc(L('УШЛО'))}</span><b class="bad">${esc(kr(-t.out))}</b></div></div>`;
+  if (!p.ledger.length) return top + empty(L('ДВИЖЕНИЯ СРЕДСТВ НЕ БЫЛО'), '');
+  // Свежее — вверху: последнее движение денег — то, ради чего раздел и
+  // открывают. Прокручивается вся лента, а не столько, сколько влезло.
+  const rows = p.ledger.slice().reverse().map((e) => `<tr><td class="dim">${esc(e.at ? fmtAt(e.at) : fmtClock(e.t))}</td>
+    <td>${esc(L(e.label))}</td><td class="n ${e.sum >= 0 ? 'good' : 'bad'}">${esc(kr(e.sum, true))}</td>
+    <td class="n dim">${typeof e.after === 'number' ? esc(kr(e.after)) : ''}</td></tr>`).join('');
+  return `${top}<table class="lt"><thead><tr><th>${esc(L('КОГДА'))}</th><th>${esc(L('ОПЕРАЦИЯ'))}</th><th class="n">${
+    esc(L('СУММА'))}</th><th class="n">${esc(L('ОСТАТОК'))}</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-// --- рамка --------------------------------------------------------------------
+// --- наружу ----------------------------------------------------------------------
 
-export function drawMenu(r, game) {
-  const ctx = r.ctx;
-  const menu = game.menu;
-  const W = r.camera.w, H = r.camera.h;
+/** Содержимое раздела пилота. port — терминал открыт в порту. */
+export function pilotBody(game, tab, port = false) {
+  if (tab === 'cargo') return cargoTab(game, port);
+  if (tab === 'contracts') return contractsTab(game);
+  if (tab === 'money') return moneyTab(game);
+  return shipTab(game);
+}
 
-  ctx.save();
-  ctx.textBaseline = 'alphabetic';
-
-  // Кадр под меню приглушён, но ВИДЕН: игрок обязан замечать, что летит.
-  ctx.fillStyle = 'rgba(0,4,10,0.45)';
-  ctx.fillRect(0, 0, W, H);
-
-  const w = Math.min(W - 24, Math.max(360, Math.round(W * 0.74)));
-  const h = Math.min(H - 24, Math.max(260, Math.round(H * 0.78)));
-  const x = Math.round((W - w) / 2), y = Math.round((H - h) / 2);
-  // Кегль выбирается по МЕНЬШЕЙ стороне рамки. По одной высоте его
-  // считать нельзя: телефон высокий и узкий, и на 390x844 закладки
-  // «3 ЗАДАНИЯ» и «4 ФИНАНСЫ» налезали друг на друга — в рамку не
-  // помещался даже заголовок раздела.
-  const fs = Math.max(10, Math.min(17, Math.round(Math.min(h * 0.028, w * 0.026))));
-  const headH = Math.round(fs * 2.4);
-  const tabH = Math.round(fs * 2.2);
-  const footH = Math.round(fs * 2.2);
-
-  ctx.fillStyle = 'rgba(4,14,24,0.95)';
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = CY;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-
-  // Шапка.
-  ctx.fillStyle = 'rgba(28,86,130,0.55)';
-  ctx.fillRect(x, y, w, headH);
-  ctx.font = `${Math.round(fs * 1.1)}px ${MONO}`;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = INK;
-  // В шапке видно, ЧЬИ это дела. Живы ли они, вопроса нет: без связи
-  // игра стоит под надписью «нет связи» (js/main.js), меню под ней тоже.
-  const who = session.name ? L('МЕНЮ ПИЛОТА · ') + session.name.toUpperCase() : L('МЕНЮ ПИЛОТА');
-  ctx.fillText(who, x + fs, y + headH * 0.68);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = game.player.balance < 0 ? RED : AMBER;
-  ctx.fillText(fmtCrowns(game.player.balance), x + w - fs, y + headH * 0.68);
-
-  // Закладки.
-  const tabW = Math.floor(w / TABS.length);
-  menu.tabRects = [];
-  ctx.font = `${fs}px ${MONO}`;
-  for (let i = 0; i < TABS.length; i++) {
-    const tx = x + i * tabW;
-    const tw = i === TABS.length - 1 ? w - tabW * (TABS.length - 1) : tabW;
-    const on = i === menu.tab;
-    menu.tabRects.push({ i, x: tx, y: y + headH, w: tw, h: tabH });
-    ctx.fillStyle = on ? 'rgba(79,179,224,0.22)'
-      : menu.hover === i ? 'rgba(79,179,224,0.10)' : 'rgba(5,17,28,0.9)';
-    ctx.fillRect(tx, y + headH, tw, tabH);
-    ctx.strokeStyle = CY_DIM;
-    ctx.strokeRect(tx + 0.5, y + headH + 0.5, tw - 1, tabH - 1);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = on ? INK : CY_DIM;
-    ctx.fillText((i + 1) + ' ' + TABS[i], tx + tw / 2, y + headH + tabH * 0.66);
-    if (on) {
-      ctx.fillStyle = CY;
-      ctx.fillRect(tx, y + headH + tabH - 2, tw, 2);
-    }
-  }
-
-  const body = {
-    x: x + fs * 1.4,
-    y: y + headH + tabH,
-    w: w - fs * 2.8,
-    h: h - headH - tabH - footH,
+/**
+ * Числа, которые меняются на ходу: бак, щиты, дальность, сроки подрядов,
+ * скорость. Рамка ставит их в узлы data-live и data-bar раз в несколько
+ * кадров — пересобирать ради них раздел значило бы терять нажатие,
+ * пришедшееся на пересборку.
+ */
+export function liveText(game) {
+  const { ship } = game;
+  const out = {
+    fuel: t1(ship.fuel) + ' / ' + t1(fuelCap()),
+    shield: SHIP.maxShield > 0 ? Math.round(ship.shield) + ' / ' + SHIP.maxShield : '',
+    warp: L('до ') + warpRange(ship).toFixed(1) + L(' св. г.'),
+    quantum: L('до ') + quantumRange(ship).toFixed(0) + L(' млн км'),
   };
-  // Рамка и поле остаются в состоянии меню: по ним ловится щелчок и
-  // проверяется вёрстка (tools/smoke.mjs). Считать их второй раз
-  // отдельной копией — верный способ развести проверку с игрой.
-  menu.rect = { x, y, w, h };
-  menu.body = body;
-  menu.fs = fs;
-
-  ctx.font = `${fs}px ${MONO}`;
-  if (menu.tab === 0) drawShip(ctx, body, game, fs);
-  else if (menu.tab === 1) drawCargo(ctx, body, game, fs);
-  else if (menu.tab === 2) drawMissions(ctx, body, game, fs);
-  else drawFinance(ctx, body, game, fs);
-
-  // Подвал: чем управлять и — главное — что корабль всё это время летит.
-  const fy = y + h - footH;
-  ctx.fillStyle = 'rgba(5,17,28,0.9)';
-  ctx.fillRect(x, fy, w, footH);
-  ctx.strokeStyle = CY_DIM;
-  ctx.beginPath();
-  ctx.moveTo(x, fy + 0.5); ctx.lineTo(x + w, fy + 0.5);
-  ctx.stroke();
-  ctx.font = `${fs}px ${MONO}`;
-  ctx.textAlign = 'left';
-  ctx.fillStyle = CY_DIM;
-  ctx.fillText(L('1–4 РАЗДЕЛ · I ЗАКРЫТЬ'), x + fs, fy + footH * 0.68);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = AMBER;
-  ctx.fillText(L('КОРАБЛЬ В ПОЛЁТЕ · ') + fmtSpeed(game.ship.speed), x + w - fs, fy + footH * 0.68);
-
-  ctx.restore();
+  for (const m of game.player.missions) out['mt' + m.id] = missionExpired(m) ? L('СРОК ВЫШЕЛ') : L('осталось ') + fmtTime(m.left);
+  return out;
 }
+
+export function liveBars(game) {
+  const { ship } = game;
+  const cap = fuelCap();
+  const out = {
+    fuelBar: cap > 0 ? ship.fuel / cap : 0,
+    shieldBar: SHIP.maxShield > 0 ? ship.shield / SHIP.maxShield : 0,
+  };
+  for (const m of game.player.missions) out['mb' + m.id] = m.total > 0 ? m.left / m.total : 0;
+  return out;
+}
+
+/** Действия разделов пилота. Вернёт true, если нажатие разобрано. */
+export function pilotAct(game, act, arg = {}) {
+  if (act === 'tomarket' && game.station) {
+    // Из трюма в порту — к продаже этого товара на рынке.
+    game.station.good = arg.code;
+    game.station.side = 'sell';
+    game.station.qty = null;
+    game.menu.tab = 'market';
+    game.menu.dirty = true;
+    return true;
+  }
+  return false;
+}
+
