@@ -228,6 +228,12 @@ html, body {
 }
 .term .tab:hover { color: var(--ink); background: rgba(79,179,224,.06); }
 .term .tab.on { color: var(--ink); border-bottom-color: var(--cy); background: rgba(79,179,224,.11); }
+/* Версия — в конце строки закладок: по снимку экрана видно, на какой
+   версии нашли ошибку. */
+.term .tt .ver {
+  margin-left: auto; align-self: center; padding: 0 8px 0 16px;
+  font-size: 10px; letter-spacing: 1.5px; color: var(--dim); white-space: nowrap;
+}
 .term kbd {
   display: inline-block; min-width: 18px; padding: 0 4px; margin-right: 7px;
   font: inherit; font-size: 10px; line-height: 16px; text-align: center;

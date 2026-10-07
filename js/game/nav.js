@@ -1,5 +1,11 @@
 // Навигация: список целей, выбор цели наведением, дистанции и ETA.
 //
+// Цель ОДНА на всю игру: тело, станция, город, метка, пилот, NPC — или
+// чужая система (её держит game.warpTarget, js/main.js). Выбор новой
+// заменяет прежнюю, и цели может не быть вовсе: nav.index = -1. Раньше их
+// было две — цель в системе и цель варпа, — и выбранную на карте звезду
+// было уже не снять: J всегда варпил.
+//
 // Автопилота здесь больше нет: перелёты делает квантовый привод
 // (js/game/quantum.js), и «долететь самому на маршевых» больше не
 // сценарий, а способ потратить час.
@@ -34,7 +40,7 @@ export function makeNav(world) {
  *        надо помнить, какой из двух способов сейчас нужен
  */
 export function refreshNav(nav, world, ship, peers = null) {
-  const prev = nav.list[nav.index] || null;
+  const prev = nav.index >= 0 ? nav.list[nav.index] || null : null;
   const local = ship ? nearestBody(world, ship.pos).body : null;
   nav.list.length = 0;
   for (const b of world.bodies) {
@@ -50,16 +56,23 @@ export function refreshNav(nav, world, ship, peers = null) {
   // ничего: там сортируют по зазору до прицела, и корабль под носом
   // выберется раньше планеты во полнеба.
   if (peers) for (const p of peers) nav.list.push(p);
-  let i = nav.list.indexOf(prev);
+  let i = prev ? nav.list.indexOf(prev) : -1;
   // Цель могла выпасть из списка: улетели от планеты, и её маркеры
   // скрылись. Тогда держимся за само тело, а не сбрасываем выбор.
   if (i < 0 && prev && prev.isMarker) i = nav.list.indexOf(prev.body);
-  if (i < 0) i = Math.min(nav.index, nav.list.length - 1);
-  nav.index = Math.max(0, i);
+  // Пропала совсем (пилот ушёл, NPC исчез) — цели больше нет. Раньше на её
+  // место вставало то, что оказалось под тем же номером списка, и пушка
+  // молча переводилась на соседа.
+  nav.index = i;
   return nav.list;
 }
 
-export const currentTarget = (nav) => nav.list[nav.index] || null;
+export const currentTarget = (nav) => (nav.index >= 0 ? nav.list[nav.index] || null : null);
+
+/** Снять цель в системе. */
+export function clearNavTarget(nav) {
+  nav.index = -1;
+}
 
 // Допуск наведения: на столько нос может не дотянуть до объекта, чтобы
 // тот всё равно считался выбранным. Двенадцать градусов — это заметно

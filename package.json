@@ -1,6 +1,6 @@
 {
   "name": "solar-trader",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "description": "Космический симулятор в духе Elite: WebGL2, ES-модули, без сборки",
   "type": "module",

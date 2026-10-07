@@ -616,7 +616,7 @@ export function showShip(game, m) {
   const s = m.sysId === null ? null : galaxy().systems.find((x) => x.id === m.sysId);
   if (!s) { say(game.state, L('ГДЕ ЭТОТ КОРАБЛЬ, НЕИЗВЕСТНО'), AMBER); return; }
   switchView(game, 'galaxy');
-  aimSystem(game, s);
+  map.gsel = s;
 }
 
 /** Вид галактики — к системе: она в середине, соседи вокруг. */
@@ -625,15 +625,15 @@ function showSystem(map, s) {
 }
 
 /**
- * Выбор системы — это и цель варпа: на этой карте выбирают только затем,
- * чтобы лететь (состав чужой системы неизвестен до прибытия, читать о
- * ней нечего). Если напрямую не долететь — цель первый прыжок маршрута,
- * а маршрут запоминается: прибыв, игра сама поставит следующий
- * (js/main.js, прибытие).
+ * Взять систему в цель. Цель в игре одна (js/main.js): система заменяет
+ * планету, станцию или пилота, и наоборот. Если напрямую не долететь —
+ * цель первый прыжок маршрута, а маршрут запоминается: прибыв, игра сама
+ * поставит следующий (js/main.js, прибытие).
  *
- * Чего больше нет: цель НЕ назначается тем, что вид открыли. Раньше
- * открытие галактики само ставило ближайшего соседа — и случайный взгляд
- * на карту менял, куда полетит J.
+ * Чего больше нет: цель НЕ назначается выбором на карте. Раньше выбранная
+ * система сразу становилась целью варпа, и снять её было нечем — J улетал
+ * туда, куда случайно щёлкнули. Теперь выбор только показывает систему и
+ * маршрут, а целью её делает Tab, Enter или кнопка в карточке.
  */
 function aimSystem(game, s) {
   const map = game.map, cur = game.sys;
@@ -647,8 +647,7 @@ function aimSystem(game, s) {
   }
   const hop = route.path[1];
   const same = game.warpTarget && game.warpTarget.seed === hop.seed && destOf(game) === s;
-  game.warpTarget = hop;
-  game.warpRoute = route.hops > 1 ? route.path.map((x) => x.id) : null;
+  game.targetSystem(hop, route.hops > 1 ? route.path.map((x) => x.id) : null);
   if (same) return false;
   if (route.hops > 1) {
     say(game.state, L('МАРШРУТ ДО ') + s.name.toUpperCase() + ': ' + route.hops + L(' ПРЫЖКА · ПЕРВЫЙ — ')
@@ -668,7 +667,10 @@ function pickObj(game, obj, fly) {
   if (fly) focusOn(map, game.world, obj);
 }
 
-/** Назначить выбранное целью (Tab). Свой корабль — то, у чего он стоит. */
+/**
+ * Tab на карте: выбранное — в цель, а если оно уже цель — снять её.
+ * Свой корабль — то, у чего он стоит.
+ */
 function targetSel(game) {
   const map = game.map;
   const t = map.sel && map.sel.isFleet ? map.sel.host : map.sel;
@@ -676,9 +678,19 @@ function targetSel(game) {
     say(game.state, map.sel ? L('КОРАБЛЬ В ПУСТОТЕ: ЦЕЛИ РЯДОМ НЕТ') : L('ОБЪЕКТ НЕ ВЫБРАН'), AMBER);
     return false;
   }
+  if (currentTarget(game.nav) === t) { game.clearTarget(); return false; }
   game.selectTarget(t);
   say(game.state, L('ЦЕЛЬ: ') + t.name);
   return true;
+}
+
+/** То же для системы на карте галактики. */
+function targetSystemSel(game) {
+  const map = game.map, t = map.gsel;
+  if (!t) { say(game.state, L('СИСТЕМА НЕ ВЫБРАНА'), AMBER); return; }
+  if (game.sys && t.seed === game.sys.seed) { say(game.state, L('ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ'), AMBER); return; }
+  if (destOf(game) === t) { game.clearTarget(); return; }
+  aimSystem(game, t);
 }
 
 /** F — следующий свой корабль. Возвращает, было ли нажатие. */
@@ -724,7 +736,7 @@ function tapAt(game, x, y) {
   if (row) { showShip(game, row.mark); return null; }
   const lr = lrowAt(map, x, y);
   if (lr) {
-    if (map.view === 'galaxy') aimSystem(game, lr.obj);
+    if (map.view === 'galaxy') map.gsel = lr.obj;
     else pickObj(game, lr.obj, true);
     if (map.ui.narrow) map.listOpen = false;
     return null;
@@ -735,7 +747,7 @@ function tapAt(game, x, y) {
   const twice = map.last.obj === hit && map.t - map.last.t < DOUBLE;
   map.last.obj = hit; map.last.t = map.t;
   if (map.view === 'galaxy') {
-    aimSystem(game, hit);
+    map.gsel = hit;
     if (twice) showSystem(map, hit);
   } else {
     pickObj(game, hit, twice);
@@ -757,7 +769,7 @@ function pressButton(game, id) {
     case 'target': targetSel(game); return null;
     case 'jump': return jumpSel(game);
     case 'show': showSel(game); return null;
-    case 'aim': if (map.gsel) aimSystem(game, map.gsel); return null;
+    case 'aim': targetSystemSel(game); return null;
     case 'warp': return warpSel(game);
     default: return null;
   }
@@ -777,7 +789,7 @@ function showSel(game) {
   else if (map.sel) focusOn(map, game.world, map.sel);
 }
 
-/** Квантовый прыжок к выбранному: целью — и в путь (карта закрывается). */
+/** Прыжок к выбранному: целью — и в путь (карта закрывается). */
 function jumpSel(game) {
   const map = game.map;
   const t = map.sel && map.sel.isFleet ? map.sel.host : map.sel;
@@ -790,7 +802,7 @@ function warpSel(game) {
   const map = game.map;
   if (map.view === 'galaxy' && map.gsel && game.sys && map.gsel.seed !== game.sys.seed
       && destOf(game) !== map.gsel) aimSystem(game, map.gsel);
-  return 'warp';
+  return 'jump';
 }
 
 const _pan = { x: 0, y: 0 }, _drag = { x: 0, y: 0 };
@@ -798,7 +810,7 @@ const _pan = { x: 0, y: 0 }, _drag = { x: 0, y: 0 };
 /**
  * Разбор ввода карты. Вызывается каждый кадр из main.js вместо полётного
  * управления. Возвращает действие для игры: 'close' — закрыть карту,
- * 'jump' — квантовый прыжок к цели, 'warp' — J (варп или прыжок); иначе null.
+ * 'jump' — прыжок к цели (варп к системе, квантовый — к остальному); иначе null.
  */
 export function mapInput(game, input) {
   const map = game.map;
@@ -881,15 +893,11 @@ export function mapInput(game, input) {
       i = i < 0 ? 0 : (i + dir + list.length) % list.length;
       // Вид не едет: галактика маленькая, и её ценность в том, что видно
       // всё сразу — и куда, и через кого. Подлететь — пробелом или дважды.
-      aimSystem(game, list[i]);
+      // Выбор — не цель: маршрут видно сразу, целью систему делает Tab.
+      map.gsel = list[i];
     }
-    if (input.pressed('Tab', 'Enter', 'NumpadEnter')) {
-      const t = map.gsel;
-      if (!t) say(game.state, L('СИСТЕМА НЕ ВЫБРАНА'), AMBER);
-      else if (game.sys && t.seed === game.sys.seed) say(game.state, L('ВЫ УЖЕ В ЭТОЙ СИСТЕМЕ'), AMBER);
-      else if (!aimSystem(game, t)) say(game.state, L('ЦЕЛЬ ВАРПА: ') + t.name.toUpperCase() + L(' · J — ВАРП'), GREEN);
-    }
-    if (input.pressed('KeyJ')) act = warpSel(game);
+    if (input.pressed('Tab', 'Enter', 'NumpadEnter')) targetSystemSel(game);
+    if (input.pressed('KeyJ', 'KeyB')) act = warpSel(game);
   } else {
     if (dir) {
       const all = mapObjects(game.world, map.sel);
@@ -898,9 +906,12 @@ export function mapInput(game, input) {
       pickObj(game, all[i], true);
     }
     if (input.pressed('Tab', 'Enter', 'NumpadEnter')) targetSel(game);
-    if (input.pressed('KeyB')) act = jumpSel(game);
-    if (input.pressed('KeyJ')) act = 'warp';
+    // J и B — одна клавиша: прыжок к выбранному (или к цели, если на карте
+    // ничего не выбрано).
+    if (input.pressed('KeyJ', 'KeyB')) act = jumpSel(game);
   }
+  // Backspace — снять цель, как в полёте.
+  if (input.pressed('Backspace')) game.clearTarget();
 
   // Курсор: над кнопкой — рука, при вращении — «тащу», над объектом —
   // указатель, иначе обычная стрелка.
@@ -1963,11 +1974,13 @@ function drawObjectCard(ctx, map, game) {
     y += bh + gap;
   } else {
     const half = Math.floor((w - gap) / 2);
-    button(ctx, map, 'target', x, y, w, bh, isCur ? L('ЦЕЛЬ НАЗНАЧЕНА') : L('НАЗНАЧИТЬ ЦЕЛЬЮ'), 'TAB',
-      { primary: !isCur, on: !isCur, clip: r });
+    // Цель снимают той же кнопкой, что назначают: «назначена» без способа
+    // отменить — ровно та ловушка, в которую попадала выбранная звезда.
+    button(ctx, map, 'target', x, y, w, bh, isCur ? L('СНЯТЬ ЦЕЛЬ') : L('НАЗНАЧИТЬ ЦЕЛЬЮ'), 'TAB',
+      { primary: !isCur, clip: r });
     y += bh + gap;
     const flying = game.state && game.state.mode === 'flight';
-    button(ctx, map, 'jump', x, y, half, bh, L('ПРЫЖОК'), 'B', { on: !!card.jumpOk && flying, clip: r });
+    button(ctx, map, 'jump', x, y, half, bh, L('ПРЫЖОК'), 'J', { on: !!card.jumpOk && flying, clip: r });
     button(ctx, map, 'show', x + half + gap, y, w - half - gap, bh, L('ПОКАЗАТЬ'), L('ПРОБЕЛ'), { clip: r });
     y += bh + gap;
   }
@@ -2132,8 +2145,8 @@ function drawGalaxyCard(ctx, map, game) {
   const bh = Math.round(28 * k), gap = Math.round(6 * k);
   if (!card.here) {
     const half = Math.floor((w - gap) / 2);
-    button(ctx, map, 'aim', x, y, w, bh, aimed ? L('ЦЕЛЬ ВАРПА НАЗНАЧЕНА') : L('ПРОЛОЖИТЬ МАРШРУТ'), 'ENTER',
-      { primary: !aimed, on: !aimed, clip: r });
+    button(ctx, map, 'aim', x, y, w, bh, aimed ? L('СНЯТЬ ЦЕЛЬ') : L('НАЗНАЧИТЬ ЦЕЛЬЮ'), 'TAB',
+      { primary: !aimed, on: !!map.route || aimed, clip: r });
     y += bh + gap;
     const flying = game.state && game.state.mode === 'flight';
     button(ctx, map, 'warp', x, y, half, bh, L('ВАРП'), 'J', { on: card.warpOk && flying, clip: r });

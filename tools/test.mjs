@@ -3540,10 +3540,15 @@ console.log('\n== карта системы ==');
   // и закрывали его; в трёхмерной маркер, лёгший на диск, не рисуется
   // вовсе, а сбоку — рисуется.
   {
+    const TG = await import('../js/game/target.js');
     const g3 = {
       world, ship: mship, nav: makeNav(world), map: makeMap(), state: { messages: [], mode: 'flight' },
-      sys: systemById(0), fleet: [], peers: [], selectTarget() {},
+      sys: systemById(0), fleet: [], peers: [],
     };
+    // Цель — настоящим модулем (js/game/target.js), как в игре.
+    g3.selectTarget = (t) => TG.selectTarget(g3, t);
+    g3.targetSystem = (h, r) => TG.targetSystem(g3, h, r);
+    g3.clearTarget = () => TG.clearTarget(g3);
     resetMap(g3.map, world);
     mapFrame(g3, 1600, 900, 0);
     const m3 = g3.map;
@@ -3587,22 +3592,66 @@ console.log('\n== карта системы ==');
       m3.sel = home;
     }
 
-    // Открыть галактику — не значит выбрать цель. Раньше открытие вида
-    // само ставило ближайшего соседа, и случайный взгляд на карту менял,
-    // куда полетит J.
+    // Открыть галактику — не значит выбрать цель, и ВЫБРАТЬ систему — тоже.
+    // Раньше выбор сразу ставил цель варпа, и снять её было нечем: J
+    // улетал туда, куда случайно щёлкнули. Теперь целью систему делает Tab
+    // (или кнопка), повторный Tab — снимает, а цель в игре одна: система
+    // вытесняет планету, планета — систему.
     const keys = (codes) => ({
       pressed: (...c) => c.some((x) => codes.includes(x)), mouse: { x: -1, y: -1, left: false, right: false, clicked: false },
       takePan(o) { o.x = 0; o.y = 0; return o; }, takeDrag(o) { o.x = 0; o.y = 0; return o; }, takeWheel: () => 0, down: new Set(),
     });
     g3.warpTarget = null;
+    TG.selectTarget(g3, home);
     mapInput(g3, keys(['KeyG']));
     mapFrame(g3, 1600, 900, 1 / 60);
     const opened = m3.view === 'galaxy' && g3.warpTarget === null && m3.gsel === null;
     mapInput(g3, keys(['ArrowRight']));
-    const picked = g3.warpTarget && m3.gsel && g3.warpTarget.seed === m3.gsel.seed;
-    ok(opened && picked,
-      `галактика открывается без цели (${opened ? 'цели нет' : 'цель появилась сама'}), стрелка выбирает и назначает: ` +
-      (g3.warpTarget ? g3.warpTarget.name : '—'));
+    const browsed = !!m3.gsel && g3.warpTarget === null && currentTarget(g3.nav) === home;
+    mapInput(g3, keys(['Tab']));
+    const taken = g3.warpTarget && g3.warpTarget.seed === m3.gsel.seed && currentTarget(g3.nav) === null;
+    mapInput(g3, keys(['Tab']));
+    const dropped = g3.warpTarget === null && currentTarget(g3.nav) === null;
+    ok(opened && browsed && taken && dropped,
+      `галактика: открылась без цели — ${opened}; стрелка только выбрала (${m3.gsel ? m3.gsel.name : '—'}), цель — прежняя планета — ${browsed}; ` +
+      `Tab — система стала целью вместо планеты — ${!!taken}; второй Tab — цель снята — ${dropped}`);
+    mapInput(g3, keys(['KeyG']));
+  }
+
+  // --- единая цель (js/game/target.js) ----------------------------------------
+  //
+  // Цель одна: тело, станция, пилот, NPC или чужая система. Выбор новой
+  // заменяет прежнюю, цели может не быть вовсе, и пропавшая цель (пилот
+  // ушёл) не подменяется соседней по списку — раньше на её место молча
+  // вставало то, что оказалось под тем же номером.
+  {
+    const TG = await import('../js/game/target.js');
+    const { makeQuantum } = await import('../js/game/quantum.js');
+    const { makeWarp } = await import('../js/game/warp.js');
+    const gt = { world, ship: mship, nav: makeNav(world), peers: [], quantum: makeQuantum(), warp: makeWarp(),
+      warpTarget: null, warpRoute: null };
+    const other = systemById(1);
+    const planet = world.planets[2];
+    TG.selectTarget(gt, planet);
+    const a = currentTarget(gt.nav) === planet && TG.targetOf(gt) === planet;
+    TG.targetSystem(gt, other, null);
+    const b = currentTarget(gt.nav) === null && gt.warpTarget === other && TG.targetOf(gt) === other;
+    TG.selectTarget(gt, planet);
+    const c = gt.warpTarget === null && TG.targetOf(gt) === planet;
+    const had = TG.clearTarget(gt);
+    const none = TG.targetOf(gt) === null && TG.clearTarget(gt) === false;
+    refreshNav(gt.nav, world, mship, gt.peers);
+    const stays = currentTarget(gt.nav) === null;
+    ok(a && b && c && had && none && stays,
+      'цель одна: планета → система вытесняет её → планета вытесняет систему → снята, и пустая цель не заполняется сама');
+    const peer = { isPeer: true, id: 77, name: 'АННА', pos: { x: mship.pos.x + 5, y: mship.pos.y, z: mship.pos.z }, radius: 0.03 };
+    const ghost = { isPeer: true, id: 78, name: 'ЗАХАР', pos: { x: mship.pos.x + 9, y: mship.pos.y, z: mship.pos.z }, radius: 0.03 };
+    gt.peers = [peer, ghost];
+    TG.selectTarget(gt, peer);
+    gt.peers = [ghost];
+    refreshNav(gt.nav, world, mship, gt.peers);
+    ok(currentTarget(gt.nav) === null, 'пилот-цель ушёл — цели нет, а не сосед по списку (' +
+      (currentTarget(gt.nav) ? currentTarget(gt.nav).name : 'пусто') + ')');
   }
 
   // --- маршрут по галактике (js/game/warproute.js) ---------------------------
@@ -6405,6 +6454,7 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   // проверка тихо пропустила бы её.
   const NAMED = {
     Tab: ['Tab'], Space: ['Space'], Enter: ['Enter'], Escape: ['Esc'],
+    Backspace: ['Backspace'],
     Backquote: ['~'], Minus: ['-'], Equal: ['='],
     ArrowUp: ['&uarr;'], ArrowDown: ['&darr;'],
     ArrowLeft: ['&larr;'], ArrowRight: ['&rarr;'],
@@ -8520,6 +8570,16 @@ console.log('\n== наземный город ==');
       && at('2026-10-04 06:01:00') !== at('2026-10-04 06:03:00') && /2[\s ]635 кр/.test(money)
       && money.indexOf('СТЫКОВОЧНЫЙ СБОР') < money.indexOf('ПОКУПКА: ВОДА'),
       `лента: у каждой операции своё время (${at('2026-10-04 06:01:00')}, ${at('2026-10-04 06:03:00')}), остаток, свежее сверху`);
+
+    // Версия игры одна: в коде, в package.json и на экране. По снимку
+    // экрана видно, на какой версии нашли ошибку, — если номер не врёт.
+    {
+      const { VERSION } = await import('../js/core/version.js');
+      const { bootHtml } = await import('../js/ui/screens.js');
+      const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+      ok(VERSION === pkg.version && T.terminalHtml(game, true).includes('v' + VERSION) && bootHtml().includes('v' + VERSION),
+        `версия ${VERSION}: совпадает с package.json (${pkg.version}), видна в терминале и на стартовом экране`);
+    }
 
     // Корпус в процентах — от предела ЭТОГО корпуса: у крейсера 600 единиц,
     // и целый корпус был бы «600 %».
