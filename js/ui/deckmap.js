@@ -155,7 +155,7 @@ export function drawDeckMap(ctx, w, h, game, I) {
   ctx.fillText(L('ПЛАН: ') + L(D.deck), pad, sc(38));
   ctx.font = fnt(12);
   ctx.fillStyle = CY;
-  ctx.fillText(L('НОС — ВВЕРХУ'), pad, sc(56));
+  ctx.fillText(I.station ? L('ЩЕЛЬ ПОРТА — ВВЕРХУ') : L('НОС — ВВЕРХУ'), pad, sc(56));
 
   // Помещения.
   const routeRooms = new Set(game.walkRoute ? game.walkRoute.steps.map((e) => e.to) : []);
@@ -167,6 +167,11 @@ export function drawDeckMap(ctx, w, h, game, I) {
     if (r.kind === 'lift') fill = 'rgba(40,120,110,0.75)';
     else if (r.kind === 'lock') fill = 'rgba(120,96,40,0.6)';
     else if (r.kind === 'shaft') fill = 'rgba(70,80,96,0.75)';
+    // Станция: перрон — фоном, площадки — жёлтой разметкой, терминал на
+    // плане перрона — тёмным блоком.
+    else if (r.kind === 'apron') fill = 'rgba(30,44,56,0.35)';
+    else if (r.kind === 'pad') fill = 'rgba(120,100,40,0.45)';
+    else if (r.kind === 'block') fill = 'rgba(60,72,84,0.85)';
     if (routeRooms.has(r.id)) fill = 'rgba(60,120,70,0.55)';
     if (isHere) fill = 'rgba(79,179,224,0.45)';
     ctx.fillStyle = fill;

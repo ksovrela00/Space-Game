@@ -13,7 +13,7 @@
 //
 // Без мира и без рендера: проверяется в Node (tools/test.mjs).
 
-import { bodyBasis } from './world.js';
+import { frameBasis } from './world.js';
 import { makeBasis, toLocal, toWorld, dirToWorld } from '../core/basis.js';
 
 /** Точка в осях корабля (м) -> мир (км). */
@@ -67,25 +67,25 @@ const _B = makeBasis();
 
 /** Точка мира -> оси тела (км), как их пишет сохранение (anchor, out_pose). */
 export function bodyLocal(body, P, out = { x: 0, y: 0, z: 0 }) {
-  bodyBasis(body, _B);
+  frameBasis(body, _B);
   return toLocal(_B, body.pos, P, out);
 }
 
 /** Направление мира -> оси тела. */
 export function bodyLocalDir(body, d, out = { x: 0, y: 0, z: 0 }) {
-  bodyBasis(body, _B);
+  frameBasis(body, _B);
   return toLocal(_B, { x: 0, y: 0, z: 0 }, d, out);
 }
 
 /** Оси тела (км) -> мир. */
 export function bodyWorld(body, l, out = { x: 0, y: 0, z: 0 }) {
-  bodyBasis(body, _B);
+  frameBasis(body, _B);
   return toWorld(_B, body.pos, l, out);
 }
 
 /** Направление в осях тела -> мир. */
 export function bodyWorldDir(body, d, out = { x: 0, y: 0, z: 0 }) {
-  bodyBasis(body, _B);
+  frameBasis(body, _B);
   return dirToWorld(_B, d, out);
 }
 
@@ -94,7 +94,8 @@ export function bodyWorldDir(body, d, out = { x: 0, y: 0, z: 0 }) {
  * оси тела — «вверх» и «вперёд».
  *
  *   на палубе — в осях корабля: верх — верх корабля, вперёд — по yaw;
- *   на грунте — в осях тела: верх — от центра тела, вперёд — куда смотрит.
+ *   на грунте — в осях тела: верх — от центра тела, вперёд — куда смотрит;
+ *   на полу зала станции — в её осях: верх — верх станции.
  *
  * @param vessel  корабль, на борту которого человек (или null)
  * @param body    тело, на грунте которого он (или null)
@@ -104,9 +105,14 @@ export function personPlace(person, vessel, body, out) {
   if (person.st === 'out') {
     if (!body) return false;
     bodyWorld(body, { x: person.p[0], y: person.p[1], z: person.p[2] }, out.pos);
-    const ux = out.pos.x - body.pos.x, uy = out.pos.y - body.pos.y, uz = out.pos.z - body.pos.z;
-    const ul = Math.hypot(ux, uy, uz) || 1;
-    out.basis.up.x = ux / ul; out.basis.up.y = uy / ul; out.basis.up.z = uz / ul;
+    if (body.isStation) {
+      const bu = body.basis.up;
+      out.basis.up.x = bu.x; out.basis.up.y = bu.y; out.basis.up.z = bu.z;
+    } else {
+      const ux = out.pos.x - body.pos.x, uy = out.pos.y - body.pos.y, uz = out.pos.z - body.pos.z;
+      const ul = Math.hypot(ux, uy, uz) || 1;
+      out.basis.up.x = ux / ul; out.basis.up.y = uy / ul; out.basis.up.z = uz / ul;
+    }
     bodyWorldDir(body, person.face, out.basis.fwd);
   } else {
     if (!vessel) return false;

@@ -28,7 +28,7 @@
 
 import { v3 } from '../core/vec3.js';
 import { makeBasis, toLocal, toWorld, lookAlong } from '../core/basis.js';
-import { STATION_G, padAt, padByNo, inHall } from './stationplan.js';
+import { STATION_G, PAD_H, padAt, padByNo, inHall } from './stationplan.js';
 import { HULL } from './hull.js';
 import { SHIP } from './ship.js';
 import { COMBAT } from './weapons.js';
@@ -45,7 +45,7 @@ export const BERTH = {
   friction: 0.55,
   settle: 0.004,           // км/с — ниже этого удар — уже не удар, а касание
   tumble: 9,
-  pad: 0.00005,            // км — плита площадки над полом (5 см)
+  pad: PAD_H / 1000,       // км — плита площадки над полом (5 см)
 };
 
 const _o = v3(), _l = v3(), _w = v3(), _n = v3();

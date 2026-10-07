@@ -31,7 +31,7 @@ import { v3, set, cross, normalize } from '../core/vec3.js';
 import { SHIP } from './ship.js';
 import { typeSpec } from './specs.js';
 import { makeBasis, orthonormalize, toWorld, dirToWorld } from '../core/basis.js';
-import { bodyBasis } from './world.js';
+import { frameBasis, placeById } from './world.js';
 
 /** На сколько картинка отстаёт от снимков, с. Чуть больше тика сервера. */
 export const PEER_DELAY = 0.25;
@@ -246,13 +246,11 @@ export function peerPoses(store, now, out = [], world = null) {
 const _B = makeBasis();
 const _lp = v3(), _lf = v3(), _lu = v3(), _lv = v3();
 
-/** Тело по номеру в мире — или null. */
-const bodyById = (world, id) => {
-  if (!world || id === null) return null;
-  const list = world.bodies;
-  for (let i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
-  return null;
-};
+/**
+ * Тело по номеру в мире — или null. И станция: корабль на площадке в её
+ * зале стоит в её осях (Hub::dormOf, shipLocal в js/main.js).
+ */
+const bodyById = (world, id) => placeById(world, id);
 
 function poseAt(r, t, world) {
   const s = r.samples;
@@ -308,7 +306,7 @@ function poseAt(r, t, world) {
     set(L.pos, _lp.x, _lp.y, _lp.z);
     setBasis(L.basis, _lf, _lu);
     // Оси тела — на СЕЙЧАС: тело повернулось, и корабль с ним.
-    bodyBasis(body, _B);
+    frameBasis(body, _B);
     toWorld(_B, body.pos, _lp, o.pos);
     dirToWorld(_B, _lv, o.vel);
     dirToWorld(_B, _lf, _tmpF);

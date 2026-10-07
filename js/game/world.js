@@ -734,6 +734,29 @@ export function bodyBasis(body, out) {
   return out;
 }
 
+/**
+ * Оси того, на чём стоят: у тела — его вращающиеся оси (bodyBasis), у
+ * станции — её собственные (вращаются вокруг оси порта). Пешком ходят и
+ * по грунту, и по полу зала станции (js/game/stationwalk.js), и место
+ * пилота в обоих случаях пишется в осях опоры.
+ */
+export function frameBasis(obj, out) {
+  if (!obj.isStation) return bodyBasis(obj, out);
+  const b = obj.basis;
+  out.right.x = b.right.x; out.right.y = b.right.y; out.right.z = b.right.z;
+  out.up.x = b.up.x; out.up.y = b.up.y; out.up.z = b.up.z;
+  out.fwd.x = b.fwd.x; out.fwd.y = b.fwd.y; out.fwd.z = b.fwd.z;
+  return out;
+}
+
+/** Тело или станция системы по номеру — или null (номера у них общие). */
+export function placeById(world, id) {
+  if (!world || id === null || id === undefined) return null;
+  for (const b of world.bodies) if (b.id === id) return b;
+  for (const s of world.stations || []) if (s.id === id) return s;
+  return null;
+}
+
 // Ближайшее крупное тело — для mass lock и проверки столкновений.
 export function nearestBody(world, pos) {
   let best = null, bestGap = Infinity;

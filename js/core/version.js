@@ -5,4 +5,4 @@
 // стоит в package.json и в теге релиза (vX.Y.Z, CHANGELOG.md) — проверка
 // (tools/test.mjs) сверяет этот файл с package.json, и разойтись им нельзя.
 
-export const VERSION = '0.7.2';
+export const VERSION = '0.7.3';

@@ -126,7 +126,9 @@ export function terminalHtml(game, port = false) {
     : `<div class="note dim">${kbd('Q')}${kbd('E')}${esc(L('разделы'))}${port ? ' &nbsp; ' + kbd('↑') + kbd('↓') + esc(L('выбор')) : ''}</div>`;
   // Вылет из терминала — докинг-компьютером (C): щелчок по кнопке не
   // «подержать пробел три секунды», а руками из зала выводят без терминала.
-  const foot = port
+  // У пульта ангарной службы пилот на ногах: ни встать, ни вылететь.
+  const walking = !!(game.walk && game.walk.on);
+  const foot = port && !walking
     ? `${btn(esc(L('КАРТА')) + ' ' + kbd('M'), 'map')}${game.cockpit ? btn(esc(L('ВСТАТЬ')) + ' ' + kbd('Y'), 'stand') : ''}${
       btn(esc(L('ЗАКРЫТЬ')) + ' ' + kbd('I'), 'close')}${btn(esc(L('ВЫЛЕТ')) + ' ' + kbd('C'), 'launch', {}, 'pri')}`
     : btn(esc(L('ЗАКРЫТЬ')) + ' ' + kbd('I'), 'close');

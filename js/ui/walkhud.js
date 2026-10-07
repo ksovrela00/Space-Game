@@ -198,6 +198,7 @@ export function drawWalkHud(r, game, hint = {}) {
   if (hint.plan) tips.push([hint.plan, CY]);
   if (hint.hatch) tips.push(hint.hatch);
   if (hint.bay) tips.push(hint.bay);
+  if (hint.kiosk) tips.push(hint.kiosk);
   if (hint.seat) tips.push([hint.seat, GREEN]);
   if (hint.mouse) tips.push([hint.mouse, AMBER]);
   if (hint.intro) tips.push([hint.intro, CY]);
@@ -221,8 +222,11 @@ const _rw = v3(), _rc = v3(), _rs = { x: 0, y: 0 };
  * цели. За краем кадра или за спиной — стрелкой у края в её сторону.
  */
 function drawRoute(ctx, r, game) {
-  const R = game.walkRoute, I = game.interior, V = game.frame;
-  if (!R || !I || !V || !V.basis || !game.walk || game.walk.out || (game.deckMap && game.deckMap.open)) return;
+  // План и оси — того, по чему идёт пилот (js/main.js, walkPlan): палуба
+  // корабля или пол станции.
+  const I = game.routePlan || game.interior, V = game.routeFrame || game.frame;
+  const R = game.walkRoute;
+  if (!R || !I || !V || !V.basis || !game.walk || (game.deckMap && game.deckMap.open)) return;
   const p = R.next.point, b = V.basis;
   const y = p[1] + 1.3;               // на уровне глаз
   _rw.x = V.pos.x + (b.right.x * p[0] + b.up.x * y + b.fwd.x * p[2]) / 1000;

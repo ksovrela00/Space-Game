@@ -20,17 +20,19 @@
 // уходит вниз на 0.1–0.3 м, и высота грунта считается по РАДИУСУ в той же
 // точке, а не по оси «вверх», так что под ногами она верна точно. Дальше
 // километра система отсчёта переносится к пилоту.
+//
+// СТАНЦИЯ — тоже опора (js/game/stationwalk.js): у неё свои оси, пол
+// плоский, и «вверх» — не от центра, а вверх по станции. Оси шага на ней —
+// её собственные (stationFrame), а у трапа корабля, стоящего на площадке, —
+// оси трапа, как и на грунте.
 
-import { bodyFrame, waterAt } from './surface.js';
+import { waterAt } from './surface.js';
+import { frameBasis } from './world.js';
+import { stationFrame } from './stationwalk.js';
+import { walkFloorAt } from './stationplan.js';
 
 const _B = { right: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 0 }, fwd: { x: 0, y: 0, z: 0 } };
-const frameOf = (body) => {
-  const f = bodyFrame(body);
-  _B.right.x = f.right.x; _B.right.y = f.right.y; _B.right.z = f.right.z;
-  _B.up.x = f.up.x; _B.up.y = f.up.y; _B.up.z = f.up.z;
-  _B.fwd.x = f.fwd.x; _B.fwd.y = f.fwd.y; _B.fwd.z = f.fwd.z;
-  return _B;
-};
+const frameOf = (body) => frameBasis(body, _B);
 // Мир -> оси тела и обратно (поворот базиса тела).
 const toLocal = (B, x, y, z, out) => {
   out[0] = B.right.x * x + B.right.y * y + B.right.z * z;
@@ -55,6 +57,9 @@ export const RECENTER = 1000;
  * @returns { body, o: начало в осях тела (км), r, u, f: оси в осях тела }
  */
 export function makeGroundFrame(body, feet, fwd) {
+  // На станции оси шага — её собственные: пол плоский и переносить их к
+  // пилоту не нужно.
+  if (body.isStation) return stationFrame(body);
   const B = frameOf(body);
   const o = toLocal(B, feet.x - body.pos.x, feet.y - body.pos.y, feet.z - body.pos.z, [0, 0, 0]);
   const u = norm(o.slice());
@@ -139,12 +144,21 @@ function radial(G, x, z) {
  *        (js/gl/scene.js, drawnGround) — ноги стоят на той земле, что в кадре
  */
 export function groundY(G, x, z, radiusOf) {
+  if (G.body.isStation) {
+    // Пол зала — плоскость станции: где вертикаль осей шага через точку
+    // (у трапа она наклонена с кораблём) встречает пол под этой точкой.
+    const sx = G.o[0] * 1000 + G.r[0] * x + G.f[0] * z;
+    const sy = G.o[1] * 1000 + G.r[1] * x + G.f[1] * z;
+    const sz = G.o[2] * 1000 + G.r[2] * x + G.f[2] * z;
+    return (walkFloorAt(G.body.layout, sx, sz) - sy) / (Math.abs(G.u[1]) > 0.2 ? G.u[1] : 1);
+  }
   const len = radial(G, x, z);
   return (radiusOf(G.body, _d) - len) * 1000;
 }
 
 /** Вода ли под точкой (x, z) осей грунта. */
 export function waterUnder(G, x, z) {
+  if (G.body.isStation) return false;
   radial(G, x, z);
   return waterAt(G.body, _d);
 }

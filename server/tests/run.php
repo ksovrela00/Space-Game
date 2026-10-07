@@ -1759,6 +1759,26 @@ section('станция изнутри: площадки и помещения')
         && abs($berthA['pose']['up']['y'] - 1) < 1e-9,
         'новый корабль стоит на площадке ' . ($berthA['pad'] ?? '—') . ' в зале порта, а не «в доке вообще»');
 
+    // С корабля на площадке — по трапу на пол зала (js/game/stationwalk.js):
+    // опора — сама станция, место пилота — в её осях, как на грунте — в
+    // осях тела. И обратно на борт — с пола рядом с кораблём.
+    $pa = $berthA['pose']['pos'];
+    $shipA0 = (int) Players::ship($ra['player_id'])['id'];
+    $floor = static fn($dx) => ['system' => 0, 'out' => ['body' => $home,
+        'o' => ['x' => $pa['x'] + $dx, 'y' => $pa['y'] - 0.004, 'z' => $pa['z']],
+        'f' => ['x' => 0, 'y' => 0, 'z' => 1], 'pitch' => 0]];
+    $mv = Api::call('pilot.move', ['me' => $floor(0.012)], $ta);
+    $sw = Api::call('player.state', [], $ta);
+    ok($mv['moved'] === true && $sw['me']['aboard'] === null && $sw['me']['out']['body'] === $home
+        && $sw['position']['dockedBody'] === $home,
+        'с корабля на площадке — на пол зала: пилот в осях станции, корабль в порту');
+    $mv = Api::call('pilot.move', ['me' => ['aboard' => $shipA0, 'own' => true, 'seated' => true]], $ta);
+    ok($mv['moved'] === true && $mv['me']['aboard'] === $shipA0, 'с пола зала у трапа — снова на борту, в кресле');
+    // А с корабля в хранилище порта на пол не сойти: его нет на площадке.
+    $farFloor = Api::call('pilot.move', ['me' => $floor(0.9)], $ta);
+    ok($farFloor['moved'] === false && $farFloor['denied'] === 'too_far',
+        'сойти на пол зала в 900 м от своего корабля нельзя: это не трап');
+
     // Второй пилот в том же порту, пока первый в игре, — на другой площадке.
     Db::update('player', ['online' => 1], '`id`=?', [$ra['player_id']]);
     $rb = Auth::register('pad_b', 'secret', 'ПЛОЩАДКА Б');

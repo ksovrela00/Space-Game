@@ -11,6 +11,52 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-10-08
+
+### Added
+- **Station halls.** Behind the docking slot a tunnel opens into a hall with
+  its own 1 g gravity and air, and 6–10 landing pads — small ones and large
+  ones for the Prometheus — on both sides of a central terminal. The port
+  assigns a pad when you enter and holds it for you; its number and a marker
+  are shown in the frame. Pads, their sizes and the rooms are generated per
+  station, the same on the client and the server.
+- The docking computer flies through the tunnel and lands on the assigned
+  pad, and in port it lifts off and takes the ship out past the slot (C).
+- **Walking on stations.** Leave the ship by the hatch stair or on the cargo
+  platform down to the hall floor and walk to the terminal: a gate lounge for
+  every pad (seats, windows onto the pad), the concourse, port authority,
+  hangar service, bar, medical bay and shops — 10–20 rooms per station.
+- Station plan (M) with routes and an on-screen marker to the next door; by
+  default it selects the pad of your own ship.
+- **Port storage and ship retrieval**, Star Citizen style: a bought ship goes
+  to port storage; the hangar service console (E) calls a stored ship to a
+  pad and lays a route to it, while from the pilot seat "Call and board" does
+  the same and seats you in it.
+- Realistic CC0 photogrammetry materials from Poly Haven for the hall and the
+  terminal: hangar concrete, terrazzo, rubber tiles, herringbone parquet,
+  wooden panels, concrete panels, plaster, leather and tread plate
+  (`npm run stationtex`).
+- Server schema 13: station pads and rooms (rooms already carry a future shop
+  kind and a tenant), a ship's pad, pose on the hall floor and storage flag;
+  new calls `station.request`, `station.layout` and `ship.retrieve`.
+
+### Changed
+- The port terminal no longer pops up when you dock: open it with I from the
+  pilot seat; I or Esc closes it, Y stands up, C departs.
+- Leaving port: hold Space for three seconds to lift off the pad and fly out
+  through the tunnel yourself, or press C for the docking computer.
+- The start screen button no longer launches the ship: the game starts in the
+  seat of the ship standing on its pad.
+- In port the hatch stair and the cargo platform reach down to the hall floor.
+- A pilot walking on the floor of the station where their ship is docked
+  counts as being in port: market, shipyard and the hangar console work.
+
+### Fixed
+- Upside-down entries into the slot no longer bump along the tunnel: the
+  approach rolls the ship to the station's top, not to the nearest of two.
+- Teleporting, towing and tests no longer leave a ship "inside" a station
+  hall it has left; a ship far outside the station is let go at once.
+
 ## [0.7.2] — 2026-10-08
 
 ### Added

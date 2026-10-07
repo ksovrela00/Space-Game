@@ -292,6 +292,17 @@ export function stationLayout(kind, name) {
   return { kind, name, seed: stationSeed(name || kind), hall, floor: F, tunnel, face, terminal, pads, rooms, doors, openings };
 }
 
+/** Плита площадки над полом зала, м: на неё садятся корабли и наступают пешком. */
+export const PAD_H = 0.05;
+
+/**
+ * Пол зала под точкой (x, z) для шага, м (оси станции): на площадке — её
+ * плита. Терминал стоит на том же полу, и внутри него пол тот же.
+ */
+export function walkFloorAt(L, x, z) {
+  return L.floor + (padAt(L, x, z) ? PAD_H : 0);
+}
+
 /** Площадка под точкой (м, оси станции) — или null. */
 export function padAt(L, x, z, m = 0) {
   for (const p of L.pads) {

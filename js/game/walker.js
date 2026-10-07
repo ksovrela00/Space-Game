@@ -656,7 +656,10 @@ export function updateWalker(w, interior, ctl, dt, outside = null) {
   w.landed = 0;
 
   if (w.out) {
-    if (w.room) { w.room = null; ev.room = true; }
+    // На станции помещения есть и за бортом корабля (js/game/stationwalk.js):
+    // перрон, площадки, терминал. На грунте — нет.
+    const r = W.roomAt ? W.roomAt(w.pos) || w.room : null;
+    if (r !== w.room) { w.room = r; ev.room = true; }
     return ev;
   }
   const r = interior.roomAt(w.pos) || w.room;
@@ -961,8 +964,12 @@ export function closeDoors(interior) {
   for (const d of interior.doors) { d.open = 0; d.want = 0; }
 }
 
-/** Мир за бортом для шага (updateWalker, outside): твёрдое, грунт, вода, тяжесть. */
-export function outsideWorld(solids, ground, water, g) {
-  return { grid: EMPTY, extra: solids, ground, water, g };
+/**
+ * Мир за бортом для шага (updateWalker, outside): твёрдое, грунт, вода,
+ * тяжесть. На станции ещё её стены и мебель (grid, оси станции) и
+ * помещение под ногами (roomAt).
+ */
+export function outsideWorld(solids, ground, water, g, grid = EMPTY, roomAt = null) {
+  return { grid, extra: solids, ground, water, g, roomAt };
 }
 const EMPTY = new Map();

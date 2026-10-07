@@ -92,11 +92,12 @@ final class Shipyard
     /**
      * Вызвать свой корабль из хранилища порта на площадку — как в ангаре
      * Star Citizen: тот, что стоит на площадке пилота, уходит в хранилище, а
-     * вызванный поднимается на его место. Пилот — в его кресле: пересесть из
-     * хранилища можно только так.
+     * вызванный поднимается на его место.
      *
-     * Где пилот: на борту своего корабля в этом порту или на станции
-     * (on_station). Вызванный — свой и в этом же порту (docked_body).
+     * Где пилот: на борту своего корабля в этом порту — тогда он и в
+     * кресле вызванного; или пешком на полу станции, у пульта ангарной
+     * службы (out_body — эта станция), — тогда он там и остаётся, а к
+     * кораблю идёт сам. Вызванный — свой и в этом же порту (docked_body).
      */
     public static function retrieve(int $playerId, int $shipId): array
     {
@@ -115,8 +116,10 @@ final class Shipyard
             }
             $sys = (int) $want['system_id'];
             $st = (int) $want['docked_body'];
-            // Пилот — в этом же порту: на станции или на борту корабля, что стоит здесь.
-            $here = $p['on_station'] !== null && (int) $p['on_station'] === $st && (int) $p['system_id'] === $sys;
+            // Пилот — в этом же порту: на полу станции (место «за бортом» в её
+            // осях) или на борту корабля, что стоит здесь.
+            $here = $p['aboard_ship'] === null && $p['out_body'] !== null && (int) $p['out_body'] === $st
+                && $p['system_id'] !== null && (int) $p['system_id'] === $sys;
             if (!$here && $p['aboard_ship'] !== null) {
                 $from = Players::shipRow((int) $p['aboard_ship']);
                 $here = $from !== null && $from['docked_body'] !== null && (int) $from['docked_body'] === $st
@@ -155,8 +158,7 @@ final class Shipyard
             // хранилище) — в кресло вызванного; на станции — остаётся там.
             $set = ['ship_id' => $shipId];
             if ($p['aboard_ship'] !== null) {
-                $set += ['aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null,
-                    'on_station' => null, 'station_pose' => null];
+                $set += ['aboard_ship' => $shipId, 'seated' => 1, 'walk_pose' => null];
             }
             Db::update('player', $set, '`id`=?', [$playerId]);
             $state = Players::state($playerId);

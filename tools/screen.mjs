@@ -157,6 +157,21 @@ const WALK_SCENE = (pos, yaw, pitch = 0, tons = 0) => `
   });
 `;
 
+// Пилот на ногах на полу станции типа type (js/game/stationwalk.js):
+// корабль в её порту, пилот — в точке at(L) её осей (м), взгляд yaw.
+const STN_WALK = (type, at, yaw, pitch = 0) => `
+  liftoff();
+  const st = pickStation('${type}');
+  GAME.dockHere(st);
+  frames(4);
+  const L = st.layout;
+  const p = (${at.toString()})(L);
+  return GAME.walkStation(st, p, ${yaw}, ${pitch}).then(() => {
+    GAME.state.view = 'cockpit';
+    frames(8);
+  });
+`;
+
 // Пилот на ногах на «Прометее» (js/models/interior.prom.js): точка —
 // в осях СБОРКИ корпуса (м, как в плане), её переводит сдвиг корпуса.
 const PROM_WALK = (pos, yaw, pitch = 0, then = '') => `
@@ -592,6 +607,34 @@ const SCENES = {
       GAME.state.view = 'chase';
       frames(20);
     `,
+  },
+  // Пешком по станции (js/game/stationwalk.js): точки — оси станции, м.
+  stnconc: {
+    title: 'конкорс терминала: терраццо, светильники, таблички над дверями',
+    run: STN_WALK('coriolis', (L) => { const g = L.rooms.find((r) => r.kind === 'gate' && r.pad === 1);
+      return [-2.5, L.floor, (g.lo[2] + g.hi[2]) / 2 + 12]; }, 'Math.PI * 0.86', 0.02),
+  },
+  stngate: {
+    title: 'зал ожидания: кресла, окна на площадку и корабль на ней',
+    run: STN_WALK('coriolis', (L) => { const g = L.rooms.find((r) => r.kind === 'gate' && r.pad === 1);
+      return [g.lo[0] + 3, L.floor, (g.lo[2] + g.hi[2]) / 2 - 4]; }, '1.35', 0.02),
+  },
+  stnapron: {
+    title: 'перрон: терминал, выход к площадке, свой корабль',
+    run: STN_WALK('coriolis', (L) => { const p = L.pads[0];
+      return [p.side * (26 + 10), L.floor, p.c[2] - 14]; }, 'Math.PI * 0.75', 0.08),
+  },
+  stnbar: {
+    title: 'бар терминала: паркет, стойка, деревянные стены',
+    run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'bar');
+      const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
+      return [s > 0 ? r.lo[0] + 2 : r.hi[0] - 2, L.floor, r.lo[2] + 2]; }, '0.7', -0.05),
+  },
+  stnshop: {
+    title: 'лавка терминала: стеллажи, витрины, касса',
+    run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'shop');
+      const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
+      return [s > 0 ? r.lo[0] + 1.5 : r.hi[0] - 1.5, L.floor, (r.lo[2] + r.hi[2]) / 2 - 1]; }, '0.9', -0.1),
   },
   hallcab: {
     title: 'из кабины на площадке: зал станции за фонарём',

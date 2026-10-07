@@ -432,7 +432,12 @@ const ok = (cond, msg) => {
   console.log((cond ? '  OK   ' : '  FAIL ') + msg);
 };
 
+// SMOKE_ONLY=часть,часть — только шаги с такими подписями (и три первых, где
+// игра поднимается): прогон одного места вместо восьми минут всего набора.
+const ONLY = process.env.SMOKE_ONLY ? process.env.SMOKE_ONLY.split(',') : null;
+let stepNo = 0;
 const step = async (label, fn) => {
+  if (ONLY && stepNo++ > 2 && !ONLY.some((o) => label.includes(o))) return;
   try { await fn(); ok(true, label); }
   catch (e) { ok(false, label + ' -> ' + e.message); if (process.env.V) console.log(e.stack); }
   finally { if (seamRec) seamStop(); }
@@ -3965,6 +3970,237 @@ await step('в порту терминал один: I в кресле — те�
   key('KeyI'); frames(2);
   if (!game.menu.open || !nodes.term.classList.contains('port')) throw new Error('в кресле в порту I открыл терминал без порта');
   key('KeyI'); frames(2);
+});
+
+// Пешком по станции (js/game/stationwalk.js): с корабля на площадке — по
+// трапу на пол зала, по пути (M — план станции) в конкорс терминала и
+// обратно на борт. Воздух в зале — воздух порта: люк открывается без
+// стравливания, а место пилота уходит серверу в осях станции.
+await step('в порту: люк и трап на пол зала, путь в терминал, план станции, обратно на борт', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { AIR } = await import('../js/game/airlock.js');
+  const saved = game.cockpit;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    if (ONLY && game.state.mode !== 'docked') { game.dockHere(game.world.home.station); await settle(6); frames(4); }
+    if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+    const st = game.ship.dockedAt;
+    if (!game.menu.open) { /* терминал закрыт — так и надо */ } else { key('KeyI'); frames(1); }
+    key('KeyY'); frames(60);
+    const w = game.walk, I = game.interior, air = I.air;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    w.pos = [3.3, -9.0, 15.3]; w.room = I.roomById.lockN; w.yaw = Math.PI / 2; w.pitch = 0;
+    frames(3);
+    const hx = air.hatches.find((x) => x.id === 'nR');
+    key('KeyE');
+    frames(Math.ceil((AIR.hatchTime + AIR.stairTime) * 60) + 90);
+    if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) {
+      throw new Error(`люк в порту не открылся до пола: панель ${hx.open}, трап ${hx.stair}, до пола ${hx.footGap}`);
+    }
+    if (!(air.pOut > 0.9)) throw new Error('в зале станции за бортом не воздух порта: ' + air.pOut);
+    // Вниз по трапу — до пола зала.
+    holdDown('KeyW');
+    for (let i = 0; i < 60 * 14 && !(w.out && w.out.stn && w.ground); i++) frames(1);
+    release('KeyW'); frames(10);
+    if (!w.out || w.out.body !== st) throw new Error('за порог не вышли на станцию: ' + (w.out ? w.out.body.name : 'на борту'));
+    if (!w.out.stn || !w.ground) {
+      throw new Error('с трапа на пол зала не сошли: ' + (w.out.trap ? 'на трапе' : 'оси ' + w.out.body.name)
+        + ', ноги ' + w.pos.map((v) => v.toFixed(2)).join(',') + (w.ground ? '' : ', в воздухе'));
+    }
+    if (!w.room || (w.room.kind !== 'pad' && w.room.kind !== 'apron')) throw new Error('под ногами не перрон: ' + (w.room && w.room.id));
+    const foot = { pos: w.pos.slice(), yaw: w.yaw };
+    await settle(4);
+    const mv = fake.state && fake.moves ? fake.moves[fake.moves.length - 1] : null;
+    if (mv && !(mv.out && mv.out.body === st.id)) throw new Error('место пилота ушло серверу не в осях станции: ' + JSON.stringify(mv));
+    // Строка «где я»: станция и помещение.
+    texts = []; frames(2);
+    const seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('СТАНЦИЯ') >= 0)) throw new Error('за бортом в порту не сказано, что это станция');
+    // План станции (M) — с площадками и терминалом.
+    key('KeyM'); frames(2);
+    if (!game.deckMap.open) throw new Error('M на станции не открыл план');
+    texts = []; frames(1);
+    const plan = texts.map((t) => t.s); texts = null;
+    if (!plan.some((s) => s.indexOf('ЩЕЛЬ ПОРТА') >= 0)) throw new Error('план — не станции');
+    key('Escape'); frames(2);
+    if (game.deckMap.open) throw new Error('план станции не закрылся');
+    // По пути — в конкорс: метка следующей точки, туда и идём бегом.
+    game.setWalkGoal('concourse');
+    if (!game.walkRoute) throw new Error('путь в конкорс не проложен');
+    holdDown('KeyW'); holdDown('ShiftLeft');
+    let t = 0;
+    for (; t < 60 * 150 && !(w.room && w.room.id === 'concourse'); t++) {
+      const R = game.walkRoute;
+      if (R) {
+        const p = R.here ? R.end : R.next.point;
+        w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]);
+      }
+      if (process.env.WDBG && t % 120 === 0) {
+        console.log('    путь:', w.room && w.room.id, R ? R.next.kind + '>' + R.next.to + ' ' + R.next.point.map((v) => v.toFixed(0)).join(',')
+          + (R.here ? ' here' : '') : 'нет', w.pos.map((v) => v.toFixed(1)).join(','), 'цель', game.walkGoal);
+      }
+      frames(1);
+    }
+    release('KeyW'); release('ShiftLeft'); frames(5);
+    if (!w.room || w.room.id !== 'concourse') {
+      throw new Error('до конкорса не дошли за ' + (t / 60).toFixed(0) + ' с: ' + (w.room && w.room.id)
+        + ' в ' + w.pos.map((v) => v.toFixed(1)).join(','));
+    }
+    // Обратно к трапу (переносом — путь туда уже проверен) и вверх на борт.
+    game.walkGoal = null;
+    w.pos = foot.pos.slice(); w.yaw = foot.yaw + Math.PI; w.vel = [0, 0, 0];
+    frames(5);
+    holdDown('KeyW');
+    for (let i = 0; i < 60 * 14 && w.out; i++) frames(1);
+    release('KeyW'); frames(10);
+    if (w.out || !w.room || w.room.id !== 'lockN') throw new Error('по трапу на борт не поднялись: ' + (w.out ? 'снаружи' : w.room && w.room.id));
+    // В кресло: люк задраится сам.
+    w.pos = I.seat.stand.slice(); w.room = I.roomById[I.seat.room || 'bridge']; w.yaw = 0;
+    frames(2);
+    key('KeyE'); frames(60);
+    if (w.on) throw new Error('у кресла не сели');
+    frames(60 * 4);
+    if (hx.open > 0) throw new Error('сели, а люк в порту открыт');
+  } finally {
+    game.cockpit = saved;
+  }
+});
+
+// «Прометей» в порту: большая площадка, шлюз палубы 11 и трап в 97 ступеней
+// — до пола зала. Трап дотягивается до пола так же, как до грунта: пол для
+// него — плоскость станции под кораблём (js/main.js, floorUnder).
+await step('«Прометей» в порту: на большой площадке, трап палубы 11 — до пола зала и на перрон', async () => {
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const { AIR } = await import('../js/game/airlock.js');
+  const Sp = await import('../js/game/specs.js');
+  const SP = await import('../js/game/stationplan.js');
+  const saved = game.cockpit;
+  const w = game.walk;
+  const st = game.world.home.station;
+  try {
+    if (game.state.mode === 'docked') { game.launchOut(); frames(4); await settle(4); }
+    if (Sp.useShipType('prometheus') !== 'prometheus') throw new Error('на «Прометей» не пересесть');
+    game.syncHull();
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    game.dockHere(st);
+    await settle(6); frames(4);
+    if (game.state.mode !== 'docked') throw new Error('не встали в порт: ' + game.state.mode);
+    const pad = SP.padByNo(st.layout, game.ship.berth.pad);
+    if (!pad || pad.size !== 'L') throw new Error('«Прометею» дана не большая площадка: ' + (pad && pad.size));
+    key('KeyY'); frames(60);
+    const I = game.interior, air = I.air;
+    if (!w.on || w.phase !== 'walk') throw new Error('не встали');
+    const hx = air.hatches.find((x) => x.id === 'lockL86'), h = hx.h;
+    const r = I.roomById[h.lock];
+    const zc = (h.z[0] + h.z[1]) / 2;
+    w.pos = [h.panel[0] - h.side * 0.3, r.lo[1], h.panel[2] - 0.6]; w.room = r;
+    w.yaw = h.side * Math.PI / 2; w.pitch = 0;
+    frames(3);
+    if (game.walkHatch !== hx) throw new Error('у пульта люк палубы 11 не под рукой');
+    key('KeyE');
+    frames(Math.ceil((AIR.hatchTime + AIR.stairTime) * 60) + 90);
+    if (!(hx.open === 1 && hx.stair === 1 && hx.exitOk)) {
+      throw new Error(`трап палубы 11 не встал на пол зала: панель ${hx.open}, трап ${hx.stair}, до пола ${hx.footGap}`);
+    }
+    w.pos = [(r.lo[0] + r.hi[0]) / 2, r.lo[1], zc]; w.room = r; w.yaw = h.side * Math.PI / 2;
+    frames(2);
+    holdDown('KeyW');
+    for (let i = 0; i < 60 * 30 && !(w.out && w.out.stn && w.ground); i++) frames(1);
+    release('KeyW'); frames(10);
+    if (!w.out || !w.out.stn || !w.ground) throw new Error('по трапу на пол зала не сошли: ' + (w.out ? (w.out.trap ? 'на трапе' : 'в воздухе') : 'на борту'));
+    if (!w.room || (w.room.kind !== 'pad' && w.room.kind !== 'apron')) throw new Error('под ногами не перрон: ' + (w.room && w.room.id));
+  } finally {
+    game.seatHere();
+    frames(2);
+    const I = game.interior;
+    if (I && I.air) {
+      for (const x of I.air.hatches) { x.want = false; x.open = 0; x.stair = 0; }
+      for (const L of Object.values(I.air.locks)) { L.p = 1; L.state = 'sealed'; L.vent = false; }
+      for (const q of Object.values(I.air.rooms)) { q.p = 1; q.leak = false; }
+    }
+    if (game.state.mode === 'docked') { game.launchOut(); frames(4); await settle(4); }
+    Sp.useShipType('challenger');
+    game.syncHull();
+    game.cockpit = saved;
+    game.dockHere(st);
+    await settle(6); frames(4);
+  }
+});
+
+// Ангарная служба (js/game/stationwalk.js, пульт kiosk): пешком у пульта E —
+// терминал порта на разделе кораблей; корабль из хранилища вызывается на
+// площадку (Shipyard::retrieve), командование — им, а пилот остаётся на
+// ногах, и путь к площадке проложен. Как в ангаре Star Citizen.
+await step('в порту: пульт ангарной службы — корабль из хранилища на площадку, пилот на ногах, путь к нему', async () => {
+  const { stationAct } = await import('../js/ui/station.js');
+  const { HULL } = await import('../js/game/hull.js');
+  const SWm = await import('../js/game/stationwalk.js');
+  if (ONLY && game.state.mode !== 'docked') { game.dockHere(game.world.home.station); await settle(6); frames(4); }
+  if (game.state.mode !== 'docked') throw new Error('режим ' + game.state.mode);
+  const st = game.ship.dockedAt, padN = game.ship.berth.pad;
+  const plan = SWm.stationPlan(st.layout);
+  const k = plan.props.find((b) => b.kind === 'kiosk');
+  if (!k) throw new Error('на станции нет пульта ангарной службы');
+  const room = plan.roomById[k.room];
+  const sx = room.lo[0] + room.hi[0] > 0 ? 1 : -1;
+  const S = fake.state;
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const first = clone(S.ship);
+  const second = Object.assign(clone(first), { id: 2, type: { code: 'prometheus', name: 'Prometheus' } });
+  fake.routes['shipyard.list'] = () => ({ open: true, tech: 5, hulls: [], here: [
+    { id: 1, active: S.ship.id === 1, typeName: 'Challenger', title: 'ЛЁГКИЙ ТОРГОВЫЙ КОРАБЛЬ', pad: S.ship.id === 1 ? padN : null, stored: S.ship.id !== 1 },
+    { id: 2, active: S.ship.id === 2, typeName: 'Prometheus', title: 'ТЯЖЁЛЫЙ КРЕЙСЕР', pad: S.ship.id === 2 ? padN : null, stored: S.ship.id !== 2 }] });
+  fake.routes['ship.retrieve'] = (b) => {
+    S.ship = clone(b.id === 2 ? second : first);
+    return Object.assign(clone(S), { retrieved: { id: b.id, pad: padN } });
+  };
+  const w = game.walk;
+  const { buildCockpit } = await import('../js/models/cockpit.js');
+  const savedCp = game.cockpit;
+  try {
+    game.cockpit = buildCockpit();
+    await game.loadInterior();
+    // Шаг перед пультом — со стороны помещения, лицом к нему.
+    const p = [(k.lo[0] + k.hi[0]) / 2 + sx * 1.0, st.layout.floor, (k.lo[2] + k.hi[2]) / 2];
+    if (!(await game.walkStation(st, p, sx > 0 ? -Math.PI / 2 : Math.PI / 2))) throw new Error('не встали на пол станции');
+    frames(4);
+    texts = []; frames(2);
+    const seen = texts.map((t) => t.s); texts = null;
+    if (!seen.some((s) => s.indexOf('АНГАРНАЯ СЛУЖБА') >= 0)) throw new Error('у пульта нет подсказки ангарной службы');
+    // Список кораблей прошлых шагов — без корабля в хранилище: спросить заново.
+    if (game.station) game.station.ships = null;
+    key('KeyE'); frames(2); await settle(6); frames(2);
+    const html = () => nodes.term.innerHTML;
+    if (!game.menu.open || !nodes.term.classList.contains('port')) throw new Error('E у пульта не открыл терминал порта');
+    if (game.menu.tab !== 'ships') throw new Error('терминал открылся не на кораблях: ' + game.menu.tab);
+    if (html().indexOf('data-act="retrieve"') < 0 || html().indexOf('data-act="path"') < 0) {
+      throw new Error('у пульта нет «вызвать на площадку» и «путь к нему»');
+    }
+    if (html().indexOf('data-act="launch"') >= 0 || html().indexOf('data-act="stand"') >= 0) {
+      throw new Error('у пульта, пешком, — кнопки вылета и «встать»');
+    }
+    stationAct(game, 'retrieve', { id: '2' });
+    await settle(12); frames(2); await settle(6); frames(2);
+    if (game.ship.id !== 2 || HULL.code !== 'prometheus') throw new Error('корабль не вызван: №' + game.ship.id + ', ' + HULL.code);
+    if (!w.on || !w.out || !w.out.stn) throw new Error('вызвав корабль, пилот не остался на ногах на станции');
+    if (game.walkGoal !== 'pad' + padN) throw new Error('путь к площадке не проложен: ' + game.walkGoal);
+    if (!fake.calls.includes('ship.retrieve')) throw new Error('вызов не дошёл до сервера (ship.retrieve)');
+    // Обратно — «Челленджер»: дальше проверки летают на нём.
+    stationAct(game, 'retrieve', { id: '1' });
+    await settle(12); frames(2); await settle(6); frames(2);
+    if (game.ship.id !== 1 || HULL.code !== 'challenger') throw new Error('обратно не вызван: ' + HULL.code);
+  } finally {
+    delete fake.routes['shipyard.list'];
+    delete fake.routes['ship.retrieve'];
+    S.ship = first;
+    if (game.menu.open) { key('KeyI'); frames(1); }
+    game.walkGoal = null;
+    game.seatHere();
+    frames(4);
+    game.cockpit = savedCp;
+  }
 });
 
 // Вылет — как с грунта: подержать пробел, корабль отрывается от площадки

@@ -8527,9 +8527,11 @@ console.log('\n== наземный город ==');
     // Закладки: в порту — четыре порта и четыре свои, с номерами клавиш.
     const html = page('market');
     const tabs = [...html.matchAll(/data-act="tab" data-tab="(\w+)"><kbd>(\d)<\/kbd>/g)].map((m) => m[2] + m[1]);
+    // Закрыть — можно: корабль стоит в зале, терминал открывают по I и
+    // закрывают тем же I (js/ui/terminal.js).
     ok(tabs.join(' ') === '1port 2market 3outfit 4ships 5ship 6cargo 7contracts 8money'
-      && /data-act="launch"/.test(html) && !/data-act="close"/.test(html),
-      'в порту восемь разделов (порт и свои), вылет в подвале, закрыть нельзя: ' + tabs.join(' '));
+      && /data-act="launch"/.test(html) && /data-act="close"/.test(html),
+      'в порту восемь разделов (порт и свои), вылет и «закрыть» в подвале: ' + tabs.join(' '));
 
     // Рынок: выбран то, что в трюме, и сторона — продажа: в порт чаще
     // прилетают продавать. Кнопка — сколько и почём.
@@ -8627,7 +8629,8 @@ console.log('\n== наземный город ==');
     }
     ok(solo === '', 'автономной игры нет: ни один раздел о ней не говорит' + (solo ? ' (' + solo + ')' : ''));
 
-    // Клавиши: номер, Q/E по кругу, I — к своим делам и обратно.
+    // Клавиши: номер, Q/E по кругу; I и Esc — закрыть, Y — встать, C —
+    // вылет компьютером (как кнопки подвала).
     game.menu.tab = 'market'; game.menu.lastPort = 'market';
     T.terminalKeys(game, keys('Digit3'), true);
     const d3 = game.menu.tab;
@@ -8636,11 +8639,10 @@ console.log('\n== наземный город ==');
     T.terminalKeys(game, keys('KeyQ'), true);
     const back = game.menu.tab;
     T.terminalKeys(game, keys('Digit2'), true);
-    T.terminalKeys(game, keys('KeyI'), true);
-    const mine = game.menu.tab;
-    T.terminalKeys(game, keys('KeyI'), true);
-    ok(d3 === 'outfit' && back === 'money' && mine === 'money' && game.menu.tab === 'market',
-      `клавиши: 3 — ${d3}, трижды Q — ${back} (по кругу), с рынка I — к своим (${mine}), ещё раз I — обратно (${game.menu.tab})`);
+    const acts = ['KeyI', 'Escape', 'KeyY', 'KeyC'].map((k) => T.terminalKeys(game, keys(k), true));
+    ok(d3 === 'outfit' && back === 'money' && game.menu.tab === 'market'
+      && acts.join(' ') === 'close close stand launch',
+      `клавиши порта: 3 — ${d3}, трижды Q — ${back} (по кругу), I/Esc/Y/C — ${acts.join(' ')}`);
     const wasd = game.menu.tab;
     ok(T.terminalKeys(game, keys('KeyA', 'KeyD', 'KeyW', 'KeyS'), true) === null && game.menu.tab === wasd,
       'W/A/S/D в терминале не делают ничего');
@@ -11096,6 +11098,108 @@ console.log('\n== вездеход: навигация и приборы ==');
     `мониторы вездехода рисуются: ход 36 км/ч, «ВПЕРЁД», курс 000°, до корабля — метры`);
   ok(P.NOMINAL.rann[0] / P.NOMINAL.rann[1] === 10 && P.SCREEN_RATE.rdrive === 30,
     'табло — 800 × 80, экран хода — тридцать кадров в секунду, как экран полёта');
+}
+
+// --- пешком по станции -------------------------------------------------------
+//
+// js/game/stationwalk.js: план станции для шага — помещения, двери, стены
+// с проёмами, мебель — и тот же шаг, что за бортом на грунте. Проверяется
+// то, на чём пешеход застрял бы молча: в каждое помещение есть путь, в
+// каждой двери тело помещается, мебель проход не перегораживает, и робот
+// с площадки доходит по пути до каждого помещения терминала.
+{
+  console.log('\n== пешком по станции ==');
+  const SW = await import('../js/game/stationwalk.js');
+  const SP = await import('../js/game/stationplan.js');
+  const Wk = await import('../js/game/walker.js');
+  const Rt = await import('../js/game/route.js');
+  const O = await import('../js/game/outside.js');
+  const all = [];
+  for (let id = 0; id < 7; id++) for (const st of makeSystem(systemById(id)).stations) all.push(st);
+  // В каждое помещение — путь с каждой площадки.
+  let cut = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    for (const p of st.layout.pads) {
+      for (const r of plan.rooms) {
+        if (r.kind === 'block') continue;
+        if (!Rt.pathRooms(plan, 'pad' + p.n, r.id)) cut.push(st.name + ': ' + p.n + '→' + r.id);
+      }
+    }
+  }
+  ok(cut.length === 0, `с каждой площадки ${all.length} станций — путь в каждое помещение` + (cut.length ? ': нет ' + cut.slice(0, 4).join(', ') : ''));
+  // Дверь — проём: тело во весь рост в середине двери и по метру по обе
+  // стороны от неё ни во что не упирается.
+  const shut = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    const W = SW.stationWorld(plan, st, []);
+    for (const d of plan.doors) {
+      if (d.edge) continue;
+      for (const k of [-1, 0, 1]) {
+        const p = d.pos.slice();
+        p[d.ax] += k;
+        if (Wk.blocked(W, p)) { shut.push(st.name + ' ' + d.id + (k ? (k > 0 ? '+' : '−') : '')); break; }
+      }
+    }
+  }
+  ok(shut.length === 0, 'в каждой двери терминала и у неё с обеих сторон тело помещается во весь рост'
+    + (shut.length ? ': нет у ' + shut.slice(0, 5).join(', ') : ''));
+  // Пол — плита площадки на пять сантиметров выше перрона, по ней
+  // ходят без ступеньки; на полу — оси станции как есть.
+  {
+    const st = all[0], L = st.layout, p = L.pads[0];
+    const G = SW.stationFrame(st);
+    const g0 = O.groundY(G, p.c[0], p.c[2]), g1 = O.groundY(G, 0, (L.terminal.lo[2] + L.terminal.hi[2]) / 2);
+    ok(Math.abs(g0 - (L.floor + SP.PAD_H)) < 1e-9 && Math.abs(g1 - L.floor) < 1e-9 && SP.PAD_H < Wk.WALK.step,
+      `пол для шага: площадка ${(g0 - L.floor).toFixed(2)} м над перроном (ступень — ${Wk.WALK.step} м), в терминале — пол зала`);
+  }
+  // Робот: с края площадки по пути — в каждое помещение терминала. По
+  // станции каждого типа, самой большой из них.
+  const big = (type) => all.filter((s) => s.type === type).sort((a, b) => b.layout.rooms.length - a.layout.rooms.length)[0];
+  for (const st of [big('coriolis'), big('orbis')]) {
+    const plan = SW.stationPlan(st.layout), L = st.layout;
+    const W = SW.stationWorld(plan, st, []);
+    const fail = [];
+    let longest = 0;
+    for (const r of plan.rooms) {
+      if (r.open || r.kind === 'block') continue;
+      const w = Wk.makeWalker();
+      w.on = true; w.phase = 'walk'; w.out = SW.stationFrame(st);
+      const pad = L.pads[0];
+      w.pos = [pad.side * (SP.TERM.hw + SP.PAD.apron + 3), L.floor + SP.PAD_H, pad.c[2]];
+      w.room = plan.roomAt(w.pos);
+      let t = 0, reached = false;
+      for (; t < 240; t += 1 / 30) {
+        const R = Rt.routeTo(plan, w.room, w.pos, r.id);
+        if (!R) break;
+        const p = R.here ? R.end : R.next.point;
+        if (R.here && Math.hypot(p[0] - w.pos[0], p[2] - w.pos[2]) < 1.5) { reached = true; break; }
+        w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]);
+        Wk.updateWalker(w, { doors: [] }, { fwd: 1, side: 0, run: true }, 1 / 30, W);
+      }
+      if (!reached) fail.push(r.id + ' (' + (w.room && w.room.id) + ')');
+      longest = Math.max(longest, t);
+    }
+    ok(fail.length === 0, `${st.name} (${st.type}): с площадки 1 бегом — в каждое из ${plan.rooms.filter((r) => !r.open && r.kind !== 'block').length} помещений, дольше всего ${longest.toFixed(0)} с`
+      + (fail.length ? '; не дошёл: ' + fail.join(', ') : ''));
+  }
+  // Мебель — внутри своего помещения и не в проходе к двери.
+  const out = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    for (const b of plan.props) {
+      const r = plan.roomById[b.room];
+      if (b.lo[0] < r.lo[0] - 1e-6 || b.hi[0] > r.hi[0] + 1e-6 || b.lo[2] < r.lo[2] - 1e-6 || b.hi[2] > r.hi[2] + 1e-6) {
+        out.push(st.name + ' ' + b.room + ':' + b.kind);
+      }
+    }
+  }
+  ok(out.length === 0, 'мебель стоит в своих помещениях' + (out.length ? ': нет — ' + out.slice(0, 4).join(', ') : ''));
+  // Помещения у ангарной службы — пульт вызова корабля.
+  const kiosks = all.filter((st) => SW.stationPlan(st.layout).props.some((b) => b.kind === 'kiosk')).length;
+  const hangars = all.filter((st) => st.layout.rooms.some((r) => r.kind === 'hangar')).length;
+  ok(kiosks === hangars && hangars > 0, `у ангарной службы пульт вызова корабля: ${kiosks} из ${hangars}`);
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));

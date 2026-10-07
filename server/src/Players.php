@@ -228,8 +228,17 @@ final class Players
     {
         $p = self::byId($playerId);
         $ship = self::ship($playerId);
-        if ($ship['docked_body'] === null || $ship['system_id'] === null
-            || (int) $p['aboard_ship'] !== (int) $ship['id']) {
+        if ($ship['docked_body'] === null || $ship['system_id'] === null) {
+            return null;
+        }
+        // В порту — на борту своего корабля в доке или пешком на полу той же
+        // станции (схема 13, js/game/stationwalk.js): к пульту ангарной
+        // службы и в лавки ходят ногами.
+        $aboard = (int) $p['aboard_ship'] === (int) $ship['id'];
+        $onFloor = $p['aboard_ship'] === null && $p['out_body'] !== null
+            && (int) $p['out_body'] === (int) $ship['docked_body']
+            && $p['system_id'] !== null && (int) $p['system_id'] === (int) $ship['system_id'];
+        if (!$aboard && !$onFloor) {
             return null;
         }
         return ['system_id' => (int) $ship['system_id'], 'local_id' => (int) $ship['docked_body'],
@@ -541,14 +550,24 @@ final class Players
     /**
      * Точка корабля в ОСЯХ ТЕЛА, км, и само тело — для проверки «рядом ли».
      *
-     * Есть только у стоящего на грунте и у висящего над телом: именно там
-     * и ходят пешком. В порту и в пустоте точки нет — сойти с корабля там
-     * некуда, взойти неоткуда.
+     * Есть у стоящего на грунте, у висящего над телом и у стоящего на
+     * площадке в зале станции (схема 13): там опора — сама станция, и
+     * пешком ходят по полу её зала (js/game/stationwalk.js). В пустоте и в
+     * хранилище порта точки нет — сойти с корабля там некуда.
      *
      * @return array{body:int, p:array{0:float,1:float,2:float}}|null
      */
     public static function shipPoint(array $ship): ?array
     {
+        if ($ship['docked_body'] !== null) {
+            $pose = (int) ($ship['stored'] ?? 0) === 1 ? null : self::json($ship['dock_pose'] ?? null);
+            $p = is_array($pose) ? ($pose['pos'] ?? null) : null;
+            if (!is_array($p)) {
+                return null;
+            }
+            return ['body' => (int) $ship['docked_body'],
+                'p' => [(float) ($p['x'] ?? 0), (float) ($p['y'] ?? 0), (float) ($p['z'] ?? 0)]];
+        }
         if ($ship['landed_body'] !== null) {
             $pose = self::json($ship['landed_pose']);
             $d = is_array($pose) ? ($pose['dir'] ?? null) : null;

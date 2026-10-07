@@ -10,6 +10,7 @@ import { SHADE_GLSL } from './citymesh.js';
 import { SKY_GLSL } from './nebula.js';
 import { SHIP_SHADOW_GLSL } from './shipshadow.js';
 import { WATER_GLSL } from './water.js';
+import { STATION_GLSL, STMAT_BASE } from './stationtex.js';
 
 // Глубина пишется логарифмически (см. mat4.js): иначе на диапазоне от
 // метров до миллионов километров начинается z-fighting.
@@ -320,6 +321,8 @@ uniform float uSurfMode;
 ${GRAIN_GLSL}
 // Обшивка корабля: швы, переплёт мостика, сопла (js/gl/hull.js).
 ${HULL_GLSL}
+// Фактуры станции: фотограмметрия полов, стен и мебели (js/gl/stationtex.js).
+${STATION_GLSL}
 ${AIR_GLSL}
 // Море водного мира (js/gl/water.js): урез, толща, волны, прибой.
 ${WATER_GLSL}
@@ -370,7 +373,7 @@ ${LOG_DEPTH_FRAG}
   // кораблю (uCarveN, js/gl/scene.js). Стекло фонаря не вырезается
   // никогда: нижний край лобового стекла спускается к носу ниже палубы
   // рубки, к самому коридору, и вырез средней палубы задевал его.
-  if (uCarveN > 0 && vMat > 0.5 && floor(vMat + 0.5) != ${MAT.glass}.0
+  if (uCarveN > 0 && vMat > 0.5 && vMat < ${STMAT_BASE - 0.5} && floor(vMat + 0.5) != ${MAT.glass}.0
     && hullCarved(vLocal * 1000.0)) discard;
   vec3 n = uFlatN > 0.5 ? normalize(cross(dFdx(vViewPos), dFdy(vViewPos))) : normalize(vNormal);
   vec3 albedo = vColor.rgb;
@@ -525,13 +528,16 @@ ${detail ? '    gw *= 1.0 - dPlate(dirG);       // бетон площадки �
 
   // Обшивка корабля. У всего, что не корабль, материала нет (vMat = 0),
   // и блок пропускается одним сравнением.
-  if (vMat > 0.5) hullDetail(vViewPos, n, albedo, emit);
+  // Станция: материалы от STMAT_BASE — фотографией в метрах её осей.
+  if (vMat > ${STMAT_BASE - 0.5}) stationDetail(vLocal * 1000.0, vNormalL,
+    uHallOn > 0.5 ? uHallLo.y * 1000.0 + 3.0 : -1e9, albedo);
+  else if (vMat > 0.5) hullDetail(vViewPos, n, albedo, emit);
   // Над водой свет ложится по волнам, а не по грунту дна.
   if (water > 0.0) n = normalize(mix(n, seaN, water));
   // Свой корпус ИЗНУТРИ (вид из рубки): изнанка обшивки у фонаря — это
   // стены рубки. Снаружи она тёмный борт в тени, а изнутри — крашеная
   // стена, освещённая тем, что попало под стекло.
-  bool inner = uHullInside > 0.5 && vMat > 0.5 && dot(n, vViewPos) > 0.0;
+  bool inner = uHullInside > 0.5 && vMat > 0.5 && vMat < ${STMAT_BASE - 0.5} && dot(n, vViewPos) > 0.0;
   if (inner) albedo = vec3(0.30, 0.32, 0.35);
 
   // Двустороннее освещение: нормаль всегда разворачиваем к камере. Так

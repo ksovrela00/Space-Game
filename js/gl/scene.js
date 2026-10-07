@@ -38,6 +38,7 @@ import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtr
 import {
   SHIP_SHADOW, shadowFrame, shadowMatrix, hullRadius, depthVs, DEPTH_FS, makeShadowArray,
 } from './shipshadow.js';
+import { loadStationTex, stationK, STATION_TEX } from './stationtex.js';
 import { cityLocal } from '../game/city.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
@@ -406,6 +407,16 @@ export class GlScene {
     gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.shipShadow ? this.shipShadow.tex : null);
     gl.activeTexture(gl.TEXTURE0);
+    // Фактуры станции (js/gl/stationtex.js) — на своём блоке, привязаны
+    // всегда: сэмплер массива на блоке 0 рядом с плоской текстурой сорвал
+    // бы каждую отрисовку сеток.
+    this.stationTex = loadStationTex(gl);
+    for (const p of [this.pMesh, this.pForest]) {
+      if (!p) continue;
+      p.use();
+      gl.uniform1i(p.loc('uStationTex'), STATION_TEX.unit);
+      gl.uniform1fv(p.loc('uStationK'), stationK());
+    }
     this.stars = this.buildStars();
     // Поток частиц прыжка. Строится один раз на запуск и от звёзд не
     // зависит вовсе: звёзды бесконечно далеко и лететь мимо не могут.
@@ -2461,7 +2472,9 @@ export class GlScene {
       }
     }
 
-    // Станции.
+    // Станции. Фактуры зала кладутся по осям станции (vLocal — точка
+    // модели), сдвига, как у плиток грунта, нет.
+    gl.uniform3f(prog.loc('uLocalShift'), 0, 0, 0);
     for (const st of world.stations) {
       const d = Math.hypot(
         st.pos.x - this.camera.pos.x,

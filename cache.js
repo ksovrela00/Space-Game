@@ -47,14 +47,14 @@
       'city', 'galaxy', 'gravity', 'lamps', 'landing', 'lift', 'loadout', 'nav', 'npc', 'peers', 'pilot',
       'outside', 'player', 'quantum', 'route', 'ship', 'specs', 'state', 'surface', 'target',
       'vessels', 'walker', 'warp', 'weapons', 'world', 'zoom', 'mousefly', 'rover', 'drivecam', 'rovernav', 'hangar', 'mapcam', 'warproute',
-      'stationplan', 'berth'
+      'stationplan', 'berth', 'stationwalk'
     ],
     'gl/': [
       'bake', 'cabin', 'citymesh', 'context', 'detail', 'flora', 'forest', 'forestfield',
       'forestworker', 'gputime', 'ground',
       'icosphere', 'mat4', 'mesh', 'nebula', 'patches', 'planetmesh', 'program',
       'quadtree', 'rocks', 'scene', 'shaders', 'shipshadow', 'spacesuit', 'terrain', 'tilegeo', 'tilepool',
-      'hull', 'tiles', 'tileworker', 'wash', 'water'
+      'hull', 'tiles', 'tileworker', 'wash', 'water', 'stationtex'
     ],
     'models/': [
       'airstair', 'bridge.prom', 'city', 'city.parts', 'cockpit', 'cockpit.prom', 'cockpit.rover', 'gear', 'geometry', 'hull.data', 'hulldetail', 'hulls',
