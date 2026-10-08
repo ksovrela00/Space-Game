@@ -515,7 +515,8 @@ function drawJumpPanel(ctx, w, h, q, state) {
 
   ctx.font = '28px Consolas, monospace';
   ctx.fillStyle = '#d8f2ff';
-  ctx.fillText(fmtDist(q.dist), cx, h - 96);
+  // По прямой без тела впереди остатка нет — ход в пустоту.
+  ctx.fillText(Number.isFinite(q.dist) ? fmtDist(q.dist) : '∞', cx, h - 96);
 
   ctx.font = '14px Consolas, monospace';
   ctx.fillStyle = AMBER;

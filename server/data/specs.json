@@ -329,6 +329,60 @@
             "tech": 5
         },
         {
+            "code": "quantum_lo",
+            "name": "КВАНТОВЫЙ ПРИВОД НИЗКОГО ВЫХОДА",
+            "slot": "drive",
+            "spec": {
+                "rampIn": 2,
+                "rampOut": 7,
+                "spool": 3.5,
+                "alignDeg": 3,
+                "fade": 0.5,
+                "exitAlt": 50,
+                "exitFrac": 0.001,
+                "exitStation": 40,
+                "exitPeer": 20,
+                "peerMatch": 2,
+                "exitMin": 2,
+                "clearPad": 10,
+                "minSpeed": 1.2,
+                "flight": {
+                    "quantumSpeed": 50000,
+                    "quantumFuel": 0.12
+                }
+            },
+            "price": 36000,
+            "installed": false,
+            "tech": 3
+        },
+        {
+            "code": "quantum_e",
+            "name": "ЭКОНОМИЧНЫЙ КВАНТОВЫЙ ПРИВОД",
+            "slot": "drive",
+            "spec": {
+                "rampIn": 2.5,
+                "rampOut": 5,
+                "spool": 4,
+                "alignDeg": 3,
+                "fade": 0.5,
+                "exitAlt": 250,
+                "exitFrac": 0.05,
+                "exitStation": 40,
+                "exitPeer": 20,
+                "peerMatch": 2,
+                "exitMin": 2,
+                "clearPad": 10,
+                "minSpeed": 1.2,
+                "flight": {
+                    "quantumSpeed": 42000,
+                    "quantumFuel": 0.065
+                }
+            },
+            "price": 21000,
+            "installed": false,
+            "tech": 2
+        },
+        {
             "code": "quantum_p",
             "name": "КВАНТОВЫЙ ПРИВОД КРЕЙСЕРА",
             "slot": "drive",

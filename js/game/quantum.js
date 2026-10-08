@@ -16,10 +16,19 @@
 // Короткий прыжок укорачивает себя сам: на 40 000 км корабль просто не
 // успевает разогнаться до потолка, и всё занимает секунды. Отдельного
 // правила для ближних целей не нужно.
+//
+// ПО ПРЯМОЙ. Цели нет — дважды J (js/main.js): прыжок по носу, по прямой,
+// без конца (freeTarget, freeStep). Те же калибровка, разгон и выход, но
+// точка выхода не задана заранее: каждый шаг привод смотрит вперёд по
+// прямой, и первое тело, чья сфера выхода на ней (та же высота, что у
+// прыжка к телу: exitAlt, у крупных — доля радиуса exitFrac), становится
+// концом прыжка. Нет такого — ход на потолке в пустоту, пока топлива
+// хватает на торможение; кончается — гашение хода, как при срыве.
 
 import { v3, set, normalize } from '../core/vec3.js';
 import { lookAlong, aimAngles } from '../core/basis.js';
 import { bodyPosAt, nearestBody } from './world.js';
+import { localDir, groundRadius, isSolid } from './surface.js';
 import { quantumTons, affords, fuelReserve } from './fuel.js';
 import { L } from '../core/lang.js';
 
@@ -91,8 +100,34 @@ export const quantumSpeed = (ship) => (ship && ship.quantumSpeed) || QUANTUM.spe
 /** Запас, с которым коридор обязан обходить тело. */
 export const clearOf = (b) => b.radius * (1 + QUANTUM.relief) + QUANTUM.clearPad;
 
+/**
+ * Высота выхода над телом — НАД ГРУНТОМ под точкой выхода, км: та же у
+ * прыжка к телу и у прыжка по прямой. Числа — у стоящего привода
+ * (exitAlt, у крупных — доля радиуса exitFrac).
+ *
+ * Раньше она мерилась от среднего радиуса. При двухстах пятидесяти
+ * километрах это было неважно, но вершины здесь до 39 км над средним
+ * радиусом (на 26 телах из 81 — выше 25 км), и привод с выходом в
+ * пятьдесят километров выводил бы корабль в одиннадцати над вершиной.
+ */
+const exitAltOf = (b) => Math.max(QUANTUM.exitAlt, b.radius * QUANTUM.exitFrac);
+
+/** Радиус грунта тела под мировой точкой p, км (у звезды и газового гиганта — сам радиус). */
+const _gd = v3();
+const groundUnder = (b, p) => (isSolid(b) ? groundRadius(b, localDir(b, p, _gd)) : b.radius);
+
+// Точка «по курсу» прыжка по прямой — для прицела калибровки, км.
+const FREE_FAR = 1e9;
+
 /** Точка выхода: не сама цель, а подступ к ней с той стороны, откуда идём. */
 export function exitPoint(target, from, out = v3()) {
+  // По прямой: точки выхода нет — прицел держат по курсу.
+  if (target.isFree) {
+    out.x = from.x + target.dir.x * FREE_FAR;
+    out.y = from.y + target.dir.y * FREE_FAR;
+    out.z = from.z + target.dir.z * FREE_FAR;
+    return out;
+  }
   // Наземный город — особый случай: он лежит НА поверхности, и подходить
   // к нему «с той стороны, откуда идём» негде — с трёх сторон из четырёх
   // там грунт. Поэтому выход считается не от города, а от его тела и
@@ -101,17 +136,18 @@ export function exitPoint(target, from, out = v3()) {
   // километрах от построек, то есть внутри планеты.
   if (target.isCity) {
     const b = target.body;
-    const gap = b.radius + Math.max(QUANTUM.exitAlt, b.radius * QUANTUM.exitFrac);
-    const k = gap / (target.groundR || b.radius);
+    const gR = target.groundR || b.radius;
+    const k = (gR + exitAltOf(b)) / gR;
     out.x = b.pos.x + (target.pos.x - b.pos.x) * k;
     out.y = b.pos.y + (target.pos.y - b.pos.y) * k;
     out.z = b.pos.z + (target.pos.z - b.pos.z) * k;
     return out;
   }
+  // До тела — над грунтом в той стороне, откуда идём.
   const gap = target.isPeer ? QUANTUM.exitPeer
     : (target.isStation ? QUANTUM.exitStation
       : (target.isMarker ? QUANTUM.exitMin
-        : target.radius + Math.max(QUANTUM.exitAlt, target.radius * QUANTUM.exitFrac)));
+        : groundUnder(target, from) + exitAltOf(target)));
   const dx = from.x - target.pos.x, dy = from.y - target.pos.y, dz = from.z - target.pos.z;
   const d = Math.hypot(dx, dy, dz);
   if (d < 1e-6) {
@@ -156,6 +192,12 @@ export function corridorBlock(world, from, target, vTop = QUANTUM.speed) {
   const total = jumpTime(dist, vTop);
 
   for (const b of world.bodies) {
+    // Тело-цель себе не помеха: выход к нему — на прямой от его середины к
+    // кораблю, по нашу сторону. Запас ниже (near) этого не ловил у низкого
+    // выхода над горой: точка выхода чуть выше запаса коридора, а тело за
+    // прыжок уходит по орбите на сотню километров — и коридор «упирался» в
+    // саму цель.
+    if (b === target) continue;
     const clear = clearOf(b);
     // Особый случай: корабль СТОИТ на теле или висит над ним, то есть уже
     // внутри его запаса. Запрещать прыжок целиком нельзя — с поверхности
@@ -213,6 +255,7 @@ const _fuelP = v3();
 export function canJump(world, ship, target) {
   if (!target) return { ok: false, reason: L('ЦЕЛЬ НЕ ВЫБРАНА') };
   if (ship.landedAt || ship.dockedAt) return { ok: false, reason: L('ПРИВОД НЕ РАБОТАЕТ НА СТОЯНКЕ') };
+  if (target.isFree) return canFree(world, ship, target.dir);
   const block = corridorBlock(world, ship.pos, target, quantumSpeed(ship));
   if (block) return { ok: false, reason: L('КОРИДОР ПЕРЕКРЫТ: ') + block.name, block };
   if (typeof ship.fuel === 'number') {
@@ -265,6 +308,116 @@ export function suggestHop(world, ship, target, vTop = QUANTUM.speed) {
     }
   }
   return best;
+}
+
+// --- по прямой -------------------------------------------------------------------
+
+/** Цель прыжка по прямой: курс — нос корабля сейчас. */
+export function freeTarget(ship) {
+  const f = ship.basis.fwd;
+  return { isFree: true, name: L('ПО ПРЯМОЙ'), dir: v3(f.x, f.y, f.z), stop: null };
+}
+
+/**
+ * Где на прямой from + dir·t прыжок кончается: первая точка впереди, где
+ * высота над грунтом тела дошла до высоты выхода. Тело, над которым
+ * корабль уже ниже неё, — не конец (от него и улетают), но курс в его
+ * грунт — помеха.
+ *
+ * Грунт не сфера, поэтому так: вход в сферу над горами и высотой выхода
+ * (clearOf + высота выхода), дальше — шагами по прямой, каждый не длиннее
+ * половины оставшейся высоты, до ближайшей к телу точки прямой; нашёл —
+ * уточнил делением пополам и встал на последнюю точку выше.
+ * @returns { body, t (км) } | { block } | null — впереди пусто
+ */
+export function freeStop(world, from, dir) {
+  let best = null;
+  const at = (t) => { _fp.x = from.x + dir.x * t; _fp.y = from.y + dir.y * t; _fp.z = from.z + dir.z * t; return _fp; };
+  for (const b of world.bodies) {
+    const rx = b.pos.x - from.x, ry = b.pos.y - from.y, rz = b.pos.z - from.z;
+    const proj = rx * dir.x + ry * dir.y + rz * dir.z;
+    if (proj <= 0) continue;                       // позади
+    const d2 = rx * rx + ry * ry + rz * rz;
+    const perp2 = d2 - proj * proj;
+    const A = exitAltOf(b);
+    const top = clearOf(b) + A;
+    if (perp2 >= top * top) continue;              // проходим выше гор и высоты выхода
+    const above = (t) => { const p = at(t); return Math.hypot(p.x - b.pos.x, p.y - b.pos.y, p.z - b.pos.z) - groundUnder(b, p) - A; };
+    if (above(0) < 0) {
+      // Уже над телом ниже высоты выхода: курс, задевающий его запас, —
+      // в грунт (как и у прыжка к цели, corridorBlock).
+      const clear = clearOf(b);
+      if (perp2 < clear * clear) return { block: b };
+      continue;
+    }
+    let t = Math.max(0, proj - Math.sqrt(top * top - perp2)), prev = t, hit = null;
+    for (let k = 0; k < 400; k++) {
+      const h = above(t);
+      if (h <= 0) { hit = t; break; }
+      if (t >= proj) break;                         // ближе к телу прямая не подходит
+      prev = t;
+      t = Math.min(proj, t + Math.max(0.5, h * 0.5));
+    }
+    if (hit === null) continue;
+    let lo = prev, hi = hit;
+    for (let k = 0; k < 24; k++) { const m = (lo + hi) / 2; if (above(m) > 0) lo = m; else hi = m; }
+    if (!best || lo < best.t) best = { body: b, t: lo };
+  }
+  return best;
+}
+const _fp = v3();
+
+/** Можно ли прыгать по прямой: в полёте, не в грунт и топливо сверх резерва. */
+function canFree(world, ship, dir) {
+  const hit = freeStop(world, ship.pos, dir);
+  if (hit && hit.block) return { ok: false, reason: L('КОРИДОР ПЕРЕКРЫТ: ') + hit.block.name, block: hit.block };
+  if (typeof ship.fuel === 'number' && !affords(ship, quantumTons(FREE_MIN))) {
+    return { ok: false, fuel: true, reason: L('МАЛО ТОПЛИВА ДЛЯ ПРЫЖКА') };
+  }
+  return { ok: true };
+}
+// Меньше этого пути в баке сверх резерва — прыгать незачем, км.
+const FREE_MIN = 1e5;
+
+/**
+ * Шаг прыжка по прямой. Конец ищется заново каждый шаг: тела движутся, а
+ * прямая может уйти в пустоту. Торможение — то же кинематическое, что у
+ * прыжка к цели: до точки выхода корабль встаёт ровно за rampOut.
+ */
+function freeStep(q, ship, world, t, dt) {
+  const vTop = quantumSpeed(ship);
+  const aIn = vTop / QUANTUM.rampIn, aOut = vTop / QUANTUM.rampOut;
+  const hit = freeStop(world, ship.pos, t.dir);
+  const end = hit && hit.body ? hit : null;
+  t.stop = end ? end.body : null;
+  t.name = end ? L('ПО ПРЯМОЙ → ') + end.body.name : L('ПО ПРЯМОЙ');
+  const rem = end ? end.t : Infinity;
+  q.dist = rem;
+  // Топливо: тормозной путь тоже идёт по топливу. Не хватает на него сверх
+  // резерва — гашение хода сейчас, как при срыве.
+  const brakeKm = q.speed * q.speed / (2 * aOut);
+  if (typeof ship.fuel === 'number' && !affords(ship, quantumTons(brakeKm + q.speed * dt))) {
+    abortQuantum(q, ship, L('ТОПЛИВО НА ИСХОДЕ — ГАШЕНИЕ ХОДА'));
+    return 'fuel';
+  }
+  q.speed = Math.min(vTop, q.speed + aIn * dt, Math.sqrt(2 * aOut * rem));
+  const stepLen = q.speed * dt;
+  if (end && stepLen >= rem) {
+    ship.pos.x += t.dir.x * rem; ship.pos.y += t.dir.y * rem; ship.pos.z += t.dir.z * rem;
+    q.target = end.body;
+    arrive(q, ship);
+    return 'arrive';
+  }
+  ship.pos.x += t.dir.x * stepLen;
+  ship.pos.y += t.dir.y * stepLen;
+  ship.pos.z += t.dir.z * stepLen;
+  lookAlong(ship.basis, t.dir, ship.basis.up);
+  q.warp = (q.warp + dt * (0.22 + 0.75 * (q.speed / vTop))) % 1;
+  ship.vel.x = t.dir.x * q.speed;
+  ship.vel.y = t.dir.y * q.speed;
+  ship.vel.z = t.dir.z * q.speed;
+  ship.speed = q.speed;
+  return null;
 }
 
 /** Насколько нос отклонён от точки выхода, рад. */
@@ -329,7 +482,8 @@ export function abortQuantum(q, ship, reason = '') {
 
 /**
  * Шаг привода. Возвращает событие для главного цикла:
- * null | 'engage' | 'arrive' | 'abort'.
+ * null | 'engage' | 'arrive' | 'abort' | 'stopped' | 'fuel' (прыжок по
+ * прямой: топлива осталось на торможение — гасит ход).
  *
  * Во время прыжка корабль ведёт именно этот код: положение, ориентацию
  * и скорость. updateShip в это время не вызывается вовсе.
@@ -393,6 +547,7 @@ export function updateQuantum(q, ship, world, dt) {
   }
 
   // --- ход
+  if (t.isFree) return freeStep(q, ship, world, t, dt);
   exitPoint(t, ship.pos, _exit);
   const dx = _exit.x - ship.pos.x, dy = _exit.y - ship.pos.y, dz = _exit.z - ship.pos.z;
   const rem = Math.hypot(dx, dy, dz);

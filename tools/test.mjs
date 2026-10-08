@@ -21,12 +21,12 @@ import {
 } from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
-  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed,
+  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed, freeTarget,
 } from '../js/game/quantum.js';
 import { checkStation, startDockingComputer, startLaunchComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
-  isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
+  isLandable, isSolid, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
   worldPoint, surfaceVelocity, localDir, dirToWorldBody, waterAt, hasSea,
 } from '../js/game/surface.js';
 import {
@@ -59,7 +59,7 @@ import {
   CHASE, CHASE_UNDER, eyeHeight, chaseRates, makeChase, updateChase, placeChase,
 } from '../js/game/chase.js';
 import { HULL_VOLUME_M3, HULL_CLEAR as HULL_FLOOR, GEAR_CLEAR } from '../js/models/ships.js';
-import { massT } from '../js/game/fuel.js';
+import { massT, burnQuantum, quantumTons } from '../js/game/fuel.js';
 import { cityLocal } from '../js/game/city.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
@@ -842,7 +842,10 @@ function runJump(w, sh, target, maxSeconds = 300) {
     if (ev === 'abort') return { status: 'abort', reason: q.reason, t };
     if (ev === 'arrive') {
       const d = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
-      return { status: 'arrived', t, alt: d - target.radius, vMax, minGap, speed: sh.speed };
+      // Высота выхода у тела — над грунтом под кораблём (js/game/quantum.js,
+      // exitAltOf); у станции — от её середины.
+      const alt = isSolid(target) ? altitudeOf(target, sh.pos).alt : d - target.radius;
+      return { status: 'arrived', t, alt, vMax, minGap, speed: sh.speed };
     }
   }
   return { status: 'timeout', t, vMax, minGap };
@@ -913,9 +916,8 @@ for (const name of jumpTargets) {
     // радиуса плюс запас на рельеф (exitFrac). У станции такой поправки
     // нет — там расстояние обязано совпасть точь-в-точь, иначе стыковаться
     // придётся с другой дистанции, чем рассчитан докинг-компьютер.
-    const wantAlt = r.station ? QUANTUM.exitStation - r.radius : QUANTUM.exitAlt;
-    ok(r.station ? Math.abs(r.alt - wantAlt) < 1e-6
-                 : (Math.abs(r.alt - wantAlt) < 1 || r.alt > wantAlt),
+    const wantAlt = r.station ? QUANTUM.exitStation - r.radius : Math.max(QUANTUM.exitAlt, r.radius * QUANTUM.exitFrac);
+    ok(r.station ? Math.abs(r.alt - wantAlt) < 1e-6 : Math.abs(r.alt - wantAlt) < 1,
       `выход над ${name} на заданной высоте: ${r.alt.toFixed(1)} км ` +
       `(ожидание ${wantAlt.toFixed(1)})`);
     ok(r.speed < 1e-6, `скорость на выходе у ${name} нулевая: ${r.speed.toFixed(6)} км/с`);
@@ -1451,6 +1453,106 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   const sea = touchAt(w.home, wet);
   ok(sea.zone && sea.zone.water && sea.touch && sea.touch.result === 'crash' && landingReadout(makeShip(), sea.zone).landOk === false,
     `касание воды — крушение, и прибор «суша» горит красным заранее: ${sea.touch ? sea.touch.reason : '—'}`);
+}
+
+// Прыжок по прямой (цели нет — дважды J, js/main.js): по носу, до первого
+// тела впереди — выход на той же высоте, что у прыжка к телу (exitAlt, у
+// крупных — exitFrac радиуса), в нуле относительно него, — или в пустоту,
+// пока топлива хватает на торможение. С малой высоты курсом в планету —
+// отказ: под прыжком не проверяются касания.
+{
+  const w = makeSystem(0x1a7e);
+  const P = w.planets[2];
+  const nrm = normalize(v3(P.orbit.A.y * P.orbit.B.z - P.orbit.A.z * P.orbit.B.y,
+    P.orbit.A.z * P.orbit.B.x - P.orbit.A.x * P.orbit.B.z, P.orbit.A.x * P.orbit.B.y - P.orbit.A.y * P.orbit.B.x));
+  const freeRun = (sh, seconds) => {
+    const q = makeQuantum();
+    const ft = freeTarget(sh);
+    const check = canJump(w, sh, ft);
+    if (!check.ok) return { status: 'blocked', reason: check.reason, block: check.block };
+    startCalibration(q, ft);
+    let minAlt = Infinity, fuelEv = false;
+    for (let i = 0; i < 60 * seconds; i++) {
+      updateWorld(w, STEP);
+      clearControls(sh);
+      const ev = updateQuantum(q, sh, w, STEP);
+      if (q.phase === 'jump' || q.phase === 'brake') burnQuantum(sh, sh.speed * STEP);
+      else if (q.phase !== 'calib') updateShip(sh, STEP);
+      minAlt = Math.min(minAlt, Math.hypot(sh.pos.x - P.pos.x, sh.pos.y - P.pos.y, sh.pos.z - P.pos.z) - P.radius);
+      if (ev === 'fuel') fuelEv = true;
+      if (ev === 'arrive' || ev === 'stopped') return { status: ev, q, minAlt, fuelEv, i };
+      if (ev === 'abort') return { status: 'abort', reason: q.reason };
+    }
+    return { status: q.phase, q, minAlt, fuelEv };
+  };
+  const at = (k) => v3(P.pos.x + nrm.x * k, P.pos.y + nrm.y * k, P.pos.z + nrm.z * k);
+  // 1. Над полюсом орбиты, носом в планету — встаёт на высоте выхода.
+  const want = Math.max(QUANTUM.exitAlt, P.radius * QUANTUM.exitFrac);
+  const a = makeShip();
+  placeShip(a, at(2e6), makeBasis());
+  lookAlong(a.basis, v3(-nrm.x, -nrm.y, -nrm.z), a.basis.up);
+  const ra = freeRun(a, 200);
+  const altA = altitudeOf(P, a.pos).alt;
+  ok(ra.status === 'arrive' && Math.abs(altA - want) < 1 && a.speed < 1e-6,
+    `по прямой носом в ${P.name}: выход на ${altA.toFixed(1)} км над грунтом (у модуля — ${want.toFixed(0)}), скорость относительно неё ${a.speed.toFixed(3)} км/с`);
+  // 2. От неё — в пустоту: на потолке хода, без конца, остатка нет.
+  const b = makeShip();
+  placeShip(b, at(2e6), makeBasis());
+  lookAlong(b.basis, nrm, b.basis.up);
+  b.fuel = 1e9;
+  const rb = freeRun(b, 40);
+  ok(rb.status === 'jump' && Math.abs(rb.q.speed - quantumSpeed(b)) < 1e-6 && rb.q.dist === Infinity && rb.q.target.isFree,
+    `по прямой в пустоту: ${rb.status}, на потолке ${rb.q.speed.toFixed(0)} км/с, конца нет`);
+  // 3. Топлива — в обрез: гасит ход сам и встаёт, бак не уходит в минус.
+  const c = makeShip();
+  placeShip(c, at(2e6), makeBasis());
+  lookAlong(c.basis, nrm, c.basis.up);
+  c.fuel = SHIP.fuelReserve + quantumTons(4e6);
+  const f0 = c.fuel;
+  const rc = freeRun(c, 200);
+  ok(rc.status === 'stopped' && rc.fuelEv && c.fuel >= 0 && c.speed < 1e-6 && c.fuel < f0,
+    `по прямой с топливом на 4 млн км сверх резерва: гасит ход сам и встаёт, в баке ${c.fuel.toFixed(3)} т (резерв ${SHIP.fuelReserve} т)`);
+  // 4. С малой высоты курсом в планету — отказ: в грунт не прыгают.
+  const d = makeShip();
+  placeShip(d, at(groundRadius(P, localDir(P, at(P.radius))) + 50), makeBasis());
+  lookAlong(d.basis, v3(-nrm.x, -nrm.y, -nrm.z), d.basis.up);
+  const rd = freeRun(d, 5);
+  ok(rd.status === 'blocked' && rd.block === P, `с 50 км курсом в ${P.name} — отказ: ${rd.reason}`);
+}
+
+// Привод низкого выхода (quantum_lo, server/data/specs.php): ставится, как
+// в игре, снаряжением и выводит в пятидесяти километрах НАД ГРУНТОМ — и
+// над горой тоже. Прыжок — к телу с самыми высокими горами, точно над
+// вершиной: от среднего радиуса выход был бы в десятке километров над
+// ней, а не в пятидесяти. И коридор к самой цели не перекрыт ею же.
+{
+  const docQ = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const stock = docQ.modules.filter((m) => m.installed);
+  const lo = docQ.modules.find((m) => m.code === 'quantum_lo');
+  useShipEquipment(stock.map((m) => (m.slot === 'drive' ? lo : m)));
+  // Самые высокие горы — не в родной системе: ищем по всем семи.
+  let peak = null;
+  for (let id = 0; id < 7; id++) {
+    const ws = makeSystem(systemById(id));
+    for (const b of ws.bodies) {
+      if (!isSolid(b)) continue;
+      for (let i = 0; i < 600; i++) {
+        const y = 1 - 2 * (i + 0.5) / 600, r = Math.sqrt(1 - y * y), ph = i * 2.399963;
+        const dl = v3(r * Math.cos(ph), y, r * Math.sin(ph));
+        const h = groundRadius(b, dl) - b.radius;
+        if (!peak || h > peak.h) peak = { w: ws, b, dl, h };
+      }
+    }
+  }
+  const w = peak.w, P = peak.b, dw = dirToWorldBody(P, peak.dl, v3());
+  const sh = makeShip();
+  placeShip(sh, v3(P.pos.x + dw.x * (P.radius + 2e4), P.pos.y + dw.y * (P.radius + 2e4), P.pos.z + dw.z * (P.radius + 2e4)), makeBasis());
+  const speedLo = SHIP.quantumSpeed, exitLo = QUANTUM.exitAlt;
+  const r = runJump(w, sh, P);
+  useShipEquipment(stock);
+  ok(lo && r.status === 'arrived' && peak.h > 30 && Math.abs(r.alt - 50) < 1 && exitLo === 50 && speedLo === lo.spec.flight.quantumSpeed,
+    `привод низкого выхода: над вершиной в ${peak.h.toFixed(1)} км (${P.name}) — выход в ${r.alt === undefined ? '—' : r.alt.toFixed(1)} км над грунтом `
+    + `(у модуля ${exitLo}), ход ${speedLo} км/с` + (r.reason ? ' · ' + r.reason : ''));
 }
 
 // Шасси: время выпуска и ограничение скорости.

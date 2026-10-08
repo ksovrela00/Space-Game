@@ -4791,6 +4791,27 @@ await step('J — одна клавиша прыжка: привод выбир�
     throw new Error('J не отменил квантовый привод: ' + game.quantum.phase);
   }
 
+  // 1а. Цели нет: одно J — только «цель не выбрана», дважды подряд —
+  // прыжок по прямой, по носу (калибровка с целью «по прямой»); ещё J —
+  // отменить. Окно двойного нажатия — по часам игры (здесь они идут по
+  // кадрам): между одиночными нажатиями — сорок кадров, две трети секунды.
+  game.nav.index = -1;
+  frames(2);
+  key('KeyJ'); frames(2);
+  if (game.quantum.phase !== 'idle') throw new Error('одно J без цели включило привод: ' + game.quantum.phase);
+  frames(40);
+  key('KeyJ'); frames(2);
+  if (game.quantum.phase !== 'idle') throw new Error('J через полсекунды — уже не двойное, а привод включился');
+  key('KeyJ'); frames(2);
+  const qf = game.quantum;
+  if (qf.phase !== 'calib' || !qf.target || !qf.target.isFree) {
+    throw new Error('дважды J без цели — не прыжок по прямой: ' + qf.phase + (qf.reason ? ' (' + qf.reason + ')' : ''));
+  }
+  const fwd = game.ship.basis.fwd, dir = qf.target.dir;
+  if (Math.abs(fwd.x * dir.x + fwd.y * dir.y + fwd.z * dir.z - 1) > 1e-6) throw new Error('прыжок по прямой — не по носу');
+  key('KeyJ'); frames(2);
+  if (game.quantum.phase !== 'idle') throw new Error('J не отменил прыжок по прямой: ' + game.quantum.phase);
+
   // 2. Цель в другой системе — та же клавиша берёт варп.
   key('KeyM'); frames(2);
   key('KeyG'); frames(2);

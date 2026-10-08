@@ -49,6 +49,16 @@ GitHub release notes.
 - Server schema 13: station pads and rooms (rooms already carry a future shop
   kind and a tenant), a ship's pad, pose on the hall floor and storage flag;
   new calls `station.request`, `station.layout` and `ship.retrieve`.
+- **Straight-ahead quantum jump.** With no target, press J twice: the drive
+  calibrates on your nose and jumps straight ahead — it drops out at the exit
+  altitude above the first planet, moon or star on the line, or keeps going
+  into the void until only the fuel to slow down is left, then slows down by
+  itself. J aborts it like any jump; a single J without a target still just
+  says that nothing is targeted.
+- **Quantum drive modules** to buy in station outfitting: an economy drive
+  (42 000 km/s, a third less fuel, tech 2) and a low-exit drive that drops
+  out 50 km above the ground instead of 250 (50 000 km/s, tech 3). The
+  module comparison shows the exit altitude.
 
 ### Changed
 - The port terminal no longer pops up when you dock: open it with I from the
@@ -60,6 +70,9 @@ GitHub release notes.
 - In port the hatch stair and the cargo platform reach down to the hall floor.
 - A pilot walking on the floor of the station where their ship is docked
   counts as being in port: market, shipyard and the hangar console work.
+- Quantum exit altitude over a planet or moon is measured above the ground
+  under the exit point, not above the body's mean radius: over mountains the
+  ship now drops out at the drive's altitude above the peaks.
 
 ### Fixed
 - Upside-down entries into the slot no longer bump along the tunnel: the

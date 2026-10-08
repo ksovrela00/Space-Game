@@ -25,7 +25,7 @@ import {
 } from './game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum,
-  canJump, suggestHop, QUANTUM,
+  canJump, suggestHop, freeTarget, QUANTUM,
 } from './game/quantum.js';
 import {
   checkStation, startDockingComputer, stopDockingComputer, startLaunchComputer,
@@ -4009,7 +4009,27 @@ function handleKeys(dt) {
     } else if (q.phase === 'calib') { stopQuantum(q); say(st, L('ПРИВОД ОТКЛЮЧЁН')); }
     else {
       const t = currentTarget(game.nav);
-      if (!t) { say(st, L('ЦЕЛЬ НЕ ВЫБРАНА · TAB — ВЗЯТЬ ТО, НА ЧТО НАВЕДЁН НОС'), '#ffcc66'); return; }
+      if (!t) {
+        // Цели нет: дважды J — прыжок по прямой, по носу, до первого тела
+        // впереди или в пустоту, пока хватает топлива (js/game/quantum.js,
+        // freeTarget). Двойное нажатие, а не одно: одинокое J без цели —
+        // чаще забытая цель, чем желание улететь куда глаза глядят.
+        const now = performance.now() / 1000;
+        if (game.freeTapT && now - game.freeTapT < FREE_TAP_S) {
+          game.freeTapT = 0;
+          const ft = freeTarget(ship);
+          const res = canJump(world, ship, ft);
+          if (!res.ok) { say(st, res.reason, '#ff7a66'); return; }
+          stopDockingComputer(ship);
+          stopLanding(ship);
+          startCalibration(q, ft);
+          say(st, L('ПРИВОД: КАЛИБРОВКА ПО ПРЯМОЙ'), '#78e08f');
+          return;
+        }
+        game.freeTapT = now;
+        say(st, L('ЦЕЛЬ НЕ ВЫБРАНА · TAB — ВЗЯТЬ ТО, НА ЧТО НАВЕДЁН НОС'), '#ffcc66');
+        return;
+      }
       // Коридор проверяется и здесь, до калибровки: держать прицел три
       // секунды, чтобы узнать «перекрыто», — издевательство.
       const res = canJump(world, ship, t);
@@ -4192,6 +4212,8 @@ game.rover = rover;
 const driveCam = makeDriveCam();
 game.driveCam = driveCam;
 const _rd = v3(), _roverPosts = [];
+// Двойное J без цели — прыжок по прямой: второе нажатие не позже этого, с.
+const FREE_TAP_S = 0.45;
 const _roverIdle = { throttle: 0, steer: 0, brake: 1 };
 const _roverEnv = {
   g: 0,
@@ -4898,6 +4920,8 @@ function step(dt) {
     if (ev === 'arrive') {
       say(st, L('ВЫХОД ИЗ ПРЫЖКА'), '#78e08f');
       audioReset(game.audio, ship);
+    } else if (ev === 'fuel') {
+      say(st, q.reason, '#ffb454', 4);
     } else if (ev === 'stopped') {
       say(st, L('ХОД ПОГАШЕН'), '#78e08f');
       audioReset(game.audio, ship);
