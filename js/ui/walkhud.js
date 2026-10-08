@@ -211,6 +211,23 @@ export function drawWalkHud(r, game, hint = {}) {
     ctx.fillText(s, cx, ty);
     ty -= sc(22);
   }
+  // Пульт лифта станции: список остановок справа от прицела — их до
+  // одиннадцати, и одной строкой подсказки их не показать.
+  if (hint.liftList) {
+    ctx.textAlign = 'left';
+    ctx.font = fnt(14);
+    const lx = cx + sc(120);
+    let ly = h * 0.5 - hint.liftList.length * sc(10);
+    ctx.strokeText(L('ЛИФТ'), lx, ly - sc(26));
+    ctx.fillStyle = CY;
+    ctx.fillText(L('ЛИФТ'), lx, ly - sc(26));
+    for (const [s, c] of hint.liftList) {
+      ctx.strokeText(s, lx, ly);
+      ctx.fillStyle = c;
+      ctx.fillText(s, lx, ly);
+      ly += sc(20);
+    }
+  }
   ctx.restore();
 }
 

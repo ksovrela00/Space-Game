@@ -610,14 +610,24 @@ const SCENES = {
   },
   // Пешком по станции (js/game/stationwalk.js): точки — оси станции, м.
   stnconc: {
-    title: 'конкорс терминала: терраццо, светильники, таблички над дверями',
-    run: STN_WALK('coriolis', (L) => { const g = L.rooms.find((r) => r.kind === 'gate' && r.pad === 1);
-      return [-2.5, L.floor, (g.lo[2] + g.hi[2]) / 2 + 12]; }, 'Math.PI * 0.86', 0.02),
+    title: 'галерея: площадь на кровле терминала, окна на площадки, двери служб и лавок',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'concourse');
+      return [-6, c.lo[1], c.lo[2] + 3]; }, '0.35', 0.02),
+  },
+  stnwin: {
+    title: 'галерея: вид в окно на ряд площадок',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'concourse');
+      return [c.hi[0] - 4, c.lo[1], (c.lo[2] + c.hi[2]) / 2]; }, 'Math.PI / 2', -0.12),
   },
   stngate: {
-    title: 'зал ожидания: кресла, окна на площадку и корабль на ней',
+    title: 'холл площадки: кресла, окна на площадку, кабина лифта в торце',
     run: STN_WALK('coriolis', (L) => { const g = L.rooms.find((r) => r.kind === 'gate' && r.pad === 1);
-      return [g.lo[0] + 3, L.floor, (g.lo[2] + g.hi[2]) / 2 - 4]; }, '1.35', 0.02),
+      return [(g.lo[0] + g.hi[0]) / 2 + 2, L.floor, g.hi[2] - 1.5]; }, 'Math.PI', 0.0),
+  },
+  stnlift: {
+    title: 'кабина лифта: пульт у двери, створки',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'lift1');
+      return [(c.lo[0] + c.hi[0]) / 2 - 0.3, L.floor, c.lo[2] + 0.5]; }, '0.25', -0.05),
   },
   stnapron: {
     title: 'перрон: терминал, выход к площадке, свой корабль',
@@ -625,16 +635,16 @@ const SCENES = {
       return [p.side * (26 + 10), L.floor, p.c[2] - 14]; }, 'Math.PI * 0.75', 0.08),
   },
   stnbar: {
-    title: 'бар терминала: паркет, стойка, деревянные стены',
+    title: 'бар галереи: паркет, стойка, деревянные стены',
     run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'bar');
-      const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
-      return [s > 0 ? r.lo[0] + 2 : r.hi[0] - 2, L.floor, r.lo[2] + 2]; }, '0.7', -0.05),
+      const front = r.lo[2] > L.rooms.find((q) => q.id === 'concourse').lo[2];
+      return [(r.lo[0] + r.hi[0]) / 2 - 1, r.lo[1], front ? r.lo[2] + 1.5 : r.hi[2] - 1.5]; }, '(L.rooms.find((q) => q.kind === "bar").lo[2] > L.rooms.find((q) => q.id === "concourse").lo[2] ? 0.15 : Math.PI + 0.15)', -0.05),
   },
   stnshop: {
-    title: 'лавка терминала: стеллажи, витрины, касса',
+    title: 'лавка галереи: стеллажи, витрины, касса',
     run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'shop');
-      const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
-      return [s > 0 ? r.lo[0] + 1.5 : r.hi[0] - 1.5, L.floor, (r.lo[2] + r.hi[2]) / 2 - 1]; }, '0.9', -0.1),
+      const front = r.lo[2] > L.rooms.find((q) => q.id === 'concourse').lo[2];
+      return [(r.lo[0] + r.hi[0]) / 2 - 0.8, r.lo[1], front ? r.lo[2] + 1.2 : r.hi[2] - 1.2]; }, '(L.rooms.find((q) => q.kind === "shop").lo[2] > L.rooms.find((q) => q.id === "concourse").lo[2] ? 0.2 : Math.PI + 0.2)', -0.1),
   },
   hallcab: {
     title: 'из кабины на площадке: зал станции за фонарём',

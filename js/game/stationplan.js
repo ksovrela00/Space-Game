@@ -24,10 +24,17 @@
 // ПОЧЕМУ ТЕРМИНАЛ ПОСРЕДИНЕ. Площадки стоят двумя рядами по бокам от
 // него, как гейты аэропорта: от трапа до двери терминала — шестнадцать
 // метров перрона и меньше длины корабля, а не полкилометра через зал.
-// Внутри — сквозной конкорс вдоль оси, из него — залы ожидания у каждой
-// площадки и помещения станции: управление порта, ангарная служба,
-// медпункт, бар и магазины. Магазины пока пустые: в базе они уже есть
-// (station_room.shop) — торговать в них будут потом.
+//
+// СЕКЦИИ И ЛИФТ. Внутри терминала по нему не ходят: у каждой площадки —
+// свой лифтовой холл с кабиной, а службы и лавки — в галерее на кровле
+// терминала, посередине, с окнами на оба ряда площадок. Между ними —
+// лифт: кабины одинаковы на всех остановках, и поездка — как на
+// «Прометее» (js/game/lift.js). Раньше терминал был одним зданием вдоль
+// зала с конкорсом во всю длину — у «Кориолиса» полкилометра, две минуты
+// шагом от площадки до бара, — и автор игры попросил разделить станцию на
+// маленькие секции, соединённые лифтом, и подгружать ту, где пилот.
+// Магазины пока пустые: в базе они уже есть (station_room.shop) —
+// торговать в них будут потом.
 
 import { mulberry32 } from '../core/rng.js';
 
@@ -67,17 +74,40 @@ export const PAD = {
   gap: 18,                    // м — между площадками в ряду
 };
 
-// Терминал: полуширина, высота корпуса, конкорс и помещения.
+// Терминал: полуширина, высота корпуса, стены.
 export const TERM = {
   hw: 26,                     // м — полуширина корпуса (наружная грань)
   height: 14,                 // м — до кровли
   wall: 0.6,                  // м — стена (столько же, сколько перегородка помещений)
-  cw: 5,                      // м — полуширина конкорса
-  ceilC: 6,                   // м — потолок конкорса
-  ceilG: 5,                   // м — потолок зала ожидания
-  ceilR: 4.5,                 // м — потолок помещений
-  gateLen: 18,                // м — длина зала ожидания вдоль ряда
   end: 12,                    // м — от крайней площадки до торца терминала
+};
+
+// Лифтовой холл у площадки — у наружной стены терминала, напротив её
+// середины: дверь на перрон, в торце холла — дверь кабины. От трапа до
+// лифта — край площадки, перрон и холл: меньше шестидесяти метров.
+export const LOBBY = { depth: 9, len: 12, ceil: 4.5 };
+
+// Кабина лифта: одна на все остановки и повёрнута везде одинаково —
+// дверью вперёд, к щели порта (+z). Поездка переносит пилота в такую же
+// кабину другой остановки на то же место без поворота (js/game/lift.js):
+// у кабин, смотрящих в разные стороны, стоявший у двери одной оказывался
+// бы в стене другой.
+export const CAB = { w: 2.6, d: 2.6, h: 2.6 };
+
+// Галерея на кровле терминала: площадь с окнами на оба ряда площадок, по
+// торцам — помещения служб и лавок, а посреди заднего ряда — кабина лифта
+// дверью на площадь. Площадь открыта: от лифта до любой двери — прямая
+// меньше тридцати метров. Кабина посреди площади мешала бы ей — в
+// неё упирались прямые от двери до двери.
+export const GAL = {
+  hw: 22,                     // м — полуширина (терминал — 26: по краю кровли остаётся карниз)
+  plaza: 24,                  // м — длина площади вдоль оси порта
+  roomD: 10,                  // м — глубина ряда помещений у торца (со стеной)
+  h: 6,                       // м — потолок площади
+  ceilR: 4.5,                 // м — потолок помещений
+  // Пол галереи — над карнизом кровли терминала (он выше кровли на 0.4 м,
+  // сплошной коробкой): ниже его пол галереи закрывала грань карниза.
+  slab: 0.5,                  // м — пол галереи над кровлей
 };
 
 // Помещения станции сверх конкорса и залов ожидания. kind — для игры и
@@ -196,77 +226,86 @@ export function stationLayout(kind, name) {
   const terminal = { lo: [-TERM.hw, F, tz0], hi: [TERM.hw, F + TERM.height, tz1] };
 
   // --- помещения -----------------------------------------------------------------
+  //
+  // Двери — с точкой на полу (pos) и осью стены (ax: 0 — стена x = const,
+  // 2 — z = const): gate — на перрон, lift — дверь кабины, room — из
+  // площади галереи в помещение.
   const w = TERM.wall;
-  const xIn = TERM.cw + w, xOut = TERM.hw - w;        // помещения у бортов: от конкорса до стены
   const rooms = [];
   const doors = [];
   const openings = [];
-  rooms.push({ id: 'concourse', kind: 'concourse', name: 'КОНКОРС',
-    lo: [-TERM.cw, F, tz0 + w], hi: [TERM.cw, F + TERM.ceilC, tz1 - w] });
 
-  // Залы ожидания — у каждой площадки, напротив её середины.
-  const taken = { 1: [], [-1]: [] };
+  // Лифтовые холлы и кабины — у каждой площадки, напротив её середины.
+  const xo = TERM.hw - w, xi = xo - LOBBY.depth;      // холл: от наружной стены внутрь
   for (const p of pads) {
+    const s = p.side, zc = p.c[2];
     const id = 'gate' + p.n;
-    const zc = p.c[2];
-    const lo = p.side > 0 ? [xIn, F, zc - TERM.gateLen / 2] : [-xOut, F, zc - TERM.gateLen / 2];
-    const hi = p.side > 0 ? [xOut, F + TERM.ceilG, zc + TERM.gateLen / 2] : [-xIn, F + TERM.ceilG, zc + TERM.gateLen / 2];
-    rooms.push({ id, kind: 'gate', name: 'ВЫХОД НА ПЛОЩАДКУ ' + p.n, pad: p.n, lo, hi });
+    const span = (a, b, y) => (s > 0 ? [[a, F, zc], [b, F + y, zc]] : [[-b, F, zc], [-a, F + y, zc]]);
+    const [lo, hi] = span(xi, xo, LOBBY.ceil);
+    rooms.push({ id, kind: 'gate', name: 'ВЫХОД НА ПЛОЩАДКУ ' + p.n, pad: p.n,
+      lo: [lo[0], F, zc - LOBBY.len / 2], hi: [hi[0], F + LOBBY.ceil, zc + LOBBY.len / 2] });
     p.gate = id;
-    taken[p.side].push([lo[2], hi[2]]);
-    // Дверь в конкорс и дверь на перрон — напротив середины площадки.
-    doors.push({ id: 'g' + p.n + 'c', a: id, b: 'concourse', c: zc });
-    doors.push({ id: 'g' + p.n + 'a', a: id, b: p.side > 0 ? 'apronR' : 'apronL', c: zc, gate: p.n });
+    doors.push({ id: 'g' + p.n + 'a', a: id, b: s > 0 ? 'apronR' : 'apronL', gate: p.n,
+      pos: [s * (TERM.hw - w / 2), F, zc], ax: 0 });
+    // Кабина — за задним торцом холла, посередине его глубины, дверью в
+    // холл (вперёд, как у всех кабин).
+    const xc = s * (xi + xo) / 2, zb = zc - LOBBY.len / 2 - w;
+    rooms.push({ id: 'lift' + p.n, kind: 'lift', name: 'ЛИФТ', pad: p.n, section: id,
+      lo: [xc - CAB.w / 2, F, zb - CAB.d], hi: [xc + CAB.w / 2, F + CAB.h, zb] });
+    doors.push({ id: 'l' + p.n, a: 'lift' + p.n, b: id, lift: true, pos: [xc, F, zb + w / 2], ax: 2 });
   }
 
-  // Службы и лавки — в просветах между залами ожидания, ближе к середине
-  // терминала: от площадки к ним идти меньше всего.
+  // Галерея — на кровле, посередине терминала.
+  const zm = (tz0 + tz1) / 2, GF = F + TERM.height + GAL.slab;
+  const gz0 = zm - GAL.plaza / 2 - GAL.roomD, gz1 = zm + GAL.plaza / 2 + GAL.roomD;
+  const gallery = { lo: [-GAL.hw, F + TERM.height, gz0], hi: [GAL.hw, GF + GAL.h, gz1], floor: GF };
+  rooms.push({ id: 'concourse', kind: 'concourse', name: 'КОНКОРС',
+    lo: [-GAL.hw + w, GF, zm - GAL.plaza / 2], hi: [GAL.hw - w, GF + GAL.h, zm + GAL.plaza / 2] });
+  // Кабина лифта — посреди заднего ряда, дверью на площадь (вперёд, как
+  // у всех кабин). По бокам от неё — стены во всю глубину ряда.
+  const zb = zm - GAL.plaza / 2 - w;
+  rooms.push({ id: 'liftc', kind: 'lift', name: 'ЛИФТ', section: 'concourse',
+    lo: [-CAB.w / 2, GF, zb - CAB.d], hi: [CAB.w / 2, GF + CAB.h, zb] });
+  doors.push({ id: 'lc', a: 'liftc', b: 'concourse', lift: true, pos: [0, GF, zb + w / 2], ax: 2 });
+  const slot = CAB.w / 2 + w;                          // половина места кабины в ряду, со стенами
+
+  // Службы и лавки — по торцам галереи. Сколько их: от 10 до 20 помещений
+  // всего (холлы, площадь и они), крупной станции больше.
   const pads1 = pads.length;
-  // Сколько помещений сверх конкорса и залов: от 10 до 20 всего —
-  // крупной станции больше.
   const total = Math.max(10, Math.min(20, pads1 + 3 + Math.floor(rnd() * 6)));
   const extra = Math.max(3, total - 1 - pads1);
   const want = [];
   for (let i = 0; i < Math.min(SERVICES.length, extra); i++) want.push({ ...SERVICES[i] });
   const shopPool = SHOPS.slice();
   while (want.length < extra && shopPool.length) {
-    const s = shopPool.splice(Math.floor(rnd() * shopPool.length), 1)[0];
-    want.push({ kind: 'shop', shop: s.shop, name: 'МАГАЗИН · ' + s.name, len: 18 + Math.floor(rnd() * 3) * 2 });
+    const sh = shopPool.splice(Math.floor(rnd() * shopPool.length), 1)[0];
+    want.push({ kind: 'shop', shop: sh.shop, name: 'МАГАЗИН · ' + sh.name });
   }
-  // Свободные отрезки вдоль каждого борта.
-  const free = [];
-  for (const side of [1, -1]) {
-    const busy = taken[side].slice().sort((a, b) => a[0] - b[0]);
-    let z = tz0 + w;
-    for (const [a, b] of busy) {
-      if (a - w - z > 8) free.push({ side, z0: z, z1: a - w });
-      z = b + w;
-    }
-    if (tz1 - w - z > 8) free.push({ side, z0: z, z1: tz1 - w });
-  }
-  const zc = (tz0 + tz1) / 2;
-  free.sort((a, b) => Math.abs((a.z0 + a.z1) / 2 - zc) - Math.abs((b.z0 + b.z1) / 2 - zc));
+  // Передний ряд — тот, куда смотрит дверь лифта: в него — первые по
+  // важности (управление порта, ангарная служба).
+  const nFront = Math.ceil(want.length / 2);
+  // Задний ряд — по обе стороны от кабины: левая половина и правая.
+  const back = want.slice(nFront), nLeft = Math.ceil(back.length / 2);
+  const x0g = -GAL.hw + w, x1g = GAL.hw - w;
+  const rowsAt = [
+    { s: 1, z0: zm + GAL.plaza / 2 + w, z1: gz1 - w, x0: x0g, x1: x1g, list: want.slice(0, nFront) },
+    { s: -1, z0: gz0 + w, z1: zm - GAL.plaza / 2 - w, x0: x0g, x1: -slot, list: back.slice(0, nLeft) },
+    { s: -1, z0: gz0 + w, z1: zm - GAL.plaza / 2 - w, x0: slot, x1: x1g, list: back.slice(nLeft) },
+  ];
   let k = 0;
-  for (const f of free) {
-    // В отрезке — подряд, от того его конца, что ближе к середине
-    // терминала: от площадки до помещений станции идти меньше всего.
-    const up = (f.z0 + f.z1) / 2 < zc ? -1 : 1;     // куда растёт ряд: от середины наружу
-    let edge = up > 0 ? f.z0 : f.z1;
-    while (k < want.length) {
-      const r = want[k];
-      const len = r.len || 18;
-      const lo = up > 0 ? edge : edge - len;
-      const hi = up > 0 ? edge + len : edge;
-      if (lo < f.z0 - 1e-6 || hi > f.z1 + 1e-6) break;
-      edge = up > 0 ? hi + w : lo - w;
-      const id = r.kind === 'shop' ? 'shop' + (k + 1) : r.kind;
-      const x = f.side > 0 ? [xIn, xOut] : [-xOut, -xIn];
+  for (const row of rowsAt) {
+    const n = row.list.length;
+    if (!n) continue;
+    const x0 = row.x0, x1 = row.x1;
+    const wid = (x1 - x0 - (n - 1) * w) / n;
+    row.list.forEach((r, i) => {
+      const a = x0 + i * (wid + w), b = a + wid;
+      const id = r.kind === 'shop' ? 'shop' + (++k) : r.kind;
       rooms.push({ id, kind: r.kind, shop: r.shop || null, name: r.name,
-        lo: [x[0], F, lo], hi: [x[1], F + TERM.ceilR, hi] });
-      doors.push({ id: id + 'c', a: id, b: 'concourse', c: (lo + hi) / 2 });
-      k++;
-    }
-    if (k >= want.length) break;
+        lo: [a, GF, row.z0], hi: [b, GF + GAL.ceilR, row.z1] });
+      const zd = row.s > 0 ? zm + GAL.plaza / 2 + w / 2 : zm - GAL.plaza / 2 - w / 2;
+      doors.push({ id: id + 'c', a: id, b: 'concourse', pos: [(a + b) / 2, GF, zd], ax: 2 });
+    });
   }
 
   // Перрон: зал вокруг терминала — четыре открытых «помещения» без стен
@@ -285,11 +324,8 @@ export function stationLayout(kind, name) {
   openings.push({ a: 'apronF', b: 'apronL', u: [tz1, hall.hi[2]] });
   openings.push({ a: 'apronB', b: 'apronR', u: [hall.lo[2], tz0] });
   openings.push({ a: 'apronB', b: 'apronL', u: [hall.lo[2], tz0] });
-  // Главные входы — по торцам конкорса.
-  doors.push({ id: 'mainF', a: 'concourse', b: 'apronF', c: 0, main: true });
-  doors.push({ id: 'mainB', a: 'concourse', b: 'apronB', c: 0, main: true });
-
-  return { kind, name, seed: stationSeed(name || kind), hall, floor: F, tunnel, face, terminal, pads, rooms, doors, openings };
+  return { kind, name, seed: stationSeed(name || kind), hall, floor: F, tunnel, face, terminal, gallery,
+    pads, rooms, doors, openings };
 }
 
 /** Плита площадки над полом зала, м: на неё садятся корабли и наступают пешком. */

@@ -542,7 +542,7 @@ final class Players
             'berth' => $ship['docked_body'] === null ? null : [
                 'pad' => $int($ship['pad'] ?? null),
                 'pose' => self::json($ship['dock_pose'] ?? null),
-                'stored' => (bool) ($ship['stored'] ?? false),
+                'stored' => Stations::inStorage($ship),
             ],
         ];
     }
@@ -1434,7 +1434,7 @@ final class Players
             // Корабль в хранилище порта (схема 13): пересесть в него — значит
             // сначала вызвать его на площадку (Shipyard::retrieve). Он и
             // командование передаёт, и пилота сажает в кресло.
-            if ((int) ($row['stored'] ?? 0) === 1 && $row['docked_body'] !== null) {
+            if (Stations::inStorage($row)) {
                 return Shipyard::retrieve($playerId, $shipId);
             }
             if ((int) $p['aboard_ship'] !== $shipId && !self::sameDock($p, $row)) {

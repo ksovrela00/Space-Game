@@ -1805,6 +1805,54 @@ section('станция изнутри: площадки и помещения')
     ok($d['pad'] === $req['pad'] && $sb['position']['berth']['pad'] === $req['pad']
         && abs($sb['position']['berth']['pose']['pos']['x'] - 0.08) < 1e-9,
         'встал на выданную площадку: номер и поза на полу зала — в базе');
+    // Вездеход в трюме едет с носителем и получает его место порта — тот же
+    // номер площадки. Площадку он не держит: корабль снова встаёт на свою.
+    // Раньше это был отказ «площадка занята» (409) у автора игры. Хозяин —
+    // в игре: площадку держат только корабли тех, кто в игре.
+    {
+        $wasOnline = (int) Db::one('SELECT `online` FROM `player` WHERE `id`=?', [$rb['player_id']]);
+        Db::update('player', ['online' => 1], '`id`=?', [$rb['player_id']]);
+        $shipB0 = (int) Players::ship($rb['player_id'])['id'];
+        $rt = Db::row("SELECT * FROM `ship_type` WHERE `code`='rover'");
+        $rov = Db::insert('ship', ['type_id' => $rt['id'], 'owner_id' => $rb['player_id'], 'name' => '',
+            'hull' => $rt['hull_max'], 'shield' => 0, 'fuel_t' => 0, 'system_id' => 0, 'docked_body' => $home,
+            'carrier_id' => $shipB0, 'stowed' => 1]);
+        Players::carryAlong($shipB0);
+        try {
+            $again = Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $req['pad'], 'pose' => $pose], $tb);
+            $why = '';
+        } catch (ApiError $e) {
+            $again = ['pad' => null];
+            $why = ': отказ «' . $e->getMessage() . '»';
+        }
+        ok((int) Players::shipRow($rov)['pad'] === $req['pad'] && $again['pad'] === $req['pad']
+            && !in_array($req['pad'], Stations::busyPads(0, $home, $shipB0), true),
+            'вездеход в трюме на той же площадке её не держит: корабль снова встаёт на свою' . $why);
+        Db::run('DELETE FROM `ship` WHERE `id`=?', [$rov]);
+        Db::update('player', ['online' => $wasOnline], '`id`=?', [$rb['player_id']]);
+    }
+    // Корабль, вставший в порт до схемы 13: в порту, но ни на площадке, ни
+    // на полу зала. Он — в хранилище: у пульта его вызывают, «пересесть»
+    // вызывает его на площадку. Так было у автора игры с «Прометеем»: у
+    // пульта для него не было ни одной кнопки.
+    {
+        $keepB = Players::shipRow((int) Players::ship($rb['player_id'])['id']);
+        $keepP = Db::row('SELECT `ship_id`, `aboard_ship`, `seated` FROM `player` WHERE `id`=?', [$rb['player_id']]);
+        $ct = Db::row("SELECT * FROM `ship_type` WHERE `code`='challenger'");
+        $old = Db::insert('ship', ['type_id' => $ct['id'], 'owner_id' => $rb['player_id'], 'name' => '',
+            'hull' => $ct['hull_max'], 'shield' => 0, 'fuel_t' => $ct['fuel_t'], 'system_id' => 0, 'docked_body' => $home]);
+        $list = Api::call('shipyard.list', [], $tb);
+        $mine = array_values(array_filter($list['here'], static fn($x) => $x['id'] === $old));
+        $cmd = Api::call('ship.command', ['id' => $old], $tb);
+        $row = Players::shipRow($old);
+        ok($mine && $mine[0]['stored'] === true && $cmd['ship']['id'] === $old && $row['pad'] !== null
+            && $row['dock_pose'] !== null && (int) $row['stored'] === 0,
+            'корабль из порта до схемы 13 — в хранилище: у пульта его вызывают, «пересесть» ставит его на площадку ' . ($row['pad'] ?? '—'));
+        Db::run('DELETE FROM `ship` WHERE `id`=?', [$old]);
+        Db::update('ship', ['pad' => $keepB['pad'], 'stored' => $keepB['stored'], 'dock_pose' => $keepB['dock_pose'],
+            'berth_station' => $keepB['berth_station']], '`id`=?', [(int) $keepB['id']]);
+        Db::update('player', $keepP, '`id`=?', [$rb['player_id']]);
+    }
     // Кривая поза из чужих рук в базу не идёт — площадка ставит свою.
     Api::call('station.undock', [], $tb);
     Api::call('station.dock', ['system' => 0, 'station' => $home, 'pad' => $req['pad'],

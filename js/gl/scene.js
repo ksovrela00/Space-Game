@@ -1196,6 +1196,37 @@ export class GlScene {
   }
 
   /**
+   * Станция изнутри: видимые секции (холлы площадок, галерея — js/main.js,
+   * stationSections) и створки кабин лифта в них, раздвинутые по открытию.
+   * Секция собирается при первом показе (js/models/stationhall.js,
+   * sectionMesh); остальные не рисуются вовсе.
+   */
+  drawStationInside(prog, game, st, sunPos) {
+    if (!game.stationSections) return;
+    const v = game.stationSections(st);
+    if (!v) return;
+    const ids = new Set(v.ids);
+    for (const id of v.ids) this.drawObject(prog, this.glMeshFor(game.stationSectionMesh(st, id)), st.pos, st.basis, 1, sunPos);
+    const b = st.basis, p = this._leafPos || (this._leafPos = { x: 0, y: 0, z: 0 });
+    for (const d of v.plan.liftDoors) {
+      const cab = v.plan.roomById[d.rooms[0]];
+      if (!cab || !ids.has(cab.section)) continue;
+      const mesh = this.glMeshFor(game.liftLeaf(d.ax));
+      const u = d.ax === 0 ? 2 : 0;
+      // Створка — половина проёма; открываясь, уходит в стену на свою ширину.
+      for (const sg of [-1, 1]) {
+        const off = [0, 0, 0];
+        off[u] = sg * d.half * (0.5 + d.open);
+        const x = (d.pos[0] + off[0]) / 1000, y = d.pos[1] / 1000, z = (d.pos[2] + off[2]) / 1000;
+        p.x = st.pos.x + b.right.x * x + b.up.x * y + b.fwd.x * z;
+        p.y = st.pos.y + b.right.y * x + b.up.y * y + b.fwd.y * z;
+        p.z = st.pos.z + b.right.z * x + b.up.z * y + b.fwd.z * z;
+        this.drawObject(prog, mesh, p, b, 1, sunPos);
+      }
+    }
+  }
+
+  /**
    * Состояние квантового прыжка для картинки: сила эффекта, ось движения
    * в координатах камеры и точка схода на экране.
    *
@@ -2484,6 +2515,7 @@ export class GlScene {
       // Меш — по станции: корпус её типа и зал по её планировке
       // (js/models/stations.js, js/models/stationhall.js).
       this.drawObject(prog, this.glMeshFor(game.stationMesh(st)), st.pos, st.basis, 1, sunPos);
+      this.drawStationInside(prog, game, st, sunPos);
     }
 
     // Свой корабль от третьего лица. Из рубки его рисует проход кабины

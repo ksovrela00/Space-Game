@@ -1,5 +1,13 @@
-// Зал станции: тоннель за щелью, зал с тяжестью, площадки, терминал и его
-// помещения — сеткой мира (км, оси станции).
+// Зал станции: тоннель за щелью, зал с тяжестью, площадки, терминал и
+// галерея на его кровле — сеткой мира (км, оси станции).
+//
+// ОБОЛОЧКА И СЕКЦИИ. Сетка зала (hallMesh) — только то, что видно снаружи:
+// тоннель, зал, площадки, терминал и галерея снаружи. Она входит в сетку
+// станции и рисуется с ней. Внутренности — по секциям (sectionMesh): холл
+// площадки с кабиной лифта и галерея с помещениями; каждая собирается при
+// первом показе, а рисует их сцена, только когда их видно
+// (js/main.js, stationSections). Раньше весь терминал с мебелью (18–34
+// тысячи треугольников) входил в сетку станции и рисовался и из космоса.
 //
 // Планировку даёт js/game/stationplan.js, план для шага — js/game/stationwalk.js:
 // здесь только то, как они выглядят. Всё, обо что можно удариться и на что
@@ -19,7 +27,7 @@
 
 import { v3 } from '../core/vec3.js';
 import { makeMesh } from './geometry.js';
-import { PAD, TERM } from '../game/stationplan.js';
+import { PAD, TERM, GAL } from '../game/stationplan.js';
 import { stationPlan, DOOR } from '../game/stationwalk.js';
 import { STMAT } from '../gl/stationtex.js';
 
@@ -71,7 +79,7 @@ const IN = {
 // конкорса, издали, раньше, чем читают.
 const KIND_SIGN = {
   gate: [255, 190, 90], bar: [190, 120, 255], office: [110, 170, 255], hangar: [255, 140, 60],
-  med: [90, 230, 130], shop: [80, 220, 220],
+  med: [90, 230, 130], shop: [80, 220, 220], lift: [120, 210, 255],
 };
 
 /** Набор граней: квадраты и коробки в метрах, на выходе — сетка в километрах. */
@@ -338,12 +346,11 @@ function buildPad(B, p) {
 const W = TERM.wall;
 
 /**
- * Окна помещения в наружную стену (оси станции, м): залы ожидания смотрят
- * на свою площадку, бар — в зал. Кусками по обе стороны двери, на 1–3.6 м
- * над полом.
+ * Окна холла в наружную стену терминала (оси станции, м): холл смотрит на
+ * свою площадку. Кусками по обе стороны двери, на 1–3.4 м над полом.
  */
 function windowsOf(r, doorZ) {
-  if (r.kind !== 'gate' && r.kind !== 'bar') return [];
+  if (r.kind !== 'gate') return [];
   const y0 = r.lo[1] + 1.0, y1 = r.lo[1] + 3.4;
   const out = [];
   const a = r.lo[2] + 1.2, b = r.hi[2] - 1.2;
@@ -428,7 +435,7 @@ function buildTerminal(B, L, plan) {
     else if (d.main) holesZ[d.pos[2] > (z0 + z1) / 2 ? 1 : -1].push(h);
   }
   for (const r of plan.rooms) {
-    if (r.open || r.kind === 'concourse' || r.kind === 'block') continue;
+    if (r.kind !== 'gate') continue;
     const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
     const door = plan.doors.find((d) => d.gate && d.rooms[0] === r.id);
     for (const w of windowsOf(r, door ? door.pos[2] : null)) holesX[s].push(w);
@@ -470,7 +477,10 @@ function buildTerminal(B, L, plan) {
     }
   }
   // Кровля: вентиляция и техника — коробками, как на крышах вокзалов.
+  // Там, где стоит галерея, — её нет.
+  const G = L.gallery;
   for (let z = z0 + 30; z < z1 - 20; z += 70) {
+    if (G && z + 8 > G.lo[2] && z - 8 < G.hi[2]) continue;
     B.box([-10, y1 + 0.4, z - 6], [-2, y1 + 3.4, z + 6], WALL_DARK, { noBottom: true, mat: STMAT.tread });
     B.box([4, y1 + 0.4, z - 3], [12, y1 + 2.2, z + 3], RIB, { noBottom: true, mat: STMAT.tread });
   }
@@ -495,12 +505,52 @@ function buildTerminal(B, L, plan) {
       B.poly([[xa, y0 + 0.04, z + dz - 0.2], [xb, y0 + 0.04, z + dz - 0.2], [xb, y0 + 0.04, z + dz + 0.2], [xa, y0 + 0.04, z + dz + 0.2]], YELLOW);
     }
   }
-  // Главные входы по торцам: козырёк и огни.
-  for (const d of plan.doors) {
-    if (!d.main) continue;
-    const s = d.pos[2] > (z0 + z1) / 2 ? 1 : -1, z = s > 0 ? z1 : z0;
-    B.box([-5, y0 + 4.4, Math.min(z, z + s * 4)], [5, y0 + 4.7, Math.max(z, z + s * 4)], TERM_TRIM, { mat: STMAT.tread });
-    B.rect([0, y0 + 5.6, z + s * 0.08], [4.5, 0, 0], [0, 0.6, 0], LAMP, { glow: 1 });
+}
+
+// --- галерея снаружи -------------------------------------------------------------------------
+
+/**
+ * Окна площади галереи (м): на оба ряда площадок — по длинным стенам,
+ * от пола почти до потолка, в границах площади (у торцов — помещения).
+ * [u0, u1, v0, v1]: u — вдоль z, v — высота.
+ */
+function galleryWindows(L, plan) {
+  const G = L.gallery, P = plan.roomById.concourse;
+  if (!G || !P) return [];
+  return [[P.lo[2] + 0.8, P.hi[2] - 0.8, G.floor + 0.7, G.floor + GAL.h - 0.9]];
+}
+
+/**
+ * Галерея снаружи: стены с окнами на площадки, кровля с карнизом и
+ * откосы окон. Изнутри её рисует секция 'concourse' (sectionMesh).
+ */
+function buildGallery(B, L, plan) {
+  const G = L.gallery;
+  if (!G) return;
+  // Кровля — над потолком площади, цоколь — под её полом: в одной плоскости
+  // с ними они перебивали бы их (потолок выходил тёмными панелями кровли,
+  // пол — рифлёным листом цоколя).
+  const [x0, y0, z0] = G.lo, [x1, , z1] = G.hi, GF = G.floor, y1 = G.hi[1] + 0.3;
+  const P = { mat: STMAT.panels };
+  const win = galleryWindows(L, plan);
+  for (const s of [-1, 1]) {
+    const x = s > 0 ? x1 : x0;
+    B.holed(x, z0, z1, y0, y1, win, (r) => B.poly([[x, r[2], r[0]], [x, r[2], r[1]], [x, r[3], r[1]], [x, r[3], r[0]]], TERM_WALL, P));
+    const z = s > 0 ? z1 : z0;
+    B.poly([[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], TERM_WALL, P);
+    const xi = x - s * W;
+    for (const h of win) {
+      reveals(B, 0, Math.min(x, xi), Math.max(x, xi), h, TERM_TRIM, STMAT.tread, true);
+      mullions(B, 0, (x + xi) / 2, h);
+    }
+  }
+  B.poly([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], TERM_TRIM, P);
+  B.box([x0 - 0.4, y1 - 0.8, z0 - 0.4], [x1 + 0.4, y1 + 0.3, z1 + 0.4], TERM_TRIM, { noBottom: true, mat: STMAT.panels });
+  B.box([x0 - 0.2, y0, z0 - 0.2], [x1 + 0.2, GF - 0.05, z1 + 0.2], TERM_TRIM, { noBottom: true, mat: STMAT.tread });
+  // Полоса света под карнизом: галерею видно с перрона и с подлёта.
+  for (const s of [-1, 1]) {
+    const x = (s > 0 ? x1 : x0) + s * 0.05;
+    B.rect([x, y1 - 1.2, (z0 + z1) / 2], [0, 0.12, 0], [0, 0, (z1 - z0) / 2 - 1], LAMP, { glow: 0.8 });
   }
 }
 
@@ -510,6 +560,7 @@ function buildTerminal(B, L, plan) {
 function roomLook(r) {
   switch (r.kind) {
     case 'concourse': return { floor: [STMAT.terrazzo, IN.terrazzo], wall: [STMAT.wall, IN.wall] };
+    case 'lift': return { floor: [STMAT.tread, IN.steel], wall: [STMAT.panels, IN.wallCool] };
     case 'gate': return { floor: [STMAT.rubber, IN.rubber], wall: [STMAT.wall, IN.wallCool] };
     case 'bar': return { floor: [STMAT.parquet, IN.parquet], wall: [STMAT.wood, IN.wood] };
     case 'med': return { floor: [STMAT.tiles, IN.white], wall: [STMAT.wall, IN.white] };
@@ -541,11 +592,15 @@ function roomWall(B, ax, at, u0, u1, y0, y1, holes, look) {
   }
 }
 
-/** Светильники потолка: панели сеткой (у конкорса — полосы вдоль). */
+/** Светильники потолка: панели сеткой (у площади галереи — полосы поперёк). */
 function ceilingLights(B, r, y) {
   const x0 = r.lo[0], x1 = r.hi[0], z0 = r.lo[2], z1 = r.hi[2];
   if (r.kind === 'concourse') {
-    for (const x of [-2.6, 2.6]) B.rect([x, y - 0.02, (z0 + z1) / 2], [0.25, 0, 0], [0, 0, (z1 - z0) / 2 - 1], LAMP, { glow: 1 });
+    for (let z = z0 + 3; z < z1 - 2; z += 6) B.rect([(x0 + x1) / 2, y - 0.02, z], [(x1 - x0) / 2 - 1.5, 0, 0], [0, 0, 0.25], LAMP, { glow: 1 });
+    return;
+  }
+  if (r.kind === 'lift') {
+    B.rect([(x0 + x1) / 2, y - 0.02, (z0 + z1) / 2], [0.7, 0, 0], [0, 0, 0.7], LAMP, { glow: 1 });
     return;
   }
   const nx = Math.max(1, Math.round((x1 - x0) / 4)), nz = Math.max(1, Math.round((z1 - z0) / 4));
@@ -595,11 +650,12 @@ function buildProp(B, b, room) {
       break;
     case 'kiosk': {
       // Пульт ангарной службы: стойка рифлёного листа и экран — светится
-      // оранжевым, как табличка службы над дверью.
+      // оранжевым, как табличка службы над дверью. Экран — внутрь
+      // помещения (b.face): к нему подходят, войдя из галереи.
       B.box([x0, y0, z0], [x1, y1, z1], IN.steel, S);
-      // Экран — внутрь помещения: к нему подходят, войдя из конкорса.
-      const fx = room && room.lo[0] + room.hi[0] > 0 ? x1 + 0.01 : x0 - 0.01;
-      B.rect([fx, y1 - 0.35, (z0 + z1) / 2], [0, 0.22, 0], [0, 0, 0.3], KIND_SIGN.hangar, { glow: 1 });
+      const f = b.face || [1, 0, 0], c = [(x0 + x1) / 2, y1 - 0.35, (z0 + z1) / 2];
+      if (f[0]) B.rect([f[0] > 0 ? x1 + 0.01 : x0 - 0.01, c[1], c[2]], [0, 0.22, 0], [0, 0, 0.3], KIND_SIGN.hangar, { glow: 1 });
+      else B.rect([c[0], c[1], f[2] > 0 ? z1 + 0.01 : z0 - 0.01], [0, 0.22, 0], [0.3, 0, 0], KIND_SIGN.hangar, { glow: 1 });
       break;
     }
     case 'bed':
@@ -629,83 +685,149 @@ function buildProp(B, b, room) {
   }
 }
 
-/** Табличка над дверью из конкорса: цвет вида помещения, у залов ожидания — номер. */
-function doorSign(B, d, room, F) {
-  const c = KIND_SIGN[room.kind] || KIND_SIGN.shop;
-  const s = Math.sign(d.pos[0]);              // стена конкорса: x = ±(cw + W/2)
-  const x = d.pos[0] - s * (W / 2 + 0.06);    // на грани со стороны конкорса
-  const y = F + d.height + 0.55;
-  B.box([Math.min(x, x - s * 0.08), y - 0.32, d.pos[2] - 1.3], [Math.max(x, x - s * 0.08), y + 0.32, d.pos[2] + 1.3], DARK);
-  B.rect([x - s * 0.09, y + 0.22, d.pos[2]], [0, 0.05, 0], [0, 0, 1.25], c, { glow: 1 });
+/**
+ * Табличка над дверью помещения — со стороны, откуда её читают (from):
+ * цвет вида помещения, у холла — номер площадки. Над дверью кабины —
+ * полоса лифта.
+ */
+function doorSign(B, d, room, from) {
+  const c = d.lift ? KIND_SIGN.lift : (KIND_SIGN[room.kind] || KIND_SIGN.shop);
+  const ax = d.ax, u = ax === 0 ? 2 : 0;
+  // С какой стороны стены читают: к середине помещения from.
+  const mid = (from.lo[ax] + from.hi[ax]) / 2;
+  const s = mid > d.pos[ax] ? 1 : -1;
+  const at = d.pos[ax] + s * (W / 2 + 0.06);
+  const y = d.pos[1] + d.height + 0.45;
+  const P = (a, v, uu) => { const p = [0, v, 0]; p[ax] = a; p[u] = uu; return p; };
+  const lo = P(Math.min(at, at + s * 0.08), y - 0.3, d.pos[u] - 1.2), hi = P(Math.max(at, at + s * 0.08), y + 0.3, d.pos[u] + 1.2);
+  B.box(lo, hi, DARK);
+  const ua = [0, 0, 0]; ua[u] = 1.15;
+  B.rect(P(at + s * 0.09, y + 0.2, d.pos[u]), [0, 0.05, 0], ua, c, { glow: 1 });
   if (room.kind === 'gate' && room.pad) {
-    const h = 0.38, wN = digitsWidth(room.pad, h);
-    // Читается из конкорса: «вправо» для смотрящего на стену с оси.
-    digits(B, room.pad, [x - s * 0.1, y - 0.25, d.pos[2] + s * wN / 2], [0, 0, -s], [0, 1, 0], h, c, 1);
+    const h = 0.36, wN = digitsWidth(room.pad, h);
+    // «Вправо» для читающего: у стены, к которой он стоит лицом.
+    const r = [0, 0, 0]; r[u] = ax === 0 ? -s : s;
+    digits(B, room.pad, P(at + s * 0.1, y - 0.24, d.pos[u] - r[u] * wN / 2), r, [0, 1, 0], h, c, 1);
   } else if (room.kind === 'med') {
-    B.rect([x - s * 0.1, y - 0.05, d.pos[2]], [0, 0.07, 0], [0, 0, 0.2], c, { glow: 1 });
-    B.rect([x - s * 0.1, y - 0.05, d.pos[2]], [0, 0.2, 0], [0, 0, 0.07], c, { glow: 1 });
+    const a = [0, 0, 0]; a[u] = 0.2;
+    const b2 = [0, 0, 0]; b2[u] = 0.07;
+    B.rect(P(at + s * 0.1, y - 0.05, d.pos[u]), [0, 0.07, 0], a, c, { glow: 1 });
+    B.rect(P(at + s * 0.1, y - 0.05, d.pos[u]), [0, 0.2, 0], b2, c, { glow: 1 });
   }
 }
 
 /**
- * Помещения терминала изнутри: полы, потолки со светильниками, стены с
- * проёмами дверей и окон, рамы, таблички над дверями и мебель. Коробки —
- * плана шага (js/game/stationwalk.js): грань стены — ровно там, где в неё
- * упирается пешеход.
+ * Стены помещения изнутри — по граням его коробки, с проёмами дверей и
+ * окон этой грани. Окна: у холла — в наружной стене, у площади галереи —
+ * в длинных стенах на площадки.
  */
-function buildInterior(B, L, plan) {
-  const F = L.floor, T = L.terminal;
-  const yF = F + 0.02;                       // пол помещений — над бетоном зала (без мерцания)
-  for (const r of plan.rooms) {
-    if (r.open || r.kind === 'block') continue;
+function roomWalls(B, r, plan, L, look) {
+  const G = L.gallery;
+  for (const ax of [0, 2]) {
+    const u = ax === 0 ? 2 : 0;
+    for (const side of [-1, 1]) {
+      const at = side < 0 ? r.lo[ax] : r.hi[ax];
+      const wallMid = at + side * W / 2;
+      const holes = plan.doors
+        .filter((d) => !d.edge && d.ax === ax && Math.abs(d.pos[ax] - wallMid) < 0.02
+          && d.pos[u] > r.lo[u] - 0.01 && d.pos[u] < r.hi[u] + 0.01 && Math.abs(d.pos[1] - r.lo[1]) < 0.5)
+        .map((d) => [d.pos[u] - d.half, d.pos[u] + d.half, r.lo[1], r.lo[1] + d.height]);
+      if (r.kind === 'gate' && ax === 0 && Math.abs(Math.abs(at) - (TERM.hw - W)) < 0.02) {
+        const gate = plan.doors.find((d) => d.gate && d.rooms[0] === r.id);
+        holes.push(...windowsOf(r, gate ? gate.pos[2] : null));
+      }
+      if (r.kind === 'concourse' && ax === 0 && G) holes.push(...galleryWindows(L, plan));
+      roomWall(B, ax, at, r.lo[u], r.hi[u], r.lo[1], r.hi[1], holes, look.wall);
+    }
+  }
+}
+
+/** Пульт лифта в кабине: щиток и светящийся экран — внутрь кабины. */
+function liftPanel(B, stop, r) {
+  const p = stop.panel;
+  const ax = Math.abs(p[0] - r.lo[0]) < 0.1 || Math.abs(p[0] - r.hi[0]) < 0.1 ? 0 : 2;
+  const u = ax === 0 ? 2 : 0;
+  const inward = Math.abs(p[ax] - r.lo[ax]) < Math.abs(p[ax] - r.hi[ax]) ? 1 : -1;
+  const lo = p.slice(), hi = p.slice();
+  lo[ax] = p[ax] - inward * 0.05; hi[ax] = p[ax] + inward * 0.01;
+  lo[u] -= 0.13; hi[u] += 0.13; lo[1] -= 0.22; hi[1] += 0.22;
+  B.box([Math.min(lo[0], hi[0]), lo[1], Math.min(lo[2], hi[2])], [Math.max(lo[0], hi[0]), hi[1], Math.max(lo[2], hi[2])], IN.steel, { mat: STMAT.tread });
+  const c = p.slice(); c[ax] = p[ax] + inward * 0.02;
+  const a = [0, 0, 0]; a[u] = 0.09;
+  B.rect(c, a, [0, 0.16, 0], KIND_SIGN.lift, { glow: 1 });
+}
+
+/**
+ * Секция изнутри (м -> км): полы, потолки со светильниками, стены с
+ * проёмами дверей и окон, рамы и таблички, мебель, кабина лифта с пультом.
+ * Коробки — плана шага (js/game/stationwalk.js): грань стены — ровно там,
+ * где в неё упирается пешеход.
+ */
+function buildSection(B, L, plan, id) {
+  const rooms = plan.rooms.filter((r) => r.section === id && !r.open);
+  const lift = plan.lifts[0];
+  for (const r of rooms) {
     const look = roomLook(r);
     const [x0, , z0] = r.lo, [x1, y1, z1] = r.hi;
+    const yF = r.lo[1] + 0.02;                // пол помещений — над бетоном зала (без мерцания)
     B.poly([[x0, yF, z0], [x1, yF, z0], [x1, yF, z1], [x0, yF, z1]], look.floor[1], { mat: look.floor[0] });
     B.poly([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], IN.ceil, { mat: STMAT.wall });
     ceilingLights(B, r, y1);
-    const doorsHere = plan.doors.filter((d) => !d.edge && d.rooms.includes(r.id));
-    // Проёмы по стенам: [u0, u1, v0, v1] в плоскости стены.
-    const holesAt = (ax, at) => doorsHere
-      .filter((d) => d.ax === ax && Math.abs(d.pos[ax] - at) <= W / 2 + 0.01)
-      .map((d) => [d.pos[ax === 0 ? 2 : 0] - d.half, d.pos[ax === 0 ? 2 : 0] + d.half, F, F + d.height]);
-    if (r.kind === 'concourse') {
-      // Стены вдоль — грани стен конкорса; торцы — внутренние грани торцов
-      // терминала с главными входами.
-      for (const s of [-1, 1]) {
-        const at = s * TERM.cw, mid = s * (TERM.cw + W / 2);
-        roomWall(B, 0, at, z0, z1, F, y1, holesAt(0, mid), look.wall);
-      }
-      for (const s of [-1, 1]) {
-        const at = s > 0 ? z1 : z0, mid = s > 0 ? T.hi[2] - W / 2 : T.lo[2] + W / 2;
-        roomWall(B, 2, at, x0, x1, F, y1, holesAt(2, mid), look.wall);
-      }
-      continue;
+    roomWalls(B, r, plan, L, look);
+    if (r.kind === 'lift') {
+      const stop = lift && lift.stops.find((q) => q.room === r.id);
+      if (stop) liftPanel(B, stop, r);
     }
-    const s = r.lo[0] + r.hi[0] > 0 ? 1 : -1;
-    const xi = s > 0 ? x0 : x1, xo = s > 0 ? x1 : x0;
-    // У конкорса.
-    roomWall(B, 0, xi, z0, z1, F, y1, holesAt(0, s * (TERM.cw + W / 2)), look.wall);
-    // Наружная стена: дверь на перрон и окна.
-    const gateDoor = doorsHere.find((d) => d.gate);
-    const outHoles = holesAt(0, s * (TERM.hw - W / 2)).concat(windowsOf(r, gateDoor ? gateDoor.pos[2] : null));
-    roomWall(B, 0, xo, z0, z1, F, y1, outHoles, look.wall);
-    // Торцы.
-    roomWall(B, 2, z0, x0, x1, F, y1, [], look.wall);
-    roomWall(B, 2, z1, x0, x1, F, y1, [], look.wall);
   }
-  // Откосы и рамы дверей внутри (стены конкорса): толщина — W.
+  // Проёмы дверей секции: откосы, рамы, пороги, таблички.
+  const ids = new Set(rooms.map((r) => r.id));
   for (const d of plan.doors) {
-    if (d.edge || d.gate || d.main) continue;
-    const s = Math.sign(d.pos[0]);
-    const f0 = s * TERM.cw, f1 = s * (TERM.cw + W);
-    const h = [d.pos[2] - d.half, d.pos[2] + d.half, F, F + d.height];
-    reveals(B, 0, Math.min(f0, f1), Math.max(f0, f1), h, IN.frame, STMAT.tread, false);
-    doorTrim(B, 0, Math.min(f0, f1), Math.max(f0, f1), d.pos[2], d.half, F, d.height);
-    sill(B, 0, Math.min(f0, f1), Math.max(f0, f1), d.pos[2], d.half, yF);
-    doorSign(B, d, plan.roomById[d.rooms[0]], F);
+    if (d.edge || d.gate || !(ids.has(d.rooms[0]) || ids.has(d.rooms[1]))) continue;
+    const u = d.ax === 0 ? 2 : 0;
+    const f0 = d.pos[d.ax] - W / 2, f1 = d.pos[d.ax] + W / 2, y0 = d.pos[1];
+    reveals(B, d.ax, f0, f1, [d.pos[u] - d.half, d.pos[u] + d.half, y0, y0 + d.height], IN.frame, STMAT.tread, false);
+    doorTrim(B, d.ax, f0, f1, d.pos[u], d.half, y0, d.height);
+    sill(B, d.ax, f0, f1, d.pos[u], d.half, y0 + 0.02);
+    // Табличка — со стороны, откуда в дверь входят: из площади в
+    // помещение, из холла — в кабину.
+    const inner = plan.roomById[d.rooms[0]], outer = plan.roomById[d.rooms[1]];
+    doorSign(B, d, d.lift ? outer : inner, outer);
   }
-  // Мебель.
-  for (const b of plan.props) buildProp(B, b, plan.roomById[b.room]);
+  for (const b of plan.props) if (ids.has(b.room)) buildProp(B, b, plan.roomById[b.room]);
+}
+
+/**
+ * Внутренность секции станции (км, оси станции): 'gateN' — холл площадки
+ * с кабиной лифта, 'concourse' — галерея с помещениями и своей кабиной.
+ * Собирается один раз, при первом показе.
+ */
+export function sectionMesh(L, id) {
+  const cache = L._sections || (L._sections = new Map());
+  if (cache.has(id)) return cache.get(id);
+  const B = new Build();
+  buildSection(B, L, stationPlan(L), id);
+  const m = B.mesh();
+  cache.set(id, m);
+  return m;
+}
+
+/** Секции станции: холлы площадок и галерея (их и рисует сцена изнутри). */
+export const sectionIds = (L) => [...L.pads.map((p) => 'gate' + p.n), 'concourse'];
+
+/**
+ * Створка двери кабины (км): коробка шириной в половину проёма, по оси
+ * вдоль стены, от пола. ax — ось стены двери (0 — стена x = const). Сцена
+ * рисует две створки на дверь и раздвигает их по открытию (door.open).
+ */
+export function liftLeaf(ax) {
+  const key = '_leaf' + ax;
+  if (liftLeaf[key]) return liftLeaf[key];
+  const B = new Build();
+  const hw = DOOR.lift.half / 2, t = 0.03, h = DOOR.lift.height;
+  const lo = ax === 0 ? [-t, 0, -hw] : [-hw, 0, -t], hi = ax === 0 ? [t, h, hw] : [hw, h, t];
+  B.box(lo, hi, IN.steel, { mat: STMAT.tread });
+  liftLeaf[key] = B.mesh();
+  return liftLeaf[key];
 }
 
 /**
@@ -720,7 +842,7 @@ export function hallMesh(L) {
   buildHall(B, L);
   for (const p of L.pads) buildPad(B, p);
   buildTerminal(B, L, plan);
-  buildInterior(B, L, plan);
+  buildGallery(B, L, plan);
   return B.mesh();
 }
 

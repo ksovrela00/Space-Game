@@ -23,11 +23,21 @@ GitHub release notes.
 - The docking computer flies through the tunnel and lands on the assigned
   pad, and in port it lifts off and takes the ship out past the slot (C).
 - **Walking on stations.** Leave the ship by the hatch stair or on the cargo
-  platform down to the hall floor and walk to the terminal: a gate lounge for
-  every pad (seats, windows onto the pad), the concourse, port authority,
-  hangar service, bar, medical bay and shops — 10–20 rooms per station.
-- Station plan (M) with routes and an on-screen marker to the next door; by
-  default it selects the pad of your own ship.
+  platform down to the hall floor. Every pad has its own elevator lobby a
+  short walk from the ship; an elevator takes you to the gallery on the
+  terminal roof — a plaza with windows over both rows of pads, with port
+  authority, hangar service, bar, medical bay and shops around it (10–20
+  rooms per station). From the farthest pad to any room takes under half a
+  minute.
+- **Station elevator**: walk into the car, pick the stop at the panel with the
+  mouse wheel, ↑/↓ or a digit (the pad number), press E. The panel lists all
+  stops and marks your ship's pad; the doors close for the ride.
+- Only the part of the station you can see is loaded and drawn: the lobby
+  you are in, the gallery, or — from the hall — the lobbies and the gallery
+  through their windows. From space no interiors are drawn at all.
+- Station plan (M) with routes through the elevator and an on-screen marker
+  to the next door or elevator; by default it selects the pad of your own
+  ship.
 - **Port storage and ship retrieval**, Star Citizen style: a bought ship goes
   to port storage; the hangar service console (E) calls a stored ship to a
   pad and lays a route to it, while from the pilot seat "Call and board" does
@@ -56,6 +66,14 @@ GitHub release notes.
   approach rolls the ship to the station's top, not to the nearest of two.
 - Teleporting, towing and tests no longer leave a ship "inside" a station
   hall it has left; a ship far outside the station is let go at once.
+- Docking again on your own pad was refused ("pad busy", HTTP 409) when a
+  rover rode in your hold, and on login the ship could be moved off its pad:
+  the rover counted as another ship holding the pad.
+- Ships that were in port before station halls existed now show up in the
+  hangar service as stored and can be called to a pad; "Board" from the seat
+  calls them first instead of switching to a ship with no place in the hall.
+- A pilot saved somewhere the station no longer has (inside a wall or the
+  old terminal) is placed by the elevator in their ship's pad lobby.
 
 ## [0.7.2] — 2026-10-08
 

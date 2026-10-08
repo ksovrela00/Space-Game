@@ -58,14 +58,36 @@ final class Stations
      */
     public static function busyPads(int $systemId, int $localId, int $exceptShip): array
     {
+        // Вездеход в трюме (stowed) площадку не держит: место порта у него —
+        // носителя (carryAlong), с тем же номером площадки, и раньше он
+        // «занимал» её у собственного корабля. Повторная стыковка на свою
+        // площадку получала отказ «площадка занята» (409), а при входе в игру
+        // корабль переезжал с неё (settle), будто её занял другой.
         $rows = Db::all(
             'SELECT s.`pad` FROM `ship` s JOIN `player` p ON p.`id` = s.`owner_id`
              WHERE s.`system_id`=? AND s.`berth_station`=? AND s.`pad` IS NOT NULL
-               AND s.`id`<>? AND s.`stored`=0
+               AND s.`id`<>? AND s.`stored`=0 AND s.`stowed`=0
                AND ((s.`docked_body`=? AND p.`online`=1) OR (s.`docked_body` IS NULL AND s.`pad_at` > ?))',
             [$systemId, $localId, $exceptShip, $localId, Db::at(-self::RESERVE_S)]
         );
         return array_map(static function ($r) { return (int) $r['pad']; }, $rows);
+    }
+
+    /**
+     * Стоит ли корабль в хранилище порта: отмечен так (stored) — или он в
+     * порту, но в зал станции не вставал вовсе (berth_station пуст), как
+     * корабли, вставшие в порт до схемы 13. Зала тогда не было, и у пульта
+     * ангарной службы для них не было ни кнопки «вызвать», ни «путь к нему»,
+     * а «пересесть» передавало командование кораблю без места в зале.
+     * Любая стыковка по схеме 13 отмечает станцию — и севший на пол зала
+     * мимо площадок в хранилище не попадает.
+     */
+    public static function inStorage(array $ship): bool
+    {
+        if ($ship['docked_body'] === null || ($ship['carrier_id'] ?? null) !== null) {
+            return false;
+        }
+        return (int) ($ship['stored'] ?? 0) === 1 || (($ship['pad'] ?? null) === null && ($ship['berth_station'] ?? null) === null);
     }
 
     /**

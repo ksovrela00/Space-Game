@@ -11154,35 +11154,164 @@ console.log('\n== вездеход: навигация и приборы ==');
     ok(Math.abs(g0 - (L.floor + SP.PAD_H)) < 1e-9 && Math.abs(g1 - L.floor) < 1e-9 && SP.PAD_H < Wk.WALK.step,
       `пол для шага: площадка ${(g0 - L.floor).toFixed(2)} м над перроном (ступень — ${Wk.WALK.step} м), в терминале — пол зала`);
   }
-  // Робот: с края площадки по пути — в каждое помещение терминала. По
-  // станции каждого типа, самой большой из них.
+  // Робот: с края площадки по пути — в каждое помещение станции, на
+  // лифте, как человек: к пульту, выбрал остановку, створки закрылись,
+  // приехал, вышел. Створки настоящие — закрытые твёрдые (liftDoorSolids).
+  // Меряется то, на что жаловался автор игры: раньше от площадки до бара
+  // по конкорсу во всю длину терминала шли две минуты. Теперь — не дольше
+  // минуты до любого помещения, и пешком из них — не больше сорока секунд.
+  const Lf = await import('../js/game/lift.js');
   const big = (type) => all.filter((s) => s.type === type).sort((a, b) => b.layout.rooms.length - a.layout.rooms.length)[0];
   for (const st of [big('coriolis'), big('orbis')]) {
     const plan = SW.stationPlan(st.layout), L = st.layout;
-    const W = SW.stationWorld(plan, st, []);
     const fail = [];
-    let longest = 0;
+    let longest = 0, longestWalk = 0, rides = 0;
+    // Самая дальняя от галереи площадка: дальше всего ехать.
+    const pad = L.pads.slice().sort((p, q) => Math.abs(q.c[2] - L.gallery.lo[2]) - Math.abs(p.c[2] - L.gallery.lo[2]))[0];
     for (const r of plan.rooms) {
       if (r.open || r.kind === 'block') continue;
+      for (const d of plan.liftDoors) { d.open = 0; d.lock = false; }
       const w = Wk.makeWalker();
       w.on = true; w.phase = 'walk'; w.out = SW.stationFrame(st);
-      const pad = L.pads[0];
       w.pos = [pad.side * (SP.TERM.hw + SP.PAD.apron + 3), L.floor + SP.PAD_H, pad.c[2]];
       w.room = plan.roomAt(w.pos);
-      let t = 0, reached = false;
-      for (; t < 240; t += 1 / 30) {
+      let t = 0, walk = 0, reached = false;
+      // Обход, как у человека: путь ведёт от двери к двери по прямой, а
+      // кабина лифта стоит посреди площади галереи. Не продвинулся к цели
+      // за секунду — полторы секунды идёт вбок от прямой.
+      let mark = null, markT = 0, side = 0;
+      for (; t < 120; t += 1 / 30) {
+        SW.stepLiftDoors(plan, w.pos, 1 / 30);
+        const W = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+        if (w.ride) {
+          if (Lf.stepRide(w, plan, 1 / 30) === 'arrive') rides++;
+          continue;
+        }
         const R = Rt.routeTo(plan, w.room, w.pos, r.id);
         if (!R) break;
+        if (R.next.kind === 'lift') {
+          const at = Lf.panelNear(w, plan);
+          if (at) { at.to = R.next.stop; Lf.startRide(w, plan, at); continue; }
+        }
         const p = R.here ? R.end : R.next.point;
-        if (R.here && Math.hypot(p[0] - w.pos[0], p[2] - w.pos[2]) < 1.5) { reached = true; break; }
-        w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]);
+        const dp = Math.hypot(p[0] - w.pos[0], p[2] - w.pos[2]);
+        if (R.here && dp < 1.5) { reached = true; break; }
+        if (!mark || mark.p !== p) { mark = { p, d: dp }; markT = t; }
+        else if (t - markT > 1) {
+          if (mark.d - dp < 0.5 && side <= 0) side = 1.5;
+          mark.d = dp; markT = t;
+        }
+        side -= 1 / 30;
+        w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]) + (side > 0 ? 1.3 : 0);
         Wk.updateWalker(w, { doors: [] }, { fwd: 1, side: 0, run: true }, 1 / 30, W);
+        walk += 1 / 30;
       }
       if (!reached) fail.push(r.id + ' (' + (w.room && w.room.id) + ')');
       longest = Math.max(longest, t);
+      longestWalk = Math.max(longestWalk, walk);
     }
-    ok(fail.length === 0, `${st.name} (${st.type}): с площадки 1 бегом — в каждое из ${plan.rooms.filter((r) => !r.open && r.kind !== 'block').length} помещений, дольше всего ${longest.toFixed(0)} с`
+    for (const d of plan.liftDoors) { d.open = 0; d.lock = false; }
+    ok(fail.length === 0 && longest < 60 && longestWalk < 40 && rides > 0,
+      `${st.name} (${st.type}): с дальней площадки ${pad.n} бегом и на лифте — в каждое из ${plan.rooms.filter((r) => !r.open && r.kind !== 'block').length} помещений, `
+      + `дольше всего ${longest.toFixed(0)} с, из них пешком не больше ${longestWalk.toFixed(0)} с (поездок ${rides})`
       + (fail.length ? '; не дошёл: ' + fail.join(', ') : ''));
+  }
+  // Секции: у каждой площадки — холл с кабиной лифта и остановка на
+  // пульте; в галерее — своя кабина; от двери перрона до двери кабины —
+  // проход через холл, от двери кабины в галерее до любой двери её
+  // помещений — меньше тридцати метров; лифт едет не дольше десяти секунд.
+  {
+    const bad = [];
+    let far = 0, ride = 0;
+    for (const st of all) {
+      const plan = SW.stationPlan(st.layout), L = st.layout, Lt = plan.lifts[0];
+      if (!Lt) { bad.push(st.name + ': нет лифта'); continue; }
+      for (const p of L.pads) {
+        const g = plan.roomById['gate' + p.n], c = plan.roomById['lift' + p.n];
+        if (!g || !c || c.section !== g.id || !Lt.stops.some((q) => q.room === c.id && q.pad === p.n)) bad.push(st.name + ': площадка ' + p.n);
+      }
+      const lc = plan.doors.find((d) => d.id === 'lc');
+      if (!lc || !Lt.stops.some((q) => q.room === 'liftc')) { bad.push(st.name + ': нет кабины в галерее'); continue; }
+      for (const d of plan.doors) {
+        if (d.lift || d.edge || !d.rooms.includes('concourse')) continue;
+        far = Math.max(far, Math.hypot(d.pos[0] - lc.pos[0], d.pos[2] - lc.pos[2]));
+      }
+      for (const A of Lt.stops) for (const B of Lt.stops) {
+        const a = plan.roomById[A.room], b = plan.roomById[B.room];
+        ride = Math.max(ride, Lt.time([b.lo[0] - a.lo[0], b.lo[1] - a.lo[1], b.lo[2] - a.lo[2]]));
+      }
+    }
+    ok(bad.length === 0 && far < 30 && ride <= SW.RIDE.max,
+      `у каждой площадки холл с кабиной лифта, в галерее своя; от лифта галереи до дальней двери ${far.toFixed(1)} м (меньше 30), `
+      + `поездка не дольше ${ride.toFixed(1)} с` + (bad.length ? ': ' + bad.slice(0, 4).join(', ') : ''));
+  }
+  // Подгрузка по секциям: в сетке станции — только оболочка (зал,
+  // площадки, терминал и галерея снаружи), внутренности — сетками секций.
+  // Раньше весь терминал с мебелью входил в сетку станции и рисовался и из
+  // космоса.
+  {
+    const H = await import('../js/models/stationhall.js');
+    const tri = (m) => m.faces.reduce((n, q) => n + Math.max(0, q.v.length - 2), 0);
+    const st = big('coriolis'), L = st.layout;
+    const shell = tri(H.hallMesh(L));
+    const secs = H.sectionIds(L).map((id) => tri(H.sectionMesh(L, id)));
+    ok(secs.length === L.pads.length + 1 && secs.every((n) => n > 50) && shell < Math.min(...secs.filter((n) => n > 0)) * 20
+      && secs.reduce((a, n) => a + n, 0) > shell,
+      `${st.name}: в сетке станции — оболочка (${shell} треугольников), внутренности — ${secs.length} секций по ${Math.min(...secs)}–${Math.max(...secs)}`);
+  }
+  // Створки кабины лифта: закрытые — твёрдые, перед пилотом открываются, на
+  // время поездки заперты и закрываются; ехать — только целиком в кабине,
+  // а не из проёма (стоявшего там створки зажали бы, а поездка перенесла бы
+  // его в стену другой кабины).
+  {
+    const st = big('orbis'), plan = SW.stationPlan(st.layout);
+    const d = plan.doorById.l1, cab = plan.roomById.lift1;
+    for (const q of plan.liftDoors) { q.open = 0; q.lock = false; }
+    const inDoor = d.pos.slice();
+    const W0 = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+    const shut = Wk.blocked(W0, inDoor);
+    const near = d.pos.slice(); near[2] += 1.5;                   // в холле у двери
+    for (let i = 0; i < 30; i++) SW.stepLiftDoors(plan, near, 1 / 30);
+    const W1 = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+    const opened = d.open === 1 && !Wk.blocked(W1, inDoor);
+    const w = Wk.makeWalker();
+    w.on = true; w.phase = 'walk'; w.out = SW.stationFrame(st);
+    w.pos = [d.pos[0], cab.lo[1], cab.hi[2] - 0.1]; w.room = cab;     // в проёме, ещё не в кабине
+    const fromDoor = Lf.panelNear(w, plan);
+    w.pos = [d.pos[0] + 0.6, cab.lo[1], (cab.lo[2] + cab.hi[2]) / 2 + 0.6];
+    const at = Lf.panelNear(w, plan);
+    let closedOnRide = false;
+    if (at) {
+      at.to = 0;
+      Lf.startRide(w, plan, at);
+      for (let i = 0; i < 60 && w.ride && w.ride.phase === 'close'; i++) { SW.stepLiftDoors(plan, w.pos, 1 / 30); Lf.stepRide(w, plan, 1 / 30); }
+      closedOnRide = d.lock && d.open === 0 && w.ride && w.ride.phase === 'move';
+      for (let i = 0; i < 600 && w.ride; i++) { SW.stepLiftDoors(plan, w.pos, 1 / 30); Lf.stepRide(w, plan, 1 / 30); }
+    }
+    ok(shut && opened && !fromDoor && at && closedOnRide && w.room && w.room.id === 'liftc' && !d.lock,
+      `створки кабины: закрытые — твёрдые (${shut}), у двери открылись (${opened}); из проёма не едут (${!fromDoor}), `
+      + `из кабины — да, створки заперты и закрыты на ходу (${closedOnRide}), приехал в галерею: ${w.room && w.room.id}`);
+    for (const q of plan.liftDoors) { q.open = 0; q.lock = false; }
+  }
+  // Место из прежней планировки (в старом конкорсе — теперь в толще
+  // терминала) — у двери кабины в холле своей площадки, на полу, свободно.
+  {
+    const st = big('coriolis'), plan = SW.stationPlan(st.layout), L = st.layout;
+    const oldConcourse = [0, L.floor, (L.terminal.lo[2] + L.terminal.hi[2]) / 2 + 40];
+    const W = SW.stationWorld(plan, st, []);
+    const at = SW.standByLift(plan, 3), atG = SW.standByLift(plan, null);
+    const r = plan.roomAt(at.pos), rg = plan.roomAt(atG.pos);
+    ok(!plan.roomAt(oldConcourse) && r && r.id === 'gate3' && !Wk.blocked(W, at.pos) && rg && rg.id === 'concourse' && !Wk.blocked(W, atG.pos),
+      `место в бывшем конкорсе — вне помещений; встаёт у лифта в холле площадки 3 (${r && r.id}) или в галерее (${rg && rg.id})`);
+  }
+  // Галерея на кровле для полёта в зале — твёрдая, и над ней пол — её кровля.
+  {
+    const Bt = await import('../js/game/berth.js');
+    const st = big('coriolis'), G = st.layout.gallery;
+    const c = [(G.lo[0] + G.hi[0]) / 2, (G.lo[1] + G.hi[1]) / 2, (G.lo[2] + G.hi[2]) / 2];
+    ok(Bt.solidAt(st, c) === 'gallery' && Math.abs(Bt.floorAt(st.layout, c[0], c[2]) - G.hi[1]) < 1e-9
+      && Bt.floorAt(st.layout, 0, st.layout.terminal.lo[2] + 5) === st.layout.terminal.hi[1],
+      `галерея в полёте твёрдая, пол над ней — её кровля (${G.hi[1]} м), рядом — кровля терминала`);
   }
   // Мебель — внутри своего помещения и не в проходе к двери.
   const out = [];

@@ -17,6 +17,11 @@
 // Двери остановок на время поездки заперты (door.lock): у отправления —
 // чтобы закрылись и не открылись, пока пилот стоит рядом, у прибытия — до
 // самого прибытия.
+//
+// НА СТАНЦИИ — тот же лифт (js/game/stationwalk.js): кабины у холлов
+// площадок и в галерее, план — план станции, пешеход — на её полу (w.out
+// с осями станции). Едет он и через зал, поэтому время в пути у него своё,
+// по расстоянию (lift.time), а не по высоте шахты.
 
 /** Дотянуться до пульта, м. */
 export const LIFT = { near: 1.5 };
@@ -48,9 +53,14 @@ export const nextStop = (L, from) => (from + 1) % L.stops.length;
  * @returns { lift, stop, to } или null
  */
 export function panelNear(w, I) {
-  if (!w.on || w.phase !== 'walk' || w.out || w.ride || !w.room) return null;
+  if (!w.on || w.phase !== 'walk' || (w.out && !w.out.stn) || w.ride || !w.room) return null;
   const at = liftOf(I, w.room.id);
   if (!at) return null;
+  // Ехать — только целиком в кабине: стоявшего в проёме закрывающиеся
+  // створки зажали бы, а поездка перенесла бы его в стену другой кабины.
+  const cab = I.roomById[at.lift.stops[at.stop].room];
+  const m = 0.25;
+  if (cab && (w.pos[0] < cab.lo[0] + m || w.pos[0] > cab.hi[0] - m || w.pos[2] < cab.lo[2] + m || w.pos[2] > cab.hi[2] - m)) return null;
   const p = at.lift.stops[at.stop].panel;
   const d = Math.hypot(w.pos[0] - p[0], w.pos[2] - p[2]);
   if (d > LIFT.near || Math.abs(w.pos[1] + 1.2 - p[1]) > 1.0) return null;
@@ -68,7 +78,8 @@ export function startRide(w, I, at) {
     const d = doorOf(I, s.door);
     if (d) d.lock = true;
   }
-  w.ride = { lift: L, from: at.stop, to: at.to, off, t: 0, T: rideTime(L, off[1]), phase: 'close' };
+  const T = L.time ? L.time(off) : rideTime(L, off[1]);
+  w.ride = { lift: L, from: at.stop, to: at.to, off, t: 0, T, phase: 'close' };
   return w.ride;
 }
 

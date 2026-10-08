@@ -172,7 +172,7 @@ final class Shipyard
     // нельзя (водят его по грунту, Players::command), и в списке он лишний.
     private static function here(int $playerId, array $port, int $activeId): array
     {
-        $rows = Db::all('SELECT s.`id`, s.`name`, s.`pad`, s.`stored`, t.`code`, t.`name` AS `type_name`, t.`title`
+        $rows = Db::all('SELECT s.`id`, s.`name`, s.`pad`, s.`stored`, s.`berth_station`, s.`docked_body`, s.`carrier_id`, t.`code`, t.`name` AS `type_name`, t.`title`
             FROM `ship` s JOIN `ship_type` t ON t.`id` = s.`type_id`
             WHERE s.`owner_id`=? AND s.`system_id`=? AND s.`docked_body`=? AND s.`carrier_id` IS NULL ORDER BY s.`id`',
             [$playerId, $port['system_id'], $port['local_id']]);
@@ -181,7 +181,7 @@ final class Shipyard
             $out[] = ['id' => (int) $r['id'], 'name' => $r['name'], 'type' => $r['code'],
                 'typeName' => $r['type_name'], 'title' => $r['title'], 'active' => (int) $r['id'] === $activeId,
                 // На площадке или в хранилище порта.
-                'pad' => $r['pad'] === null ? null : (int) $r['pad'], 'stored' => (bool) $r['stored']];
+                'pad' => $r['pad'] === null ? null : (int) $r['pad'], 'stored' => Stations::inStorage($r)];
         }
         return $out;
     }

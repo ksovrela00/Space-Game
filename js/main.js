@@ -37,7 +37,8 @@ import {
   takeoffFromHall, stationWorld as stationWorldM, stationM,
 } from './game/berth.js';
 import { padByNo, padSizeFor, padAt, walkFloorAt, STATION_G } from './game/stationplan.js';
-import { stationPlan, HALL_AIR } from './game/stationwalk.js';
+import { stationPlan, HALL_AIR, stepLiftDoors, liftDoorSolids, standByLift, stationWorld } from './game/stationwalk.js';
+import { sectionMesh, sectionIds, liftLeaf } from './models/stationhall.js';
 import { isLandable, localDir, groundRadius, worldPoint, waterAt } from './game/surface.js';
 import { cityCrash, cityPadUnder, applyCities } from './game/city.js';
 import { captureBody, carryShip, gravityField, gravityAt } from './game/gravity.js';
@@ -82,7 +83,7 @@ import { nextZoom, zoomFov, lookScale } from './game/zoom.js';
 import { makeStick, moveStick, centerStick, stickControls, STICK } from './game/mousefly.js';
 import {
   makeWalker, standUp, sitDown, seatNow, updateWalker, nearSeat, walkerEye, walkerLook, outsideWorld,
-  standAt, deckWorld, enterAt,
+  standAt, deckWorld, enterAt, blocked,
   crateSolids, stepDoors, WALK,
 } from './game/walker.js';
 import { drawWalkHud } from './ui/walkhud.js';
@@ -1342,8 +1343,8 @@ function seated() {
 function seatPilot() {
   // Шлюзы — сразу закрыты и под давлением: крушение, страховка, рестарт.
   if (ownAir()) resetAirlocks(ownAir());
-  // Ехал в лифте — поездка брошена, двери отперты.
-  cancelRide(game.walk, game.interior);
+  // Ехал в лифте — поездка брошена, двери отперты (на станции — её план).
+  cancelRide(game.walk, walkPlan() || game.interior);
   game.frame = ownVessel;
   game.walk.vessel = null;
   game.walk.air = null;
@@ -1396,7 +1397,8 @@ function walkKeys() {
   }
   // Люк под рукой — E открывает и закрывает (у пульта в шлюзе, в проёме,
   // на трапе и под люком снаружи).
-  const lift = !w.out && game.interior ? panelNear(w, game.interior) : null;
+  const LP = walkPlan();
+  const lift = LP ? panelNear(w, LP) : null;
   if (lift) {
     // У пульта лифта: колесо и ↑↓ — палуба, E — ехать (js/game/lift.js).
     const n = lift.lift.stops.length;
@@ -1417,14 +1419,24 @@ function walkKeys() {
       if (game.liftPick === lift.stop) game.liftPick = (game.liftPick + d + n) % n;
       step -= d;
     }
+    // На станции — ещё и цифрой: 1–9 и 0 — площадка с этим номером (0 —
+    // десятая). Остановок у лифта станции до одиннадцати, и листать их
+    // колесом дольше, чем назвать.
+    if (lift.lift.station) {
+      for (let k = 0; k <= 9; k++) {
+        if (!input.pressed('Digit' + k, 'Numpad' + k)) continue;
+        const i = lift.lift.stops.findIndex((q) => q.num === (k === 0 ? 10 : k));
+        if (i >= 0 && i !== lift.stop) game.liftPick = i;
+      }
+    }
   } else {
     game.liftPick = null;
   }
   if (lift && input.pressed('KeyE')) {
     lift.to = game.liftPick;
-    const r = startRide(w, game.interior, lift);
+    const r = startRide(w, LP, lift);
     audioCue(game.audio, 'lift', { dur: r.T + 0.45, up: r.off[1] > 0 });
-    say(st, L('ЛИФТ: ') + L(lift.lift.stops[lift.to].deck), '#9fd9ff', 2);
+    say(st, L('ЛИФТ: ') + stopName(lift.lift.stops[lift.to]), '#9fd9ff', 2);
   } else if (game.walkKiosk && input.pressed('KeyE')) {
     openKiosk();
   } else if (game.walkBay && input.pressed('KeyE')) {
@@ -1511,12 +1523,16 @@ function walkFrame(dt) {
     const airV = !w.out ? (V.own ? ownAir() : V.air) : null;
     w.float = !!airV && !vesselBody(V) && outsideHull(airV, w.pos);
   }
+  // Створки кабин лифта станции: открываются перед пилотом, закрываются
+  // за ним и на время поездки (js/game/stationwalk.js).
+  const SP = w.out && w.out.stn ? stationPlan(w.out.body.layout) : null;
+  if (SP) for (const d of stepLiftDoors(SP, w.pos, dt)) audioCue(game.audio, 'door', { dur: WALK.doorTime });
   const ev = updateWalker(w, I, ctl, dt, w.out ? outsideFrame() : null);
   for (let i = 0; i < ev.opened.length; i++) audioCue(game.audio, 'door', { dur: WALK.doorTime });
   // Лифт в пути: двери закрылись — кабина пошла; приехали — пилот уже в
-  // кабине той палубы (js/game/lift.js).
+  // кабине той палубы (js/game/lift.js). На станции — по её плану.
   if (w.ride) {
-    const rv = stepRide(w, I, dt);
+    const rv = stepRide(w, SP || I, dt);
     if (rv === 'arrive') { ev.room = true; game.liftPick = null; game.liftPickRoute = null; }
   }
   updateRoute();
@@ -2027,6 +2043,8 @@ const OUT_NEAR = 0.15;          // км
 
 const _outT = { R: new Float64Array(9), t: [0, 0, 0] };
 const _shipBoxes = [], _outSolids = [], _airBuf = [], _nearV = [];
+// Мир шага на станции: коробки кораблей и закрытые створки кабин лифта.
+const _stnExtra = [];
 // Твёрдое тоннелей люков — по планировке (у каждого типа своя).
 const _tunnels = new Map();
 function tunnelsOf(I) {
@@ -2138,8 +2156,15 @@ function outsideFrame(G = game.walk.out, pos = game.walk.pos) {
     // На полу станции — её стены и мебель (оси шага — её оси), у трапа
     // корабля — только он сам и пол: стены терминала далеко.
     const plan = stationPlan(G.body.layout);
-    return G.stn ? outsideWorld(_outSolids, groundOut, waterOut, STATION_G, plan.grid, plan.roomAt)
-      : outsideWorld(_outSolids, groundOut, waterOut, STATION_G);
+    if (G.stn) {
+      // Закрытые створки кабин лифта — твёрдое в проёме. Своим списком:
+      // _outSolids переиспользуется из кадра в кадр под коробки кораблей.
+      _stnExtra.length = 0;
+      for (let i = 0; i < n; i++) _stnExtra.push(_outSolids[i]);
+      liftDoorSolids(plan, _stnExtra);
+      return outsideWorld(_stnExtra, groundOut, waterOut, STATION_G, plan.grid, plan.roomAt);
+    }
+    return outsideWorld(_outSolids, groundOut, waterOut, STATION_G);
   }
   return outsideWorld(_outSolids, groundOut, waterOut, gravityAt(G.body, _feetW) * 1000);
 }
@@ -2439,6 +2464,40 @@ function planFrame() {
   return !w.out ? game.frame : w.out.stn ? w.out.body : null;
 }
 
+/**
+ * Какие секции станции st видно изнутри (js/models/stationhall.js,
+ * sectionMesh) и её план — или null: камера не в зале.
+ *
+ * Как на корабле (видимые комнаты, js/models/interior.js): из кабины с
+ * закрытыми створками — только она сама и её секция; из холла — он
+ * один (галерея — на кровле, сквозь стены её не видно); из галереи — она
+ * одна (холлы — в толще терминала); из зала — с перрона, площадки, из
+ * кресла корабля или в полёте — холлы (сквозь окна и двери на перрон) и
+ * галерея (сквозь её окна). Снаружи станции — ничего: зал видно только
+ * в щель, и внутренности там лишние.
+ */
+const _camSt = [0, 0, 0];
+function stationSections(st) {
+  const L0 = st.layout;
+  if (!L0 || !L0.hall) return null;
+  const c = camera.pos, b = st.basis;
+  const dx = (c.x - st.pos.x) * 1000, dy = (c.y - st.pos.y) * 1000, dz = (c.z - st.pos.z) * 1000;
+  _camSt[0] = dx * b.right.x + dy * b.right.y + dz * b.right.z;
+  _camSt[1] = dx * b.up.x + dy * b.up.y + dz * b.up.z;
+  _camSt[2] = dx * b.fwd.x + dy * b.fwd.y + dz * b.fwd.z;
+  const h = L0.hall;
+  if (_camSt[0] < h.lo[0] || _camSt[0] > h.hi[0] || _camSt[1] < h.lo[1] || _camSt[1] > h.hi[1]
+    || _camSt[2] < h.lo[2] || _camSt[2] > h.hi[2]) return null;
+  const plan = stationPlan(L0);
+  const w = game.walk;
+  const r = w.on && w.out && w.out.stn && w.out.body === st ? w.room : null;
+  if (r && r.section) return { plan, ids: [r.section] };
+  return { plan, ids: sectionIds(L0) };
+}
+game.stationSections = stationSections;
+game.stationSectionMesh = (st, id) => sectionMesh(st.layout, id);
+game.liftLeaf = liftLeaf;
+
 /** Площадка своего корабля на этой станции — помещение плана, или null. */
 function homePad(plan) {
   const st = ship.dockedAt;
@@ -2497,24 +2556,49 @@ function routeHint() {
   const R = game.walkRoute, I = walkPlan();
   if (!R || !I || !game.walkGoal) return null;
   const goal = roomName(I.roomById[game.walkGoal]);
-  const next = R.next.kind === 'lift' ? L('ЛИФТ НА ') + L(R.next.lift.stops[R.next.stop].deck)
+  const next = R.next.kind === 'lift'
+    ? (R.next.lift.station ? L('ЛИФТ: ') + stopName(R.next.lift.stops[R.next.stop]) : L('ЛИФТ НА ') + L(R.next.lift.stops[R.next.stop].deck))
     : R.next.kind === 'goal' ? goal : roomName(I.roomById[R.next.to]);
   return [L('ПУТЬ: ') + goal + ' · ' + Math.round(R.dist) + L(' м') + (R.here ? '' : L(' · ДАЛЬШЕ: ') + next), '#78e08f'];
 }
 
+/**
+ * Остановка лифта для приборов: на корабле — палуба и что на ней, на
+ * станции — «ПЛОЩАДКА 3» или «КОНКОРС».
+ */
+function stopName(to) {
+  if (to.num) return L(to.what) + ' ' + to.num;
+  return to.deck && to.deck !== to.what && !to.pad && to.what !== 'КОНКОРС' ? L(to.deck) + ' · ' + L(to.what) : L(to.what);
+}
+
 /** Подсказка у пульта лифта: куда поедем и как выбрать. */
 function liftHint() {
-  const w = game.walk, I = game.interior;
-  if (!I || w.out) return null;
-  if (w.ride) {
-    const L0 = w.ride.lift, to = L0.stops[w.ride.to];
-    return [L('ЛИФТ ИДЁТ: ') + L(to.deck) + ' · ' + L(to.what), '#9fd9ff'];
-  }
+  const w = game.walk, I = walkPlan();
+  if (!I) return null;
+  if (w.ride) return [L('ЛИФТ ИДЁТ: ') + stopName(w.ride.lift.stops[w.ride.to]), '#9fd9ff'];
   const at = panelNear(w, I);
   if (!at) return null;
   const pick = game.liftPick === null || game.liftPick === undefined ? at.to : game.liftPick;
   const to = at.lift.stops[pick];
-  return [(Q.touchUi ? '' : L('E — ЛИФТ: ')) + L(to.deck) + ' · ' + L(to.what) + (Q.touchUi ? '' : L(' · КОЛЕСО ИЛИ ↑↓ — ПАЛУБА')), '#78e08f'];
+  const how = at.lift.station ? L(' · КОЛЕСО, ↑↓ ИЛИ ЦИФРА — ПЛОЩАДКА') : L(' · КОЛЕСО ИЛИ ↑↓ — ПАЛУБА');
+  return [(Q.touchUi ? '' : L('E — ЛИФТ: ')) + stopName(to) + (Q.touchUi ? '' : how), '#78e08f'];
+}
+
+/**
+ * Список остановок у пульта лифта станции: все, выбранная — отмечена,
+ * та, где кабина сейчас, — приглушена. На корабле остановок две-три, и
+ * хватает одной строки подсказки; на станции их до одиннадцати.
+ */
+function liftList() {
+  const w = game.walk, I = walkPlan();
+  if (!I || w.ride || !w.out || !w.out.stn) return null;
+  const at = panelNear(w, I);
+  if (!at || !at.lift.station) return null;
+  const pick = game.liftPick === null || game.liftPick === undefined ? at.to : game.liftPick;
+  const mine = ship.dockedAt === w.out.body && ship.berth ? ship.berth.pad : null;
+  return at.lift.stops.map((q, i) => [
+    (i === pick ? '▸ ' : '  ') + stopName(q) + (q.pad && q.pad === mine ? L(' · ВАШ КОРАБЛЬ') : '') + (i === at.stop ? L(' · ЗДЕСЬ') : ''),
+    i === at.stop ? '#5a7f8f' : i === pick ? '#78e08f' : '#9fd9ff']);
 }
 
 /** Подсказки внизу кадра пилоту на ногах. */
@@ -2542,6 +2626,7 @@ function walkHints() {
     bay: bayHint(),
     kiosk: game.walkKiosk ? ['E' + L(' — АНГАРНАЯ СЛУЖБА: ВАШИ КОРАБЛИ'), '#78e08f'] : null,
     lift: liftHint(),
+    liftList: liftList(),
     route: routeHint(),
     plan: !w.out && !Q.touchUi && game.interior && game.interior.rooms.length > 20 && !game.walkRoute
       ? L('M — ПЛАН ПАЛУБЫ И ПУТЬ') : null,
@@ -3166,6 +3251,18 @@ function restoreMe() {
     const fl = worldDirToGround(w.out, F);
     w.yaw = Math.atan2(fl[0], fl[2]);
     w.pitch = clamp(me.out.pitch || 0, -1.2, 1.2);
+    // На станции записанное место могло остаться в планировке, которой
+    // больше нет: в старом конкорсе терминала — теперь в его толще, — или в
+    // стене. Тогда — у двери лифта в холле площадки своего корабля.
+    if (w.out.stn) {
+      const plan = stationPlan(body.layout);
+      if (!plan.roomAt(w.pos) || blocked(stationWorld(plan, body, []), w.pos)) {
+        const at = standByLift(plan, ship.dockedAt === body && ship.berth ? ship.berth.pad : null);
+        w.pos = at.pos;
+        w.yaw = at.yaw;
+      }
+      w.room = plan.roomAt(w.pos);
+    }
     game.frame = ownVessel;
   } else if (me.seated === false && me.walk && Array.isArray(me.walk.pos)) {
     const own = me.own || me.aboard === ship.id;

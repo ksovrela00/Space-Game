@@ -4025,13 +4025,30 @@ await step('в порту: люк и трап на пол зала, путь в 
     if (!plan.some((s) => s.indexOf('ЩЕЛЬ ПОРТА') >= 0)) throw new Error('план — не станции');
     key('Escape'); frames(2);
     if (game.deckMap.open) throw new Error('план станции не закрылся');
-    // По пути — в конкорс: метка следующей точки, туда и идём бегом.
+    // По пути — в конкорс галереи: метка следующей точки, туда и идём
+    // бегом, а в кабине лифта — как человек: у пульта список остановок,
+    // остановка пути уже выбрана, E — и едем (js/game/lift.js).
+    const Lf = await import('../js/game/lift.js');
+    const SWm = await import('../js/game/stationwalk.js');
+    const splan = SWm.stationPlan(st.layout);
     game.setWalkGoal('concourse');
     if (!game.walkRoute) throw new Error('путь в конкорс не проложен');
     holdDown('KeyW'); holdDown('ShiftLeft');
-    let t = 0;
-    for (; t < 60 * 150 && !(w.room && w.room.id === 'concourse'); t++) {
+    let t = 0, rode = false, listed = false;
+    for (; t < 60 * 60 && !(w.room && w.room.id === 'concourse'); t++) {
       const R = game.walkRoute;
+      if (R && R.next.kind === 'lift' && !w.ride && Lf.panelNear(w, splan)) {
+        release('KeyW'); release('ShiftLeft'); frames(2);
+        texts = []; frames(1);
+        const seenL = texts.map((q) => q.s); texts = null;
+        listed = seenL.some((q) => q.indexOf('КОНКОРС') >= 0) && seenL.filter((q) => q.indexOf('ПЛОЩАДКА') >= 0).length >= st.layout.pads.length - 1;
+        key('KeyE'); frames(2);
+        if (!w.ride) throw new Error('у пульта лифта E не повёз');
+        for (let i = 0; i < 60 * 20 && w.ride; i++) frames(1);
+        rode = true;
+        holdDown('KeyW'); holdDown('ShiftLeft');
+        continue;
+      }
       if (R) {
         const p = R.here ? R.end : R.next.point;
         w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]);
@@ -4043,10 +4060,14 @@ await step('в порту: люк и трап на пол зала, путь в 
       frames(1);
     }
     release('KeyW'); release('ShiftLeft'); frames(5);
-    if (!w.room || w.room.id !== 'concourse') {
+    if (!w.room || w.room.id !== 'concourse' || !rode) {
       throw new Error('до конкорса не дошли за ' + (t / 60).toFixed(0) + ' с: ' + (w.room && w.room.id)
-        + ' в ' + w.pos.map((v) => v.toFixed(1)).join(','));
+        + ' в ' + w.pos.map((v) => v.toFixed(1)).join(',') + (rode ? '' : ', на лифте не ехали'));
     }
+    if (!listed) throw new Error('у пульта лифта нет списка остановок: конкорс и площадки');
+    // Вся дорога от трапа до галереи — меньше минуты: раньше по конкорсу
+    // во всю длину терминала шли две.
+    if (t / 60 > 50) throw new Error('до конкорса — ' + (t / 60).toFixed(0) + ' с, дольше минуты с лишним');
     // Обратно к трапу (переносом — путь туда уже проверен) и вверх на борт.
     game.walkGoal = null;
     w.pos = foot.pos.slice(); w.yaw = foot.yaw + Math.PI; w.vel = [0, 0, 0];
@@ -4143,8 +4164,8 @@ await step('в порту: пульт ангарной службы — кора
   const plan = SWm.stationPlan(st.layout);
   const k = plan.props.find((b) => b.kind === 'kiosk');
   if (!k) throw new Error('на станции нет пульта ангарной службы');
-  const room = plan.roomById[k.room];
-  const sx = room.lo[0] + room.hi[0] > 0 ? 1 : -1;
+  // Встать перед экраном пульта (k.face — куда он смотрит), лицом к нему.
+  const kf = k.face || [1, 0, 0];
   const S = fake.state;
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const first = clone(S.ship);
@@ -4163,8 +4184,8 @@ await step('в порту: пульт ангарной службы — кора
     game.cockpit = buildCockpit();
     await game.loadInterior();
     // Шаг перед пультом — со стороны помещения, лицом к нему.
-    const p = [(k.lo[0] + k.hi[0]) / 2 + sx * 1.0, st.layout.floor, (k.lo[2] + k.hi[2]) / 2];
-    if (!(await game.walkStation(st, p, sx > 0 ? -Math.PI / 2 : Math.PI / 2))) throw new Error('не встали на пол станции');
+    const p = [(k.lo[0] + k.hi[0]) / 2 + kf[0] * 1.0, k.lo[1], (k.lo[2] + k.hi[2]) / 2 + kf[2] * 1.0];
+    if (!(await game.walkStation(st, p, Math.atan2(-kf[0], -kf[2])))) throw new Error('не встали на пол станции');
     frames(4);
     texts = []; frames(2);
     const seen = texts.map((t) => t.s); texts = null;

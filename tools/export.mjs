@@ -95,7 +95,8 @@ for (const sys of g.systems) {
       pads: L.pads.map((p) => ({ n: p.n, size: p.size, side: p.side,
         x: num(p.c[0], 2), y: num(p.c[1], 2), z: num(p.c[2], 2),
         w: num(p.hi[2] - p.lo[2], 2), d: num(p.hi[0] - p.lo[0], 2) })),
-      rooms: L.rooms.filter((r) => !r.open).map((r) => ({
+      // Кабины лифта — не помещения станции: в них не торгуют и не живут.
+      rooms: L.rooms.filter((r) => !r.open && r.kind !== 'lift').map((r) => ({
         code: r.id, kind: r.kind, name: r.name, shop: r.shop || null, pad: r.pad || null,
         areaM2: num((r.hi[0] - r.lo[0]) * (r.hi[2] - r.lo[2]), 1),
         x: num((r.lo[0] + r.hi[0]) / 2, 2), y: num(r.lo[1], 2), z: num((r.lo[2] + r.hi[2]) / 2, 2),

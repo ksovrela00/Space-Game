@@ -171,17 +171,23 @@ export function stationField(st) {
 
 // --- что твёрдо -----------------------------------------------------------------------
 
-/** Пол под точкой (м, оси станции): кровля терминала над ним, иначе пол зала. */
+// Галерея стоит на кровле терминала (js/game/stationplan.js): для полёта
+// она — ещё одна твёрдая коробка, и над ней пол — её кровля.
+const inBox = (B, x, z) => !!B && x > B.lo[0] && x < B.hi[0] && z > B.lo[2] && z < B.hi[2];
+
+/** Пол под точкой (м, оси станции): кровля галереи или терминала над ним, иначе пол зала. */
 export function floorAt(L, x, z) {
   const T = L.terminal;
-  if (x > T.lo[0] && x < T.hi[0] && z > T.lo[2] && z < T.hi[2]) return T.hi[1];
+  if (inBox(L.gallery, x, z)) return L.gallery.hi[1];
+  if (inBox(T, x, z)) return T.hi[1];
   return L.floor + (padAt(L, x, z) ? BERTH.pad * 1000 : 0);
 }
 
-/** Твёрдо ли в точке (м, оси станции): корпус станции или корпус терминала. */
+/** Твёрдо ли в точке (м, оси станции): корпус станции, терминала или галереи. */
 export function solidAt(st, p) {
-  const T = st.layout.terminal;
+  const T = st.layout.terminal, G = st.layout.gallery;
   if (p[0] > T.lo[0] && p[0] < T.hi[0] && p[1] > T.lo[1] - 1 && p[1] < T.hi[1] && p[2] > T.lo[2] && p[2] < T.hi[2]) return 'terminal';
+  if (G && inBox(G, p[0], p[2]) && p[1] > G.lo[1] - 1 && p[1] < G.hi[1]) return 'gallery';
   return st.shape.inside(p[0] / 1000, p[1] / 1000, p[2] / 1000) ? 'hull' : null;
 }
 
@@ -196,8 +202,8 @@ function pushOut(st, p, kind, out) {
   const face = (nx, ny, nz, d) => {
     if (d >= 0 && d < best) { best = d; out.n[0] = nx; out.n[1] = ny; out.n[2] = nz; }
   };
-  if (kind === 'terminal') {
-    const T = L.terminal;
+  if (kind === 'terminal' || kind === 'gallery') {
+    const T = kind === 'gallery' ? L.gallery : L.terminal;
     face(-1, 0, 0, p[0] - T.lo[0]); face(1, 0, 0, T.hi[0] - p[0]);
     face(0, 1, 0, T.hi[1] - p[1]);
     face(0, 0, -1, p[2] - T.lo[2]); face(0, 0, 1, T.hi[2] - p[2]);
