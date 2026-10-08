@@ -2,7 +2,7 @@
 // обработка глобальных клавиш и отрисовка кадра.
 
 import { v3, copy, normalize, dot, clamp } from './core/vec3.js';
-import { makeBasis, dirToWorld, lookAlong, toWorld, toLocal } from './core/basis.js';
+import { makeBasis, copyBasis, dirToWorld, lookAlong, toWorld, toLocal } from './core/basis.js';
 import { input } from './core/input.js';
 import { sound } from './core/sound.js';
 import { Camera } from './render/camera.js';
@@ -130,7 +130,7 @@ import {
 } from './game/peers.js';
 import {
   makeGuns, updateGuns, fireGuns, addForeignBolt, aimDir, shieldFlash, hasShieldFlash,
-  quantumFx, wreckFx,
+  quantumFx, wreckFx, carryBolts,
 } from './game/weapons.js';
 import { makeClock, clockFromServer, clockTarget, clockStep } from './game/clock.js';
 import { shipAnchor, anchorOk, anchorPose } from './game/anchor.js';
@@ -321,6 +321,8 @@ const _camUp = v3();
 const _wLook = { fwd: [0, 0, 1], right: [1, 0, 0], up: [0, 1, 0] };
 // Куда уехало несущее тело за шаг мира: замер до и после updateWorld.
 const _carried = v3();
+// Поза корабля до переноса: по ней болты едут вместе с ним (carryBolts).
+const _preCarry = { pos: v3(), basis: makeBasis() };
 
 // --- смена звёздной системы --------------------------------------------------
 
@@ -4822,15 +4824,23 @@ function step(dt) {
   // «зависнуть над точкой» нельзя — поверхность уезжает из-под корабля.
   const wasCarrier = carrier;
   game.capture = captureBody(world, ship.pos);
+  copy(_preCarry.pos, ship.pos);
+  copyBasis(_preCarry.basis, ship.basis);
+  let carried = false;
   if (inSt && st.mode === ST.FLIGHT) {
     // В зале — вместе со станцией, а не с телом: зал вращается.
     carryInStation(ship, inSt, _stFrame);
+    carried = true;
   } else if (game.capture && st.mode === ST.FLIGHT) {
     // Замеренное смещение годится, только если тело то же самое: сменился
     // захват — считаем по скорости, шаг там всё равно кадровый.
     carryShip(ship, game.capture, dtWorld,
       game.capture === wasCarrier ? _carried : null);
+    carried = true;
   }
+  // Болты — тем же переносом, что и корабль: его скорость, которую они
+  // уносят, — скорость в этой системе (js/game/weapons.js, carryBolts).
+  if (carried) carryBolts(game.guns, _preCarry.pos, _preCarry.basis, ship.pos, ship.basis);
 
   if (st.mode === ST.DOCKED) {
     // Корабль стоит на полу зала и едет вместе со станцией: поза — в её

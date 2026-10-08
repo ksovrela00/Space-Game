@@ -4457,6 +4457,66 @@ await step('приборы подхода: в левой колонке, цен�
   frames(2);
 });
 
+// Болты у вращающейся планеты летят от корабля по прямой. Корабль здесь
+// переносится вместе с грунтом, и пока болты летели в мировых осях, их
+// сносило вбок на ход грунта — очередь косила и шла мимо цели. Проверка
+// ведёт настоящий выстрел левой кнопкой через главный цикл: связку
+// «перенос корабля — перенос болтов» test.mjs сам по себе не видит.
+await step('болты у вращающейся планеты летят по прямой от корабля', () => {
+  const body = game.world.planets.reduce((a, b) => (b.spin * b.radius > a.spin * a.radius ? b : a));
+  game.nav.index = game.nav.list.indexOf(body);
+  game.teleAlt = 4;                       // 3 км: вращение переносится целиком
+  key('KeyK'); frames(3);
+  if (game.capture !== body) throw new Error('нет захвата у ' + body.name);
+  const sh = game.ship;
+  // Нос — по горизонту поперёк хода грунта: снос, если он есть, уйдёт вбок.
+  const p = body.pole;
+  const rx = sh.pos.x - body.pos.x, ry = sh.pos.y - body.pos.y, rz = sh.pos.z - body.pos.z;
+  const rl = Math.hypot(rx, ry, rz);
+  const up = { x: rx / rl, y: ry / rl, z: rz / rl };
+  const gx = p.y * up.z - p.z * up.y, gy = p.z * up.x - p.x * up.z, gz = p.x * up.y - p.y * up.x;
+  const gl = Math.hypot(gx, gy, gz);
+  const g = { x: gx / gl, y: gy / gl, z: gz / gl };
+  const f = { x: g.y * up.z - g.z * up.y, y: g.z * up.x - g.x * up.z, z: g.x * up.y - g.y * up.x };
+  Object.assign(sh.basis.fwd, f);
+  Object.assign(sh.basis.up, up);
+  Object.assign(sh.basis.right, { x: up.y * f.z - up.z * f.y, y: up.z * f.x - up.x * f.z, z: up.x * f.y - up.y * f.x });
+  sh.vel.x = sh.vel.y = sh.vel.z = 0;
+  game.guns.bolts.length = 0;
+  game.guns.cool = 0;
+  mouse('mousedown', { button: 0 });
+  frames(1);
+  mouse('mouseup', { button: 0 });
+  const b = game.guns.bolts[0];
+  if (!b) throw new Error('у планеты не выстрелили');
+  // Болт в осях корабля: где он сейчас и куда идёт.
+  const local = () => {
+    const B = sh.basis;
+    const dx = b.x - sh.pos.x, dy = b.y - sh.pos.y, dz = b.z - sh.pos.z;
+    return [B.right, B.up, B.fwd].map((a) => dx * a.x + dy * a.y + dz * a.z);
+  };
+  const l0 = local();
+  frames(30);
+  if (!game.guns.bolts.includes(b)) throw new Error('болт погас раньше времени');
+  const l1 = local();
+  const d = l1.map((v, i) => v - l0[i]);
+  const run = Math.hypot(...d);
+  // Сошёл с прямой — это составляющая пути поперёк начального направления
+  // болта. Ход корабля обнулён, ствол смотрит по носу (цели-пилота нет).
+  const side = Math.hypot(d[0], d[1]);
+  // Сколько стоила бы ошибка: ход грунта под кораблём за время полёта.
+  const pr = rx * p.x + ry * p.y + rz * p.z;
+  const axis = Math.sqrt(Math.max(0, rl * rl - pr * pr));
+  const t = run / game.guns.spec.speed;
+  const cost = body.spin * axis * t;
+  if (!(cost > 0.05)) throw new Error('сцена не ловит снос: грунт уходит лишь на ' + (cost * 1000).toFixed(0) + ' м');
+  if (side > cost * 0.05) {
+    throw new Error(`болт у ${body.name} сошёл с прямой на ${(side * 1000).toFixed(0)} м за ${t.toFixed(2)} с `
+      + `(ход грунта за то же время — ${(cost * 1000).toFixed(0)} м)`);
+  }
+  game.guns.bolts.length = 0;
+});
+
 await step('удар о грунт: отскок, урон и потеря управления', () => {
   const moon = game.world.bodies.find((b) => b.kind === 'moon');
   game.nav.index = game.nav.list.indexOf(moon);

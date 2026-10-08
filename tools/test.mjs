@@ -1,6 +1,6 @@
 // Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
 import { v3, normalize, dot, cross, len, clamp } from '../js/core/vec3.js';
-import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
+import { makeBasis, rotateBasis, toLocal, copyBasis } from '../js/core/basis.js';
 import { shipAnchor, anchorOk, anchorPose } from '../js/game/anchor.js';
 import { pilotRows, pilotsShown } from '../js/ui/pilots.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
@@ -77,7 +77,7 @@ import {
   smoothPing, linkLoss, linkGrade, linkState, PING_SMOOTH,
 } from '../js/net/quality.js';
 import {
-  WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit,
+  WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit, carryBolts, blast,
   COMBAT, INSTALLED, shieldFlash, hasShieldFlash,
 } from '../js/game/weapons.js';
 import { SHIELD_AXES, HULL_SIZE } from '../js/models/ships.js';
@@ -7329,6 +7329,119 @@ console.log("\n== пилот: кроны, трюм, задания ==");
   addForeignBolt(g14, { w: 'laser_g', x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1, by: 4 });
   ok(Math.abs(g14.bolts[0].vx) < 1e-12,
     'а без известной скорости стрелка летит одной дульной, как раньше');
+}
+
+// --- болты едут вместе с кораблём ---------------------------------------------
+//
+// ЭТО БЫЛО СЛОМАНО. У тела корабль переносится вместе с ним (carryShip), в
+// зале — вместе со станцией (carryInStation), и скорость, которую болт
+// уносит, — скорость В ЭТОЙ системе. Сам же болт летел в мировых осях:
+// у Lave IV за 0.8 с полёта его сносило вбок на двести с лишним метров —
+// очередь косила, и по кораблю в двух километрах шла мимо всегда.
+//
+// Шаг — как в игре (js/main.js, step): мир, болты, перенос корабля, и тем
+// же переносом болты. Проверяется инвариант: в осях корабля болт идёт по
+// прямой ровно со своей дульной скоростью. Рядом та же сцена без
+// carryBolts — она показывает цену ошибки.
+{
+  console.log('\n== болты едут вместе с кораблём ==');
+  const spec = WEAPONS.laser_g;
+  const life = spec.range / spec.speed;
+  const frames = Math.floor(life / STEP) - 1;
+  // Оси корабля: нос по fwd, верх по up (единичные, взаимно перпендикулярные).
+  const axes = (fwd, up) => {
+    const b = makeBasis();
+    b.fwd = normalize(v3(fwd.x, fwd.y, fwd.z));
+    b.up = normalize(v3(up.x, up.y, up.z));
+    b.right = cross(b.up, b.fwd, v3());
+    return b;
+  };
+  // Где болт относительно корабля в его осях и насколько он сошёл с прямой
+  // по носу. Ход корабля в сценах — ноль, так что прямая — это ось z.
+  const offLine = (sh, b) => {
+    const l = toLocal(sh.basis, sh.pos, v3(b.x, b.y, b.z));
+    return { side: Math.hypot(l.x, l.y), ahead: l.z };
+  };
+  const pre = { pos: v3(), basis: makeBasis() };
+  const remember = (sh) => { pre.pos = v3(sh.pos.x, sh.pos.y, sh.pos.z); copyBasis(pre.basis, sh.basis); };
+
+  // 1. У планеты. Тело — самое быстрое по вращению, точка — над экватором
+  //    в трёх километрах (там вращение переносится целиком), нос — по
+  //    меридиану, поперёк хода грунта: снос, если он есть, уходит вбок.
+  const planetShot = (carry) => {
+    const w = makeSystem(HOME_SEED);
+    const body = w.planets.reduce((a, b) => (b.spin * b.radius > a.spin * a.radius ? b : a));
+    const p = body.pole;
+    const e = normalize(v3(p.y, -p.x, 0));
+    const r = groundRadius(body, e) + 3;
+    const sh = makeShip();
+    placeShip(sh, v3(body.pos.x + e.x * r, body.pos.y + e.y * r, body.pos.z + e.z * r), axes(p, e));
+    const g = makeGuns('laser_g');
+    fireGuns(g, sh, null, [v3(0, 0, 0)], []);
+    const b = g.bolts[0];
+    blast(g, sh.pos.x + e.x * 0.3, sh.pos.y + e.y * 0.3, sh.pos.z + e.z * 0.3, null);
+    const fl = g.blasts[0];
+    const flWas = toLocal(sh.basis, sh.pos, v3(fl.x, fl.y, fl.z));
+    let flOff = 0;
+    for (let i = 0; i < frames; i++) {
+      const cap = captureBody(w, sh.pos);
+      const was = v3(cap.pos.x, cap.pos.y, cap.pos.z);
+      updateWorld(w, STEP);
+      updateGuns(g, STEP, []);
+      remember(sh);
+      carryShip(sh, cap, STEP, v3(cap.pos.x - was.x, cap.pos.y - was.y, cap.pos.z - was.z));
+      if (carry) carryBolts(g, pre.pos, pre.basis, sh.pos, sh.basis);
+      if (g.blasts.includes(fl)) {
+        const l = toLocal(sh.basis, sh.pos, v3(fl.x, fl.y, fl.z));
+        flOff = Math.max(flOff, Math.hypot(l.x - flWas.x, l.y - flWas.y, l.z - flWas.z));
+      }
+    }
+    return { body, t: frames * STEP, flOff, ...offLine(sh, b) };
+  };
+  const good = planetShot(true);
+  ok(good.side < 0.001 && Math.abs(good.ahead - spec.speed * good.t) < 0.001,
+    `у ${good.body.name} (грунт идёт ${(good.body.spin * good.body.radius * 1000).toFixed(0)} м/с) `
+    + `болт за ${good.t.toFixed(2)} с ушёл по носу на ${(good.ahead * 1000).toFixed(0)} м, `
+    + `вбок — на ${(good.side * 1000).toFixed(2)} м`);
+  ok(good.flOff < 0.001,
+    `вспышка попадания стоит на месте удара: сошла на ${(good.flOff * 1000).toFixed(2)} м`);
+  const bad = planetShot(false);
+  ok(bad.side > 0.1 && bad.flOff > 0.05,
+    `без переноса болт сносит вбок на ${(bad.side * 1000).toFixed(0)} м, `
+    + `вспышку — на ${(bad.flOff * 1000).toFixed(0)} м — так и было`);
+
+  // 2. В зале станции. Зал вращается (оборот за минуту с небольшим) и
+  //    переносит с собой и скорость корабля, поэтому болту мало сдвига —
+  //    его скорость тоже должна поворачиваться: без этого путь в осях
+  //    корабля загибается на угол поворота станции за полёт.
+  const hallShot = (carry) => {
+    const w = makeSystem(0x1a7e);
+    const st = w.home.station;
+    const sh = makeShip();
+    const sb = st.basis;
+    placeShip(sh, v3(st.pos.x + sb.up.x * 0.05, st.pos.y + sb.up.y * 0.05, st.pos.z + sb.up.z * 0.05),
+      axes(sb.right, sb.up));
+    const g = makeGuns('laser_g');
+    fireGuns(g, sh, null, [v3(0, 0, 0)], []);
+    const b = g.bolts[0];
+    let frame = null;
+    for (let i = 0; i < frames; i++) {
+      frame = stationFrame(st, frame || undefined);
+      updateWorld(w, STEP);
+      updateGuns(g, STEP, []);
+      remember(sh);
+      carryInStation(sh, st, frame);
+      if (carry) carryBolts(g, pre.pos, pre.basis, sh.pos, sh.basis);
+    }
+    return { st, t: frames * STEP, ...offLine(sh, b) };
+  };
+  const inHall = hallShot(true);
+  ok(inHall.side < 0.001 && Math.abs(inHall.ahead - spec.speed * inHall.t) < 0.001,
+    `в зале ${inHall.st.name} болт ушёл по носу на ${(inHall.ahead * 1000).toFixed(0)} м, `
+    + `вбок — на ${(inHall.side * 1000).toFixed(2)} м`);
+  const hallBad = hallShot(false);
+  ok(hallBad.side > 0.1,
+    `без переноса в зале болт уходит вбок на ${(hallBad.side * 1000).toFixed(0)} м`);
 }
 
 

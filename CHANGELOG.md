@@ -87,6 +87,11 @@ GitHub release notes.
   calls them first instead of switching to a ship with no place in the hall.
 - A pilot saved somewhere the station no longer has (inside a wall or the
   old terminal) is placed by the elevator in their ship's pad lobby.
+- Near a planet, blaster bolts drifted sideways, against the planet's
+  rotation (over 200 m at full range near Lave IV), so they missed a ship
+  two kilometres away every time. Inside a station hall they curved off too.
+  Bolts and hit flashes now move with your ship's frame of reference, so a
+  shot flies straight from the guns whatever the planet or the hall is doing.
 
 ## [0.7.2] — 2026-10-08
 
