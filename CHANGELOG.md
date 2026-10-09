@@ -11,6 +11,88 @@ GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-10-08
+
+### Added
+- **Station halls.** Behind the docking slot a tunnel opens into a hall with
+  its own 1 g gravity and air, and 6–10 landing pads — small ones and large
+  ones for the Prometheus — on both sides of a central terminal. The port
+  assigns a pad when you enter and holds it for you; its number and a marker
+  are shown in the frame. Pads, their sizes and the rooms are generated per
+  station, the same on the client and the server.
+- The docking computer flies through the tunnel and lands on the assigned
+  pad, and in port it lifts off and takes the ship out past the slot (C).
+- **Walking on stations.** Leave the ship by the hatch stair or on the cargo
+  platform down to the hall floor. Every pad has its own elevator lobby a
+  short walk from the ship; an elevator takes you to the gallery on the
+  terminal roof — a plaza with windows over both rows of pads, with port
+  authority, hangar service, bar, medical bay and shops around it (10–20
+  rooms per station). From the farthest pad to any room takes under half a
+  minute.
+- **Station elevator**: walk into the car, pick the stop at the panel with the
+  mouse wheel, ↑/↓ or a digit (the pad number), press E. The panel lists all
+  stops and marks your ship's pad; the doors close for the ride.
+- Only the part of the station you can see is loaded and drawn: the lobby
+  you are in, the gallery, or — from the hall — the lobbies and the gallery
+  through their windows. From space no interiors are drawn at all.
+- Station plan (M) with routes through the elevator and an on-screen marker
+  to the next door or elevator; by default it selects the pad of your own
+  ship.
+- **Port storage and ship retrieval**, Star Citizen style: a bought ship goes
+  to port storage; the hangar service console (E) calls a stored ship to a
+  pad and lays a route to it, while from the pilot seat "Call and board" does
+  the same and seats you in it.
+- Realistic CC0 photogrammetry materials from Poly Haven for the hall and the
+  terminal: hangar concrete, terrazzo, rubber tiles, herringbone parquet,
+  wooden panels, concrete panels, plaster, leather and tread plate
+  (`npm run stationtex`).
+- Server schema 13: station pads and rooms (rooms already carry a future shop
+  kind and a tenant), a ship's pad, pose on the hall floor and storage flag;
+  new calls `station.request`, `station.layout` and `ship.retrieve`.
+- **Straight-ahead quantum jump.** With no target, press J twice: the drive
+  calibrates on your nose and jumps straight ahead — it drops out at the exit
+  altitude above the first planet, moon or star on the line, or keeps going
+  into the void until only the fuel to slow down is left, then slows down by
+  itself. J aborts it like any jump; a single J without a target still just
+  says that nothing is targeted.
+- **Quantum drive modules** to buy in station outfitting: an economy drive
+  (42 000 km/s, a third less fuel, tech 2) and a low-exit drive that drops
+  out 50 km above the ground instead of 250 (50 000 km/s, tech 3). The
+  module comparison shows the exit altitude.
+
+### Changed
+- The port terminal no longer pops up when you dock: open it with I from the
+  pilot seat; I or Esc closes it, Y stands up, C departs.
+- Leaving port: hold Space for three seconds to lift off the pad and fly out
+  through the tunnel yourself, or press C for the docking computer.
+- The start screen button no longer launches the ship: the game starts in the
+  seat of the ship standing on its pad.
+- In port the hatch stair and the cargo platform reach down to the hall floor.
+- A pilot walking on the floor of the station where their ship is docked
+  counts as being in port: market, shipyard and the hangar console work.
+- Quantum exit altitude over a planet or moon is measured above the ground
+  under the exit point, not above the body's mean radius: over mountains the
+  ship now drops out at the drive's altitude above the peaks.
+
+### Fixed
+- Upside-down entries into the slot no longer bump along the tunnel: the
+  approach rolls the ship to the station's top, not to the nearest of two.
+- Teleporting, towing and tests no longer leave a ship "inside" a station
+  hall it has left; a ship far outside the station is let go at once.
+- Docking again on your own pad was refused ("pad busy", HTTP 409) when a
+  rover rode in your hold, and on login the ship could be moved off its pad:
+  the rover counted as another ship holding the pad.
+- Ships that were in port before station halls existed now show up in the
+  hangar service as stored and can be called to a pad; "Board" from the seat
+  calls them first instead of switching to a ship with no place in the hall.
+- A pilot saved somewhere the station no longer has (inside a wall or the
+  old terminal) is placed by the elevator in their ship's pad lobby.
+- Near a planet, blaster bolts drifted sideways, against the planet's
+  rotation (over 200 m at full range near Lave IV), so they missed a ship
+  two kilometres away every time. Inside a station hall they curved off too.
+  Bolts and hit flashes now move with your ship's frame of reference, so a
+  shot flies straight from the guns whatever the planet or the hall is doing.
+
 ## [0.7.2] — 2026-10-08
 
 ### Added

@@ -355,6 +355,8 @@ final class Fuel
                 'basis' => null,
                 'hatches' => null,
             ], '`id`=?', [$shipId]);
+            // Буксир ставит корабль на свободную площадку зала.
+            Stations::park($shipId, $dest['system_id'], $dest['local_id']);
             Players::carryAlong($shipId);
             Db::update('player', [
                 'last_station' => $dest['local_id'],

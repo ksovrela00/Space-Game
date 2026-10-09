@@ -173,7 +173,7 @@ const DETAIL = {
     + s.lateral.toFixed(2) + L(' км/с²'),
   lift: (s) => L('струя ') + s.liftExhaust.toLocaleString(numLocale()) + L(' км/с'),
   boost: (s) => L('заряд ') + s.boostBurn + L(' с · восстановление ') + s.boostFill + L(' с'),
-  drive: (s) => s.quantumFuel + L(' т на млн км · калибровка ') + s.spool + L(' с'),
+  drive: (s) => s.quantumFuel + L(' т на млн км · калибровка ') + s.spool + L(' с · выход ') + s.exitAlt + L(' км'),
   scanner: (s) => (s.steps || []).length + L(' ступеней'),
 };
 

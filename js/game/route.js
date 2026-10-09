@@ -11,6 +11,14 @@
 // Путь — кратчайший по числу переходов (поиск в ширину по графу
 // помещений). Переход — дверь, проём или поездка на лифте; поездка любой
 // длины — один переход: дольше ехать, но не идти.
+//
+// НА СТАНЦИИ — кратчайший по метрам (plan.station): там помещения — от
+// кабины лифта в два шага до перрона в восемьсот метров, и по числу
+// переходов обход зала по перрону «короче» лифта. Метры — от точки, где
+// вошёл в помещение (у первого — от ног пилота), до точки следующего
+// перехода; поездка — как LIFT_M метров пешком. От середины помещения
+// считать нельзя: у перрона она посреди зала, и путь вёл бы к холлу в
+// середине зала, а не к своему.
 
 /** Ярус помещения: у «Прометея» — номер палубы, у «Челленджера» — по полу. */
 export function deckOf(room) {
@@ -68,9 +76,51 @@ export function graphOf(I) {
   return adj;
 }
 
-/** Переходы из помещения a в b (кратчайший путь) или null. */
-export function pathRooms(I, a, b) {
+// Поездка на лифте станции в метрах пешком: столько бегом за её десять
+// секунд — лифт выбирается, как только обход длиннее.
+const LIFT_M = 40;
+
+const mid = (r) => [(r.lo[0] + r.hi[0]) / 2, r.lo[1], (r.lo[2] + r.hi[2]) / 2];
+const flat = (p, q) => Math.hypot(p[0] - q[0], p[2] - q[2]);
+
+/**
+ * Кратчайший по метрам путь по плану станции (Дейкстра) или null. from —
+ * откуда идут в помещении a (ноги пилота); нет — от его середины.
+ */
+function pathMeters(I, a, b, from) {
+  const adj = graphOf(I);
+  const dist = new Map([[a, 0]]);
+  const at = new Map([[a, from || mid(I.roomById[a])]]);
+  const prev = new Map([[a, null]]);
+  const done = new Set();
+  for (;;) {
+    let c = null, cd = Infinity;
+    for (const [k, v] of dist) if (!done.has(k) && v < cd) { c = k; cd = v; }
+    if (c === null || c === b) break;
+    done.add(c);
+    const here = at.get(c);
+    for (const e of adj.get(c) || []) {
+      if (done.has(e.to)) continue;
+      const p = stepPoint(I, { ...e, from: c });
+      const w = flat(here, p) + (e.lift ? LIFT_M : 0);
+      if (cd + w < (dist.has(e.to) ? dist.get(e.to) : Infinity)) {
+        dist.set(e.to, cd + w);
+        // Приехал на лифте — у пульта кабины прибытия; прошёл — в двери.
+        at.set(e.to, e.lift ? mid(I.roomById[e.to]) : p);
+        prev.set(e.to, { from: c, e });
+      }
+    }
+  }
+  if (!prev.has(b)) return null;
+  const out = [];
+  for (let c = b; prev.get(c); c = prev.get(c).from) out.push({ from: prev.get(c).from, ...prev.get(c).e });
+  return out.reverse();
+}
+
+/** Переходы из помещения a в b (кратчайший путь) или null; from — ноги пилота в a. */
+export function pathRooms(I, a, b, from = null) {
   if (a === b) return [];
+  if (I.station) return pathMeters(I, a, b, from);
   const adj = graphOf(I);
   const prev = new Map([[a, null]]);
   const q = [a];
@@ -128,7 +178,7 @@ export function goalPoint(I, roomId) {
  */
 export function routeTo(I, room, pos, goal) {
   if (!room || !I.roomById[goal]) return null;
-  const steps = pathRooms(I, room.id, goal);
+  const steps = pathRooms(I, room.id, goal, pos);
   if (!steps) return null;
   const end = goalPoint(I, goal);
   const pts = steps.filter((e) => !e.lift).map((e) => stepPoint(I, e));

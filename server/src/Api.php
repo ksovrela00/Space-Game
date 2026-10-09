@@ -27,6 +27,9 @@ final class Api
             'galaxy.stations' => [[self::class, 'galaxyStations'], false],
             'station.info' => [[self::class, 'stationInfo'], false],
             'station.dock' => [[self::class, 'stationDock'], true],
+            'station.request' => [[self::class, 'stationRequest'], true],
+            'station.layout' => [[self::class, 'stationLayout'], false],
+            'ship.retrieve' => [[self::class, 'shipRetrieve'], true],
             'station.undock' => [[self::class, 'stationUndock'], true],
             'station.repair' => [[self::class, 'stationRepair'], true],
             'station.refuel' => [[self::class, 'stationRefuel'], true],
@@ -188,7 +191,35 @@ final class Api
 
     public static function stationDock(array $in, ?int $playerId): array
     {
-        return Stations::dock($playerId, self::int($in, 'system'), self::int($in, 'station'));
+        return Stations::dock($playerId, self::int($in, 'system'), self::int($in, 'station'),
+            self::int($in, 'pad'), $in['pose'] ?? null);
+    }
+
+    /** Площадка у порта (Stations::request): размер берётся по кораблю, а не со слов клиента. */
+    public static function stationRequest(array $in, ?int $playerId): array
+    {
+        return Stations::request($playerId, self::int($in, 'system'), self::int($in, 'station'));
+    }
+
+    /** Площадки и помещения станции (Stations::layout). */
+    public static function stationLayout(array $in, ?int $playerId): array
+    {
+        $sys = self::int($in, 'system');
+        $loc = self::int($in, 'station');
+        if ($sys === null || $loc === null) {
+            throw ApiError::bad('нужен порт: система и номер тела');
+        }
+        return Stations::layout($sys, $loc);
+    }
+
+    /** Вызвать свой корабль из хранилища порта на площадку (Shipyard::retrieve). */
+    public static function shipRetrieve(array $in, ?int $playerId): array
+    {
+        $id = self::int($in, 'id');
+        if ($id === null) {
+            throw ApiError::bad('нужен номер корабля');
+        }
+        return Shipyard::retrieve($playerId, $id);
     }
 
     public static function stationUndock(array $in, ?int $playerId): array

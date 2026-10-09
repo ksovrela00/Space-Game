@@ -38,6 +38,7 @@ import { tileKey, tileTexelAngle, tileCellAngle, TILE_MAX_LEVEL } from './quadtr
 import {
   SHIP_SHADOW, shadowFrame, shadowMatrix, hullRadius, depthVs, DEPTH_FS, makeShadowArray,
 } from './shipshadow.js';
+import { loadStationTex, stationK, STATION_TEX } from './stationtex.js';
 import { cityLocal } from '../game/city.js';
 
 import { localDir, altitudeOf } from '../game/surface.js';
@@ -80,6 +81,7 @@ import { hatchCut, hatchPanelAt, stairPose, bayCut } from '../game/airlock.js';
 import { buildStairMesh, buildHatchMesh, buildCableMesh } from '../models/airstair.js';
 import { waveSet, waterFrame, makeWaterFrame } from './water.js';
 import { seesOutside, seesHull } from '../models/interior.js';
+import { interiorOf } from '../game/stationplan.js';
 
 // Пилот за бортом: на трапе или на грунте (js/game/walker.js, out).
 // Дальше этого людей не рисуем, км: человек в двух метрах ростом с
@@ -405,6 +407,16 @@ export class GlScene {
     gl.activeTexture(gl.TEXTURE0 + SHIP_SHADOW.unit);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.shipShadow ? this.shipShadow.tex : null);
     gl.activeTexture(gl.TEXTURE0);
+    // Фактуры станции (js/gl/stationtex.js) — на своём блоке, привязаны
+    // всегда: сэмплер массива на блоке 0 рядом с плоской текстурой сорвал
+    // бы каждую отрисовку сеток.
+    this.stationTex = loadStationTex(gl);
+    for (const p of [this.pMesh, this.pForest]) {
+      if (!p) continue;
+      p.use();
+      gl.uniform1i(p.loc('uStationTex'), STATION_TEX.unit);
+      gl.uniform1fv(p.loc('uStationK'), stationK());
+    }
     this.stars = this.buildStars();
     // Поток частиц прыжка. Строится один раз на запуск и от звёзд не
     // зависит вовсе: звёзды бесконечно далеко и лететь мимо не могут.
@@ -529,6 +541,10 @@ export class GlScene {
     this.shadeB = new Float32Array(SHADE_MAX * 4);
     this.cityOrg = new Float32Array(3);
     this.cityAxes = new Float32Array(9);
+    // Зал станции: её центр и оси в осях камеры (setHall).
+    this.hallO = new Float32Array(3);
+    this.hallM = new Float32Array(9);
+    this.hallUp = new Float32Array(3);
     this.axis3 = new Float32Array(3);
     this.basisTmp = makeBasis();
     // Единичный базис: им берут матрицу ЧИСТОГО поворота камеры для
@@ -720,6 +736,72 @@ export class GlScene {
     gl.uniform4fv(prog.loc('uShadeA[0]'), this.shadeA);
     gl.uniform4fv(prog.loc('uShadeB[0]'), this.shadeB);
     return n;
+  }
+
+  /**
+   * Станция, в зал которой смотрит глаз: ближайшая, и не дальше её
+   * габарита с запасом. В зале своё освещение (shaders.js, hallAt), а
+   * снаружи коробка зала ничего не задевает — зал виден разве что сквозь
+   * щель, и светится он там своим светом.
+   */
+  hallStation(game) {
+    const cam = this.camera;
+    let best = null, bd = Infinity;
+    for (const st of (game.world && game.world.stations) || []) {
+      const d = Math.hypot(st.pos.x - cam.pos.x, st.pos.y - cam.pos.y, st.pos.z - cam.pos.z);
+      if (d < st.radius * 1.4 && d < bd) { bd = d; best = st; }
+    }
+    return best;
+  }
+
+  /**
+   * Свет зала станции — в uniform-ы сеток. Ставится на проход, как фары:
+   * в зале одной программой рисуются и станция, и корабли на площадках, и
+   * их стойки, трапы и люди.
+   */
+  setHall(prog, game) {
+    const gl = this.gl;
+    const st = this.hallStation(game);
+    gl.uniform1f(prog.loc('uHallOn'), st ? 1 : 0);
+    if (!st) return null;
+    const cam = this.camera;
+    this.centerInCamera(st.pos, this.hallO);
+    const axes = [st.basis.right, st.basis.up, st.basis.fwd];
+    for (let i = 0; i < 3; i++) {
+      dirToCamera(cam.basis, axes[i].x, axes[i].y, axes[i].z, this.axis3);
+      this.hallM[i * 3] = this.axis3[0];
+      this.hallM[i * 3 + 1] = this.axis3[1];
+      this.hallM[i * 3 + 2] = this.axis3[2];
+    }
+    dirToCamera(cam.basis, st.basis.up.x, st.basis.up.y, st.basis.up.z, this.hallUp);
+    const V = this._hallBox || (this._hallBox = {});
+    let box = V[st.type];
+    if (!box) {
+      // С запасом в три метра наружу: пол, стены и потолок зала лежат
+      // РОВНО на границе коробки, и без запаса половина их пикселей
+      // проходила проверку, а половина — нет (сыпь из солнечных и
+      // зальных точек по всему полу).
+      const I = interiorOf(st.type);
+      const m = 0.003;
+      const km = (a, s) => a.map((v) => v / 1000 + s * m);
+      const t = I.tunnel;
+      box = V[st.type] = {
+        lo: km(I.hall.lo, -1), hi: km(I.hall.hi, 1),
+        tlo: [-t.hw / 1000 - m, -t.hh / 1000 - m, t.z0 / 1000 - m], thi: [t.hw / 1000 + m, t.hh / 1000 + m, st.shape.D + m],
+      };
+    }
+    gl.uniform3fv(prog.loc('uHallO'), this.hallO);
+    gl.uniformMatrix3fv(prog.loc('uHallM'), false, this.hallM);
+    gl.uniform3fv(prog.loc('uHallLo'), box.lo);
+    gl.uniform3fv(prog.loc('uHallHi'), box.hi);
+    gl.uniform3fv(prog.loc('uTunLo'), box.tlo);
+    gl.uniform3fv(prog.loc('uTunHi'), box.thi);
+    gl.uniform3fv(prog.loc('uHallUp'), this.hallUp);
+    // Рассеянный, сверху (ряды под потолком), снизу (отражённый от пола) и
+    // сбоку (от светлых стен): в настоящих ангарах стены светлые, и чёрным
+    // провалом зал не читается.
+    gl.uniform4f(prog.loc('uHallLight'), 0.40, 0.52, 0.14, 0.22);
+    return st;
   }
 
   /** Погасить фары для прохода, которому они не нужны (кабина, варп). */
@@ -1114,6 +1196,37 @@ export class GlScene {
   }
 
   /**
+   * Станция изнутри: видимые секции (холлы площадок, галерея — js/main.js,
+   * stationSections) и створки кабин лифта в них, раздвинутые по открытию.
+   * Секция собирается при первом показе (js/models/stationhall.js,
+   * sectionMesh); остальные не рисуются вовсе.
+   */
+  drawStationInside(prog, game, st, sunPos) {
+    if (!game.stationSections) return;
+    const v = game.stationSections(st);
+    if (!v) return;
+    const ids = new Set(v.ids);
+    for (const id of v.ids) this.drawObject(prog, this.glMeshFor(game.stationSectionMesh(st, id)), st.pos, st.basis, 1, sunPos);
+    const b = st.basis, p = this._leafPos || (this._leafPos = { x: 0, y: 0, z: 0 });
+    for (const d of v.plan.liftDoors) {
+      const cab = v.plan.roomById[d.rooms[0]];
+      if (!cab || !ids.has(cab.section)) continue;
+      const mesh = this.glMeshFor(game.liftLeaf(d.ax));
+      const u = d.ax === 0 ? 2 : 0;
+      // Створка — половина проёма; открываясь, уходит в стену на свою ширину.
+      for (const sg of [-1, 1]) {
+        const off = [0, 0, 0];
+        off[u] = sg * d.half * (0.5 + d.open);
+        const x = (d.pos[0] + off[0]) / 1000, y = d.pos[1] / 1000, z = (d.pos[2] + off[2]) / 1000;
+        p.x = st.pos.x + b.right.x * x + b.up.x * y + b.fwd.x * z;
+        p.y = st.pos.y + b.right.y * x + b.up.y * y + b.fwd.y * z;
+        p.z = st.pos.z + b.right.z * x + b.up.z * y + b.fwd.z * z;
+        this.drawObject(prog, mesh, p, b, 1, sunPos);
+      }
+    }
+  }
+
+  /**
    * Состояние квантового прыжка для картинки: сила эффекта, ось движения
    * в координатах камеры и точка схода на экране.
    *
@@ -1342,7 +1455,8 @@ export class GlScene {
     if (walkingOut(game)) return;
     // Пилот на ногах — внутри корабля в любом режиме, и в порту тоже.
     const walking = !!(game.walk && game.walk.on);
-    if (!st || st.view !== 'cockpit' || (st.mode === 'docked' && !walking)) return;
+    // В порту — тоже: корабль стоит на площадке в зале, и из кресла видно зал.
+    if (!st || st.view !== 'cockpit') return;
     if (!game.ship || !this.cabin) return;
     // Пост — того корабля, на палубе которого глаз (js/models/hulls.js,
     // podOf): на своём — свой, с экранами; на чужом — пост его типа без
@@ -1547,7 +1661,7 @@ export class GlScene {
     if (!this.cabin || !own) return;
     const size = [this.canvas.width, this.canvas.height];
     // Свой — от третьего лица, с грунта и с палубы чужого корабля.
-    if (game.state.mode !== 'docked' && !game.ship.away && !game.ship.hidden
+    if (!game.ship.away && !game.ship.hidden
       && (game.state.view === 'chase' || walkingOut(game) || inForeign(game))) {
       const n = this.cabin.drawLocksOutside(game, this.camera, size, sunPos, this.logFC, game.ship, own);
       this.draws += n;
@@ -2239,6 +2353,8 @@ export class GlScene {
     this.lamps = this.setLamps(prog, game);
     // Тени от фар — туда же и тем же проходом.
     this.cityShade = this.setCityShade(prog, game);
+    // Свет зала станции — тоже на весь проход.
+    this.hall = this.setHall(prog, game);
 
     // Дымка на грунте: воздух между камерой и точкой поверхности.
     // Получает её ТОЛЬКО тело, в чью атмосферу вошла камера, — у
@@ -2387,16 +2503,19 @@ export class GlScene {
       }
     }
 
-    // Станции.
+    // Станции. Фактуры зала кладутся по осям станции (vLocal — точка
+    // модели), сдвига, как у плиток грунта, нет.
+    gl.uniform3f(prog.loc('uLocalShift'), 0, 0, 0);
     for (const st of world.stations) {
       const d = Math.hypot(
         st.pos.x - this.camera.pos.x,
         st.pos.y - this.camera.pos.y,
         st.pos.z - this.camera.pos.z);
       if (d > 8000) continue;
-      // Меш берётся по ТИПУ станции: их два, а станций в системе
-      // несколько, и каждая просит свой (js/models/stations.js).
-      this.drawObject(prog, this.glMeshFor(game.stationMesh(st.type)), st.pos, st.basis, 1, sunPos);
+      // Меш — по станции: корпус её типа и зал по её планировке
+      // (js/models/stations.js, js/models/stationhall.js).
+      this.drawObject(prog, this.glMeshFor(game.stationMesh(st)), st.pos, st.basis, 1, sunPos);
+      this.drawStationInside(prog, game, st, sunPos);
     }
 
     // Свой корабль от третьего лица. Из рубки его рисует проход кабины
@@ -2408,7 +2527,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uSkyK'), skyK);
     // Пилот за бортом (на трапе, на грунте) видит свой корабль снаружи —
     // так же, как камера от третьего лица.
-    if (game.state.mode !== 'docked' && !game.ship.away && !game.ship.hidden
+    if (!game.ship.away && !game.ship.hidden
       && (game.state.view === 'chase' || walkingOut(game) || inForeign(game))) {
       const ship = game.ship;
       // Вес держат подъёмные только у тела: в пустоте сопла холодные.
@@ -2501,6 +2620,7 @@ export class GlScene {
     gl.uniform1f(prog.loc('uLiftGlow'), 0);
     gl.uniform1f(prog.loc('uSkyK'), 0);
     this.setLamps(prog, game);
+    this.setHall(prog, game);
     this.useShipShadow(prog, true);
     const t = (typeof performance === 'object' ? performance.now() : Date.now()) / 1000;
     for (const p of list) {
@@ -2931,7 +3051,7 @@ export class GlScene {
       if (d < sd) { sd = d; st = s; }
     }
     if (st && game.stationMesh) {
-      const mesh = game.stationMesh(st.type);
+      const mesh = game.stationMesh(st);
       casters.push({ kind: 'station', pos: st.pos, basis: st.basis, mesh, r: radius(mesh) });
     }
 
@@ -3396,7 +3516,7 @@ export class GlScene {
     // Факелы двигателей и огни своего корабля — в обоих видах: из рубки их
     // видно, стоит обернуться.
     const ship = game.ship;
-    const own = game.state.mode !== 'docked' && !ship.away && !ship.hidden;
+    const own = !ship.away && !ship.hidden;
     if (own && ship.throttle > 0.03 && game.shipMesh.exhausts) {
       modelView(cam.basis, cam.pos, ship.basis, ship.pos, 1, this.mv, null);
       for (const e of game.shipMesh.exhausts) {

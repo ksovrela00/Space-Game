@@ -188,9 +188,19 @@ async function attempt(fn) {
  * Отказ раньше глотался молча — и игра стояла в порту, где у сервера её
  * не было: рынок и заправка отвечали «не в порту».
  */
-export async function dock(systemId, localId) {
-  const r = await attempt(() => api.dock(systemId, localId));
+export async function dock(systemId, localId, pad = null, pose = null) {
+  const r = await attempt(() => api.dock(systemId, localId, pad, pose));
   if (r.ok) await refresh();
+  return r;
+}
+
+/** Площадка у порта: ответ — { pad } или отказ словами (все заняты). */
+export const requestPad = (systemId, localId, size) => attempt(() => api.requestPad(systemId, localId, size));
+
+/** Вызвать корабль из хранилища на площадку: ответ — полное состояние. */
+export async function retrieve(shipId) {
+  const r = await guarded(() => api.retrieve(shipId));
+  await refresh();
   return r;
 }
 

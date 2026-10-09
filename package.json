@@ -1,6 +1,6 @@
 {
   "name": "solar-trader",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "private": true,
   "description": "Космический симулятор в духе Elite: WebGL2, ES-модули, без сборки",
   "type": "module",
@@ -16,6 +16,7 @@
     "ship": "node tools/ship.mjs",
     "spacesuit": "node tools/spacesuit.mjs",
     "station": "node tools/station.mjs",
+    "stationtex": "node tools/stationtex.mjs",
     "city": "node tools/city.mjs",
     "nature": "node tools/nature.mjs",
     "ground": "node tools/ground.mjs",

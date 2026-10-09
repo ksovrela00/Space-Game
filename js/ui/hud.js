@@ -6,7 +6,8 @@ import { SHIP } from '../game/ship.js';
 import { HULL } from '../game/hull.js';
 import { QUANTUM } from '../game/quantum.js';
 import { warpDistance, offWarpAxis, warpAxis } from '../game/warp.js';
-import { LIMITS, dockingQuality } from '../game/docking.js';
+import { LIMITS, dockingQuality, rollToStation } from '../game/docking.js';
+import { BERTH } from '../game/berth.js';
 import { gearLabel, landedInfo, LAND } from '../game/landing.js';
 import { SLOT } from '../models/stations.js';
 import { targetLabel, targetKind, currentTarget } from '../game/nav.js';
@@ -208,6 +209,8 @@ export function drawHud(r, game) {
     drawAimedLabel(ctx, cam, game, target);
   }
   if (target) drawTargetMarker(ctx, cam, target);
+  // Площадка, которую выделил порт: ромбом, с номером и расстоянием.
+  if (game.padMark) drawPadMark(ctx, cam, game.padMark);
 
   // Приборы подхода включаются в гравитационном захвате и берут на себя
   // скорость, высоту, дистанцию и посадочные условия. Угловые панели
@@ -253,6 +256,8 @@ export function drawHud(r, game) {
 
   // На грунте — кнопка вместо экрана поверх игры.
   if (state.mode === 'landed') drawLandedPrompt(ctx, cam, game);
+  // На площадке в зале станции — то же: что можно сделать прямо сейчас.
+  if (state.mode === 'docked') drawDockedPrompt(ctx, cam, game);
 
   // --- приборы подхода, помощник стыковки ---
   //
@@ -510,7 +515,8 @@ function drawJumpPanel(ctx, w, h, q, state) {
 
   ctx.font = '28px Consolas, monospace';
   ctx.fillStyle = '#d8f2ff';
-  ctx.fillText(fmtDist(q.dist), cx, h - 96);
+  // По прямой без тела впереди остатка нет — ход в пустоту.
+  ctx.fillText(Number.isFinite(q.dist) ? fmtDist(q.dist) : '∞', cx, h - 96);
 
   ctx.font = '14px Consolas, monospace';
   ctx.fillStyle = AMBER;
@@ -664,6 +670,24 @@ function drawGroundMark(ctx, cam, game) {
 function drawShipColumn(ctx, px, py, game, approach) {
   const ship = game.ship;
   const rows = [];
+
+  // В зале станции — свои приборы подхода: высота над полом, скорости
+  // относительно зала и допуски касания (js/game/berth.js, BERTH).
+  const z = game.hallInfo;
+  if (z && ship.berth && !approach) {
+    const alt = Math.max(0, z.alt - (ship.gear.t > 0.5 ? SHIP.gearClear : SHIP.hullClear));
+    rows.push({ kind: 'big', label: L('ДО ПОЛА'), value: fmtDist(alt) });
+    const ms = (v) => (v * 1000).toFixed(0) + L(' м/с');
+    const vOk = -z.vUp <= BERTH.vspeed, hOk = z.hSpeed <= BERTH.hspeed;
+    rows.push({ kind: 'pair', a: [L('ВЕРТ'), ms(z.vUp), vOk ? GREEN : RED], b: [L('БОК'), ms(z.hSpeed), hOk ? GREEN : RED] });
+    rows.push({ kind: 'gauge', label: L('ТЯЖЕСТЬ'), frac: 1, color: CY, note: (BERTH.g * 1000).toFixed(2) + L(' м/с²') });
+    rows.push({ kind: 'chips', chips: [
+      [L('ШАССИ'), ship.gear.out && ship.gear.t > 0.995],
+      [L('НАКЛОН'), z.tilt >= BERTH.tilt],
+      [L('ПЛОЩАДКА'), !!z.pad],
+    ] });
+    rows.push({ kind: 'rule', label: ship.berth.st.name.toUpperCase().slice(0, 18) });
+  }
 
   // Сверху — обстановка, если корабль в чьём-то тяготении. Прибор растёт
   // по мере снижения: за две тысячи километров вертикальная скорость
@@ -1109,6 +1133,93 @@ function drawCockpitFrame(ctx, w, h) {
  * оторвался. Полоса заполнения показывает, сколько ещё держать: без неё
  * удержание — это игра в угадайку.
  */
+/**
+ * Площадка, выделенная портом: ромб над её серединой, номер и расстояние;
+ * за кадром — стрелка у края, как у цели. Цвет — зелёный: это не цель
+ * прыжка, а место, куда садиться.
+ */
+function drawPadMark(ctx, cam, m) {
+  const c = cam.toCamera(m.pos);
+  const label = L('ПЛОЩАДКА ') + m.n + ' · ' + fmtDist(m.dist);
+  if (c.z > cam.near) {
+    const p = cam.project(c, _pt);
+    if (p.x > 4 && p.x < cam.w - 4 && p.y > 4 && p.y < cam.h - 4) {
+      ctx.save();
+      ctx.strokeStyle = GREEN;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - 12); ctx.lineTo(p.x + 12, p.y); ctx.lineTo(p.x, p.y + 12); ctx.lineTo(p.x - 12, p.y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.font = fnt(12, 'bold');
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.strokeText(label, p.x, p.y - 20);
+      ctx.fillStyle = GREEN;
+      ctx.fillText(label, p.x, p.y - 20);
+      ctx.restore();
+      return;
+    }
+  }
+  const dir = normalize(v3(c.x, c.y, 0));
+  const ang = Math.atan2(-dir.y, dir.x);
+  const rr = Math.min(cam.w, cam.h) * 0.4;
+  ctx.save();
+  ctx.translate(cam.cx + Math.cos(ang) * rr, cam.cy + Math.sin(ang) * rr);
+  ctx.rotate(ang);
+  ctx.fillStyle = c.z > 0 ? GREEN : 'rgba(120,224,143,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(11, 0); ctx.lineTo(-6, -7); ctx.lineTo(-6, 7);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Корабль стоит на площадке в зале станции: где стоит и что можно —
+ * терминал порта (I), вылет удержанием пробела или компьютером (C), встать.
+ */
+function drawDockedPrompt(ctx, cam, game) {
+  const ship = game.ship;
+  const t = clamp((game.landHold || 0) / LAND.holdOff, 0, 1);
+  const w = 360, h = 52;
+  const x = cam.cx - w / 2, y = cam.h - 172;
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,12,20,0.78)';
+  ctx.fillRect(x, y, w, h);
+  if (t > 0) {
+    ctx.fillStyle = 'rgba(255,204,102,0.22)';
+    ctx.fillRect(x, y, w * t, h);
+  }
+  ctx.strokeStyle = t > 0 ? AMBER : GREEN;
+  ctx.lineWidth = t > 0 ? 2 : 1;
+  ctx.strokeRect(x, y, w, h);
+  ctx.textAlign = 'center';
+  const mid = x + w / 2;
+  const st = ship.dockedAt;
+  const pad = ship.berth ? ship.berth.pad : null;
+  ctx.font = '10px Consolas, monospace';
+  ctx.fillStyle = 'rgba(159,217,230,0.7)';
+  ctx.fillText((st ? st.name.toUpperCase() : '') + (pad ? L(' · ПЛОЩАДКА ') + pad : L(' · ВНЕ ПЛОЩАДКИ')), mid, y - 8);
+  if (t > 0) {
+    ctx.font = 'bold 15px Consolas, monospace';
+    ctx.fillStyle = AMBER;
+    ctx.fillText(t >= 1 ? L('ОТРЫВ') : L('ВЗЛЁТ'), mid, y + 22);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = '#d8f2ff';
+    ctx.fillText(L('ДЕРЖАТЬ ЕЩЁ ') + ((1 - t) * LAND.holdOff).toFixed(1) + L(' с'), mid, y + 40);
+  } else {
+    ctx.font = 'bold 14px Consolas, monospace';
+    ctx.fillStyle = GREEN;
+    ctx.fillText(L('В ПОРТУ · I — ТЕРМИНАЛ ПОРТА · Y — ВСТАТЬ'), mid, y + 22);
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillStyle = 'rgba(159,217,230,0.8)';
+    ctx.fillText(L('УДЕРЖАТЬ ПРОБЕЛ ') + LAND.holdOff + L(' с — ВЗЛЁТ · C — ВЫЛЕТ КОМПЬЮТЕРОМ'), mid, y + 40);
+  }
+  ctx.restore();
+}
+
 function drawLandedPrompt(ctx, cam, game) {
   const ship = game.ship;
   const t = clamp((game.landHold || 0) / LAND.holdOff, 0, 1);
@@ -1809,8 +1920,6 @@ function drawDockAssist(ctx, cx, cy, a) {
 // Подготовка данных для помощника стыковки (вызывается из main).
 export function makeDockAssist(ship, station) {
   const q = dockingQuality(ship, station);
-  const tr = station.basis.right;
-  let err = Math.atan2(dot(tr, ship.basis.up), dot(tr, ship.basis.right));
-  if (Math.abs(err) > Math.PI / 2) err -= Math.sign(err) * Math.PI;
-  return { q, rollAngle: err, rollOk: q.roll > LIMITS.roll };
+  // Крен — до верха станции: за щелью зал, и пол в нём внизу по станции.
+  return { q, rollAngle: rollToStation(ship, station), rollOk: q.roll > LIMITS.roll };
 }

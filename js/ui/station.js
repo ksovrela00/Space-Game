@@ -243,7 +243,7 @@ export function stationAct(game, act, arg = {}) {
     redraw(game);
     return true;
   }
-  if (act === 'launch') { game.launch(); return true; }
+  if (act === 'launch') { game.launch(true); return true; }
   if (act === 'stand') { if (game.rise) game.rise(); return true; }
   if (act === 'map') { game.openMap(); return true; }
   if (act === 'repair') { if (!s.busy) game.repair(); return true; }
@@ -308,6 +308,27 @@ export function stationAct(game, act, arg = {}) {
     // встаёт он не в док, а в трюм того корабля, которым командуют.
     run(game, () => buyHull(arg.code),
       () => L('КУПЛЕН ВЕЗДЕХОД: ') + (arg.name || arg.code) + ' · ' + kr(-arg.price) + L(' · ОН В ТРЮМЕ'));
+    return true;
+  }
+  if (act === 'retrieve') {
+    // Вызов из хранилища пешком, у пульта: пилот остаётся на ногах (js/main.js).
+    if (!game.retrieveShip) return true;
+    s.busy = true;
+    s.note = L('ЗАПРОС…');
+    s.noteKind = '';
+    redraw(game);
+    Promise.resolve(game.retrieveShip(+arg.id)).finally(() => {
+      s.busy = false;
+      s.note = '';
+      forgetPort(game);
+      redraw(game);
+    });
+    return true;
+  }
+  if (act === 'path') {
+    // К кораблю на площадке — путь по станции; терминал закрывается.
+    if (game.setWalkGoal) game.setWalkGoal('pad' + arg.pad);
+    if (game.closeTerminal) game.closeTerminal();
     return true;
   }
   if (act === 'board') {
@@ -554,7 +575,9 @@ const CMP = {
   boost: [['boostMax', 'форсаж', (v) => '×' + v, 1], ['boostBurn', 'заряд', (v) => v + L(' с'), 1],
     ['boostFill', 'восстановление', (v) => v + L(' с'), -1]],
   drive: [['quantumSpeed', 'скорость', (v) => big(v / 1000) + L(' тыс. км/с'), 1],
-    ['quantumFuel', 'расход', (v) => v + L(' т на млн км'), -1], ['spool', 'калибровка', (v) => v + L(' с'), -1]],
+    ['quantumFuel', 'расход', (v) => v + L(' т на млн км'), -1], ['spool', 'калибровка', (v) => v + L(' с'), -1],
+    // Выход ниже — ближе к грунту: к посадке и к городу (js/game/quantum.js).
+    ['exitAlt', 'выход над грунтом', (v) => v + L(' км'), -1]],
   warp: [['warpFuel', 'расход', (v) => v + L(' т на св. год'), -1]],
   tank: [['fuelTank', 'запас', (v) => '+' + v + L(' т'), 1]],
   hold: [['hold', 'трюм', (v) => v + L(' т'), 1]],
@@ -692,10 +715,27 @@ function shipsTab(game) {
   const o = s.ships;
   const money = game.player.balance;
 
-  const here = o.here.map((x) => `<div class="card ship${x.active ? ' mine' : ''}">
-      <b>${esc(x.typeName)}</b><span class="dim">${esc(L(x.title))} · №${esc(x.id)}</span>
-      <div class="acts">${x.active ? `<span class="tag">${esc(L('ВЫ В ЕГО КРЕСЛЕ'))}</span>`
-    : btn(esc(L('ПЕРЕСЕСТЬ')), 'board', { id: x.id }, 'pri', s.busy)}</div></div>`).join('');
+  // Где корабль в порту: на площадке или в хранилище (схема 13). Из
+  // кресла пересаживаются (из хранилища — с вызовом на площадку); пешком у
+  // пульта ангарной службы корабль из хранилища вызывают, к стоящему —
+  // прокладывают путь.
+  const foot = !!(game.walk && game.walk.on);
+  const here = o.here.map((x) => {
+    const where = x.stored ? L('В ХРАНИЛИЩЕ ПОРТА') : x.pad ? L('ПЛОЩАДКА ') + x.pad : '';
+    let act;
+    if (x.stored) {
+      act = foot ? btn(esc(L('ВЫЗВАТЬ НА ПЛОЩАДКУ')), 'retrieve', { id: x.id }, 'pri', s.busy)
+        : btn(esc(L('ВЫЗВАТЬ И ПЕРЕСЕСТЬ')), 'board', { id: x.id }, 'pri', s.busy);
+    } else if (foot) {
+      act = x.pad ? btn(esc(L('ПУТЬ К НЕМУ')), 'path', { pad: x.pad }, x.active ? 'pri' : '', s.busy) : '';
+    } else {
+      act = x.active ? `<span class="tag">${esc(L('ВЫ В ЕГО КРЕСЛЕ'))}</span>`
+        : btn(esc(L('ПЕРЕСЕСТЬ')), 'board', { id: x.id }, 'pri', s.busy);
+    }
+    return `<div class="card ship${x.active ? ' mine' : ''}">
+      <b>${esc(x.typeName)}</b><span class="dim">${esc(L(x.title))} · №${esc(x.id)}${where ? ' · ' + esc(where) : ''}</span>
+      <div class="acts">${act}</div></div>`;
+  }).join('');
 
   const buy = (act, key, label, data, price) => (s.arm === key
     ? btn(esc(L('ПОДТВЕРДИТЬ · ') + kr(-price)), act, data, 'warn', s.busy || money < price)
@@ -761,7 +801,8 @@ export function stationBody(game, tab) {
  * терминал рамка (js/ui/terminal.js): в порту, в кресле — он на экране.
  */
 export function showDocked(game) {
-  if (game.walk && game.walk.on) return;
+  // На ногах порт показывает только пульт ангарной службы (game.kiosk).
+  if (game.walk && game.walk.on && !game.kiosk) return;
   const s = st(game);
   const here = game.ship.dockedAt;
   if (s.at !== here) {

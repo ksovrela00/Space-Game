@@ -83,6 +83,28 @@ for (const sys of g.systems) {
       dir: { x: num(r.dir.x, 9), y: num(r.dir.y, 9), z: num(r.dir.z, 9) } };
   });
 
+  // Станции изнутри (js/game/stationplan.js): площадки и помещения. Как и
+  // у городов, в базу уходит не геометрия зала, а то, по чему у станции
+  // ведут дела: какая площадка за каким кораблём и какая комната — лавка.
+  const stations = world.stations.map((st) => {
+    const L = st.layout;
+    return {
+      localId: st.id,
+      type: st.type,
+      floorM: L.floor,
+      pads: L.pads.map((p) => ({ n: p.n, size: p.size, side: p.side,
+        x: num(p.c[0], 2), y: num(p.c[1], 2), z: num(p.c[2], 2),
+        w: num(p.hi[2] - p.lo[2], 2), d: num(p.hi[0] - p.lo[0], 2) })),
+      // Кабины лифта — не помещения станции: в них не торгуют и не живут.
+      rooms: L.rooms.filter((r) => !r.open && r.kind !== 'lift').map((r) => ({
+        code: r.id, kind: r.kind, name: r.name, shop: r.shop || null, pad: r.pad || null,
+        areaM2: num((r.hi[0] - r.lo[0]) * (r.hi[2] - r.lo[2]), 1),
+        x: num((r.lo[0] + r.hi[0]) / 2, 2), y: num(r.lo[1], 2), z: num((r.lo[2] + r.hi[2]) / 2, 2),
+        w: num(r.hi[0] - r.lo[0], 2), h: num(r.hi[1] - r.lo[1], 2), d: num(r.hi[2] - r.lo[2], 2),
+      })),
+    };
+  });
+
   systems.push({
     id: sys.id,
     seed: sys.seed,
@@ -96,6 +118,7 @@ for (const sys of g.systems) {
     pos: { x: num(sys.pos.x, 4), y: num(sys.pos.y, 4), z: num(sys.pos.z, 4) },
     bodies,
     cities,
+    stations,
   });
 }
 
@@ -117,12 +140,16 @@ const catalog = {
   shipTypes: HULL_TYPES.map((code) => {
     const mesh = hullOf(code).mesh;
     const size = extentOf(mesh.verts).size;
+    const G = hullOf(code).gear;
     return {
       code,
       lengthM: num(size.z * 1000, 1),
       widthM: num(size.x * 1000, 1),
       heightM: num(size.y * 1000, 1),
       massT: num(mesh.volumeM3 * HULL_DENSITY / 1000, 1),
+      // Просвет на шасси: центр масс над полом. По нему сервер ставит
+      // корабль на площадку станции (Stations::padPose).
+      gearClearM: G ? num((G.legLengths[0] - G.hardpoints[0].y) * 1000, 3) : 0,
     };
   }),
   systems,
@@ -134,6 +161,8 @@ writeFileSync(out, JSON.stringify(catalog, null, 1), 'utf8');
 const bodies = systems.reduce((a, s) => a + s.bodies.length, 0);
 const stations = systems.reduce((a, s) => a + s.bodies.filter((b) => b.kind === 'station').length, 0);
 const cityN = systems.reduce((a, s) => a + s.cities.length, 0);
+const padN = systems.reduce((a, s) => a + s.stations.reduce((b, t) => b + t.pads.length, 0), 0);
+const roomN = systems.reduce((a, s) => a + s.stations.reduce((b, t) => b + t.rooms.length, 0), 0);
 console.log(`каталог выгружен: ${out}`);
 console.log(`  систем ${systems.length}, тел ${bodies} (станций ${stations}), городов ${cityN},`
-  + ` габаритов корпусов ${catalog.shipTypes.length}`);
+  + ` площадок ${padN}, помещений ${roomN}, габаритов корпусов ${catalog.shipTypes.length}`);

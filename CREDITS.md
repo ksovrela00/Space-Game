@@ -1,7 +1,7 @@
 # Заимствованное
 
 Весь код в проекте свой. Со стороны взяты звук, корпус корабля, детали
-станций и фотограмметрия грунта — всё **CC0** (общественное достояние,
+станций и фотограмметрия грунта и фактур станций — всё **CC0** (общественное достояние,
 атрибуция не обязательна, но здесь она есть).
 
 | что | источник | лицензия | автор |
@@ -19,6 +19,7 @@
 | краска кабины (царапины, потёртости, блеск) | [Blue Metal Plate](https://polyhaven.com/a/blue_metal_plate) | CC0 | Rob Tuytel (Poly Haven) |
 | камни на грунте: формы валунов (фотосканы) | [Boulder 01](https://polyhaven.com/a/boulder_01), [Namaqualand Boulder 02](https://polyhaven.com/a/namaqualand_boulder_02), [03](https://polyhaven.com/a/namaqualand_boulder_03), [04](https://polyhaven.com/a/namaqualand_boulder_04), [05](https://polyhaven.com/a/namaqualand_boulder_05), [06](https://polyhaven.com/a/namaqualand_boulder_06) | CC0 | Rico Cilliers, Greg Zaal, Jenelle van Heerden, Dario Barresi (Poly Haven) |
 | фактура камня (рельеф и тон поверхности валуна) | [Rock Boulder Dry](https://polyhaven.com/a/rock_boulder_dry) | CC0 | Dimitrios Savva, Rico Cilliers (Poly Haven) |
+| фактуры станции: бетон ангара, терраццо, плитка, резиновая плитка, паркет, деревянные панели, бетонные панели, штукатурка, кожа, рифлёный металл | [Hangar Concrete Floor](https://polyhaven.com/a/hangar_concrete_floor), [Terrazzo Tiles](https://polyhaven.com/a/terrazzo_tiles), [Interior Tiles](https://polyhaven.com/a/interior_tiles), [Rubber Tiles](https://polyhaven.com/a/rubber_tiles), [Herringbone Parquet](https://polyhaven.com/a/herringbone_parquet), [Wooden Panels](https://polyhaven.com/a/wooden_panels), [Concrete Panels](https://polyhaven.com/a/concrete_panels), [Plastered Wall 02](https://polyhaven.com/a/plastered_wall_02), [Fabric Leather 01](https://polyhaven.com/a/fabric_leather_01), [Metal Plate](https://polyhaven.com/a/metal_plate) | CC0 | Dimitrios Savva, Amal Kumar, Charlotte Baglioni, Jenelle van Heerden, Sergej Majboroda, Rob Tuytel (Poly Haven) |
 | звуки | [см. assets/sound/CREDITS.md](assets/sound/CREDITS.md) | CC0 | rubberduck, Kenney, TinyWorlds |
 
 ## Корпус

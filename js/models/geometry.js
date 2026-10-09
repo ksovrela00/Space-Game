@@ -31,6 +31,8 @@ export const makeMesh = (verts, faceDefs) => {
     // в полную. Булево здесь давало бы либо тусклый маяк, либо окна,
     // выжигающие всё вокруг.
     emissive: typeof f.emissive === 'number' ? f.emissive : (f.emissive ? 1 : 0),
+    // Материал грани (aMat): фактура зала станции, узор обшивки.
+    ...(f.mat ? { mat: f.mat } : {}),
   }));
   return { verts, faces };
 };
@@ -62,6 +64,7 @@ export const mergeMeshes = (meshes) => {
         c: f.c, n: f.n,
         twoSided: f.twoSided,
         emissive: f.emissive,
+        ...(f.mat ? { mat: f.mat } : {}),
       });
     }
   }

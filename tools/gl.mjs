@@ -4804,7 +4804,11 @@ console.log('\n== мок GL: путь отрисовки ==');
   {
     // Кабина рисуется и под тоннелем (она внутри корабля), поэтому её
     // вызовы из сравнения вычитаются: меряется МИР, а не кабина. Так же
-    // и ступени выпущенных стоек — это свой корабль.
+    // и ступени выпущенных стоек — это свой корабль. Отсев за кадром
+    // (GlScene.seen) на эти два кадра выключен: меряется, рисуется ли мир
+    // вообще, а с отсевом обычный кадр здесь — десяток вызовов, и порог
+    // «втрое меньше» решал мигающий огонь корабля (3 из 10 — да, 4 из 11 — нет).
+    scene.cull = false;
     const normal = frame() - (scene.cabinDraws || 0) - scene.gearDraws;
     scene.forgetSystem(world);
     game.warp = makeWarp();
@@ -4813,6 +4817,7 @@ console.log('\n== мок GL: путь отрисовки ==');
     game.warp.t = game.warp.total * 0.5;     // середина: тоннель глухой
     game.warp.power = warpPower(game.warp);
     const covered = frame() - (scene.cabinDraws || 0) - scene.gearDraws;
+    scene.cull = true;
     const warmed = world.bodies.filter((b) => b._glMeshes && b._glMeshes.size).length;
     ok(warpPower(game.warp) > 0.97 && covered < normal / 3 && covered > 0 && warmed > 0,
       `в тоннеле кадр из ${covered} вызовов против ${normal} обычных, ` +

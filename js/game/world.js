@@ -18,6 +18,7 @@ import { setGravity } from './gravity.js';
 import { HOME_SEED, HOME_CLASS, HAB_HOME, systemBySeed } from './galaxy.js';
 import { pressureOf } from './bodyinfo.js';
 import { STATION_KINDS, stationShape } from '../models/stations.js';
+import { stationLayout } from './stationplan.js';
 import { makeCity, updateCity, canHostCity } from './city.js';
 import { L } from '../core/lang.js';
 
@@ -213,6 +214,10 @@ const makeStation = (rng, planet, name) => {
     // Базис: fwd — ось порта (наружу от планеты), right/up вращаются
     basis: { right: v3(1, 0, 0), up: v3(0, 1, 0), fwd: v3(0, 0, 1) },
     isStation: true,
+    // Что внутри: зал за щелью, площадки, терминал и помещения
+    // (js/game/stationplan.js). Тоже от имени — по той же причине, что и
+    // тип: лишнее число из генератора мира сдвинуло бы всю галактику.
+    layout: stationLayout(type, name),
   };
 };
 
@@ -727,6 +732,29 @@ export function bodyBasis(body, out) {
   out.fwd.y = out.right.z * p.x - out.right.x * p.z;
   out.fwd.z = out.right.x * p.y - out.right.y * p.x;
   return out;
+}
+
+/**
+ * Оси того, на чём стоят: у тела — его вращающиеся оси (bodyBasis), у
+ * станции — её собственные (вращаются вокруг оси порта). Пешком ходят и
+ * по грунту, и по полу зала станции (js/game/stationwalk.js), и место
+ * пилота в обоих случаях пишется в осях опоры.
+ */
+export function frameBasis(obj, out) {
+  if (!obj.isStation) return bodyBasis(obj, out);
+  const b = obj.basis;
+  out.right.x = b.right.x; out.right.y = b.right.y; out.right.z = b.right.z;
+  out.up.x = b.up.x; out.up.y = b.up.y; out.up.z = b.up.z;
+  out.fwd.x = b.fwd.x; out.fwd.y = b.fwd.y; out.fwd.z = b.fwd.z;
+  return out;
+}
+
+/** Тело или станция системы по номеру — или null (номера у них общие). */
+export function placeById(world, id) {
+  if (!world || id === null || id === undefined) return null;
+  for (const b of world.bodies) if (b.id === id) return b;
+  for (const s of world.stations || []) if (s.id === id) return s;
+  return null;
 }
 
 // Ближайшее крупное тело — для mass lock и проверки столкновений.

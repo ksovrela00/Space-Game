@@ -157,6 +157,21 @@ const WALK_SCENE = (pos, yaw, pitch = 0, tons = 0) => `
   });
 `;
 
+// Пилот на ногах на полу станции типа type (js/game/stationwalk.js):
+// корабль в её порту, пилот — в точке at(L) её осей (м), взгляд yaw.
+const STN_WALK = (type, at, yaw, pitch = 0) => `
+  liftoff();
+  const st = pickStation('${type}');
+  GAME.dockHere(st);
+  frames(4);
+  const L = st.layout;
+  const p = (${at.toString()})(L);
+  return GAME.walkStation(st, p, ${yaw}, ${pitch}).then(() => {
+    GAME.state.view = 'cockpit';
+    frames(8);
+  });
+`;
+
 // Пилот на ногах на «Прометее» (js/models/interior.prom.js): точка —
 // в осях СБОРКИ корпуса (м, как в плане), её переводит сдвиг корпуса.
 const PROM_WALK = (pos, yaw, pitch = 0, then = '') => `
@@ -563,6 +578,81 @@ const SCENES = {
       const moon = GAME.world.bodies.find((b) => b.kind === 'moon');
       aimAt(moon, 40);
       GAME.state.view = 'chase';
+    `,
+  },
+  hall: {
+    title: 'зал «Кориолиса»: корабль на площадке, вид от третьего лица',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('coriolis'));
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  hallorbis: {
+    title: 'зал «Орбиса»: корабль на площадке',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('orbis'));
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  hallfly: {
+    title: 'зал «Кориолиса» из тоннеля: площадки и терминал',
+    run: `
+      liftoff();
+      const st = pickStation('coriolis');
+      inHall(st, [0, -10, st.layout.hall.hi[2] + 40], -1);
+      GAME.state.view = 'chase';
+      frames(20);
+    `,
+  },
+  // Пешком по станции (js/game/stationwalk.js): точки — оси станции, м.
+  stnconc: {
+    title: 'галерея: площадь на кровле терминала, окна на площадки, двери служб и лавок',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'concourse');
+      return [-6, c.lo[1], c.lo[2] + 3]; }, '0.35', 0.02),
+  },
+  stnwin: {
+    title: 'галерея: вид в окно на ряд площадок',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'concourse');
+      return [c.hi[0] - 4, c.lo[1], (c.lo[2] + c.hi[2]) / 2]; }, 'Math.PI / 2', -0.12),
+  },
+  stngate: {
+    title: 'холл площадки: кресла, окна на площадку, кабина лифта в торце',
+    run: STN_WALK('coriolis', (L) => { const g = L.rooms.find((r) => r.kind === 'gate' && r.pad === 1);
+      return [(g.lo[0] + g.hi[0]) / 2 + 2, L.floor, g.hi[2] - 1.5]; }, 'Math.PI', 0.0),
+  },
+  stnlift: {
+    title: 'кабина лифта: пульт у двери, створки',
+    run: STN_WALK('coriolis', (L) => { const c = L.rooms.find((r) => r.id === 'lift1');
+      return [(c.lo[0] + c.hi[0]) / 2 - 0.3, L.floor, c.lo[2] + 0.5]; }, '0.25', -0.05),
+  },
+  stnapron: {
+    title: 'перрон: терминал, выход к площадке, свой корабль',
+    run: STN_WALK('coriolis', (L) => { const p = L.pads[0];
+      return [p.side * (26 + 10), L.floor, p.c[2] - 14]; }, 'Math.PI * 0.75', 0.08),
+  },
+  stnbar: {
+    title: 'бар галереи: паркет, стойка, деревянные стены',
+    run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'bar');
+      const front = r.lo[2] > L.rooms.find((q) => q.id === 'concourse').lo[2];
+      return [(r.lo[0] + r.hi[0]) / 2 - 1, r.lo[1], front ? r.lo[2] + 1.5 : r.hi[2] - 1.5]; }, '(L.rooms.find((q) => q.kind === "bar").lo[2] > L.rooms.find((q) => q.id === "concourse").lo[2] ? 0.15 : Math.PI + 0.15)', -0.05),
+  },
+  stnshop: {
+    title: 'лавка галереи: стеллажи, витрины, касса',
+    run: STN_WALK('coriolis', (L) => { const r = L.rooms.find((q) => q.kind === 'shop');
+      const front = r.lo[2] > L.rooms.find((q) => q.id === 'concourse').lo[2];
+      return [(r.lo[0] + r.hi[0]) / 2 - 0.8, r.lo[1], front ? r.lo[2] + 1.2 : r.hi[2] - 1.2]; }, '(L.rooms.find((q) => q.kind === "shop").lo[2] > L.rooms.find((q) => q.id === "concourse").lo[2] ? 0.2 : Math.PI + 0.2)', -0.1),
+  },
+  hallcab: {
+    title: 'из кабины на площадке: зал станции за фонарём',
+    run: `
+      liftoff();
+      GAME.dockHere(pickStation('coriolis'));
+      GAME.state.view = 'cockpit';
+      frames(20);
     `,
   },
   dock: {
@@ -1767,7 +1857,9 @@ const HELPERS = `
     const b = document.getElementById('bootBtn');
     if (b) b.click();
     frames(6);
-    if (GAME.state.mode === 'docked') press('Space');
+    // Из порта — сразу за створ (game.launchOut): вылет в игре — отрыв с
+    // площадки и полёт по залу, а снимкам нужен корабль в пустоте.
+    if (GAME.state.mode === 'docked') GAME.launchOut();
     frames(30);
   };
   // Поставить корабль в gap километрах от поверхности цели, носом на неё.
@@ -1800,6 +1892,20 @@ const HELPERS = `
   // нельзя — так и потеряли её из кадра в первый раз.
   // Из станций нужного типа берём ту, что повёрнута портом к солнцу:
   // порт смотрит наружу от планеты, и у половины станций он в тени.
+  // Корабль в зале станции st: точка p в её осях (м), нос — вдоль оси
+  // порта (dir = −1 — вглубь зала), брюхом к полу.
+  const inHall = (st, p, dir) => {
+    const s = GAME.ship, b = st.basis;
+    s.pos.x = st.pos.x + (b.right.x * p[0] + b.up.x * p[1] + b.fwd.x * p[2]) / 1000;
+    s.pos.y = st.pos.y + (b.right.y * p[0] + b.up.y * p[1] + b.fwd.y * p[2]) / 1000;
+    s.pos.z = st.pos.z + (b.right.z * p[0] + b.up.z * p[1] + b.fwd.z * p[2]) / 1000;
+    s.basis.fwd.x = b.fwd.x * dir; s.basis.fwd.y = b.fwd.y * dir; s.basis.fwd.z = b.fwd.z * dir;
+    s.basis.up.x = b.up.x; s.basis.up.y = b.up.y; s.basis.up.z = b.up.z;
+    s.basis.right.x = b.right.x * dir; s.basis.right.y = b.right.y * dir; s.basis.right.z = b.right.z * dir;
+    s.vel.x = s.vel.y = s.vel.z = 0; s.speed = 0; s.throttle = 0;
+    s.berth = { st, pad: null };
+    frames(4);
+  };
   const pickStation = (type) => {
     const sun = GAME.world.star;
     const all = GAME.world.stations.filter((s) => s.type === type);

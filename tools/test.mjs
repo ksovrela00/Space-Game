@@ -1,6 +1,6 @@
 // Headless-проверка игровой логики: мир, полёт, квантовый привод, стыковка.
 import { v3, normalize, dot, cross, len, clamp } from '../js/core/vec3.js';
-import { makeBasis, rotateBasis, toLocal } from '../js/core/basis.js';
+import { makeBasis, rotateBasis, toLocal, copyBasis } from '../js/core/basis.js';
 import { shipAnchor, anchorOk, anchorPose } from '../js/game/anchor.js';
 import { pilotRows, pilotsShown } from '../js/ui/pilots.js';
 import { makeSystem, updateWorld, nearestBody, bodyPosAt, bodyBasis } from '../js/game/world.js';
@@ -21,12 +21,12 @@ import {
 } from '../js/game/nav.js';
 import {
   makeQuantum, updateQuantum, startCalibration, stopQuantum, abortQuantum, canJump,
-  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed,
+  corridorBlock, exitPoint, exitVelocity, jumpTime, suggestHop, QUANTUM, quantumSpeed, freeTarget,
 } from '../js/game/quantum.js';
-import { checkStation, startDockingComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
+import { checkStation, startDockingComputer, startLaunchComputer, updateDockingComputer, dockingQuality, slotFit } from '../js/game/docking.js';
 import { alignBasis, horizontal } from '../js/game/pilot.js';
 import {
-  isLandable, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
+  isLandable, isSolid, groundRadius, altitudeOf, surfaceNormal, slopeAt, findSite,
   worldPoint, surfaceVelocity, localDir, dirToWorldBody, waterAt, hasSea,
 } from '../js/game/surface.js';
 import {
@@ -59,7 +59,7 @@ import {
   CHASE, CHASE_UNDER, eyeHeight, chaseRates, makeChase, updateChase, placeChase,
 } from '../js/game/chase.js';
 import { HULL_VOLUME_M3, HULL_CLEAR as HULL_FLOOR, GEAR_CLEAR } from '../js/models/ships.js';
-import { massT } from '../js/game/fuel.js';
+import { massT, burnQuantum, quantumTons } from '../js/game/fuel.js';
 import { cityLocal } from '../js/game/city.js';
 import { fmtTime } from '../js/ui/hud.js';
 import {
@@ -77,7 +77,7 @@ import {
   smoothPing, linkLoss, linkGrade, linkState, PING_SMOOTH,
 } from '../js/net/quality.js';
 import {
-  WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit,
+  WEAPONS, makeGuns, leadPoint, aimDir, fireGuns, updateGuns, addForeignBolt, segmentHit, carryBolts, blast,
   COMBAT, INSTALLED, shieldFlash, hasShieldFlash,
 } from '../js/game/weapons.js';
 import { SHIELD_AXES, HULL_SIZE } from '../js/models/ships.js';
@@ -103,6 +103,13 @@ import { buildPrometheus, buildPrometheusGear } from '../js/models/prometheus.js
 import { stageLift, legBoxes, LEG, tripodShares } from '../js/models/gear.js';
 import { LAMP, lampBeams, lampCone } from '../js/game/lamps.js';
 import { stationMesh as buildStationMesh, stationShape, SLOT, STATION_KINDS } from '../js/models/stations.js';
+import {
+  frameOf as stationFrame, carryInStation, enterStation, stationField, stepInStation, settleInHall,
+  hallZone, padPose, placeDocked, takeoffFromHall, stationM, BERTH,
+} from '../js/game/berth.js';
+import {
+  stationLayout, padAt, padByNo, padSizeFor, interiorOf, inHall, PAD, TERM, STATION_G,
+} from '../js/game/stationplan.js';
 import { Camera } from '../js/render/camera.js';
 import { velocityMarker, projectDir } from '../js/ui/hud.js';
 import { buildCockpit, makeYoke, updateYoke, YOKE, SCREENS, CMAT } from '../js/models/cockpit.js';
@@ -497,8 +504,10 @@ console.log('\n== станции ==');
   // Обе точки — ПО ДИАГОНАЛИ: по осям от ступицы к кольцу идут спицы, и
   // там тело в любом случае. Проверка на оси проходила бы и с
   // выброшенным кольцом — то есть не проверяла бы ничего.
+  // Ступица теперь 560 м в радиусе (внутри неё зал): «между ступицей и
+  // кольцом» — это 0.75 км от оси.
   const d45 = Math.SQRT1_2;
-  ok(orb.inside(1.0 * d45, 1.0 * d45, -0.02) && !orb.inside(0.42 * d45, 0.42 * d45, -0.02),
+  ok(orb.inside(1.0 * d45, 1.0 * d45, -0.02) && !orb.inside(0.75 * d45, 0.75 * d45, -0.02),
     '«Орбис»: кольцо сплошное, а между ним и ступицей пусто');
   ok(orb.inside(0.6, 0, -0.02), '«Орбис»: спица — тоже тело, а не картинка');
   ok(orb.inside(0, 0, -0.8) && !orb.inside(0.4, 0, -0.8),
@@ -623,30 +632,62 @@ console.log('\n== выбор цели наведением ==');
 }
 
 console.log('\n== докинг-компьютер ==');
-function dockTest(distKm, startDir) {
+// Стыковка теперь — не рама щели, а посадка на площадку в зале станции:
+// подход к створу, тоннель, зал, над площадкой, вниз на шасси. Проверка
+// ведёт корабль ВЕСЬ путь тем же кодом, что игра (js/main.js, hallStep):
+// перенос вместе со станцией, тяжесть зала, касания пола и стен
+// (js/game/berth.js, stepInStation). Состыковался — значит сел на ту
+// площадку, которую ему дали, и ни разу ни обо что не ударился.
+function stepBerth(w, st, sh, z) {
+  const frame = sh.berth ? stationFrame(st, sh._frame || (sh._frame = stationFrame(st))) : null;
+  updateWorld(w, STEP);
+  if (frame) carryInStation(sh, st, frame);
+  clearControls(sh);
+  updateDockingComputer(sh, STEP);
+  updateGear(sh, STEP);
+  updateShip(sh, STEP, sh.berth ? stationField(st) : null);
+  if (!sh.berth) {
+    const r = checkStation(sh, st);
+    if (r === 'enter') { enterStation(sh, st); return { enter: true }; }
+    if (r === 'crash') return { crash: true, reason: 'корпус станции' };
+    return null;
+  }
+  return stepInStation(sh, st, z);
+}
+
+function dockTest(distKm, startDir, station = null) {
   const w = makeSystem(0x1a7e);
-  const st = w.home.station;
+  const st = station ? station(w) : w.home.station;
   const sh = makeShip();
   const bb = makeBasis();
   // Ставим корабль на расстоянии distKm от станции в заданном направлении
   const d = normalize(startDir(st));
   placeShip(sh, v3(st.pos.x + d.x * distKm, st.pos.y + d.y * distKm, st.pos.z + d.z * distKm), bb);
-  const res = startDockingComputer(sh, st);
+  // Площадка — по размеру корпуса, как её даёт порт (Stations::request).
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = st.layout.pads.find((p) => want === 'S' ? p.size === 'S' : p.size === 'L');
+  const res = startDockingComputer(sh, st, pad.n);
   if (!res.ok) return { status: 'refused', reason: res.reason };
-  let t = 0;
+  let t = 0, entered = null, bumps = 0;
+  const z = {};
   for (let i = 0; i < 60 * 900; i++) {
-    updateWorld(w, STEP);
-    clearControls(sh);
-    updateDockingComputer(sh, STEP);
-    updateShip(sh, STEP);
+    const ev = stepBerth(w, st, sh, z);
     t += STEP;
-    const nb = nearestBody(w, sh.pos);
-    if (nb.gap <= 0) return { status: 'crash-planet', t };
-    const r = checkStation(sh, st);
-    if (r === 'docked') return { status: 'docked', t, q: dockingQuality(sh, st) };
-    if (r === 'crash') return { status: 'crash-station', t, q: dockingQuality(sh, st) };
+    if (!sh.berth) {
+      const nb = nearestBody(w, sh.pos);
+      if (nb.gap <= 0) return { status: 'crash-planet', t };
+    }
+    if (!ev) continue;
+    if (ev.enter) { entered = t; continue; }
+    if (ev.crash) return { status: 'crash-station', t, why: ev.reason, entered };
+    if (ev.bump) { bumps++; continue; }
+    if (ev.left) return { status: 'left', t };
+    if (ev.landed) {
+      settleInHall(sh, st);
+      return { status: sh.berth.pad === pad.n && bumps === 0 ? 'docked' : 'wrong-pad', t, pad: sh.berth.pad, want: pad.n, bumps, entered };
+    }
   }
-  return { status: 'timeout', t };
+  return { status: 'timeout', t, entered };
 }
 
 const t1 = dockTest(20, (st) => ({ ...st.basis.fwd }));
@@ -664,6 +705,44 @@ ok(t3.status === 'docked' && t3.t > 30,
 
 const t4 = dockTest(400, (st) => ({ ...st.basis.fwd }));
 ok(t4.status === 'refused', `с 400 км докинг-компьютер отказывает: ${t4.reason || t4.status}`);
+
+// И обратно: с площадки — вверх, к тоннелю и сквозь щель наружу, ни обо
+// что не задев. Отрыв — как в игре (js/main.js, game.launch).
+function launchTest(station = null) {
+  const w = makeSystem(0x1a7e);
+  const st = station ? station(w) : w.home.station;
+  const sh = makeShip();
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = st.layout.pads.filter((p) => want === 'S' || p.size === 'L').pop();
+  sh.gear.out = true; sh.gear.t = 1;
+  placeDocked(sh, st, padPose(st.layout, pad.n));
+  sh.berth = { st, pad: pad.n };
+  takeoffFromHall(sh);
+  startLaunchComputer(sh, st);
+  let t = 0, bumps = 0;
+  const z = {};
+  for (let i = 0; i < 60 * 300; i++) {
+    const ev = stepBerth(w, st, sh, z);
+    t += STEP;
+    if (!ev) continue;
+    if (ev.crash) return { status: 'crash', t, why: ev.reason };
+    if (ev.bump) bumps++;
+    if (ev.left) return { status: bumps ? 'bumped' : 'out', t, bumps, pad: pad.n };
+    if (ev.landed) return { status: 'landed-again', t };
+  }
+  return { status: 'timeout', t, bumps };
+}
+const l1 = launchTest();
+ok(l1.status === 'out', `вылет с дальней площадки ${l1.pad} докинг-компьютером: ${l1.status} за ${l1.t.toFixed(0)} с`);
+
+// И у «Кориолиса»: зал у него больше, тоннель длиннее, площадок десять.
+{
+  const cor = (w) => w.stations.find((s) => s.type === 'coriolis');
+  const c1 = dockTest(30, (st) => ({ ...st.basis.fwd }), cor);
+  const c2 = launchTest(cor);
+  ok(c1.status === 'docked' && c2.status === 'out',
+    `«Кориолис»: заход по оси — ${c1.status} за ${c1.t.toFixed(0)} с на площадку ${c1.pad}, вылет — ${c2.status} за ${c2.t.toFixed(0)} с`);
+}
 
 // «Прометей» в ту же щель. Он доворачивает вдвое дольше, и с прежними
 // коэффициентами компьютер раскачивал его на входе на сотню метров и бил
@@ -684,6 +763,8 @@ ok(t4.status === 'refused', `с 400 км докинг-компьютер отк�
   ];
   ok(runs.every(([, r]) => r.status === 'docked'),
     'докинг-компьютер вводит «Прометей» в порт: ' + runs.map(([n, r]) => `${n} — ${r.status} за ${r.t ? r.t.toFixed(0) : '?'} с`).join('; '));
+  const lp = launchTest();
+  ok(lp.status === 'out', `«Прометей» с большой площадки ${lp.pad} — наружу, ни обо что не задев: ${lp.status} за ${lp.t.toFixed(0)} с`);
   useShipType('challenger');
 }
 
@@ -715,8 +796,8 @@ ok(t4.status === 'refused', `с 400 км докинг-компьютер отк�
       sh.speed = 0;
       return checkStation(sh, st);
     };
-    ok(st !== null && enter(0, 0) === 'docked',
-      `${kind}: по оси в створ — стыковка`);
+    ok(st !== null && enter(0, 0) === 'enter',
+      `${kind}: по оси в створ — вход в тоннель`);
     ok(enter(SLOT.hw * 2.5, 0) === 'crash',
       `${kind}: мимо створа в обшивку — столкновение`);
     ok(enter(0, SLOT.hh * 4) === 'crash',
@@ -761,7 +842,10 @@ function runJump(w, sh, target, maxSeconds = 300) {
     if (ev === 'abort') return { status: 'abort', reason: q.reason, t };
     if (ev === 'arrive') {
       const d = Math.hypot(target.pos.x - sh.pos.x, target.pos.y - sh.pos.y, target.pos.z - sh.pos.z);
-      return { status: 'arrived', t, alt: d - target.radius, vMax, minGap, speed: sh.speed };
+      // Высота выхода у тела — над грунтом под кораблём (js/game/quantum.js,
+      // exitAltOf); у станции — от её середины.
+      const alt = isSolid(target) ? altitudeOf(target, sh.pos).alt : d - target.radius;
+      return { status: 'arrived', t, alt, vMax, minGap, speed: sh.speed };
     }
   }
   return { status: 'timeout', t, vMax, minGap };
@@ -832,9 +916,8 @@ for (const name of jumpTargets) {
     // радиуса плюс запас на рельеф (exitFrac). У станции такой поправки
     // нет — там расстояние обязано совпасть точь-в-точь, иначе стыковаться
     // придётся с другой дистанции, чем рассчитан докинг-компьютер.
-    const wantAlt = r.station ? QUANTUM.exitStation - r.radius : QUANTUM.exitAlt;
-    ok(r.station ? Math.abs(r.alt - wantAlt) < 1e-6
-                 : (Math.abs(r.alt - wantAlt) < 1 || r.alt > wantAlt),
+    const wantAlt = r.station ? QUANTUM.exitStation - r.radius : Math.max(QUANTUM.exitAlt, r.radius * QUANTUM.exitFrac);
+    ok(r.station ? Math.abs(r.alt - wantAlt) < 1e-6 : Math.abs(r.alt - wantAlt) < 1,
       `выход над ${name} на заданной высоте: ${r.alt.toFixed(1)} км ` +
       `(ожидание ${wantAlt.toFixed(1)})`);
     ok(r.speed < 1e-6, `скорость на выходе у ${name} нулевая: ${r.speed.toFixed(6)} км/с`);
@@ -952,8 +1035,14 @@ console.log('\n== полный цикл: станция -> станция ==');
   aimAtTarget(sh, leg);
   startCalibration(q, leg);
   let t = 0, status = 'timeout', docking = false;
+  const want = padSizeFor(HULL.size.z * 1000, HULL.size.x * 1000);
+  const pad = to.layout.pads.find((p) => want === 'S' || p.size === 'L');
+  const zz = {};
+  let frame = null;
   for (let i = 0; i < 60 * 1500; i++) {
+    if (sh.berth) frame = stationFrame(to, frame || undefined);
     updateWorld(w, STEP);
+    if (sh.berth) carryInStation(sh, to, frame);
     clearControls(sh);
     if (q.phase !== 'idle') {
       // Пока привод калибруется, нос надо держать на цели — в игре это
@@ -961,7 +1050,7 @@ console.log('\n== полный цикл: станция -> станция ==');
       if (q.phase === 'calib') aimAtTarget(sh, leg);
       const ev = updateQuantum(q, sh, w, STEP);
       if (ev === 'arrive') {
-        if (leg === to) { startDockingComputer(sh, to); docking = true; }
+        if (leg === to) { startDockingComputer(sh, to, pad.n); docking = true; }
         else {
           // Дошли до обходной точки — считаем следующее плечо.
           leg = canJump(w, sh, to).ok ? to : suggestHop(w, sh, to, SHIP.quantumSpeed);
@@ -974,12 +1063,21 @@ console.log('\n== полный цикл: станция -> станция ==');
     } else if (sh.docking) {
       updateDockingComputer(sh, STEP);
     }
-    if (q.phase !== 'jump') updateShip(sh, STEP);
+    updateGear(sh, STEP);
+    if (q.phase !== 'jump') updateShip(sh, STEP, sh.berth ? stationField(to) : null);
     t += STEP;
+    if (sh.berth) {
+      // В зале — шаг игры (js/game/berth.js): сел на площадку — состыковался.
+      const ev = stepInStation(sh, to, zz);
+      if (ev && ev.landed) { settleInHall(sh, to); status = sh.berth.pad === pad.n ? 'docked' : 'wrong-pad'; break; }
+      if (ev && (ev.crash || ev.bump)) { status = 'удар в зале: ' + ev.reason; break; }
+      if (ev && ev.left) { status = 'вылетел из зала'; break; }
+      continue;
+    }
     const nb = nearestBody(w, sh.pos);
     if (nb.gap <= 0) { status = 'crash into ' + nb.body.name; break; }
     const r = checkStation(sh, to);
-    if (r === 'docked') { status = 'docked'; break; }
+    if (r === 'enter') enterStation(sh, to);
     if (r === 'crash') { status = 'crash-station'; break; }
   }
   ok(status === 'docked', `${from.name} -> ${to.name}: ${status} за ${t.toFixed(0)} с (докинг включался: ${docking})`);
@@ -1355,6 +1453,106 @@ const rockPick = (w) => w.planets.find((p) => p.kind === 'rock');
   const sea = touchAt(w.home, wet);
   ok(sea.zone && sea.zone.water && sea.touch && sea.touch.result === 'crash' && landingReadout(makeShip(), sea.zone).landOk === false,
     `касание воды — крушение, и прибор «суша» горит красным заранее: ${sea.touch ? sea.touch.reason : '—'}`);
+}
+
+// Прыжок по прямой (цели нет — дважды J, js/main.js): по носу, до первого
+// тела впереди — выход на той же высоте, что у прыжка к телу (exitAlt, у
+// крупных — exitFrac радиуса), в нуле относительно него, — или в пустоту,
+// пока топлива хватает на торможение. С малой высоты курсом в планету —
+// отказ: под прыжком не проверяются касания.
+{
+  const w = makeSystem(0x1a7e);
+  const P = w.planets[2];
+  const nrm = normalize(v3(P.orbit.A.y * P.orbit.B.z - P.orbit.A.z * P.orbit.B.y,
+    P.orbit.A.z * P.orbit.B.x - P.orbit.A.x * P.orbit.B.z, P.orbit.A.x * P.orbit.B.y - P.orbit.A.y * P.orbit.B.x));
+  const freeRun = (sh, seconds) => {
+    const q = makeQuantum();
+    const ft = freeTarget(sh);
+    const check = canJump(w, sh, ft);
+    if (!check.ok) return { status: 'blocked', reason: check.reason, block: check.block };
+    startCalibration(q, ft);
+    let minAlt = Infinity, fuelEv = false;
+    for (let i = 0; i < 60 * seconds; i++) {
+      updateWorld(w, STEP);
+      clearControls(sh);
+      const ev = updateQuantum(q, sh, w, STEP);
+      if (q.phase === 'jump' || q.phase === 'brake') burnQuantum(sh, sh.speed * STEP);
+      else if (q.phase !== 'calib') updateShip(sh, STEP);
+      minAlt = Math.min(minAlt, Math.hypot(sh.pos.x - P.pos.x, sh.pos.y - P.pos.y, sh.pos.z - P.pos.z) - P.radius);
+      if (ev === 'fuel') fuelEv = true;
+      if (ev === 'arrive' || ev === 'stopped') return { status: ev, q, minAlt, fuelEv, i };
+      if (ev === 'abort') return { status: 'abort', reason: q.reason };
+    }
+    return { status: q.phase, q, minAlt, fuelEv };
+  };
+  const at = (k) => v3(P.pos.x + nrm.x * k, P.pos.y + nrm.y * k, P.pos.z + nrm.z * k);
+  // 1. Над полюсом орбиты, носом в планету — встаёт на высоте выхода.
+  const want = Math.max(QUANTUM.exitAlt, P.radius * QUANTUM.exitFrac);
+  const a = makeShip();
+  placeShip(a, at(2e6), makeBasis());
+  lookAlong(a.basis, v3(-nrm.x, -nrm.y, -nrm.z), a.basis.up);
+  const ra = freeRun(a, 200);
+  const altA = altitudeOf(P, a.pos).alt;
+  ok(ra.status === 'arrive' && Math.abs(altA - want) < 1 && a.speed < 1e-6,
+    `по прямой носом в ${P.name}: выход на ${altA.toFixed(1)} км над грунтом (у модуля — ${want.toFixed(0)}), скорость относительно неё ${a.speed.toFixed(3)} км/с`);
+  // 2. От неё — в пустоту: на потолке хода, без конца, остатка нет.
+  const b = makeShip();
+  placeShip(b, at(2e6), makeBasis());
+  lookAlong(b.basis, nrm, b.basis.up);
+  b.fuel = 1e9;
+  const rb = freeRun(b, 40);
+  ok(rb.status === 'jump' && Math.abs(rb.q.speed - quantumSpeed(b)) < 1e-6 && rb.q.dist === Infinity && rb.q.target.isFree,
+    `по прямой в пустоту: ${rb.status}, на потолке ${rb.q.speed.toFixed(0)} км/с, конца нет`);
+  // 3. Топлива — в обрез: гасит ход сам и встаёт, бак не уходит в минус.
+  const c = makeShip();
+  placeShip(c, at(2e6), makeBasis());
+  lookAlong(c.basis, nrm, c.basis.up);
+  c.fuel = SHIP.fuelReserve + quantumTons(4e6);
+  const f0 = c.fuel;
+  const rc = freeRun(c, 200);
+  ok(rc.status === 'stopped' && rc.fuelEv && c.fuel >= 0 && c.speed < 1e-6 && c.fuel < f0,
+    `по прямой с топливом на 4 млн км сверх резерва: гасит ход сам и встаёт, в баке ${c.fuel.toFixed(3)} т (резерв ${SHIP.fuelReserve} т)`);
+  // 4. С малой высоты курсом в планету — отказ: в грунт не прыгают.
+  const d = makeShip();
+  placeShip(d, at(groundRadius(P, localDir(P, at(P.radius))) + 50), makeBasis());
+  lookAlong(d.basis, v3(-nrm.x, -nrm.y, -nrm.z), d.basis.up);
+  const rd = freeRun(d, 5);
+  ok(rd.status === 'blocked' && rd.block === P, `с 50 км курсом в ${P.name} — отказ: ${rd.reason}`);
+}
+
+// Привод низкого выхода (quantum_lo, server/data/specs.php): ставится, как
+// в игре, снаряжением и выводит в пятидесяти километрах НАД ГРУНТОМ — и
+// над горой тоже. Прыжок — к телу с самыми высокими горами, точно над
+// вершиной: от среднего радиуса выход был бы в десятке километров над
+// ней, а не в пятидесяти. И коридор к самой цели не перекрыт ею же.
+{
+  const docQ = JSON.parse(readFileSync('server/data/specs.json', 'utf8'));
+  const stock = docQ.modules.filter((m) => m.installed);
+  const lo = docQ.modules.find((m) => m.code === 'quantum_lo');
+  useShipEquipment(stock.map((m) => (m.slot === 'drive' ? lo : m)));
+  // Самые высокие горы — не в родной системе: ищем по всем семи.
+  let peak = null;
+  for (let id = 0; id < 7; id++) {
+    const ws = makeSystem(systemById(id));
+    for (const b of ws.bodies) {
+      if (!isSolid(b)) continue;
+      for (let i = 0; i < 600; i++) {
+        const y = 1 - 2 * (i + 0.5) / 600, r = Math.sqrt(1 - y * y), ph = i * 2.399963;
+        const dl = v3(r * Math.cos(ph), y, r * Math.sin(ph));
+        const h = groundRadius(b, dl) - b.radius;
+        if (!peak || h > peak.h) peak = { w: ws, b, dl, h };
+      }
+    }
+  }
+  const w = peak.w, P = peak.b, dw = dirToWorldBody(P, peak.dl, v3());
+  const sh = makeShip();
+  placeShip(sh, v3(P.pos.x + dw.x * (P.radius + 2e4), P.pos.y + dw.y * (P.radius + 2e4), P.pos.z + dw.z * (P.radius + 2e4)), makeBasis());
+  const speedLo = SHIP.quantumSpeed, exitLo = QUANTUM.exitAlt;
+  const r = runJump(w, sh, P);
+  useShipEquipment(stock);
+  ok(lo && r.status === 'arrived' && peak.h > 30 && Math.abs(r.alt - 50) < 1 && exitLo === 50 && speedLo === lo.spec.flight.quantumSpeed,
+    `привод низкого выхода: над вершиной в ${peak.h.toFixed(1)} км (${P.name}) — выход в ${r.alt === undefined ? '—' : r.alt.toFixed(1)} км над грунтом `
+    + `(у модуля ${exitLo}), ход ${speedLo} км/с` + (r.reason ? ' · ' + r.reason : ''));
 }
 
 // Шасси: время выпуска и ограничение скорости.
@@ -7133,6 +7331,119 @@ console.log("\n== пилот: кроны, трюм, задания ==");
     'а без известной скорости стрелка летит одной дульной, как раньше');
 }
 
+// --- болты едут вместе с кораблём ---------------------------------------------
+//
+// ЭТО БЫЛО СЛОМАНО. У тела корабль переносится вместе с ним (carryShip), в
+// зале — вместе со станцией (carryInStation), и скорость, которую болт
+// уносит, — скорость В ЭТОЙ системе. Сам же болт летел в мировых осях:
+// у Lave IV за 0.8 с полёта его сносило вбок на двести с лишним метров —
+// очередь косила, и по кораблю в двух километрах шла мимо всегда.
+//
+// Шаг — как в игре (js/main.js, step): мир, болты, перенос корабля, и тем
+// же переносом болты. Проверяется инвариант: в осях корабля болт идёт по
+// прямой ровно со своей дульной скоростью. Рядом та же сцена без
+// carryBolts — она показывает цену ошибки.
+{
+  console.log('\n== болты едут вместе с кораблём ==');
+  const spec = WEAPONS.laser_g;
+  const life = spec.range / spec.speed;
+  const frames = Math.floor(life / STEP) - 1;
+  // Оси корабля: нос по fwd, верх по up (единичные, взаимно перпендикулярные).
+  const axes = (fwd, up) => {
+    const b = makeBasis();
+    b.fwd = normalize(v3(fwd.x, fwd.y, fwd.z));
+    b.up = normalize(v3(up.x, up.y, up.z));
+    b.right = cross(b.up, b.fwd, v3());
+    return b;
+  };
+  // Где болт относительно корабля в его осях и насколько он сошёл с прямой
+  // по носу. Ход корабля в сценах — ноль, так что прямая — это ось z.
+  const offLine = (sh, b) => {
+    const l = toLocal(sh.basis, sh.pos, v3(b.x, b.y, b.z));
+    return { side: Math.hypot(l.x, l.y), ahead: l.z };
+  };
+  const pre = { pos: v3(), basis: makeBasis() };
+  const remember = (sh) => { pre.pos = v3(sh.pos.x, sh.pos.y, sh.pos.z); copyBasis(pre.basis, sh.basis); };
+
+  // 1. У планеты. Тело — самое быстрое по вращению, точка — над экватором
+  //    в трёх километрах (там вращение переносится целиком), нос — по
+  //    меридиану, поперёк хода грунта: снос, если он есть, уходит вбок.
+  const planetShot = (carry) => {
+    const w = makeSystem(HOME_SEED);
+    const body = w.planets.reduce((a, b) => (b.spin * b.radius > a.spin * a.radius ? b : a));
+    const p = body.pole;
+    const e = normalize(v3(p.y, -p.x, 0));
+    const r = groundRadius(body, e) + 3;
+    const sh = makeShip();
+    placeShip(sh, v3(body.pos.x + e.x * r, body.pos.y + e.y * r, body.pos.z + e.z * r), axes(p, e));
+    const g = makeGuns('laser_g');
+    fireGuns(g, sh, null, [v3(0, 0, 0)], []);
+    const b = g.bolts[0];
+    blast(g, sh.pos.x + e.x * 0.3, sh.pos.y + e.y * 0.3, sh.pos.z + e.z * 0.3, null);
+    const fl = g.blasts[0];
+    const flWas = toLocal(sh.basis, sh.pos, v3(fl.x, fl.y, fl.z));
+    let flOff = 0;
+    for (let i = 0; i < frames; i++) {
+      const cap = captureBody(w, sh.pos);
+      const was = v3(cap.pos.x, cap.pos.y, cap.pos.z);
+      updateWorld(w, STEP);
+      updateGuns(g, STEP, []);
+      remember(sh);
+      carryShip(sh, cap, STEP, v3(cap.pos.x - was.x, cap.pos.y - was.y, cap.pos.z - was.z));
+      if (carry) carryBolts(g, pre.pos, pre.basis, sh.pos, sh.basis);
+      if (g.blasts.includes(fl)) {
+        const l = toLocal(sh.basis, sh.pos, v3(fl.x, fl.y, fl.z));
+        flOff = Math.max(flOff, Math.hypot(l.x - flWas.x, l.y - flWas.y, l.z - flWas.z));
+      }
+    }
+    return { body, t: frames * STEP, flOff, ...offLine(sh, b) };
+  };
+  const good = planetShot(true);
+  ok(good.side < 0.001 && Math.abs(good.ahead - spec.speed * good.t) < 0.001,
+    `у ${good.body.name} (грунт идёт ${(good.body.spin * good.body.radius * 1000).toFixed(0)} м/с) `
+    + `болт за ${good.t.toFixed(2)} с ушёл по носу на ${(good.ahead * 1000).toFixed(0)} м, `
+    + `вбок — на ${(good.side * 1000).toFixed(2)} м`);
+  ok(good.flOff < 0.001,
+    `вспышка попадания стоит на месте удара: сошла на ${(good.flOff * 1000).toFixed(2)} м`);
+  const bad = planetShot(false);
+  ok(bad.side > 0.1 && bad.flOff > 0.05,
+    `без переноса болт сносит вбок на ${(bad.side * 1000).toFixed(0)} м, `
+    + `вспышку — на ${(bad.flOff * 1000).toFixed(0)} м — так и было`);
+
+  // 2. В зале станции. Зал вращается (оборот за минуту с небольшим) и
+  //    переносит с собой и скорость корабля, поэтому болту мало сдвига —
+  //    его скорость тоже должна поворачиваться: без этого путь в осях
+  //    корабля загибается на угол поворота станции за полёт.
+  const hallShot = (carry) => {
+    const w = makeSystem(0x1a7e);
+    const st = w.home.station;
+    const sh = makeShip();
+    const sb = st.basis;
+    placeShip(sh, v3(st.pos.x + sb.up.x * 0.05, st.pos.y + sb.up.y * 0.05, st.pos.z + sb.up.z * 0.05),
+      axes(sb.right, sb.up));
+    const g = makeGuns('laser_g');
+    fireGuns(g, sh, null, [v3(0, 0, 0)], []);
+    const b = g.bolts[0];
+    let frame = null;
+    for (let i = 0; i < frames; i++) {
+      frame = stationFrame(st, frame || undefined);
+      updateWorld(w, STEP);
+      updateGuns(g, STEP, []);
+      remember(sh);
+      carryInStation(sh, st, frame);
+      if (carry) carryBolts(g, pre.pos, pre.basis, sh.pos, sh.basis);
+    }
+    return { st, t: frames * STEP, ...offLine(sh, b) };
+  };
+  const inHall = hallShot(true);
+  ok(inHall.side < 0.001 && Math.abs(inHall.ahead - spec.speed * inHall.t) < 0.001,
+    `в зале ${inHall.st.name} болт ушёл по носу на ${(inHall.ahead * 1000).toFixed(0)} м, `
+    + `вбок — на ${(inHall.side * 1000).toFixed(2)} м`);
+  const hallBad = hallShot(false);
+  ok(hallBad.side > 0.1,
+    `без переноса в зале болт уходит вбок на ${(hallBad.side * 1000).toFixed(0)} м`);
+}
+
 
 // --- цель в бою -------------------------------------------------------------
 //
@@ -8431,9 +8742,11 @@ console.log('\n== наземный город ==');
     // Закладки: в порту — четыре порта и четыре свои, с номерами клавиш.
     const html = page('market');
     const tabs = [...html.matchAll(/data-act="tab" data-tab="(\w+)"><kbd>(\d)<\/kbd>/g)].map((m) => m[2] + m[1]);
+    // Закрыть — можно: корабль стоит в зале, терминал открывают по I и
+    // закрывают тем же I (js/ui/terminal.js).
     ok(tabs.join(' ') === '1port 2market 3outfit 4ships 5ship 6cargo 7contracts 8money'
-      && /data-act="launch"/.test(html) && !/data-act="close"/.test(html),
-      'в порту восемь разделов (порт и свои), вылет в подвале, закрыть нельзя: ' + tabs.join(' '));
+      && /data-act="launch"/.test(html) && /data-act="close"/.test(html),
+      'в порту восемь разделов (порт и свои), вылет и «закрыть» в подвале: ' + tabs.join(' '));
 
     // Рынок: выбран то, что в трюме, и сторона — продажа: в порт чаще
     // прилетают продавать. Кнопка — сколько и почём.
@@ -8531,7 +8844,8 @@ console.log('\n== наземный город ==');
     }
     ok(solo === '', 'автономной игры нет: ни один раздел о ней не говорит' + (solo ? ' (' + solo + ')' : ''));
 
-    // Клавиши: номер, Q/E по кругу, I — к своим делам и обратно.
+    // Клавиши: номер, Q/E по кругу; I и Esc — закрыть, Y — встать, C —
+    // вылет компьютером (как кнопки подвала).
     game.menu.tab = 'market'; game.menu.lastPort = 'market';
     T.terminalKeys(game, keys('Digit3'), true);
     const d3 = game.menu.tab;
@@ -8540,11 +8854,10 @@ console.log('\n== наземный город ==');
     T.terminalKeys(game, keys('KeyQ'), true);
     const back = game.menu.tab;
     T.terminalKeys(game, keys('Digit2'), true);
-    T.terminalKeys(game, keys('KeyI'), true);
-    const mine = game.menu.tab;
-    T.terminalKeys(game, keys('KeyI'), true);
-    ok(d3 === 'outfit' && back === 'money' && mine === 'money' && game.menu.tab === 'market',
-      `клавиши: 3 — ${d3}, трижды Q — ${back} (по кругу), с рынка I — к своим (${mine}), ещё раз I — обратно (${game.menu.tab})`);
+    const acts = ['KeyI', 'Escape', 'KeyY', 'KeyC'].map((k) => T.terminalKeys(game, keys(k), true));
+    ok(d3 === 'outfit' && back === 'money' && game.menu.tab === 'market'
+      && acts.join(' ') === 'close close stand launch',
+      `клавиши порта: 3 — ${d3}, трижды Q — ${back} (по кругу), I/Esc/Y/C — ${acts.join(' ')}`);
     const wasd = game.menu.tab;
     ok(T.terminalKeys(game, keys('KeyA', 'KeyD', 'KeyW', 'KeyS'), true) === null && game.menu.tab === wasd,
       'W/A/S/D в терминале не делают ничего');
@@ -11000,6 +11313,237 @@ console.log('\n== вездеход: навигация и приборы ==');
     `мониторы вездехода рисуются: ход 36 км/ч, «ВПЕРЁД», курс 000°, до корабля — метры`);
   ok(P.NOMINAL.rann[0] / P.NOMINAL.rann[1] === 10 && P.SCREEN_RATE.rdrive === 30,
     'табло — 800 × 80, экран хода — тридцать кадров в секунду, как экран полёта');
+}
+
+// --- пешком по станции -------------------------------------------------------
+//
+// js/game/stationwalk.js: план станции для шага — помещения, двери, стены
+// с проёмами, мебель — и тот же шаг, что за бортом на грунте. Проверяется
+// то, на чём пешеход застрял бы молча: в каждое помещение есть путь, в
+// каждой двери тело помещается, мебель проход не перегораживает, и робот
+// с площадки доходит по пути до каждого помещения терминала.
+{
+  console.log('\n== пешком по станции ==');
+  const SW = await import('../js/game/stationwalk.js');
+  const SP = await import('../js/game/stationplan.js');
+  const Wk = await import('../js/game/walker.js');
+  const Rt = await import('../js/game/route.js');
+  const O = await import('../js/game/outside.js');
+  const all = [];
+  for (let id = 0; id < 7; id++) for (const st of makeSystem(systemById(id)).stations) all.push(st);
+  // В каждое помещение — путь с каждой площадки.
+  let cut = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    for (const p of st.layout.pads) {
+      for (const r of plan.rooms) {
+        if (r.kind === 'block') continue;
+        if (!Rt.pathRooms(plan, 'pad' + p.n, r.id)) cut.push(st.name + ': ' + p.n + '→' + r.id);
+      }
+    }
+  }
+  ok(cut.length === 0, `с каждой площадки ${all.length} станций — путь в каждое помещение` + (cut.length ? ': нет ' + cut.slice(0, 4).join(', ') : ''));
+  // Дверь — проём: тело во весь рост в середине двери и по метру по обе
+  // стороны от неё ни во что не упирается.
+  const shut = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    const W = SW.stationWorld(plan, st, []);
+    for (const d of plan.doors) {
+      if (d.edge) continue;
+      for (const k of [-1, 0, 1]) {
+        const p = d.pos.slice();
+        p[d.ax] += k;
+        if (Wk.blocked(W, p)) { shut.push(st.name + ' ' + d.id + (k ? (k > 0 ? '+' : '−') : '')); break; }
+      }
+    }
+  }
+  ok(shut.length === 0, 'в каждой двери терминала и у неё с обеих сторон тело помещается во весь рост'
+    + (shut.length ? ': нет у ' + shut.slice(0, 5).join(', ') : ''));
+  // Пол — плита площадки на пять сантиметров выше перрона, по ней
+  // ходят без ступеньки; на полу — оси станции как есть.
+  {
+    const st = all[0], L = st.layout, p = L.pads[0];
+    const G = SW.stationFrame(st);
+    const g0 = O.groundY(G, p.c[0], p.c[2]), g1 = O.groundY(G, 0, (L.terminal.lo[2] + L.terminal.hi[2]) / 2);
+    ok(Math.abs(g0 - (L.floor + SP.PAD_H)) < 1e-9 && Math.abs(g1 - L.floor) < 1e-9 && SP.PAD_H < Wk.WALK.step,
+      `пол для шага: площадка ${(g0 - L.floor).toFixed(2)} м над перроном (ступень — ${Wk.WALK.step} м), в терминале — пол зала`);
+  }
+  // Робот: с края площадки по пути — в каждое помещение станции, на
+  // лифте, как человек: к пульту, выбрал остановку, створки закрылись,
+  // приехал, вышел. Створки настоящие — закрытые твёрдые (liftDoorSolids).
+  // Меряется то, на что жаловался автор игры: раньше от площадки до бара
+  // по конкорсу во всю длину терминала шли две минуты. Теперь — не дольше
+  // минуты до любого помещения, и пешком из них — не больше сорока секунд.
+  const Lf = await import('../js/game/lift.js');
+  const big = (type) => all.filter((s) => s.type === type).sort((a, b) => b.layout.rooms.length - a.layout.rooms.length)[0];
+  for (const st of [big('coriolis'), big('orbis')]) {
+    const plan = SW.stationPlan(st.layout), L = st.layout;
+    const fail = [];
+    let longest = 0, longestWalk = 0, rides = 0;
+    // Самая дальняя от галереи площадка: дальше всего ехать.
+    const pad = L.pads.slice().sort((p, q) => Math.abs(q.c[2] - L.gallery.lo[2]) - Math.abs(p.c[2] - L.gallery.lo[2]))[0];
+    for (const r of plan.rooms) {
+      if (r.open || r.kind === 'block') continue;
+      for (const d of plan.liftDoors) { d.open = 0; d.lock = false; }
+      const w = Wk.makeWalker();
+      w.on = true; w.phase = 'walk'; w.out = SW.stationFrame(st);
+      w.pos = [pad.side * (SP.TERM.hw + SP.PAD.apron + 3), L.floor + SP.PAD_H, pad.c[2]];
+      w.room = plan.roomAt(w.pos);
+      let t = 0, walk = 0, reached = false;
+      // Обход, как у человека: путь ведёт от двери к двери по прямой, а
+      // кабина лифта стоит посреди площади галереи. Не продвинулся к цели
+      // за секунду — полторы секунды идёт вбок от прямой.
+      let mark = null, markT = 0, side = 0;
+      for (; t < 120; t += 1 / 30) {
+        SW.stepLiftDoors(plan, w.pos, 1 / 30);
+        const W = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+        if (w.ride) {
+          if (Lf.stepRide(w, plan, 1 / 30) === 'arrive') rides++;
+          continue;
+        }
+        const R = Rt.routeTo(plan, w.room, w.pos, r.id);
+        if (!R) break;
+        if (R.next.kind === 'lift') {
+          const at = Lf.panelNear(w, plan);
+          if (at) { at.to = R.next.stop; Lf.startRide(w, plan, at); continue; }
+        }
+        const p = R.here ? R.end : R.next.point;
+        const dp = Math.hypot(p[0] - w.pos[0], p[2] - w.pos[2]);
+        if (R.here && dp < 1.5) { reached = true; break; }
+        if (!mark || mark.p !== p) { mark = { p, d: dp }; markT = t; }
+        else if (t - markT > 1) {
+          if (mark.d - dp < 0.5 && side <= 0) side = 1.5;
+          mark.d = dp; markT = t;
+        }
+        side -= 1 / 30;
+        w.yaw = Math.atan2(p[0] - w.pos[0], p[2] - w.pos[2]) + (side > 0 ? 1.3 : 0);
+        Wk.updateWalker(w, { doors: [] }, { fwd: 1, side: 0, run: true }, 1 / 30, W);
+        walk += 1 / 30;
+      }
+      if (!reached) fail.push(r.id + ' (' + (w.room && w.room.id) + ')');
+      longest = Math.max(longest, t);
+      longestWalk = Math.max(longestWalk, walk);
+    }
+    for (const d of plan.liftDoors) { d.open = 0; d.lock = false; }
+    ok(fail.length === 0 && longest < 60 && longestWalk < 40 && rides > 0,
+      `${st.name} (${st.type}): с дальней площадки ${pad.n} бегом и на лифте — в каждое из ${plan.rooms.filter((r) => !r.open && r.kind !== 'block').length} помещений, `
+      + `дольше всего ${longest.toFixed(0)} с, из них пешком не больше ${longestWalk.toFixed(0)} с (поездок ${rides})`
+      + (fail.length ? '; не дошёл: ' + fail.join(', ') : ''));
+  }
+  // Секции: у каждой площадки — холл с кабиной лифта и остановка на
+  // пульте; в галерее — своя кабина; от двери перрона до двери кабины —
+  // проход через холл, от двери кабины в галерее до любой двери её
+  // помещений — меньше тридцати метров; лифт едет не дольше десяти секунд.
+  {
+    const bad = [];
+    let far = 0, ride = 0;
+    for (const st of all) {
+      const plan = SW.stationPlan(st.layout), L = st.layout, Lt = plan.lifts[0];
+      if (!Lt) { bad.push(st.name + ': нет лифта'); continue; }
+      for (const p of L.pads) {
+        const g = plan.roomById['gate' + p.n], c = plan.roomById['lift' + p.n];
+        if (!g || !c || c.section !== g.id || !Lt.stops.some((q) => q.room === c.id && q.pad === p.n)) bad.push(st.name + ': площадка ' + p.n);
+      }
+      const lc = plan.doors.find((d) => d.id === 'lc');
+      if (!lc || !Lt.stops.some((q) => q.room === 'liftc')) { bad.push(st.name + ': нет кабины в галерее'); continue; }
+      for (const d of plan.doors) {
+        if (d.lift || d.edge || !d.rooms.includes('concourse')) continue;
+        far = Math.max(far, Math.hypot(d.pos[0] - lc.pos[0], d.pos[2] - lc.pos[2]));
+      }
+      for (const A of Lt.stops) for (const B of Lt.stops) {
+        const a = plan.roomById[A.room], b = plan.roomById[B.room];
+        ride = Math.max(ride, Lt.time([b.lo[0] - a.lo[0], b.lo[1] - a.lo[1], b.lo[2] - a.lo[2]]));
+      }
+    }
+    ok(bad.length === 0 && far < 30 && ride <= SW.RIDE.max,
+      `у каждой площадки холл с кабиной лифта, в галерее своя; от лифта галереи до дальней двери ${far.toFixed(1)} м (меньше 30), `
+      + `поездка не дольше ${ride.toFixed(1)} с` + (bad.length ? ': ' + bad.slice(0, 4).join(', ') : ''));
+  }
+  // Подгрузка по секциям: в сетке станции — только оболочка (зал,
+  // площадки, терминал и галерея снаружи), внутренности — сетками секций.
+  // Раньше весь терминал с мебелью входил в сетку станции и рисовался и из
+  // космоса.
+  {
+    const H = await import('../js/models/stationhall.js');
+    const tri = (m) => m.faces.reduce((n, q) => n + Math.max(0, q.v.length - 2), 0);
+    const st = big('coriolis'), L = st.layout;
+    const shell = tri(H.hallMesh(L));
+    const secs = H.sectionIds(L).map((id) => tri(H.sectionMesh(L, id)));
+    ok(secs.length === L.pads.length + 1 && secs.every((n) => n > 50) && shell < Math.min(...secs.filter((n) => n > 0)) * 20
+      && secs.reduce((a, n) => a + n, 0) > shell,
+      `${st.name}: в сетке станции — оболочка (${shell} треугольников), внутренности — ${secs.length} секций по ${Math.min(...secs)}–${Math.max(...secs)}`);
+  }
+  // Створки кабины лифта: закрытые — твёрдые, перед пилотом открываются, на
+  // время поездки заперты и закрываются; ехать — только целиком в кабине,
+  // а не из проёма (стоявшего там створки зажали бы, а поездка перенесла бы
+  // его в стену другой кабины).
+  {
+    const st = big('orbis'), plan = SW.stationPlan(st.layout);
+    const d = plan.doorById.l1, cab = plan.roomById.lift1;
+    for (const q of plan.liftDoors) { q.open = 0; q.lock = false; }
+    const inDoor = d.pos.slice();
+    const W0 = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+    const shut = Wk.blocked(W0, inDoor);
+    const near = d.pos.slice(); near[2] += 1.5;                   // в холле у двери
+    for (let i = 0; i < 30; i++) SW.stepLiftDoors(plan, near, 1 / 30);
+    const W1 = SW.stationWorld(plan, st, SW.liftDoorSolids(plan, []));
+    const opened = d.open === 1 && !Wk.blocked(W1, inDoor);
+    const w = Wk.makeWalker();
+    w.on = true; w.phase = 'walk'; w.out = SW.stationFrame(st);
+    w.pos = [d.pos[0], cab.lo[1], cab.hi[2] - 0.1]; w.room = cab;     // в проёме, ещё не в кабине
+    const fromDoor = Lf.panelNear(w, plan);
+    w.pos = [d.pos[0] + 0.6, cab.lo[1], (cab.lo[2] + cab.hi[2]) / 2 + 0.6];
+    const at = Lf.panelNear(w, plan);
+    let closedOnRide = false;
+    if (at) {
+      at.to = 0;
+      Lf.startRide(w, plan, at);
+      for (let i = 0; i < 60 && w.ride && w.ride.phase === 'close'; i++) { SW.stepLiftDoors(plan, w.pos, 1 / 30); Lf.stepRide(w, plan, 1 / 30); }
+      closedOnRide = d.lock && d.open === 0 && w.ride && w.ride.phase === 'move';
+      for (let i = 0; i < 600 && w.ride; i++) { SW.stepLiftDoors(plan, w.pos, 1 / 30); Lf.stepRide(w, plan, 1 / 30); }
+    }
+    ok(shut && opened && !fromDoor && at && closedOnRide && w.room && w.room.id === 'liftc' && !d.lock,
+      `створки кабины: закрытые — твёрдые (${shut}), у двери открылись (${opened}); из проёма не едут (${!fromDoor}), `
+      + `из кабины — да, створки заперты и закрыты на ходу (${closedOnRide}), приехал в галерею: ${w.room && w.room.id}`);
+    for (const q of plan.liftDoors) { q.open = 0; q.lock = false; }
+  }
+  // Место из прежней планировки (в старом конкорсе — теперь в толще
+  // терминала) — у двери кабины в холле своей площадки, на полу, свободно.
+  {
+    const st = big('coriolis'), plan = SW.stationPlan(st.layout), L = st.layout;
+    const oldConcourse = [0, L.floor, (L.terminal.lo[2] + L.terminal.hi[2]) / 2 + 40];
+    const W = SW.stationWorld(plan, st, []);
+    const at = SW.standByLift(plan, 3), atG = SW.standByLift(plan, null);
+    const r = plan.roomAt(at.pos), rg = plan.roomAt(atG.pos);
+    ok(!plan.roomAt(oldConcourse) && r && r.id === 'gate3' && !Wk.blocked(W, at.pos) && rg && rg.id === 'concourse' && !Wk.blocked(W, atG.pos),
+      `место в бывшем конкорсе — вне помещений; встаёт у лифта в холле площадки 3 (${r && r.id}) или в галерее (${rg && rg.id})`);
+  }
+  // Галерея на кровле для полёта в зале — твёрдая, и над ней пол — её кровля.
+  {
+    const Bt = await import('../js/game/berth.js');
+    const st = big('coriolis'), G = st.layout.gallery;
+    const c = [(G.lo[0] + G.hi[0]) / 2, (G.lo[1] + G.hi[1]) / 2, (G.lo[2] + G.hi[2]) / 2];
+    ok(Bt.solidAt(st, c) === 'gallery' && Math.abs(Bt.floorAt(st.layout, c[0], c[2]) - G.hi[1]) < 1e-9
+      && Bt.floorAt(st.layout, 0, st.layout.terminal.lo[2] + 5) === st.layout.terminal.hi[1],
+      `галерея в полёте твёрдая, пол над ней — её кровля (${G.hi[1]} м), рядом — кровля терминала`);
+  }
+  // Мебель — внутри своего помещения и не в проходе к двери.
+  const out = [];
+  for (const st of all) {
+    const plan = SW.stationPlan(st.layout);
+    for (const b of plan.props) {
+      const r = plan.roomById[b.room];
+      if (b.lo[0] < r.lo[0] - 1e-6 || b.hi[0] > r.hi[0] + 1e-6 || b.lo[2] < r.lo[2] - 1e-6 || b.hi[2] > r.hi[2] + 1e-6) {
+        out.push(st.name + ' ' + b.room + ':' + b.kind);
+      }
+    }
+  }
+  ok(out.length === 0, 'мебель стоит в своих помещениях' + (out.length ? ': нет — ' + out.slice(0, 4).join(', ') : ''));
+  // Помещения у ангарной службы — пульт вызова корабля.
+  const kiosks = all.filter((st) => SW.stationPlan(st.layout).props.some((b) => b.kind === 'kiosk')).length;
+  const hangars = all.filter((st) => st.layout.rooms.some((r) => r.kind === 'hangar')).length;
+  ok(kiosks === hangars && hangars > 0, `у ангарной службы пульт вызова корабля: ${kiosks} из ${hangars}`);
 }
 
 console.log('\n' + (fails === 0 ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : fails + ' ПРОВЕРОК УПАЛО'));
